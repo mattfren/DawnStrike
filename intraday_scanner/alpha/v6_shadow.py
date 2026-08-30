@@ -66,9 +66,7 @@ class V6Prediction:
         return {
             "status": self.status,
             "activation_probability": _round(self.activation_probability),
-            "conditional_net_excess_return_pct": _round(
-                self.conditional_net_excess_return_pct
-            ),
+            "conditional_net_excess_return_pct": _round(self.conditional_net_excess_return_pct),
             "tail_loss_pct": _round(self.tail_loss_pct),
             "utility_lcb_pct": _round(self.utility_lcb_pct),
             "sample_size": self.sample_size,
@@ -124,20 +122,17 @@ class V6EmpiricalShadowModel:
             )
         activation_probability = (len(activated) + 1) / (len(sample) + 2)
         conditional = mean(returns)
-        standard_error = (
-            pstdev(returns) / math.sqrt(len(returns)) if len(returns) > 1 else None
-        )
+        standard_error = pstdev(returns) / math.sqrt(len(returns)) if len(returns) > 1 else None
         tail = _tail_mean(returns)
         # Utility uses the conservative lower confidence bound of expected
         # activated return and a full tail-loss penalty.  It cannot override a
         # safety veto and is displayed only as shadow research.
         lower_conditional = (
-            conditional - 1.96 * standard_error
-            if standard_error is not None
-            else None
+            conditional - 1.96 * standard_error if standard_error is not None else None
         )
         utility = (
-            activation_probability * lower_conditional + (1 - activation_probability) * 0.0
+            activation_probability * lower_conditional
+            + (1 - activation_probability) * 0.0
             - max(0.0, -(tail or 0.0))
             if lower_conditional is not None
             else None
@@ -165,9 +160,7 @@ def build_v6_shadow_decisions(
 ) -> list[dict[str, Any]]:
     """Build immutable decision-time V6 records for every ranked candidate."""
 
-    feature_by_ticker = {
-        str(row.get("ticker") or "").upper(): row for row in feature_vectors
-    }
+    feature_by_ticker = {str(row.get("ticker") or "").upper(): row for row in feature_vectors}
     memberships = universe_membership_by_ticker or {}
     output: list[dict[str, Any]] = []
     for signal in signals:
@@ -255,16 +248,17 @@ def build_v6_shadow_decisions(
             "interval_lower_pct": prediction.get("interval_lower_pct"),
             "interval_upper_pct": prediction.get("interval_upper_pct"),
         }
-        draft["decision_id"] = "v6d-" + _hash(
-            {
-                "scan_id": draft["scan_id"],
-                "source_signal_id": source_signal_id,
-                "strategy_version": ALPHAOPS_V6_STRATEGY_VERSION,
-            }
-        )[:28]
-        draft["shadow_signal_id"] = "v6s-" + _hash(
-            {"decision_id": draft["decision_id"]}
-        )[:28]
+        draft["decision_id"] = (
+            "v6d-"
+            + _hash(
+                {
+                    "scan_id": draft["scan_id"],
+                    "source_signal_id": source_signal_id,
+                    "strategy_version": ALPHAOPS_V6_STRATEGY_VERSION,
+                }
+            )[:28]
+        )
+        draft["shadow_signal_id"] = "v6s-" + _hash({"decision_id": draft["decision_id"]})[:28]
         output.append(draft)
     return output
 
@@ -277,12 +271,8 @@ def build_v6_outcomes(
 ) -> list[dict[str, Any]]:
     """Turn one sourced V6 shadow receipt into one immutable learning label."""
 
-    outcome_by_signal = {
-        str(row.get("signal_id") or ""): row for row in sourced_outcomes
-    }
-    attempt_by_signal = {
-        str(row.get("signal_id") or ""): row for row in capture_attempts
-    }
+    outcome_by_signal = {str(row.get("signal_id") or ""): row for row in sourced_outcomes}
+    attempt_by_signal = {str(row.get("signal_id") or ""): row for row in capture_attempts}
     output: list[dict[str, Any]] = []
     for decision in decisions:
         shadow_signal_id = str(decision.get("shadow_signal_id") or "")
@@ -298,7 +288,9 @@ def build_v6_outcomes(
 
 
 def strict_walk_forward_evaluation(
-    *, decisions: list[dict[str, Any]], outcomes: list[dict[str, Any]],
+    *,
+    decisions: list[dict[str, Any]],
+    outcomes: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Evaluate only against future dates; no random or same-date leakage."""
 
@@ -309,8 +301,7 @@ def strict_walk_forward_evaluation(
         if decision is None:
             continue
         if (
-            classify_canonical_return_truth(outcome, decision=decision)
-            != CURRENT_RETURN_TRUTH
+            classify_canonical_return_truth(outcome, decision=decision) != CURRENT_RETURN_TRUTH
             or outcome.get("learning_eligible") is not True
             or not has_authenticated_committed_fill_truth(outcome)
         ):
@@ -324,18 +315,21 @@ def strict_walk_forward_evaluation(
         model = V6EmpiricalShadowModel(train)
         for row in test:
             prediction = model.predict(dict(row["decision"])).to_dict()
-            predictions.append({
-                "market_date": date,
-                "decision_id": row.get("decision_id"),
-                "prediction": prediction,
-                "realized_net_excess_return_pct": row.get("net_excess_return_pct"),
-                "training_max_market_date": max(
-                    (str(item.get("market_date") or "")[:10] for item in train),
-                    default=None,
-                ),
-            })
+            predictions.append(
+                {
+                    "market_date": date,
+                    "decision_id": row.get("decision_id"),
+                    "prediction": prediction,
+                    "realized_net_excess_return_pct": row.get("net_excess_return_pct"),
+                    "training_max_market_date": max(
+                        (str(item.get("market_date") or "")[:10] for item in train),
+                        default=None,
+                    ),
+                }
+            )
     eligible = [
-        row for row in predictions
+        row
+        for row in predictions
         if row["prediction"].get("status") == "CALIBRATED"
         and _number(row.get("realized_net_excess_return_pct")) is not None
     ]
@@ -350,9 +344,11 @@ def strict_walk_forward_evaluation(
         ),
         "evaluated_prediction_count": len(eligible),
         "total_label_count": len(rows),
-        "realized_net_excess_return_pct": _round(mean([
-            float(row["realized_net_excess_return_pct"]) for row in eligible
-        ])) if eligible else None,
+        "realized_net_excess_return_pct": _round(
+            mean([float(row["realized_net_excess_return_pct"]) for row in eligible])
+        )
+        if eligible
+        else None,
         "predictions": predictions,
         "research_only": True,
         "broker_execution_enabled": False,
@@ -368,16 +364,13 @@ def promotion_readiness(
 ) -> dict[str, Any]:
     """Evaluate every frozen promotion gate; absent proof always fails closed."""
 
-    decision_by_id = {
-        str(row.get("decision_id") or ""): row for row in (decisions or [])
-    }
+    decision_by_id = {str(row.get("decision_id") or ""): row for row in (decisions or [])}
     valid = []
     for row in outcomes:
         decision = decision_by_id.get(str(row.get("decision_id") or ""))
         if (
             decision is not None
-            and classify_canonical_return_truth(row, decision=decision)
-            == CURRENT_RETURN_TRUTH
+            and classify_canonical_return_truth(row, decision=decision) == CURRENT_RETURN_TRUTH
             and row.get("learning_eligible") is True
             and has_authenticated_committed_fill_truth(row)
             and row.get("prospective_promotion_eligible") is True
@@ -391,13 +384,9 @@ def promotion_readiness(
         if value is not None:
             returns.append(value)
     tail = _tail_mean(returns) if returns else None
-    tracked = [
-        row for row in (decisions or []) if row.get("action") == "SHADOW_TRACK"
-    ]
+    tracked = [row for row in (decisions or []) if row.get("action") == "SHADOW_TRACK"]
     conclusive_ids = {
-        str(row.get("decision_id") or "")
-        for row in valid
-        if str(row.get("decision_id") or "")
+        str(row.get("decision_id") or "") for row in valid if str(row.get("decision_id") or "")
     }
     outcome_coverage_pct = (
         100.0
@@ -407,9 +396,7 @@ def promotion_readiness(
         else None
     )
     daily_returns_by_date = aggregate_daily_returns(valid)
-    daily_returns = [
-        daily_returns_by_date[day][0] for day in sorted(daily_returns_by_date)
-    ]
+    daily_returns = [daily_returns_by_date[day][0] for day in sorted(daily_returns_by_date)]
     daily_weighting = daily_weighting_status(valid)
     # Allocation is already reflected in each account-day return; risk
     # observations are sessions and are not weighted again by invested cash.
@@ -420,6 +407,10 @@ def promotion_readiness(
     bootstrap_lower = _bootstrap_lower_bound(valid)
     stressed_expectancy = _stressed_expectancy(valid, multiplier=1.5)
     evaluation_data = evaluation or {}
+    account_session_evidence = evaluation_data.get("account_session_evaluation")
+    account_session_data = (
+        account_session_evidence if isinstance(account_session_evidence, dict) else {}
+    )
     return_metrics = evaluation_data.get("return_metrics")
     metrics = return_metrics if isinstance(return_metrics, dict) else {}
     holdout = evaluation_data.get("untouched_holdout")
@@ -442,12 +433,16 @@ def promotion_readiness(
             benchmark["primary_complete"] and benchmark["secondary_complete"]
         ),
         "positive_mean_net_excess_return": bool(returns and mean(returns) > 0),
+        # The one-percent objective is reported as a point target only.  It is
+        # never a sizing instruction and cannot replace the positive lower CI.
+        "one_percent_point_target_observed": bool(daily_returns and mean(daily_returns) >= 1.0),
         "bootstrap_95_lower_bound_above_zero": bool(
             bootstrap_lower is not None and bootstrap_lower > 0.0
         ),
-        "profit_factor_at_least_1_20": bool(
-            profit_factor is not None and profit_factor >= 1.2
+        "positive_lower_confidence_bound_required": bool(
+            bootstrap_lower is not None and bootstrap_lower > 0.0
         ),
+        "profit_factor_at_least_1_20": bool(profit_factor is not None and profit_factor >= 1.2),
         "positive_excess_vs_primary_and_cash": bool(returns and mean(returns) > 0),
         "maximum_drawdown_no_worse_than_minus_8_pct": bool(
             maximum_drawdown is not None and maximum_drawdown >= -8.0
@@ -489,15 +484,18 @@ def promotion_readiness(
         "primary_benchmark_coverage_complete": benchmark["primary_complete"],
         "secondary_benchmark_coverage_complete": benchmark["secondary_complete"],
         "all_sourced_and_point_in_time": all(
-            bool(row.get("source_bar_hash_sha256"))
-            and row.get("no_lookahead") is True
+            bool(row.get("source_bar_hash_sha256")) and row.get("no_lookahead") is True
             for row in valid
-        ) and bool(valid),
+        )
+        and bool(valid),
+        "authoritative_account_session_completeness": bool(
+            account_session_data.get("status") == "COMPLETE"
+        )
+        if account_session_evidence is not None
+        else False,
     }
     technical_criteria = {
-        key: value
-        for key, value in criteria.items()
-        if key != "manual_operator_approval_recorded"
+        key: value for key, value in criteria.items() if key != "manual_operator_approval_recorded"
     }
     technically_ready = all(technical_criteria.values())
     approved = technically_ready and manual_operator_approval
@@ -507,9 +505,9 @@ def promotion_readiness(
     if not comparison_binding_valid:
         promotion_blockers.append("comparison_to_v5_receipt_missing_or_hash_mismatch")
     if not daily_weighting["promotion_eligible"]:
-        promotion_blockers.append(
-            "allocation_or_account_weight_truth_missing_or_invalid"
-        )
+        promotion_blockers.append("allocation_or_account_weight_truth_missing_or_invalid")
+    if account_session_evidence is None or account_session_data.get("status") != "COMPLETE":
+        promotion_blockers.append("authoritative_account_session_completeness_missing_or_blocked")
     return {
         "status": (
             "MANUALLY_APPROVED_FOR_CONTROLLED_PROMOTION"
@@ -528,6 +526,12 @@ def promotion_readiness(
         "risk_series_status": daily_weighting["status"],
         "risk_series_promotion_eligible": daily_weighting["promotion_eligible"],
         "eligible_outcome_coverage_pct": _round(outcome_coverage_pct),
+        "target": {
+            "target_return_pct": 1.0,
+            "target_is_evaluation_only": True,
+            "point_target_observed": bool(daily_returns and mean(daily_returns) >= 1.0),
+            "positive_lower_confidence_bound_required": True,
+        },
         "mean_net_excess_return_pct": _round(mean(returns)) if returns else None,
         "tail_loss_pct": _round(tail),
         "profit_factor": _round(profit_factor),
@@ -537,9 +541,7 @@ def promotion_readiness(
         "one_point_five_x_slippage_expectancy_pct": _round(stressed_expectancy),
         "benchmark_coverage": benchmark,
         "performance_status": (
-            "ELIGIBLE_FOR_MANUAL_REVIEW"
-            if technically_ready
-            else "WAITING_FOR_FORWARD_EVIDENCE"
+            "ELIGIBLE_FOR_MANUAL_REVIEW" if technically_ready else "WAITING_FOR_FORWARD_EVIDENCE"
         ),
         "research_only": True,
         "broker_execution_enabled": False,
@@ -549,9 +551,7 @@ def promotion_readiness(
 def _profit_factor(values: list[float], weights: list[float] | None = None) -> float | None:
     effective_weights = weights if weights is not None else [1.0] * len(values)
     gains = sum(
-        value * weight
-        for value, weight in zip(values, effective_weights, strict=True)
-        if value > 0
+        value * weight for value, weight in zip(values, effective_weights, strict=True) if value > 0
     )
     losses = abs(
         sum(
@@ -576,23 +576,18 @@ def _maximum_drawdown(values: list[float]) -> float | None:
     return worst
 
 
-def _return_concentration(
-    values: list[float], weights: list[float] | None = None
-) -> float | None:
+def _return_concentration(values: list[float], weights: list[float] | None = None) -> float | None:
     if not values:
         return None
     effective_weights = weights if weights is not None else [1.0] * len(values)
     contributions = [
-        abs(value * weight)
-        for value, weight in zip(values, effective_weights, strict=True)
+        abs(value * weight) for value, weight in zip(values, effective_weights, strict=True)
     ]
     denominator = sum(contributions)
     return 100.0 * max(contributions) / denominator if denominator else 100.0
 
 
-def _holdout_binding_is_exact(
-    holdout: dict[str, Any], *, model_run_id: object
-) -> bool:
+def _holdout_binding_is_exact(holdout: dict[str, Any], *, model_run_id: object) -> bool:
     """Require an immutable holdout receipt to bind experiment/model/evidence."""
 
     evidence = holdout.get("evidence")
@@ -601,9 +596,7 @@ def _holdout_binding_is_exact(
     bound_model = str(holdout.get("model_run_id") or evidence_data.get("model_run_id") or "")
     configured_hash = str(holdout.get("configuration_hash_sha256") or "")
     evidence_experiment_id = str(evidence_data.get("experiment_id") or "")
-    evidence_configuration_hash = str(
-        evidence_data.get("configuration_hash_sha256") or ""
-    )
+    evidence_configuration_hash = str(evidence_data.get("configuration_hash_sha256") or "")
     source_lineage_hash = str(
         evidence_data.get("source_lineage_hash_sha256")
         or evidence_data.get("source_hash_sha256")
@@ -614,9 +607,7 @@ def _holdout_binding_is_exact(
     window_data = evaluation_window if isinstance(evaluation_window, dict) else {}
     evidence_hash = str(holdout.get("evidence_hash_sha256") or "")
     declared_binding = str(
-        holdout.get("model_binding_hash_sha256")
-        or holdout.get("binding_hash_sha256")
-        or ""
+        holdout.get("model_binding_hash_sha256") or holdout.get("binding_hash_sha256") or ""
     )
     expected_binding = _hash(
         {
@@ -654,9 +645,7 @@ def _holdout_binding_is_exact(
     )
 
 
-def _comparison_binding_is_exact(
-    comparison: dict[str, Any], *, model_run_id: object
-) -> bool:
+def _comparison_binding_is_exact(comparison: dict[str, Any], *, model_run_id: object) -> bool:
     """Require a persisted V5 comparison receipt with complete lineage."""
 
     comparison_id = str(comparison.get("comparison_id") or "")
@@ -665,23 +654,17 @@ def _comparison_binding_is_exact(
     experiment_id = str(comparison.get("experiment_id") or "")
     configuration_hash = str(comparison.get("configuration_hash_sha256") or "")
     source_hash = str(
-        comparison.get("source_lineage_hash_sha256")
-        or comparison.get("source_hash_sha256")
-        or ""
+        comparison.get("source_lineage_hash_sha256") or comparison.get("source_hash_sha256") or ""
     )
     code_sha = str(comparison.get("code_sha") or "")
     evaluation_window = comparison.get("evaluation_window")
     window_data = evaluation_window if isinstance(evaluation_window, dict) else {}
     declared_binding = str(
-        comparison.get("model_binding_hash_sha256")
-        or comparison.get("binding_hash_sha256")
-        or ""
+        comparison.get("model_binding_hash_sha256") or comparison.get("binding_hash_sha256") or ""
     )
     metrics = comparison.get("series_metrics")
     metrics_hash = _hash(metrics) if isinstance(metrics, dict) else ""
-    persisted_metrics_hash = str(
-        comparison.get("comparison_metrics_hash_sha256") or ""
-    )
+    persisted_metrics_hash = str(comparison.get("comparison_metrics_hash_sha256") or "")
     expected_binding = _hash(
         {
             "model_run_id": bound_model,
@@ -731,19 +714,13 @@ def _bootstrap_lower_bound(rows: list[dict[str, Any]]) -> float | None:
     generator = random.Random(6_001)
     estimates = []
     for _ in range(1_000):
-        values = [
-            value
-            for _index in dates
-            for value in by_date[generator.choice(dates)]
-        ]
+        values = [value for _index in dates for value in by_date[generator.choice(dates)]]
         estimates.append(mean(values))
     estimates.sort()
     return estimates[max(0, int(len(estimates) * 0.025) - 1)]
 
 
-def _stressed_expectancy(
-    rows: list[dict[str, Any]], *, multiplier: float
-) -> float | None:
+def _stressed_expectancy(rows: list[dict[str, Any]], *, multiplier: float) -> float | None:
     values = []
     for row in rows:
         value = _number(row.get("net_excess_return_pct"))
@@ -767,14 +744,11 @@ def _v6_outcome_from_source(
         or _utc_now()
     )
     projection = (
-        canonical_return_truth_projection(source, decision=decision)
-        if source is not None
-        else {}
+        canonical_return_truth_projection(source, decision=decision) if source is not None else {}
     )
     current_return = bool(
         source is not None
-        and classify_canonical_return_truth(source, decision=decision)
-        == CURRENT_RETURN_TRUTH
+        and classify_canonical_return_truth(source, decision=decision) == CURRENT_RETURN_TRUTH
         and projection
     )
     payload: dict[str, Any] = {
@@ -788,9 +762,7 @@ def _v6_outcome_from_source(
         # V6's compatibility alias is a projection of authenticated after-cost
         # truth.  It is never recomputed from gross or expected prices.
         "net_return_pct": (
-            _number(projection.get("after_cost_return_pct"))
-            if current_return
-            else None
+            _number(projection.get("after_cost_return_pct")) if current_return else None
         ),
         "first_touch": projection.get("path_event"),
         "counterfactual_rejected_candidate": bool(
@@ -798,8 +770,7 @@ def _v6_outcome_from_source(
         ),
         "counterfactual_policy": (source or {}).get("counterfactual_policy"),
         "learning_eligible": bool(
-            current_return and projection.get("learning_eligible") is True
-            and fill_truth_present
+            current_return and projection.get("learning_eligible") is True and fill_truth_present
         ),
         "fill_truth_required": True,
         "fill_truth_status": (
@@ -810,12 +781,9 @@ def _v6_outcome_from_source(
         ),
         "no_lookahead": bool(projection.get("no_lookahead")),
         "cost_model_version": decision.get("cost_model_version"),
-        "estimated_round_trip_cost_bps": _number(
-            decision.get("estimated_round_trip_cost_bps")
-        ),
+        "estimated_round_trip_cost_bps": _number(decision.get("estimated_round_trip_cost_bps")),
         "source_outcome_status": (
-            source_or_attempt.get("outcome_status")
-            or (attempt or {}).get("status")
+            source_or_attempt.get("outcome_status") or (attempt or {}).get("status")
         ),
         "missing_classification": missing_classification,
         "authoritative_terminal": missing_classification == "authoritative_terminal",
@@ -825,11 +793,16 @@ def _v6_outcome_from_source(
         "broker_execution_enabled": False,
     }
     if not current_return:
-        payload["outcome_id"] = "v6o-" + _hash({
-            "decision_id": payload["decision_id"],
-            "source_status": payload["source_outcome_status"],
-            "outcome_status": payload["outcome_status"],
-        })[:28]
+        payload["outcome_id"] = (
+            "v6o-"
+            + _hash(
+                {
+                    "decision_id": payload["decision_id"],
+                    "source_status": payload["source_outcome_status"],
+                    "outcome_status": payload["outcome_status"],
+                }
+            )[:28]
+        )
     return payload
 
 
@@ -926,9 +899,18 @@ def _safe_signal_facts(signal: dict[str, Any]) -> dict[str, Any]:
     return {
         key: signal.get(key)
         for key in (
-            "ticker", "rank", "alpha_score", "entry_watch_level",
-            "target_1", "invalidation_level", "can_alert", "alert_gate_status",
-            "no_trade_reason", "source_confidence", "source", "source_url",
+            "ticker",
+            "rank",
+            "alpha_score",
+            "entry_watch_level",
+            "target_1",
+            "invalidation_level",
+            "can_alert",
+            "alert_gate_status",
+            "no_trade_reason",
+            "source_confidence",
+            "source",
+            "source_url",
         )
     }
 
@@ -943,10 +925,12 @@ def _estimated_cost_bps(feature: dict[str, Any]) -> float | None:
 
 
 def _group_key(row: dict[str, Any]) -> str:
-    return "|".join((
-        str(row.get("setup_key") or "unknown"),
-        str(row.get("regime_key") or "UNKNOWN"),
-    ))
+    return "|".join(
+        (
+            str(row.get("setup_key") or "unknown"),
+            str(row.get("regime_key") or "UNKNOWN"),
+        )
+    )
 
 
 def _tail_mean(values: list[float]) -> float | None:

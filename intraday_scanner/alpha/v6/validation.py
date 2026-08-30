@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import random
 from collections import defaultdict
-from datetime import date
+from datetime import date, datetime, timezone
 from statistics import mean, pstdev
 from typing import Any
 
@@ -116,35 +116,148 @@ def compare_catalyst_ablations(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def expanding_purged_splits(
-    rows: list[dict[str, Any]], *, embargo_dates: int = 1, minimum_train_dates: int = 20
+    rows: list[dict[str, Any]],
+    *,
+    embargo_dates: int = 1,
+    minimum_train_dates: int = 20,
+    max_holding_horizon_minutes: int = 390,
+    embargo_minutes: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Create expanding folds whose training dates precede their test date."""
+    """Create expanding folds with interval purging and a holding-horizon embargo.
+
+    Date-only legacy rows retain the prior date fold shape.  When entry/exit
+    timestamps are present, a training observation is removed if its label
+    interval reaches the test interval or the configured embargo boundary.
+    """
 
     if embargo_dates < 0 or minimum_train_dates < 1:
         raise ValueError("embargo_dates must be >= 0 and minimum_train_dates must be >= 1")
-    dates = sorted(
+    dates: list[str] = sorted(
         {str(row.get("market_date") or "")[:10] for row in rows if row.get("market_date")}
     )
+    if max_holding_horizon_minutes < 0:
+        raise ValueError("max_holding_horizon_minutes must be >= 0")
+    effective_embargo_minutes = (
+        max_holding_horizon_minutes if embargo_minutes is None else embargo_minutes
+    )
+    if effective_embargo_minutes < max_holding_horizon_minutes:
+        raise ValueError("embargo must be at least the maximum holding horizon")
     folds: list[dict[str, Any]] = []
     for test_index in range(minimum_train_dates + embargo_dates, len(dates)):
         test_date = dates[test_index]
         training_dates = dates[: test_index - embargo_dates]
         if len(training_dates) < minimum_train_dates:
             continue
+        test_rows = [row for row in rows if str(row.get("market_date") or "")[:10] == test_date]
+        training_rows = [
+            row for row in rows if str(row.get("market_date") or "")[:10] in training_dates
+        ]
+        test_starts = [
+            value
+            for row in test_rows
+            if (value := _interval_start(row)) is not None
+        ]
+        test_start = min(test_starts, default=None)
+        purged_ids: list[str] = []
+        if test_start is not None:
+            cutoff = test_start.timestamp() - effective_embargo_minutes * 60
+            kept: list[dict[str, Any]] = []
+            for row in training_rows:
+                end = _interval_end(row)
+                if end is not None and end.timestamp() >= cutoff:
+                    purged_ids.append(str(row.get("decision_id") or row.get("label_id") or ""))
+                else:
+                    kept.append(row)
+            training_rows = kept
+        actual_training_dates = sorted(
+            {str(row.get("market_date") or "")[:10] for row in training_rows}
+        )
+        if len(actual_training_dates) < minimum_train_dates:
+            continue
         folds.append(
             {
                 "fold_id": f"v6-fold-{test_date}",
-                "training_dates": training_dates,
+                "training_dates": actual_training_dates,
                 "test_dates": [test_date],
                 "embargoed_dates": dates[test_index - embargo_dates : test_index],
                 "no_lookahead": max(training_dates) < test_date,
+                "purged_training_decision_ids": sorted(value for value in purged_ids if value),
+                "purge_policy": "entry_to_exit_label_interval",
+                "embargo_minutes": effective_embargo_minutes,
+                "max_holding_horizon_minutes": max_holding_horizon_minutes,
             }
         )
     return folds
 
 
+def purged_expanding_splits(
+    rows: list[dict[str, Any]],
+    *,
+    max_holding_horizon_minutes: int = 390,
+    minimum_train_dates: int = 20,
+) -> list[dict[str, Any]]:
+    """Named strict entry-to-exit purge API for governed V6 callers."""
+
+    return expanding_purged_splits(
+        rows,
+        embargo_dates=1,
+        minimum_train_dates=minimum_train_dates,
+        max_holding_horizon_minutes=max_holding_horizon_minutes,
+        embargo_minutes=max_holding_horizon_minutes,
+    )
+
+
+def evaluate_account_sessions(
+    *,
+    expected_sessions: list[dict[str, Any]],
+    observed_sessions: list[dict[str, Any]],
+    account_id: str | None = None,
+) -> dict[str, Any]:
+    """V6-facing alias for canonical account/session completeness evaluation."""
+
+    from intraday_scanner.performance.account_contract import (
+        evaluate_expected_account_sessions,
+    )
+
+    return evaluate_expected_account_sessions(
+        expected_sessions=expected_sessions,
+        observed_sessions=observed_sessions,
+        account_id=account_id,
+    )
+
+
+def _interval_start(row: dict[str, Any]) -> datetime | None:
+    return _parse_timestamp(
+        row.get("entry_at") or row.get("label_interval_start") or row.get("entry_timestamp")
+    )
+
+
+def _interval_end(row: dict[str, Any]) -> datetime | None:
+    return _parse_timestamp(
+        row.get("exit_at") or row.get("label_interval_end") or row.get("exit_timestamp")
+    )
+
+
+def _parse_timestamp(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
 def evaluate_return_predictions(
-    rows: list[dict[str, Any]], *, bootstrap_samples: int = 1_000
+    rows: list[dict[str, Any]],
+    *,
+    bootstrap_samples: int = 1_000,
+    trial_count: int | None = None,
+    global_trial_count: int | None = None,
+    experiment_trial_count: int | None = None,
+    require_durable_trial_count: bool = False,
 ) -> dict[str, Any]:
     """Evaluate a frozen prediction set with selection-bias and leakage controls."""
 
@@ -158,6 +271,32 @@ def evaluate_return_predictions(
     ]
     if not usable:
         return _empty()
+    durable_count = trial_count
+    if durable_count is None:
+        durable_count = global_trial_count
+    if durable_count is None:
+        values = [
+            value
+            for row in usable
+            if isinstance((value := row.get("experiment_trial_count")), int)
+            and value >= 1
+        ]
+        if values and len(values) == len(usable):
+            durable_count = max(values)
+    trial_evidence = {
+        "global_attempt_count": global_trial_count,
+        "experiment_attempt_count": experiment_trial_count,
+        "trial_count": durable_count,
+        "status": "EVALUABLE"
+        if isinstance(durable_count, int) and durable_count >= 1
+        else "NOT_EVALUABLE_TRIAL_COUNT_MISSING",
+        "missing_trial_count_is_not_one": True,
+    }
+    if require_durable_trial_count and trial_evidence["status"] != "EVALUABLE":
+        result = _empty()
+        result["multiple_testing"] = trial_evidence
+        result["status"] = "NOT_EVALUABLE_TRIAL_COUNT_MISSING"
+        return result
     pairs = [
         (
             float(row["utility_lcb_pct"]),
@@ -184,9 +323,7 @@ def evaluate_return_predictions(
     daily_observation_weights = [1.0] * len(daily_returns)
     drawdowns = _drawdowns(daily_returns)
     concentration = _concentration(daily_returns, daily_observation_weights)
-    conditional_value_at_risk = _conditional_value_at_risk(
-        daily_returns, daily_observation_weights
-    )
+    conditional_value_at_risk = _conditional_value_at_risk(daily_returns, daily_observation_weights)
     daily_profit_factor = _profit_factor(daily_returns, daily_observation_weights)
     daily_weighting = daily_weighting_status(usable)
     top_count = max(1, len(pairs) // 10)
@@ -204,7 +341,7 @@ def evaluate_return_predictions(
     adjusted_sharpe = _multiple_testing_adjusted_sharpe(
         sharpe,
         sample_size=len(daily_returns),
-        trial_count=max(1, max(_int(row.get("experiment_trial_count"), 1) for row in usable)),
+        trial_count=durable_count,
     )
     no_lookahead = all(
         row.get("no_lookahead") is True
@@ -220,9 +357,7 @@ def evaluate_return_predictions(
         "market_date_count": len({str(row.get("market_date") or "") for row in usable}),
         "risk_observation_unit": "market_date",
         "risk_observation_count": len(daily_returns),
-        "allocation_account_weighting": (
-            "account_weighted_return_per_market_date_cash_retained"
-        ),
+        "allocation_account_weighting": ("account_weighted_return_per_market_date_cash_retained"),
         "risk_series_status": daily_weighting["status"],
         "risk_series_promotion_eligible": daily_weighting["promotion_eligible"],
         "after_cost_expectancy_pct": round(weighted_expectancy, 6),
@@ -235,9 +370,7 @@ def evaluate_return_predictions(
         ),
         "maximum_drawdown_pct": round(min(drawdowns), 6),
         "conditional_value_at_risk_95_pct": conditional_value_at_risk,
-        "downside_deviation_pct": _downside_deviation(
-            daily_returns, daily_observation_weights
-        ),
+        "downside_deviation_pct": _downside_deviation(daily_returns, daily_observation_weights),
         "gain_loss_concentration_pct": round(concentration, 6),
         "turnover_observations_per_session": round(
             len(usable) / max(1, len({str(row.get("market_date") or "") for row in usable})),
@@ -253,6 +386,16 @@ def evaluate_return_predictions(
         "bootstrap_expectancy_95_ci_pct": bootstrap,
         "annualized_observation_sharpe": _round(sharpe),
         "multiple_testing_adjusted_sharpe": _round(adjusted_sharpe),
+        "multiple_testing": {
+            **trial_evidence,
+            "penalty": _round(
+                _multiple_testing_penalty(sample_size=len(daily_returns), trial_count=durable_count)
+            ),
+            "deflated_sharpe_ratio": _deflated_sharpe_ratio(
+                sharpe, sample_size=len(daily_returns), trial_count=durable_count
+            ),
+            "pbo_status": "NOT_EVALUABLE_PBO_UNAVAILABLE",
+        },
         "shuffled_label_rank_correlation": _shuffled_negative_control(pairs),
         "segmented_performance": {
             key: _segments(usable, key)
@@ -276,9 +419,7 @@ def _empty() -> dict[str, Any]:
         "market_date_count": 0,
         "risk_observation_unit": "market_date",
         "risk_observation_count": 0,
-        "allocation_account_weighting": (
-            "account_weighted_return_per_market_date_cash_retained"
-        ),
+        "allocation_account_weighting": ("account_weighted_return_per_market_date_cash_retained"),
         "risk_series_status": "NOT_EVALUABLE",
         "risk_series_promotion_eligible": False,
         "after_cost_expectancy_pct": None,
@@ -300,6 +441,16 @@ def _empty() -> dict[str, Any]:
         "bootstrap_expectancy_95_ci_pct": {"lower": None, "upper": None},
         "annualized_observation_sharpe": None,
         "multiple_testing_adjusted_sharpe": None,
+        "multiple_testing": {
+            "status": "NOT_EVALUABLE_TRIAL_COUNT_MISSING",
+            "global_attempt_count": None,
+            "experiment_attempt_count": None,
+            "trial_count": None,
+            "penalty": None,
+            "deflated_sharpe_ratio": None,
+            "pbo_status": "NOT_EVALUABLE_PBO_UNAVAILABLE",
+            "missing_trial_count_is_not_one": True,
+        },
         "shuffled_label_rank_correlation": None,
         "segmented_performance": {},
         "selection_bias_correction": {
@@ -630,12 +781,31 @@ def _annualized_observation_sharpe(values: list[float]) -> float | None:
 
 
 def _multiple_testing_adjusted_sharpe(
-    sharpe: float | None, *, sample_size: int, trial_count: int
+    sharpe: float | None, *, sample_size: int, trial_count: int | None
 ) -> float | None:
-    if sharpe is None or sample_size < 2:
+    if sharpe is None or sample_size < 2 or not isinstance(trial_count, int) or trial_count < 1:
         return None
     penalty = math.sqrt(2.0 * math.log(max(1, trial_count))) / math.sqrt(sample_size)
     return sharpe - penalty
+
+
+def _multiple_testing_penalty(*, sample_size: int, trial_count: int | None) -> float | None:
+    if sample_size < 2 or not isinstance(trial_count, int) or trial_count < 1:
+        return None
+    return math.sqrt(2.0 * math.log(trial_count)) / math.sqrt(sample_size)
+
+
+def _deflated_sharpe_ratio(
+    sharpe: float | None, *, sample_size: int, trial_count: int | None
+) -> float | None:
+    """Approximate DSR probability; null when durable trial evidence is absent."""
+
+    penalty = _multiple_testing_penalty(sample_size=sample_size, trial_count=trial_count)
+    if sharpe is None or penalty is None:
+        return None
+    # A normal-tail probability is a conservative, dependency-free DSR proxy.
+    z = (sharpe - penalty) * math.sqrt(max(1, sample_size))
+    return round(0.5 * (1.0 + math.erf(z / math.sqrt(2.0))), 6)
 
 
 def _weighted_mean(values: list[float], weights: list[float]) -> float:
@@ -683,4 +853,6 @@ __all__ = [
     "daily_weighting_status",
     "evaluate_return_predictions",
     "expanding_purged_splits",
+    "purged_expanding_splits",
+    "evaluate_account_sessions",
 ]

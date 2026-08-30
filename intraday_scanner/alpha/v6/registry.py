@@ -109,6 +109,8 @@ def register_experiment(
     v5_comparison_hash_sha256: str | None = None,
     input_hash_sha256: str | None = None,
     validation_end: str | None = None,
+    feature_set_hash_sha256: str | None = None,
+    cost_model_version: str | None = None,
 ) -> dict[str, Any]:
     """Register exactly one prospective policy difference; never apply it."""
 
@@ -211,6 +213,8 @@ def register_experiment(
         "code_sha": frozen_code_sha,
         "v5_comparison_hash_sha256": frozen_v5_hash,
         "input_hash_sha256": frozen_input_hash,
+        "feature_set_hash_sha256": _hash_if_present(feature_set_hash_sha256),
+        "cost_model_version": str(cost_model_version or "") or None,
         "holdout_evaluated_at": None,
         "stop_condition": stop_condition.strip(),
         "promotion_requirements": promotion_requirements,

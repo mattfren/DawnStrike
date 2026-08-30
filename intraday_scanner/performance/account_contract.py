@@ -120,9 +120,7 @@ class AccountSessionValidation:
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
         result["status"] = self.status.value
-        result["net_return"] = (
-            str(self.net_return) if self.net_return is not None else None
-        )
+        result["net_return"] = str(self.net_return) if self.net_return is not None else None
         return result
 
 
@@ -239,6 +237,95 @@ class AccountSessionTarget:
         return result
 
 
+def evaluate_expected_account_sessions(
+    *,
+    expected_sessions: list[dict[str, Any]],
+    observed_sessions: list[dict[str, Any]],
+    account_id: str | None = None,
+) -> dict[str, Any]:
+    """Evaluate one account across every authoritative expected market session.
+
+    A closed no-trade session is a real zero only when its observation carries
+    an authoritative receipt. Missing, partial, degraded, and quarantined
+    sessions remain non-evaluable and block completeness.
+    """
+
+    observed_by_date = {
+        str(row.get("market_date") or "")[:10]: row
+        for row in observed_sessions
+        if not account_id or str(row.get("account_id") or account_id) == account_id
+    }
+    rows: list[dict[str, Any]] = []
+    blocking: list[str] = []
+    for expected in sorted(expected_sessions, key=lambda row: str(row.get("market_date") or "")):
+        market_date = str(expected.get("market_date") or "")[:10]
+        observed = observed_by_date.get(market_date)
+        if observed is None:
+            validation = validate_account_session(
+                expected_session=True,
+                beginning_equity_cents=None,
+                ending_equity_cents=None,
+            )
+        else:
+            status = str(observed.get("status") or "").upper()
+            validation = validate_account_session(
+                expected_session=True,
+                beginning_equity_cents=observed.get("beginning_equity_cents"),
+                ending_equity_cents=observed.get("ending_equity_cents"),
+                external_flow_cents=observed.get("external_flow_cents", 0),
+                authoritative_receipt=observed.get("authoritative_receipt")
+                or observed.get("session_receipt"),
+                no_trade=bool(observed.get("no_trade") or status == "NO_TRADE"),
+                pending=status in {"PENDING", "OPEN"},
+                degraded=status in {"PARTIAL", "DEGRADED"},
+                quarantined=status in {"QUARANTINED", "CONFLICT"},
+            )
+        row = {
+            "account_id": account_id or observed.get("account_id") if observed else account_id,
+            "market_date": market_date,
+            "expected_session_id": expected.get("session_id"),
+            "status": validation.status.value,
+            "net_return": str(validation.net_return) if validation.net_return is not None else None,
+            "reasons": list(validation.reasons),
+            "target_return_pct": "1.00",
+            "research_only": True,
+            "broker_execution_enabled": False,
+        }
+        rows.append(row)
+        if not validation.valid:
+            blocking.append(market_date + ":" + validation.status.value)
+    return {
+        "status": "COMPLETE"
+        if not blocking and rows
+        else "NOT_EVALUABLE_ACCOUNT_SESSION_COMPLETENESS",
+        "account_id": account_id,
+        "expected_session_count": len(expected_sessions),
+        "observed_session_count": len(observed_by_date),
+        "complete_session_count": sum(
+            1
+            for row in rows
+            if row["status"]
+            in {
+                AccountSessionStatus.COMPLETE_TARGET_MET.value,
+                AccountSessionStatus.COMPLETE_TARGET_NOT_MET.value,
+                AccountSessionStatus.NO_TRADE.value,
+            }
+        ),
+        "blocking_sessions": blocking,
+        "target_return_pct": "1.00",
+        "target_is_evaluation_only": True,
+        "rows": rows,
+        "missing_truth_is_zero": False,
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+
+
+# Explicit aliases used by research/evaluation callers.
+evaluate_account_session_window = evaluate_expected_account_sessions
+build_account_session_evaluation = evaluate_expected_account_sessions
+
+
 __all__ = [
     "ACCOUNT_SESSION_CONTRACT_VERSION",
     "TARGET_NET_RETURN",
@@ -252,4 +339,7 @@ __all__ = [
     "compute_net_total_account_return",
     "account_session_return_pct",
     "validate_account_session",
+    "evaluate_expected_account_sessions",
+    "evaluate_account_session_window",
+    "build_account_session_evaluation",
 ]

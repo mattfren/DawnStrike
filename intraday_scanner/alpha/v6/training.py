@@ -42,7 +42,18 @@ _PROHIBITED_FEATURE_TOKENS = frozenset(
 )
 
 
-def train_shadow_challengers(dataset: dict[str, Any], *, code_sha: str) -> dict[str, Any]:
+def train_shadow_challengers(
+    dataset: dict[str, Any],
+    *,
+    code_sha: str,
+    experiment: dict[str, Any] | None = None,
+    arm_id: str | None = None,
+    configuration_hash_sha256: str | None = None,
+    feature_set_hash_sha256: str | None = None,
+    cost_model_version: str | None = None,
+    validation_window: dict[str, Any] | None = None,
+    require_preregistration: bool = False,
+) -> dict[str, Any]:
     """Fit the frozen model suite only after the predeclared evidence threshold.
 
     The returned artifact is JSON-safe and hash-addressable. It contains the
@@ -53,9 +64,7 @@ def train_shadow_challengers(dataset: dict[str, Any], *, code_sha: str) -> dict[
 
     raw_rows = list(dataset.get("rows") or [])
     rows = current_training_rows(raw_rows)
-    accepted_decision_ids = {
-        str(row.get("decision_id") or "") for row in rows
-    }
+    accepted_decision_ids = {str(row.get("decision_id") or "") for row in rows}
     activation_rows = [
         row
         for row in list(dataset.get("activation_rows") or [])
@@ -91,15 +100,49 @@ def train_shadow_challengers(dataset: dict[str, Any], *, code_sha: str) -> dict[
     }
     if eligibility["status"] == "NOT_TRAINED_INSUFFICIENT_LABELS":
         return _receipt(base, status="NOT_TRAINED_INSUFFICIENT_LABELS", artifact=None)
+    if require_preregistration:
+        from intraday_scanner.alpha.v6.experiment_ledger import preregistration_blockers
+
+        blockers = preregistration_blockers(
+            experiment,
+            arm_id=arm_id,
+            configuration_hash_sha256=configuration_hash_sha256,
+            feature_set_hash_sha256=feature_set_hash_sha256,
+            cost_model_version=cost_model_version,
+            validation_window=validation_window,
+        )
+        if blockers:
+            base["preregistration_blockers"] = blockers
+            return _receipt(base, status="BLOCKED_PREREGISTRATION_INCOMPLETE", artifact=None)
+        frozen_training = (
+            experiment.get("frozen_windows", {}).get("training", {})
+            if isinstance(experiment, dict)
+            else {}
+        )
+        if str(frozen_training.get("cutoff") or frozen_training.get("end") or "") != str(
+            dataset.get("training_cutoff") or ""
+        ):
+            base["preregistration_blockers"] = ["training_cutoff_not_bound_to_frozen_window"]
+            return _receipt(base, status="BLOCKED_PREREGISTRATION_INCOMPLETE", artifact=None)
+        base.update(
+            {
+                "experiment_id": (
+                    experiment.get("experiment_id") if isinstance(experiment, dict) else None
+                ),
+                "arm_id": arm_id,
+                "configuration_hash_sha256": configuration_hash_sha256,
+                "feature_set_hash_sha256": feature_set_hash_sha256,
+                "cost_model_version": cost_model_version,
+                "evaluation_window": validation_window,
+            }
+        )
     dependency = _research_dependency()
     if dependency is None:
         return _receipt(base, status="BLOCKED_RESEARCH_DEPENDENCY", artifact=None)
     suite = _fit_model_suite(
         rows,
         activation_rows=activation_rows,
-        allow_gradient_boosting=(
-            "controlled_gradient_boosting" in eligibility["allowed_families"]
-        ),
+        allow_gradient_boosting=("controlled_gradient_boosting" in eligibility["allowed_families"]),
     )
     artifact = {
         "artifact_schema_version": "dawnstrike.alphaops_v6.model_artifact.v2",
@@ -137,9 +180,7 @@ def walk_forward_challenger_predictions(
     """Generate only purged, date-forward predictions for persisted evaluation."""
 
     rows = current_training_rows(list(dataset.get("rows") or []))
-    accepted_decision_ids = {
-        str(row.get("decision_id") or "") for row in rows
-    }
+    accepted_decision_ids = {str(row.get("decision_id") or "") for row in rows}
     activation_rows = [
         row
         for row in list(dataset.get("activation_rows") or [])
@@ -192,13 +233,16 @@ def walk_forward_challenger_predictions(
                 "research_only": True,
                 "broker_execution_enabled": False,
             }
-            payload["prediction_id"] = "v6p-" + canonical_hash(
-                {
-                    "decision_id": payload["decision_id"],
-                    "model_run_id": model_run_id,
-                    "fold_id": payload["fold_id"],
-                }
-            )[:28]
+            payload["prediction_id"] = (
+                "v6p-"
+                + canonical_hash(
+                    {
+                        "decision_id": payload["decision_id"],
+                        "model_run_id": model_run_id,
+                        "fold_id": payload["fold_id"],
+                    }
+                )[:28]
+            )
             predictions.append(payload)
     return predictions
 
@@ -337,17 +381,14 @@ def _frozen_standardized_values(
     return output
 
 
-def _frozen_linear_prediction(
-    artifact: dict[str, Any], values: list[float]
-) -> float | None:
+def _frozen_linear_prediction(artifact: dict[str, Any], values: list[float]) -> float | None:
     coefficients = list(artifact.get("coefficients") or [])
     intercepts = list(artifact.get("intercept") or [])
     if artifact.get("fitted") is not True or len(coefficients) != len(values):
         return None
     intercept = _finite(intercepts[0]) if intercepts else 0.0
     return float(intercept or 0.0) + sum(
-        float(coefficient) * value
-        for coefficient, value in zip(coefficients, values, strict=True)
+        float(coefficient) * value for coefficient, value in zip(coefficients, values, strict=True)
     )
 
 
@@ -362,9 +403,7 @@ def _fit_model_suite(
     feature_rows = [_feature_mapping(row) for row in [*rows, *activation_rows]]
     feature_names = sorted({name for item in feature_rows for name in item})
     return_x = _matrix(rows, feature_names)
-    return_y = np.asarray(
-        [float(row["target_net_excess_return_pct"]) for row in rows], dtype=float
-    )
+    return_y = np.asarray([float(row["target_net_excess_return_pct"]) for row in rows], dtype=float)
     return_weights = _weights(rows)
     return_model = _fit_linear(return_x, return_y, return_weights)
 
@@ -383,14 +422,8 @@ def _fit_model_suite(
         else:
             activation_constant = _beta_rate(activation_y.tolist())
 
-    tail_rows = [
-        row
-        for row in rows
-        if _finite(row.get("tail_loss_label")) in {0.0, 1.0}
-    ]
-    tail_y = np.asarray(
-        [float(row["tail_loss_label"]) for row in tail_rows], dtype=float
-    )
+    tail_rows = [row for row in rows if _finite(row.get("tail_loss_label")) in {0.0, 1.0}]
+    tail_y = np.asarray([float(row["tail_loss_label"]) for row in tail_rows], dtype=float)
     tail_model = None
     tail_constant = None
     if len(tail_rows) >= _MIN_BINARY_LABELS:
@@ -469,13 +502,9 @@ def _fit_model_suite(
 
 def _predict_suite(suite: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
     matrix = _matrix([row], suite["feature_names"])
-    activation = _binary_prediction(
-        suite["activation_model"], suite["activation_constant"], matrix
-    )
+    activation = _binary_prediction(suite["activation_model"], suite["activation_constant"], matrix)
     conditional_return = float(suite["return_model"].predict(matrix)[0])
-    tail_probability = _binary_prediction(
-        suite["tail_model"], suite["tail_constant"], matrix
-    )
+    tail_probability = _binary_prediction(suite["tail_model"], suite["tail_constant"], matrix)
     tail_severity = suite["tail_severity_pct"]
     expected_tail = (
         float(tail_probability) * float(tail_severity)
@@ -484,14 +513,10 @@ def _predict_suite(suite: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]
     )
     residual_quantile = suite["conformal"].get("absolute_residual_quantile_pct")
     interval_lower = (
-        conditional_return - float(residual_quantile)
-        if residual_quantile is not None
-        else None
+        conditional_return - float(residual_quantile) if residual_quantile is not None else None
     )
     interval_upper = (
-        conditional_return + float(residual_quantile)
-        if residual_quantile is not None
-        else None
+        conditional_return + float(residual_quantile) if residual_quantile is not None else None
     )
     capacity_penalty = _capacity_penalty(row)
     score = conservative_utility(
@@ -582,14 +607,10 @@ def _gradient_prediction(
         "tail_loss_pct": _round(expected_tail),
         "uncertainty_pct": _round(residual_quantile),
         "interval_lower_pct": _round(
-            conditional_return - residual_quantile
-            if residual_quantile is not None
-            else None
+            conditional_return - residual_quantile if residual_quantile is not None else None
         ),
         "interval_upper_pct": _round(
-            conditional_return + residual_quantile
-            if residual_quantile is not None
-            else None
+            conditional_return + residual_quantile if residual_quantile is not None else None
         ),
         "capacity_penalty_pct": _round(capacity_penalty),
         "utility_lcb_pct": score.get("utility_lcb_pct"),
@@ -653,9 +674,7 @@ def _conformal_receipt(rows: list[dict[str, Any]], feature_names: list[str]) -> 
     fit_dates = set(dates[:-calibration_date_count])
     calibration_dates = set(dates[-calibration_date_count:])
     fit_rows = [row for row in rows if row.get("market_date") in fit_dates]
-    calibration_rows = [
-        row for row in rows if row.get("market_date") in calibration_dates
-    ]
+    calibration_rows = [row for row in rows if row.get("market_date") in calibration_dates]
     if len(fit_rows) < 50 or len(calibration_rows) < _MIN_CONFORMAL_RESIDUALS:
         return {
             "status": "INSUFFICIENT_CHRONOLOGICAL_CALIBRATION_ROWS",
@@ -699,9 +718,7 @@ def _gradient_conformal_receipt(
     fit_dates = set(dates[:-calibration_date_count])
     calibration_dates = set(dates[-calibration_date_count:])
     fit_rows = [row for row in rows if row.get("market_date") in fit_dates]
-    calibration_rows = [
-        row for row in rows if row.get("market_date") in calibration_dates
-    ]
+    calibration_rows = [row for row in rows if row.get("market_date") in calibration_dates]
     if len(fit_rows) < 50 or len(calibration_rows) < _MIN_CONFORMAL_RESIDUALS:
         return {
             "status": "INSUFFICIENT_CHRONOLOGICAL_CALIBRATION_ROWS",
@@ -775,9 +792,7 @@ def _matrix(rows: list[dict[str, Any]], feature_names: list[str]) -> Any:
 def _targets(rows: list[dict[str, Any]]) -> Any:
     import numpy as np  # type: ignore[import-not-found]
 
-    return np.asarray(
-        [float(row["target_net_excess_return_pct"]) for row in rows], dtype=float
-    )
+    return np.asarray([float(row["target_net_excess_return_pct"]) for row in rows], dtype=float)
 
 
 def _weights(rows: list[dict[str, Any]]) -> Any:
@@ -883,16 +898,19 @@ def _receipt(
 ) -> dict[str, Any]:
     payload = {**base, "status": status, "artifact": artifact}
     payload["model_artifact_hash_sha256"] = canonical_hash(artifact) if artifact else None
-    payload["model_run_id"] = "v6m-" + canonical_hash(
-        {
-            "model_version": payload.get("model_version"),
-            "dataset_id": payload.get("dataset_id"),
-            "dataset_hash_sha256": payload.get("dataset_hash_sha256"),
-            "code_sha": payload.get("code_sha"),
-            "status": status,
-            "model_artifact_hash_sha256": payload["model_artifact_hash_sha256"],
-        }
-    )[:28]
+    payload["model_run_id"] = (
+        "v6m-"
+        + canonical_hash(
+            {
+                "model_version": payload.get("model_version"),
+                "dataset_id": payload.get("dataset_id"),
+                "dataset_hash_sha256": payload.get("dataset_hash_sha256"),
+                "code_sha": payload.get("code_sha"),
+                "status": status,
+                "model_artifact_hash_sha256": payload["model_artifact_hash_sha256"],
+            }
+        )[:28]
+    )
     return payload
 
 
@@ -900,18 +918,10 @@ def _lineage_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     lineages = [evidence_lineage(row) for row in rows]
     return {
         "source_artifact_hashes": sorted(
-            {
-                item
-                for lineage in lineages
-                for item in lineage["source_artifact_hashes"]
-            }
+            {item for lineage in lineages for item in lineage["source_artifact_hashes"]}
         ),
         "path_replay_ids": sorted(
-            {
-                str(lineage["path_replay_id"])
-                for lineage in lineages
-                if lineage["path_replay_id"]
-            }
+            {str(lineage["path_replay_id"]) for lineage in lineages if lineage["path_replay_id"]}
         ),
         "benchmark_hashes": sorted(
             {
@@ -935,11 +945,7 @@ def _lineage_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
             }
         ),
         "evidence_cohorts": sorted(
-            {
-                str(lineage["evidence_cohort"])
-                for lineage in lineages
-                if lineage["evidence_cohort"]
-            }
+            {str(lineage["evidence_cohort"]) for lineage in lineages if lineage["evidence_cohort"]}
         ),
         "row_lineage_hash_sha256": canonical_hash(
             [lineage["evidence_lineage_hash_sha256"] for lineage in lineages]
