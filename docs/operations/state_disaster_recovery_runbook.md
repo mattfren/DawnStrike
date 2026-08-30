@@ -11,8 +11,10 @@ Set `-BackupRoot` to a durable directory outside `StateRoot` (the default is
 not a raw copy of an open database. Each completed bundle contains only
 `shadow_real.sqlite`, `manifest.json`, and `receipt.json`; no environment,
 secret, WAL, or SHM files are copied. The manifest and receipt are
-self-hashed, bind the source and backup byte hashes, schema, `quick_check`,
-release SHA, and UTC creation time, and are written atomically.
+self-hashed, bind the authoritative online-backup bytes/hash, application
+schema (`schema_version.version`), `quick_check`, release SHA, and UTC
+creation time. The live main-file hash is retained only as an observational
+WAL-aware field. All bundle files are written atomically.
 
 Retention is bounded to known-good bundles. Invalid, partial, or tampered
 bundles are never selected and the last known-good bundle is never deleted.

@@ -15,7 +15,11 @@ from scripts.state_disaster_recovery import (
 
 def _database(path: Path, value: str = "observed") -> None:
     with sqlite3.connect(path) as connection:
-        connection.execute("PRAGMA user_version = 26")
+        connection.execute("PRAGMA user_version = 999")
+        connection.execute(
+            "CREATE TABLE schema_version (version INTEGER NOT NULL, applied_at TEXT NOT NULL)"
+        )
+        connection.execute("INSERT INTO schema_version VALUES (26, '2026-08-30T00:00:00+00:00')")
         connection.execute("CREATE TABLE evidence (value TEXT)")
         connection.execute("INSERT INTO evidence VALUES (?)", (value,))
 
@@ -38,6 +42,14 @@ def test_online_backup_bundle_is_self_hashed_and_research_safe(tmp_path: Path) -
     assert json.loads((bundle / "receipt.json").read_text())["automatic_restore"] is False
     with sqlite3.connect(source) as connection:
         assert connection.execute("SELECT value FROM evidence").fetchone() == ("observed",)
+
+
+def test_application_schema_is_bound_not_sqlite_user_version(tmp_path: Path) -> None:
+    _, root, bundle = _make_backup(tmp_path)
+    manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["source_schema_version"] == 26
+    assert manifest["backup_schema_version"] == 26
+    assert manifest["source_sqlite_user_version"] == 999
 
 
 def test_tamper_and_partial_bundles_fail_closed(tmp_path: Path) -> None:
@@ -87,6 +99,38 @@ def test_retry_with_backup_id_is_idempotent(tmp_path: Path) -> None:
     assert Path(second["bundle_path"]) == bundle
     assert (bundle / "manifest.json").read_bytes() == first
     assert [p for p in root.iterdir() if p.is_dir()] == [bundle]
+
+
+def test_backup_id_cannot_be_reused_for_different_source_or_release(tmp_path: Path) -> None:
+    source, root, bundle = _make_backup(tmp_path, backup_id="identity")
+    other_state = tmp_path / "other-state"
+    other_state.mkdir()
+    other_source = other_state / "shadow_real.sqlite"
+    _database(other_source, "changed")
+    with pytest.raises(RecoveryValidationError, match="different source"):
+        create_backup(other_source, root, state_root=other_state, backup_id="identity")
+    create_backup(
+        source,
+        root,
+        state_root=source.parent,
+        backup_id="release",
+        source_sha="a" * 40,
+    )
+    with pytest.raises(RecoveryValidationError, match="different source"):
+        create_backup(
+            source,
+            root,
+            state_root=source.parent,
+            backup_id="release",
+            source_sha="b" * 40,
+        )
+    assert bundle.exists()
+
+
+def test_invalid_source_release_sha_fails_closed(tmp_path: Path) -> None:
+    source, root, _ = _make_backup(tmp_path)
+    with pytest.raises(RecoveryValidationError, match="exactly 40"):
+        create_backup(source, root, state_root=source.parent, source_sha="not-a-git-sha")
 
 
 def test_retention_never_deletes_last_good_and_ignores_invalid(tmp_path: Path) -> None:

@@ -28,6 +28,7 @@ DB_NAME = "shadow_real.sqlite"
 MANIFEST_NAME = "manifest.json"
 RECEIPT_NAME = "receipt.json"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_GIT_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 
 
 class RecoveryValidationError(ValueError):
@@ -100,8 +101,21 @@ def _db_metadata(path: Path, *, read_only: bool) -> dict[str, Any]:
         quick_check = str(connection.execute("PRAGMA quick_check").fetchone()[0])
         if quick_check != "ok":
             raise RecoveryValidationError(f"SQLite quick_check failed: {quick_check}")
-        schema = int(connection.execute("PRAGMA user_version").fetchone()[0])
-        return {"quick_check": quick_check, "schema_version": schema}
+        table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'"
+        ).fetchone()
+        if table is None:
+            schema = 0
+        else:
+            row = connection.execute(
+                "SELECT MAX(version) FROM schema_version"
+            ).fetchone()
+            schema = int(row[0] or 0)
+        return {
+            "quick_check": quick_check,
+            "schema_version": schema,
+            "sqlite_user_version": int(connection.execute("PRAGMA user_version").fetchone()[0]),
+        }
     except sqlite3.Error as exc:
         raise RecoveryValidationError(f"SQLite validation failed: {exc}") from exc
     finally:
@@ -169,6 +183,11 @@ def create_backup(
         raise FileNotFoundError(f"source database not found: {source}")
     _validate_roots(source, root, state_root)
     source_size, source_hash = _sha256(source)
+    normalized_source_sha = None
+    if source_sha is not None:
+        if not _GIT_SHA.fullmatch(source_sha):
+            raise RecoveryValidationError("source release SHA must be exactly 40 hex characters")
+        normalized_source_sha = source_sha.lower()
     metadata = _db_metadata(source, read_only=True)
     timestamp = created_at or _utc_now()
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T.*Z", timestamp):
@@ -176,14 +195,8 @@ def create_backup(
     bundle_name = _bundle_id(timestamp, source_hash, backup_id)
     root.mkdir(parents=True, exist_ok=True)
     final_dir = root / bundle_name
-    if final_dir.exists():
-        if not _complete_bundle(final_dir):
-            raise RecoveryValidationError(
-                f"backup id already has an incomplete bundle: {final_dir}"
-            )
-        return validate_backup(final_dir, backup_root=root)
-
     temporary_dir = Path(tempfile.mkdtemp(prefix=f".incomplete-{bundle_name}-", dir=root))
+    existing_result: dict[str, Any] | None = None
     try:
         target = temporary_dir / DB_NAME
         source_uri = f"file:{quote(source.as_posix(), safe='/:')}?mode=ro"
@@ -202,17 +215,24 @@ def create_backup(
             "backup_id": bundle_name,
             "created_at": timestamp,
             "source_db_name": source.name,
-            "source_db_bytes": source_size,
-            "source_db_sha256": source_hash,
-            "source_sha256": source_hash,
-            "source_release_sha": source_sha,
+            # These are explicitly observational: a live SQLite main file
+            # may lag committed WAL pages. The online-backup hash below is the
+            # authoritative snapshot lineage.
+            "source_live_main_file_bytes": source_size,
+            "source_live_main_file_sha256": source_hash,
+            "source_live_main_file_hash_semantics": (
+                "observational_main_database_only_wal_may_be_pending"
+            ),
+            "source_release_sha": normalized_source_sha,
             "source_quick_check": metadata["quick_check"],
             "source_schema_version": metadata["schema_version"],
+            "source_sqlite_user_version": metadata["sqlite_user_version"],
             "backup_db_name": DB_NAME,
             "backup_db_bytes": backup_size,
             "backup_db_sha256": backup_hash,
             "backup_quick_check": backup_metadata["quick_check"],
             "backup_schema_version": backup_metadata["schema_version"],
+            "backup_sqlite_user_version": backup_metadata["sqlite_user_version"],
             "research_only": True,
             "broker_execution_enabled": False,
         }
@@ -224,6 +244,10 @@ def create_backup(
             "backup_id": bundle_name,
             "created_at": timestamp,
             "manifest_sha256": manifest["manifest_sha256"],
+            "source_release_sha": normalized_source_sha,
+            "source_live_main_file_sha256": source_hash,
+            "source_schema_version": metadata["schema_version"],
+            "backup_schema_version": backup_metadata["schema_version"],
             "backup_db_sha256": backup_hash,
             "status": "PASS",
             "write_mode": "sqlite_online_backup_atomic_bundle",
@@ -234,19 +258,31 @@ def create_backup(
         receipt["receipt_sha256"] = _self_hash(receipt, "receipt_sha256")
         _atomic_json(temporary_dir / RECEIPT_NAME, receipt)
         _fsync_directory(temporary_dir)
-        try:
-            os.replace(temporary_dir, final_dir)
-        except FileExistsError as exc:
-            # Another retry won the race.  Only accept it if fully valid.
+        if final_dir.exists():
             if not _complete_bundle(final_dir):
                 raise RecoveryValidationError(
-                    "backup id collision with incomplete bundle"
-                ) from exc
+                    f"backup id already has an incomplete bundle: {final_dir}"
+                )
+            existing = validate_backup(final_dir, backup_root=root)
+            if (
+                existing["backup_db_sha256"] != backup_hash
+                or existing.get("source_release_sha") != normalized_source_sha
+                or existing["schema_version"] != backup_metadata["schema_version"]
+            ):
+                raise RecoveryValidationError(
+                    "backup id exists for a different source snapshot or release"
+                )
+            existing_result = existing
+        else:
+            os.replace(temporary_dir, final_dir)
         _fsync_directory(root)
     finally:
         if temporary_dir.exists():
             shutil.rmtree(temporary_dir)
 
+    if existing_result is not None:
+        _apply_retention(root, retention)
+        return existing_result
     result = validate_backup(final_dir, backup_root=root)
     _apply_retention(root, retention)
     return result
@@ -283,8 +319,6 @@ def validate_backup(
         "schema_version",
         "backup_id",
         "created_at",
-        "source_db_bytes",
-        "source_db_sha256",
         "source_quick_check",
         "source_schema_version",
         "backup_db_bytes",
@@ -307,18 +341,28 @@ def validate_backup(
         r"\d{4}-\d{2}-\d{2}T.*Z", manifest["created_at"]
     ):
         raise RecoveryValidationError("manifest creation time is invalid")
-    for hash_field in ("source_db_sha256", "source_sha256", "backup_db_sha256"):
+    for hash_field in (
+        "source_live_main_file_sha256",
+        "backup_db_sha256",
+    ):
         if not isinstance(manifest.get(hash_field), str) or not _SHA256.fullmatch(
             manifest[hash_field]
         ):
             raise RecoveryValidationError(f"manifest {hash_field} is invalid")
-    if manifest["source_sha256"] != manifest["source_db_sha256"]:
-        raise RecoveryValidationError("manifest source hash aliases differ")
-    for size_field in ("source_db_bytes", "backup_db_bytes"):
+    for size_field in ("source_live_main_file_bytes", "backup_db_bytes"):
         if not isinstance(manifest.get(size_field), int) or manifest[size_field] < 0:
             raise RecoveryValidationError(f"manifest {size_field} is invalid")
     if manifest.get("source_db_name") != DB_NAME or manifest.get("backup_db_name") != DB_NAME:
         raise RecoveryValidationError("manifest database name mismatch")
+    if manifest.get("source_live_main_file_hash_semantics") != (
+        "observational_main_database_only_wal_may_be_pending"
+    ):
+        raise RecoveryValidationError("manifest source hash semantics are invalid")
+    release_sha = manifest.get("source_release_sha")
+    if release_sha is not None and (
+        not isinstance(release_sha, str) or not _GIT_SHA.fullmatch(release_sha)
+    ):
+        raise RecoveryValidationError("manifest source release SHA is invalid")
     if not isinstance(manifest["source_schema_version"], int) or not isinstance(
         manifest["backup_schema_version"], int
     ):
@@ -337,6 +381,11 @@ def validate_backup(
         or receipt.get("status") != "PASS"
         or receipt.get("write_mode") != "sqlite_online_backup_atomic_bundle"
         or receipt.get("backup_db_sha256") != manifest["backup_db_sha256"]
+        or receipt.get("source_release_sha") != manifest.get("source_release_sha")
+        or receipt.get("source_live_main_file_sha256")
+        != manifest["source_live_main_file_sha256"]
+        or receipt.get("source_schema_version") != manifest["source_schema_version"]
+        or receipt.get("backup_schema_version") != manifest["backup_schema_version"]
         or receipt.get("created_at") != manifest["created_at"]
         or receipt.get("automatic_restore") is not False
         or receipt.get("research_only") is not True
@@ -365,6 +414,8 @@ def validate_backup(
         "bundle_path": str(path),
         "manifest_sha256": manifest["manifest_sha256"],
         "backup_db_sha256": digest,
+        "source_live_main_file_sha256": manifest["source_live_main_file_sha256"],
+        "source_release_sha": manifest.get("source_release_sha"),
         "created_at": manifest["created_at"],
         "schema_version": metadata["schema_version"],
         "quick_check": metadata["quick_check"],
