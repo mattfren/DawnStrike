@@ -5,13 +5,13 @@ param(
     [string]$CandidateSha,
     [ValidateSet("forward_observed", "retrospective_research")]
     [string]$Mode = "forward_observed",
-    [string]$DbPath = "C:\r\dawnstrike-forward-evidence\staging.sqlite",
+    [string]$DbPath = "C:\r\dawnstrike-forward-db\staging.sqlite",
     [string]$EvidenceRoot = "C:\r\dawnstrike-forward-evidence",
-    [string]$RunRoot = "C:\r\dawnstrike-forward-evidence\runs",
-    [string]$OutputRoot = "C:\r\dawnstrike-forward-evidence\evidence",
+    [string]$RunRoot = "C:\r\dawnstrike-forward-runs",
+    [string]$OutputRoot = "C:\r\dawnstrike-forward-output",
+    [string]$SessionRoot = "C:\r\dawnstrike-forward-sessions",
     [string]$SymbolsManifest,
     [string]$SymbolsManifestSha256,
-    [string]$ExpectedSession,
     [string]$EntitlementReceipt,
     [string]$EntitlementReceiptSha256,
     [string]$SourceConfig,
@@ -27,7 +27,7 @@ param(
 $ErrorActionPreference = "Stop"
 if ([string]::IsNullOrWhiteSpace($CandidateSha)) { throw "CandidateSha is required." }
 if ($Mode -ne "forward_observed") { throw "Scheduled capture registration is only for forward_observed." }
-foreach ($name in @("SymbolsManifest", "SymbolsManifestSha256", "ExpectedSession", "EntitlementReceipt", "EntitlementReceiptSha256", "SourceConfig", "SourceConfigSha256")) {
+foreach ($name in @("SymbolsManifest", "SymbolsManifestSha256", "EntitlementReceipt", "EntitlementReceiptSha256", "SourceConfig", "SourceConfigSha256")) {
     if ([string]::IsNullOrWhiteSpace((Get-Variable -Name $name -ValueOnly))) { throw "$name is required." }
 }
 if ([string]::IsNullOrWhiteSpace($Python)) {
@@ -36,15 +36,16 @@ if ([string]::IsNullOrWhiteSpace($Python)) {
 if ([string]::IsNullOrWhiteSpace($EnvFile)) {
     $EnvFile = Join-Path $StateRoot "secrets\runtime.env"
 }
-$runner = Join-Path $RuntimeRoot "scripts\capture_intraday_operations.py"
+$runner = Join-Path $RuntimeRoot "scripts\run_daily_intraday_capture.py"
 if (-not (Test-Path -LiteralPath $runner -PathType Leaf)) { throw "Capture runner not found: $runner" }
 
 $captureArgs = @(
-    $runner, "--mode", $Mode, "--provider", "alpaca", "--feed", "sip",
+    $runner,
     "--candidate-sha", $CandidateSha, "--repo-root", $RuntimeRoot,
     "--db-path", $DbPath, "--evidence-root", $EvidenceRoot, "--run-root", $RunRoot,
-    "--output-root", $OutputRoot, "--symbols-manifest", $SymbolsManifest,
-    "--symbols-manifest-sha256", $SymbolsManifestSha256, "--expected-session", $ExpectedSession,
+    "--output-root", $OutputRoot, "--session-root", $SessionRoot,
+    "--symbols-manifest", $SymbolsManifest,
+    "--symbols-manifest-sha256", $SymbolsManifestSha256,
     "--entitlement-receipt", $EntitlementReceipt, "--entitlement-receipt-sha256", $EntitlementReceiptSha256,
     "--source-config", $SourceConfig, "--source-config-sha256", $SourceConfigSha256,
     "--env-file", $EnvFile, "--max-pages", "100", "--retries", "3", "--execute"
@@ -61,6 +62,8 @@ $preview = [ordered]@{
     mode = $Mode
     feed = "sip"
     candidate_sha = $CandidateSha
+    expected_session_policy = "dynamic_checked_in_market_calendar"
+    session_root = $SessionRoot
     research_only = $true
     broker_execution = "disabled"
 }

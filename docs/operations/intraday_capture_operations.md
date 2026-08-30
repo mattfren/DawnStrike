@@ -43,6 +43,9 @@ py -3.13 scripts/capture_intraday_doctor.py `
 The scheduled task registration script is preview-only by default. Add
 `-Create` only after the exact candidate has passed the doctor and runtime
 cutover gates. It schedules delayed SIP capture at 15:20 Central on weekdays,
-which is 16:20 Eastern, and does not modify existing Dawnstrike tasks. No
-credentials or API keys are task arguments; credentials are loaded by the
-runtime environment file at execution time.
+which is 16:20 Eastern, and does not modify existing Dawnstrike tasks. The
+daily runner generates a write-once expected-session contract for that New
+York market date from the checked-in finite calendar, including holidays and
+early closes; it never reuses a prior day's session file. No credentials or
+API keys are task arguments; credentials are loaded by the runtime environment
+file at execution time.
