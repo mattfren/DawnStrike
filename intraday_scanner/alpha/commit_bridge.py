@@ -11,6 +11,7 @@ import hashlib
 import re
 from collections.abc import Iterator, Mapping
 from dataclasses import asdict, dataclass
+from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 from typing import Any
 
@@ -88,13 +89,6 @@ class AuthenticatedFillTruth(Mapping[str, Any]):
     _payload: Mapping[str, Any]
     _authentication_marker: object
 
-    @classmethod
-    def _from_bridge(cls, payload: Mapping[str, Any]) -> AuthenticatedFillTruth:
-        instance = object.__new__(cls)
-        object.__setattr__(instance, "_payload", _freeze(dict(payload)))
-        object.__setattr__(instance, "_authentication_marker", _AUTHENTICATION_MARKER)
-        return instance
-
     def __getitem__(self, key: str) -> Any:
         return self._payload[key]
 
@@ -126,7 +120,19 @@ class AuthenticatedFillTruth(Mapping[str, Any]):
 def has_authenticated_fill_truth(value: object) -> bool:
     """Return true only for an intact object minted by this bridge."""
 
-    return isinstance(value, AuthenticatedFillTruth) and value._is_intact()
+    try:
+        return isinstance(value, AuthenticatedFillTruth) and value._is_intact()
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
+def _mint_authenticated_fill_truth(payload: Mapping[str, Any]) -> AuthenticatedFillTruth:
+    """Private factory kept outside the public result type."""
+
+    instance = object.__new__(AuthenticatedFillTruth)
+    object.__setattr__(instance, "_payload", _freeze(dict(payload)))
+    object.__setattr__(instance, "_authentication_marker", _AUTHENTICATION_MARKER)
+    return instance
 
 
 class CommitBridge:
@@ -195,7 +201,7 @@ class CommitBridge:
         )
         if not self._identity_matches(payload, expected):
             return None
-        return AuthenticatedFillTruth._from_bridge(payload)
+        return _mint_authenticated_fill_truth(payload)
 
     def resolve_required(self, receipt_id: str, **kwargs: Any) -> AuthenticatedFillTruth:
         result = self.resolve(receipt_id, **kwargs)
@@ -232,21 +238,49 @@ class CommitBridge:
 
     @staticmethod
     def _column_binding_is_exact(columns: Mapping[str, Any], payload: Mapping[str, Any]) -> bool:
-        for field in (
+        text_fields = (
             "receipt_id",
             "receipt_hash_sha256",
             "account_id",
             "strategy_id",
             "strategy_version",
+            "experiment_id",
+            "arm_id",
+            "decision_id",
+            "selection_id",
+            "intent_id",
+            "position_id",
+            "order_id",
             "market_date",
             "execution_status",
+            "entry_at",
+            "exit_at",
             "source_artifact_hash_sha256",
             "code_sha",
             "frozen_window",
-        ):
-            if str(columns.get(field) or "") != str(payload.get(field) or ""):
+            "created_at",
+        )
+        for field in text_fields:
+            if _optional_text(columns.get(field)) != _optional_text(payload.get(field)):
                 return False
-        return columns.get("research_only") == 1 and columns.get("broker_execution_enabled") == 0
+        for field in (
+            "quantity",
+            "entry_price",
+            "exit_price",
+            "spread_cost_cents",
+            "slippage_cost_cents",
+            "fees_cents",
+            "regulatory_cost_cents",
+            "borrow_cost_cents",
+        ):
+            if not _numbers_equal(columns.get(field), payload.get(field)):
+                return False
+        return (
+            columns.get("research_only") == 1
+            and payload.get("research_only") is True
+            and columns.get("broker_execution_enabled") == 0
+            and payload.get("broker_execution_enabled") is False
+        )
 
     @classmethod
     def _payload_is_committed(cls, payload: Mapping[str, Any]) -> bool:
@@ -290,6 +324,19 @@ def resolve_committed_fill_truth(
     """Convenience wrapper for consumers that do not need a bridge instance."""
 
     return CommitBridge(store).resolve(receipt_id, **kwargs)
+
+
+def _optional_text(value: Any) -> str | None:
+    return None if value is None else str(value)
+
+
+def _numbers_equal(left: Any, right: Any) -> bool:
+    if left is None or right is None:
+        return left is None and right is None
+    try:
+        return Decimal(str(left)) == Decimal(str(right))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
 
 
 __all__ = [

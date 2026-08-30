@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
 
 from intraday_scanner.alpha.commit_bridge import (
+    AuthenticatedFillTruth,
     CommitBridge,
     FillTruthIdentity,
 )
@@ -84,6 +86,9 @@ def test_exact_persisted_filltruth_resolves_as_immutable_authenticated_object(
     )
     assert result is not None
     assert has_authenticated_committed_fill_truth(result)
+    assert not has_authenticated_committed_fill_truth(AuthenticatedFillTruth())
+    forged_instance = object.__new__(AuthenticatedFillTruth)
+    assert not has_authenticated_committed_fill_truth(forged_instance)
     assert result["exit_price"] == 101.0
     with pytest.raises(TypeError):
         result["exit_price"] = 99.0  # type: ignore[index]
@@ -174,5 +179,35 @@ def test_database_payload_tamper_is_detected_even_when_json_remains_valid(tmp_pa
         connection.execute(
             "UPDATE committed_fill_truth_receipts SET payload_json = ? WHERE receipt_id = ?",
             (json.dumps(payload, sort_keys=True, separators=(",", ":")), receipt["receipt_id"]),
+        )
+    assert CommitBridge(store).resolve(str(receipt["receipt_id"])) is None
+
+
+@pytest.mark.parametrize(
+    ("column", "replacement"),
+    [
+        ("experiment_id", "other-experiment"),
+        ("quantity", 999.0),
+        ("spread_cost_cents", 999),
+        ("created_at", "2026-08-29T21:00:00+00:00"),
+    ],
+)
+def test_every_persisted_identity_and_cost_column_is_bound_to_payload(
+    tmp_path: Path, column: str, replacement: object
+) -> None:
+    receipt = _receipt()
+    receipt["experiment_id"] = "experiment-1"
+    receipt["arm_id"] = "control"
+    receipt["receipt_hash_sha256"] = hashlib.sha256(
+        canonical_json(
+            {key: value for key, value in receipt.items() if key != "receipt_hash_sha256"}
+        ).encode("utf-8")
+    ).hexdigest()
+    store = _store(tmp_path, receipt)
+    with sqlite3.connect(store.db_path) as connection:
+        connection.execute("DROP TRIGGER committed_fill_truth_receipts_no_update")
+        connection.execute(
+            f"UPDATE committed_fill_truth_receipts SET {column} = ? WHERE receipt_id = ?",  # nosec B608
+            (replacement, receipt["receipt_id"]),
         )
     assert CommitBridge(store).resolve(str(receipt["receipt_id"])) is None
