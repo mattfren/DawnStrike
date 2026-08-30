@@ -282,6 +282,7 @@ class PaperOpsLifecycleBacktestEngine:
                         == LEGACY_PAPER_EXECUTION_POLICY_VERSION
                         and self.mode is PaperRunMode.FORWARD
                     ),
+                    all_accounts=tuple(accounts.values()),
                 )
                 if reason is not None:
                     entry_blocks.append(_blocked_order_payload(order, reason, run))
@@ -335,6 +336,7 @@ class PaperOpsLifecycleBacktestEngine:
                         == LEGACY_PAPER_EXECUTION_POLICY_VERSION
                         and self.mode is PaperRunMode.FORWARD
                     ),
+                    all_accounts=tuple(accounts.values()),
                 )
                 terminal_order_ids.add(order.order_id)
                 if reason is not None:
