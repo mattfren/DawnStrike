@@ -37,6 +37,39 @@ def test_cli_alpha_cycle_plumbs_explicit_release_sha(monkeypatch, capsys) -> Non
     assert json.loads(capsys.readouterr().out)["status"] == "fixture"
 
 
+def test_cli_v6_weekly_training_plumbs_preregistered_attempt_identity(
+    monkeypatch, capsys, tmp_path
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_weekly_training(store, **kwargs):
+        captured.update(kwargs)
+        return {"status": "fixture", "research_only": True}
+
+    monkeypatch.setattr(cli_module, "run_alpha_v6_weekly_training", fake_weekly_training)
+
+    assert (
+        main(
+            [
+                "alpha-v6-train-weekly",
+                "--db-path",
+                str(tmp_path / "v6.sqlite"),
+                "--experiment-id",
+                "experiment-1",
+                "--arm-id",
+                "candidate",
+                "--attempt-id",
+                "weekly-2026-08-30-001",
+            ]
+        )
+        == 0
+    )
+    assert captured["experiment_id"] == "experiment-1"
+    assert captured["arm_id"] == "candidate"
+    assert captured["attempt_id"] == "weekly-2026-08-30-001"
+    assert json.loads(capsys.readouterr().out)["status"] == "fixture"
+
+
 def test_cli_strategy_learning_daily_writes_research_only_receipts(tmp_path, capsys):
     out_dir = tmp_path / "strategy-learning"
     status = main(

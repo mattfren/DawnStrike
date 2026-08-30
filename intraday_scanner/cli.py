@@ -698,6 +698,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     alpha_v6_train_weekly_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
     alpha_v6_train_weekly_parser.add_argument("--code-sha", default="unresolved-local-sha")
     alpha_v6_train_weekly_parser.add_argument("--market-date", default=None)
+    alpha_v6_train_weekly_parser.add_argument("--experiment-id", default=None)
+    alpha_v6_train_weekly_parser.add_argument("--arm-id", default=None)
     alpha_v6_train_weekly_parser.add_argument("--attempt-id", default=None)
     alpha_v6_train_weekly_parser.add_argument("--reference-window", default=None)
     alpha_v6_train_weekly_parser.add_argument("--recent-window", default=None)
@@ -2069,7 +2071,6 @@ def _run_alpha_v6_daily_monitor(args: argparse.Namespace) -> int:
         market_date=args.market_date,
         reference_window=_read_v6_window(getattr(args, "reference_window", None)),
         recent_window=_read_v6_window(getattr(args, "recent_window", None)),
-        attempt_id=getattr(args, "attempt_id", None),
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
@@ -4211,6 +4212,9 @@ def _run_alpha_v6_train_weekly(args: argparse.Namespace) -> int:
         market_date=args.market_date,
         reference_window=_read_v6_window(getattr(args, "reference_window", None)),
         recent_window=_read_v6_window(getattr(args, "recent_window", None)),
+        experiment_id=getattr(args, "experiment_id", None),
+        arm_id=getattr(args, "arm_id", None),
+        attempt_id=getattr(args, "attempt_id", None),
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
