@@ -1,0 +1,15 @@
+{
+  "schema_version": "dawnstrike.frozen_symbol_manifest.v1",
+  "manifest_purpose": "bounded historical and forward evidence pilot",
+  "membership_policy": "SPY and IWM are benchmark controls; QQQ, DIA, and TLT are research controls only",
+  "point_in_time_membership": "research_control_only",
+  "membership_as_of": null,
+  "symbols": [
+    "SPY",
+    "IWM",
+    "QQQ",
+    "DIA",
+    "TLT"
+  ],
+  "operator_note": "Do not infer historical universe membership from this file. Freeze and hash a dated copy before capture."
+}
