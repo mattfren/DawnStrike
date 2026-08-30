@@ -120,6 +120,15 @@ def test_builds_one_row_per_expected_session_and_preserves_unknowns(tmp_path):
     assert rows[4]["status"] == "NOT_EXPECTED"
 
 
+def test_canonical_target_cannot_be_overridden(tmp_path):
+    with pytest.raises(ValueError, match=r"fixed at 1\.00 percentage points"):
+        CanonicalAccountLedger(
+            tmp_path / "ledger.sqlite",
+            account_id="paper-total",
+            target_return_pct=0.1,
+        )
+
+
 def test_missing_no_trade_receipt_is_not_zero(tmp_path):
     service = CanonicalAccountLedger(tmp_path / "ledger.sqlite", account_id="paper-total")
     result = service.build(account=_account(), expected_sessions=[_session("2026-08-25")])

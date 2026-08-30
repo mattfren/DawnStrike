@@ -100,7 +100,11 @@ def evaluate_execution_policy(request: ExecutionPolicyInput) -> ExecutionPolicyD
             request.portfolio_snapshot,
             limits=request.portfolio_limits,
         )
-        reasons = list(portfolio.reason_codes)
+        # Portfolio admission is an additional aggregate gate.  It must not
+        # replace the per-proposal truth gates above: the portfolio authority
+        # intentionally has no knowledge of halt, source, corporate-action,
+        # SEC, or spread fields carried by this policy input.
+        reasons.extend(portfolio.reason_codes)
         computed = portfolio.computed
     expected_exit = _parse_time(request.expected_exit_time)
     session_close = _parse_time(request.session_close_time)
