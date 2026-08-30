@@ -227,6 +227,8 @@ def test_capture_script_is_plan_only_without_execute() -> None:
     assert "New-ScheduledTaskPrincipal" in registration
     assert "-LogonType Interactive -RunLevel Limited" in registration
     assert "Choose either InteractiveCurrentUser or RunAsCredential" in registration
+    assert "-At $StartAt" in registration
+    assert "$StartAt.TimeOfDay" not in registration
 
 
 def test_inner_capture_exit_codes_only_accept_complete() -> None:

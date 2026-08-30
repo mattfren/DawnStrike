@@ -58,7 +58,7 @@ $captureArgs = @(
 )
 $argumentTokens = @($pythonPrefix + $captureArgs)
 $actionArguments = (($argumentTokens | ForEach-Object { '"' + $_ + '"' }) -join ' ')
-$trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At $StartAt.TimeOfDay
+$trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At $StartAt
 
 $preview = [ordered]@{
     status = if ($Create) { "CREATE_REQUESTED" } else { "PREVIEW_ONLY" }
