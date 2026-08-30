@@ -151,13 +151,19 @@ def _account_from_row(row: sqlite3.Row) -> dict[str, Any]:
 def _receipt_ids(
     connection: sqlite3.Connection, table: str, account_id: str, day: str
 ) -> list[str]:
-    if table not in {"committed_fill_truth_receipts", "no_trade_session_receipts"}:
+    if table == "committed_fill_truth_receipts":
+        query = (
+            "SELECT receipt_id FROM committed_fill_truth_receipts "
+            "WHERE account_id = ? AND market_date = ? ORDER BY receipt_id"
+        )
+    elif table == "no_trade_session_receipts":
+        query = (
+            "SELECT receipt_id FROM no_trade_session_receipts "
+            "WHERE account_id = ? AND market_date = ? ORDER BY receipt_id"
+        )
+    else:
         raise ValueError("unsupported receipt table")
-    rows = connection.execute(
-        f"SELECT receipt_id FROM {table} WHERE account_id = ? AND market_date = ? "
-        "ORDER BY receipt_id",
-        (account_id, day),
-    ).fetchall()
+    rows = connection.execute(query, (account_id, day)).fetchall()
     return [str(row[0]) for row in rows if str(row[0] or "").strip()]
 
 
@@ -198,9 +204,13 @@ class _ConnectionEvidenceStore:
         return self._load("no_trade_session_receipts", receipt_id)
 
     def _load(self, table: str, receipt_id: str) -> dict[str, Any] | None:
-        row = self.connection.execute(
-            f"SELECT * FROM {table} WHERE receipt_id = ?", (receipt_id,)
-        ).fetchone()
+        if table == "committed_fill_truth_receipts":
+            query = "SELECT * FROM committed_fill_truth_receipts WHERE receipt_id = ?"
+        elif table == "no_trade_session_receipts":
+            query = "SELECT * FROM no_trade_session_receipts WHERE receipt_id = ?"
+        else:
+            raise ValueError("unsupported receipt table")
+        row = self.connection.execute(query, (receipt_id,)).fetchone()
         if row is None:
             return None
         columns = dict(row)
