@@ -106,6 +106,9 @@ from intraday_scanner.services.alpha_v6_universe_service import (
 )
 from intraday_scanner.services.audit_service import run_paper_audit, run_paper_audit_rows
 from intraday_scanner.services.calendar_report_service import calendar_report
+from intraday_scanner.services.daily_account_session_reconciliation import (
+    reconcile_daily_account_sessions,
+)
 from intraday_scanner.services.daily_orchestrator_service import (
     daily_orchestration_status,
     write_heartbeat,
@@ -811,6 +814,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     account_session_parser.add_argument("--experiment-id", default=None)
     account_session_parser.add_argument("--arm-id", default=None)
 
+    account_session_reconcile_parser = subparsers.add_parser(
+        "account-session-reconcile",
+        help="Produce one bounded canonical paper account/session ledger slice",
+    )
+    account_session_reconcile_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+    account_session_reconcile_parser.add_argument("--market-date", required=True)
+    account_session_reconcile_parser.add_argument("--account-id", default=None)
+    account_session_reconcile_parser.add_argument("--release-sha", required=True)
+    account_session_reconcile_parser.add_argument("--now", default=None)
+    account_session_reconcile_parser.add_argument(
+        "--evidence-mode",
+        choices=("forward_observed", "retrospective_research"),
+        default="forward_observed",
+    )
+
     alpha_status_parser = subparsers.add_parser(
         "alpha-status", help="Print AlphaOps persistence and evidence status"
     )
@@ -1449,6 +1467,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_daily_orchestrator_status(args)
         if args.command == "account-session-report":
             return _run_account_session_report(args)
+        if args.command == "account-session-reconcile":
+            return _run_account_session_reconcile(args)
         if args.command == "alpha-status":
             return _run_alpha_status(args)
         if args.command == "alpha-doctor":
@@ -4388,6 +4408,19 @@ def _run_account_session_report(args: argparse.Namespace) -> int:
         code_sha=args.code_sha,
         experiment_id=args.experiment_id,
         arm_id=args.arm_id,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0 if result.get("status") == "COMPLETE" else 2
+
+
+def _run_account_session_reconcile(args: argparse.Namespace) -> int:
+    result = reconcile_daily_account_sessions(
+        args.db_path,
+        market_date=args.market_date,
+        account_id=args.account_id,
+        release_sha=args.release_sha,
+        now=args.now,
+        evidence_mode=args.evidence_mode,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result.get("status") == "COMPLETE" else 2

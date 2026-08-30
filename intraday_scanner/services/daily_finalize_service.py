@@ -26,6 +26,9 @@ from intraday_scanner.performance.account_session_reporting import (
 from intraday_scanner.performance.calendar_snapshot import write_public_calendar
 from intraday_scanner.performance.service import CanonicalPerformanceService
 from intraday_scanner.performance.snapshot import write_public_snapshot
+from intraday_scanner.services.daily_account_session_reconciliation import (
+    reconcile_daily_account_sessions,
+)
 from intraday_scanner.services.daily_run_service import (
     DAILY_STAGE_ORDER,
     FAILURE_STATUSES,
@@ -147,9 +150,15 @@ class DailyFinalizeService:
                         persist=True,
                         now=now,
                     )
-                    # Account-session reporting is an observer-only sidecar.
-                    # It must not change the legacy publication gate until a
-                    # canonical account ledger is actually present.
+                    # Produce the account/session slice before its observer
+                    # report. Missing evidence remains blocking and does not
+                    # alter the legacy publication gate.
+                    account_session_reconciliation = reconcile_daily_account_sessions(
+                        self.db_path,
+                        market_date=market_date,
+                        release_sha=self.release_sha,
+                        now=now,
+                    )
                     account_session_report = build_account_session_report(
                         self.db_path,
                         market_date=market_date,
@@ -334,6 +343,7 @@ class DailyFinalizeService:
                             "gate": reconciliation_gate,
                         },
                         "account_session_report": account_session_report,
+                        "account_session_reconciliation": account_session_reconciliation,
                         "upstream_status": upstream_status,
                     }
                 except (
