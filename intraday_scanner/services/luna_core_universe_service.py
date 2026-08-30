@@ -1621,18 +1621,24 @@ def _classify_core_snapshot_batch(
             # absent when no previous close exists; formula scoring treats
             # that absence as zero without turning the provider observation
             # into an asserted zero-valued gap.
+            price_text = _canonical_row_decimal(row.get("premarket_price"))
+            previous_close_text = _canonical_row_decimal(row.get("previous_close"))
             try:
-                price_value = row.get("premarket_price")
-                previous_close_value = row.get("previous_close")
-                price = float(price_value) if price_value is not None else 0.0
                 previous_close = (
-                    float(previous_close_value) if previous_close_value is not None else 0.0
+                    Decimal(previous_close_text) if previous_close_text is not None else None
                 )
-            except (TypeError, ValueError):
-                price = 0.0
-                previous_close = 0.0
-            if previous_close > 0:
-                row["gap_pct"] = ((price - previous_close) / previous_close) * 100
+                # A missing price is unavailable evidence, not a zero-valued
+                # observation.  In particular, never seal a synthetic -100%
+                # gap merely because a previous close was present.
+                if price_text is not None and previous_close is not None and previous_close > 0:
+                    row["gap_pct"] = float(
+                        ((Decimal(price_text) - previous_close) / previous_close) * 100
+                    )
+            except (InvalidOperation, TypeError, ValueError):
+                # Invalid numeric fields remain absent and are rejected by the
+                # downstream rank gate; no fabricated market value crosses the
+                # coverage receipt boundary.
+                pass
         row["core_lane_eligible"] = True
         score_text = _canonical_decimal_product(
             row.get("premarket_price"), row.get("premarket_volume")

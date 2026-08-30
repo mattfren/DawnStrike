@@ -6,9 +6,11 @@ from types import SimpleNamespace
 import pytest
 
 from intraday_scanner.config import ScannerConfig
+from intraday_scanner.notifiers.telegram_formatter import format_alpha_watch
 from intraday_scanner.providers.csv_provider import read_snapshot_csv
 from intraday_scanner.scoring import score_snapshot
 from intraday_scanner.services import luna_core_universe_service as core
+from intraday_scanner.services.luna_research_slate_service import build_ranked_research_slate
 from intraday_scanner.services.premarket_enrichment_service import _apply_observation
 
 OBSERVED_AT = datetime(2026, 1, 5, 13, 5, tzinfo=timezone.utc)
@@ -235,6 +237,72 @@ def test_missing_gap_without_previous_close_roundtrips_as_absence(tmp_path: Path
     assert loaded_row["gap_pct"] == 0.0
     assert core._core_coverage_binding_valid(loaded_row)
     assert core.rank_core_universe_rows([loaded_row])
+
+
+def test_missing_price_never_seals_synthetic_gap_and_cannot_be_selected_or_notified() -> None:
+    class Provider:
+        def validate_credentials(self):
+            return None
+
+        def get_premarket_snapshot(self, symbols, config):
+            return [
+                {
+                    "ticker": symbols[0],
+                    "source": "alpaca_iex",
+                    "source_timestamp": "2026-01-05T13:04:30+00:00",
+                    "previous_close": 9,
+                    "premarket_volume": 100,
+                }
+            ]
+
+    contract = {
+        "status": "READY",
+        "content_hash_sha256": "c" * 64,
+        "members": [{"symbol": "MISSING_PRICE", "index_memberships": ["S&P 500"]}],
+    }
+    first = core.discover_core_universe_rows(
+        contract,
+        config=SimpleNamespace(premarket_enrichment_max_age_seconds=600),
+        provider=Provider(),
+        observed_at=OBSERVED_AT,
+    )
+    second = core.discover_core_universe_rows(
+        contract,
+        config=SimpleNamespace(premarket_enrichment_max_age_seconds=600),
+        provider=Provider(),
+        observed_at=OBSERVED_AT,
+    )
+
+    assert first["status"] == "READY"
+    assert first["coverage_status"] == "COMPLETE"
+    row = first["rows"][0]
+    assert row.get("premarket_price") is None
+    assert row.get("gap_pct") is None
+    assert row.get("gap_pct") != -100.0
+    assert row["core_lane_score"] is None
+    assert first["coverage_receipt_hashes"] == second["coverage_receipt_hashes"]
+    assert first["rows"][0][core.CORE_COVERAGE_ROW_BINDING_FIELD] == second["rows"][0][
+        core.CORE_COVERAGE_ROW_BINDING_FIELD
+    ]
+    assert core.core_discovery_data_eligible(first)
+    assert core.rank_core_universe_rows(first["rows"]) == []
+
+    slate = build_ranked_research_slate(
+        core.rank_core_universe_rows(first["rows"]),
+        target=1,
+        data_eligible=True,
+        generated_at=OBSERVED_AT.isoformat(),
+        market_date=OBSERVED_AT.date().isoformat(),
+    )
+    assert slate["symbols"] == []
+    notification = format_alpha_watch(
+        signals=slate["rows"],
+        edge_label="research",
+        target_count=1,
+        published_count=0,
+        slate_shortfall_reason=slate["slate_shortfall_reason"],
+    )
+    assert "MISSING_PRICE" not in notification
 
 
 def test_duplicate_ticker_has_no_ambiguous_row_binding() -> None:
