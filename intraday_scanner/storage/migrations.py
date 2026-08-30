@@ -39,6 +39,8 @@ _ACCOUNT_TRUTH_TRIGGERS = (
     "intraday_capture_runs_no_delete",
     "committed_fill_truth_receipts_no_update",
     "committed_fill_truth_receipts_no_delete",
+    "no_trade_session_receipts_no_update",
+    "no_trade_session_receipts_no_delete",
     "experiment_trial_ledger_no_update",
     "experiment_trial_ledger_no_delete",
 )
@@ -118,6 +120,7 @@ def run_migrations(connection: sqlite3.Connection) -> int:
                 "expected_market_sessions",
                 "intraday_capture_runs",
                 "committed_fill_truth_receipts",
+                "no_trade_session_receipts",
                 "experiment_trial_ledger",
             }
             missing_account_truth_tables = {

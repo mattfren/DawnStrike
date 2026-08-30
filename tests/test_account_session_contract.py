@@ -131,6 +131,7 @@ def test_migration_31_sidecar_is_additive_idempotent_and_append_only() -> None:
             "expected_market_sessions",
             "intraday_capture_runs",
             "committed_fill_truth_receipts",
+            "no_trade_session_receipts",
             "experiment_trial_ledger",
         } <= tables
         columns = {
@@ -181,3 +182,28 @@ def test_account_sidecar_is_not_skipped_for_a_preexisting_marker_31_store() -> N
         assert connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'expected_market_sessions'"
         ).fetchone() == (1,)
+
+
+def test_account_sidecar_repairs_missing_no_trade_table_and_triggers() -> None:
+    with sqlite3.connect(":memory:") as connection:
+        assert run_migrations(connection) == 30
+        connection.execute("DROP TRIGGER no_trade_session_receipts_no_update")
+        connection.execute("DROP TRIGGER no_trade_session_receipts_no_delete")
+        connection.execute("DROP TABLE no_trade_session_receipts")
+
+        assert run_migrations(connection) == 30
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'no_trade_session_receipts'"
+        ).fetchone() == (1,)
+        triggers = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'trigger' AND name LIKE 'no_trade_session_receipts_%'"
+            )
+        }
+        assert triggers == {
+            "no_trade_session_receipts_no_update",
+            "no_trade_session_receipts_no_delete",
+        }
