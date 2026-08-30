@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from intraday_scanner.storage.intraday_evidence_store import (
+    EvidenceStoreError,
     IntradayEvidenceStore,
     RetentionNotPermittedError,
     SourceConflictError,
@@ -116,6 +117,27 @@ def test_same_identity_with_different_content_is_source_conflict(tmp_path: Path)
 
     with pytest.raises(SourceConflictError, match="SOURCE_CONFLICT|hashes differ"):
         store.store_artifact(raw_bytes=b"second", **common)
+
+
+def test_artifact_storage_rejects_noncanonical_session_identity(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+
+    with pytest.raises(EvidenceStoreError, match="canonical"):
+        store.store_artifact(
+            provider="provider",
+            feed="bars",
+            artifact_kind="intraday-bars",
+            symbol="TST",
+            market_date="2026-08-07",
+            exchange_session_id="NYSE-2026-08-07",
+            entitlement="research",
+            request_start=REQUEST_START,
+            request_end=REQUEST_END,
+            fetched_at=FETCHED_AT,
+            raw_bytes=b"raw",
+            normalized_bytes=b"normalized",
+            retention_allowed=True,
+        )
 
 
 def test_retention_denied_refuses_before_database_or_file_write(tmp_path: Path) -> None:
