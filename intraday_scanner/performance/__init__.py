@@ -1,5 +1,14 @@
 """Canonical, source-linked performance truth for Dawnstrike."""
 
+from intraday_scanner.performance.canonical_account_ledger import (
+    CanonicalAccountLedger,
+    CanonicalLedgerError,
+    LedgerBuildResult,
+    LedgerConflictError,
+    LedgerEvidenceError,
+    build_canonical_account_ledger,
+    persist_canonical_account_ledger,
+)
 from intraday_scanner.performance.contracts import (
     Cohort,
     EvidenceState,
@@ -24,6 +33,13 @@ from intraday_scanner.performance.strategy_miss_attribution import (
 
 __all__ = [
     "CanonicalPerformanceService",
+    "CanonicalAccountLedger",
+    "CanonicalLedgerError",
+    "LedgerBuildResult",
+    "LedgerConflictError",
+    "LedgerEvidenceError",
+    "build_canonical_account_ledger",
+    "persist_canonical_account_ledger",
     "Cohort",
     "EvidenceState",
     "PerformanceCohort",
