@@ -32,6 +32,9 @@ def _make_backup(tmp_path: Path, *, backup_id: str = "backup-one") -> tuple[Path
     source = state / "shadow_real.sqlite"
     _database(source)
     result = create_backup(source, root, state_root=state, backup_id=backup_id)
+    assert result["write_performed"] is True
+    assert result["created"] is True
+    assert result["reused"] is False
     return source, root, Path(result["bundle_path"])
 
 
@@ -134,6 +137,9 @@ def test_retry_with_backup_id_is_idempotent(tmp_path: Path) -> None:
     first = (bundle / "manifest.json").read_bytes()
     second = create_backup(source, root, state_root=source.parent, backup_id="retry")
     assert Path(second["bundle_path"]) == bundle
+    assert second["write_performed"] is False
+    assert second["created"] is False
+    assert second["reused"] is True
     assert (bundle / "manifest.json").read_bytes() == first
     assert [p for p in root.iterdir() if p.is_dir()] == [bundle]
 

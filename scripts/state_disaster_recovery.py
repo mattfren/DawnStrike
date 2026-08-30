@@ -292,10 +292,20 @@ def create_backup(
 
     if existing_result is not None:
         _apply_retention(root, retention)
-        return existing_result
+        return {
+            **existing_result,
+            "write_performed": False,
+            "created": False,
+            "reused": True,
+        }
     result = validate_backup(final_dir, backup_root=root)
     _apply_retention(root, retention)
-    return result
+    return {
+        **result,
+        "write_performed": True,
+        "created": True,
+        "reused": False,
+    }
 
 
 def _load_json(path: Path) -> dict[str, Any]:
