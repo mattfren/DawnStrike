@@ -25,7 +25,8 @@ function Invoke-DawnstrikeRuntimeRollback {
     $contract = Resolve-DawnstrikeActivationRoot $ContractRoot "ContractRoot"
     $state = Resolve-DawnstrikeActivationRoot $StateRoot "StateRoot"
     $safeBackupRoot = Resolve-DawnstrikeActivationRoot $BackupRoot "BackupRoot"
-    $runtime = [System.IO.Path]::GetFullPath($RuntimeRoot).TrimEnd('\')
+    $runtime = Get-DawnstrikeFutureActivationRoot $RuntimeRoot "RuntimeRoot"
+    Assert-DawnstrikeRootIsolation $safeBackupRoot @($contract, $runtime, $state) "BackupRoot"
     $receiptPath = (Resolve-Path -LiteralPath $ActivationReceipt -ErrorAction Stop).Path
     $approvedReceiptRoot = [System.IO.Path]::GetFullPath(
         (Join-Path $state "receipts\runtime-activation")
