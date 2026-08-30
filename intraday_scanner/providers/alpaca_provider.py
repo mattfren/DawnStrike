@@ -137,7 +137,7 @@ class AlpacaProvider(MarketDataProvider):
         if page_token:
             params["page_token"] = page_token
         payload = self._request_json("/v2/stocks/bars", params, config)
-        return _alpaca_page(self.provider_name, self.feed, "/v2/stocks/bars", payload, "bars")
+        return _alpaca_page(self.provider_name, self.feed, "bars", payload, "bars")
 
     def get_trades_page(
         self,
@@ -158,7 +158,7 @@ class AlpacaProvider(MarketDataProvider):
         if page_token:
             params["page_token"] = page_token
         payload = self._request_json("/v2/stocks/trades", params, config)
-        return _alpaca_page(self.provider_name, self.feed, "/v2/stocks/trades", payload, "trades")
+        return _alpaca_page(self.provider_name, self.feed, "trades", payload, "trades")
 
     def get_quotes_page(
         self,
@@ -179,7 +179,7 @@ class AlpacaProvider(MarketDataProvider):
         if page_token:
             params["page_token"] = page_token
         payload = self._request_json("/v2/stocks/quotes", params, config)
-        return _alpaca_page(self.provider_name, self.feed, "/v2/stocks/quotes", payload, "quotes")
+        return _alpaca_page(self.provider_name, self.feed, "quotes", payload, "quotes")
 
     def get_corporate_actions_page(
         self,
@@ -192,22 +192,17 @@ class AlpacaProvider(MarketDataProvider):
     ) -> IntradayPage:
         params = {
             "symbols": ",".join(symbols),
-            "effective_from": start,
-            "effective_to": end,
+            "start": _iso_date(start),
+            "end": _iso_date(end),
+            "region": "us",
+            "data_quality": "complete",
+            "sort": "asc",
             "limit": str(config.historical_intraday_page_limit),
         }
         if page_token:
             params["page_token"] = page_token
-        payload = self._request_json(
-            "/v2/corporate-actions/announcements", params, config
-        )
-        return _alpaca_page(
-            self.provider_name,
-            self.feed,
-            "/v2/corporate-actions/announcements",
-            payload,
-            "corporate_actions",
-        )
+        payload = self._request_json("/v1/corporate-actions", params, config)
+        return _alpaca_corporate_actions_page(self.provider_name, self.feed, payload)
 
     def get_premarket_snapshot(
         self, symbols: Sequence[str] | None, config: ScannerConfig
@@ -507,6 +502,62 @@ def _gap_pct(price: float, previous_close: float) -> float:
     if previous_close <= 0:
         return 0.0
     return ((price - previous_close) / previous_close) * 100
+
+
+_CORPORATE_ACTION_COLLECTIONS = {
+    "reverse_splits",
+    "forward_splits",
+    "unit_splits",
+    "cash_dividends",
+    "stock_dividends",
+    "spin_offs",
+    "cash_mergers",
+    "stock_mergers",
+    "stock_and_cash_mergers",
+    "redemptions",
+    "name_changes",
+    "worthless_removals",
+    "rights_distributions",
+    "partial_calls",
+    "reorganizations",
+    "capital_gains_distributions",
+}
+
+
+def _iso_date(value: str) -> str:
+    try:
+        return date.fromisoformat(str(value)[:10]).isoformat()
+    except ValueError as exc:
+        raise DataProviderError("corporate-action interval must begin with an ISO date") from exc
+
+
+def _alpaca_corporate_actions_page(
+    provider: str,
+    feed: str,
+    payload: dict[str, Any],
+) -> IntradayPage:
+    items: list[dict[str, Any]] = []
+    for collection in sorted(_CORPORATE_ACTION_COLLECTIONS):
+        rows = payload.get(collection) or []
+        if not isinstance(rows, list):
+            raise DataProviderError(
+                f"Alpaca corporate-action collection {collection} must be a list"
+            )
+        for row in rows:
+            if isinstance(row, dict):
+                normalized = dict(row)
+                normalized.setdefault("corporate_action_collection", collection)
+                items.append(normalized)
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return IntradayPage(
+        provider=provider,
+        feed=feed,
+        endpoint="corporate_actions",
+        items=tuple(items),
+        next_page_token=str(payload.get("next_page_token") or "") or None,
+        raw_payload_hash_sha256=hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+        request_id=str(payload.get("request_id") or ""),
+    )
 
 
 def _alpaca_page(

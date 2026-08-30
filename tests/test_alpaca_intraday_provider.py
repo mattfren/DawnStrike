@@ -34,6 +34,7 @@ def test_alpaca_pages_preserve_requested_sip_feed_and_restart_cursor(monkeypatch
     )
 
     assert first.feed == second.feed == "sip"
+    assert first.endpoint == second.endpoint == "bars"
     assert first.next_page_token == "cursor-2"
     assert second.next_page_token is None
     assert first.items[0]["symbol"] == "TST"
@@ -62,3 +63,52 @@ def test_alpaca_minute_bars_walk_all_pages_without_changing_legacy_shape(monkeyp
 
     assert [row["timestamp"] for row in rows] == ["a", "b"]
     assert rows[0]["ticker"] == "TST"
+
+
+def test_alpaca_corporate_actions_use_current_market_data_endpoint(monkeypatch) -> None:
+    config = ScannerConfig(
+        alpaca_api_key_id="id",
+        alpaca_api_secret_key="secret",  # pragma: allowlist secret - fixture
+        alpaca_data_feed="sip",
+        historical_intraday_page_limit=100,
+    )
+    provider = AlpacaProvider(config)
+    calls: list[tuple[str, dict[str, str]]] = []
+
+    def fake_request(path, params, config):
+        calls.append((path, dict(params)))
+        return {
+            "forward_splits": [{"id": "split-1", "symbol": "TST"}],
+            "cash_dividends": [{"id": "dividend-1", "symbol": "TST"}],
+            "next_page_token": "ca-next",
+        }
+
+    monkeypatch.setattr(provider, "_request_json", fake_request)
+    page = provider.get_corporate_actions_page(
+        ["TST"],
+        "2026-08-28T13:30:00+00:00",
+        "2026-08-28T14:00:00+00:00",
+        config,
+    )
+
+    assert calls == [
+        (
+            "/v1/corporate-actions",
+            {
+                "symbols": "TST",
+                "start": "2026-08-28",
+                "end": "2026-08-28",
+                "region": "us",
+                "data_quality": "complete",
+                "sort": "asc",
+                "limit": "100",
+            },
+        )
+    ]
+    assert page.endpoint == "corporate_actions"
+    assert page.feed == "sip"
+    assert page.next_page_token == "ca-next"
+    assert {row["corporate_action_collection"] for row in page.items} == {
+        "forward_splits",
+        "cash_dividends",
+    }
