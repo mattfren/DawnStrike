@@ -243,24 +243,25 @@ def evaluate_shadow_strategy(
         )
     )
     symbol = current.symbol.upper()
-    base = dict(
-        strategy_id=config.strategy_id,
-        strategy_version=config.version,
-        symbol=symbol,
-        decision_at=current.timestamp,
-        empirical_cost_status="EMPIRICAL_COST_VERIFIED"
-        if empirical_cost_verified
-        else EMPIRICAL_COST_REQUIRED,
-    )
     reasons = _common_rejections(config, current, prior)
     if reasons:
-        return ShadowEvaluation(
-            **base, status="NOT_EVALUABLE", reason_codes=tuple(dict.fromkeys(reasons))
+        return _make_evaluation(
+            config,
+            symbol=symbol,
+            decision_at=current.timestamp,
+            status="NOT_EVALUABLE",
+            reason_codes=tuple(dict.fromkeys(reasons)),
+            empirical_cost_verified=empirical_cost_verified,
         )
     local_time = current.timestamp.astimezone(MARKET_TZ).time().replace(tzinfo=None)
     if not (config.session_start <= local_time < config.session_end):
-        return ShadowEvaluation(
-            **base, status="NOT_EVALUABLE", reason_codes=("OUTSIDE_SESSION_WINDOW",)
+        return _make_evaluation(
+            config,
+            symbol=symbol,
+            decision_at=current.timestamp,
+            status="NOT_EVALUABLE",
+            reason_codes=("OUTSIDE_SESSION_WINDOW",),
+            empirical_cost_verified=empirical_cost_verified,
         )
 
     if strategy_id == "shadow_opening_range_continuation":
@@ -275,7 +276,14 @@ def evaluate_shadow_strategy(
         geometry = (None, ("UNKNOWN_STRATEGY",))
     signal_values, setup_reasons = geometry
     if signal_values is None:
-        return ShadowEvaluation(**base, status="NOT_EVALUABLE", reason_codes=tuple(setup_reasons))
+        return _make_evaluation(
+            config,
+            symbol=symbol,
+            decision_at=current.timestamp,
+            status="NOT_EVALUABLE",
+            reason_codes=tuple(setup_reasons),
+            empirical_cost_verified=empirical_cost_verified,
+        )
 
     signal = _build_signal(config, current, signal_values, setup_reasons)
     authority = risk_authority or PortfolioRiskAuthority()
@@ -293,27 +301,62 @@ def evaluate_shadow_strategy(
     )
     risk = authority.evaluate(proposal, snapshot, now=current.timestamp)
     if not risk.allowed:
-        return ShadowEvaluation(
-            **base,
+        return _make_evaluation(
+            config,
+            symbol=symbol,
+            decision_at=current.timestamp,
             status="SHADOW_BLOCKED_RISK",
             reason_codes=tuple(dict.fromkeys((*setup_reasons, *risk.reason_codes))),
             signal=signal,
             risk_decision=risk,
+            empirical_cost_verified=empirical_cost_verified,
         )
     if not empirical_cost_verified:
-        return ShadowEvaluation(
-            **base,
+        return _make_evaluation(
+            config,
+            symbol=symbol,
+            decision_at=current.timestamp,
             status=EMPIRICAL_COST_REQUIRED,
             reason_codes=tuple(dict.fromkeys((*setup_reasons, EMPIRICAL_COST_REQUIRED))),
             signal=signal,
             risk_decision=risk,
+            empirical_cost_verified=empirical_cost_verified,
         )
-    return ShadowEvaluation(
-        **base,
+    return _make_evaluation(
+        config,
+        symbol=symbol,
+        decision_at=current.timestamp,
         status="SHADOW_SIGNAL",
         reason_codes=tuple(setup_reasons),
         signal=signal,
         risk_decision=risk,
+        empirical_cost_verified=empirical_cost_verified,
+    )
+
+
+def _make_evaluation(
+    config: ShadowStrategyConfig,
+    *,
+    symbol: str,
+    decision_at: datetime,
+    status: str,
+    reason_codes: tuple[str, ...],
+    signal: ShadowSignal | None = None,
+    risk_decision: PortfolioRiskDecision | None = None,
+    empirical_cost_verified: bool,
+) -> ShadowEvaluation:
+    return ShadowEvaluation(
+        strategy_id=config.strategy_id,
+        strategy_version=config.version,
+        symbol=symbol,
+        decision_at=decision_at,
+        status=status,
+        reason_codes=reason_codes,
+        signal=signal,
+        risk_decision=risk_decision,
+        empirical_cost_status=(
+            "EMPIRICAL_COST_VERIFIED" if empirical_cost_verified else EMPIRICAL_COST_REQUIRED
+        ),
     )
 
 
