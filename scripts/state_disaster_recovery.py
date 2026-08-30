@@ -177,9 +177,9 @@ def create_backup(
     source_db: str | Path,
     backup_root: str | Path,
     *,
+    source_sha: str,
     state_root: str | Path | None = None,
     retention: int = 7,
-    source_sha: str | None = None,
     backup_id: str | None = None,
     created_at: str | None = None,
 ) -> dict[str, Any]:
@@ -191,13 +191,17 @@ def create_backup(
     root = _resolve(backup_root)
     if not source.is_file():
         raise FileNotFoundError(f"source database not found: {source}")
+    if source.name != DB_NAME:
+        raise RecoveryValidationError(
+            f"source database basename must be exactly {DB_NAME}"
+        )
     _validate_roots(source, root, state_root)
     source_size, source_hash = _sha256(source)
-    normalized_source_sha = None
-    if source_sha is not None:
-        if not _GIT_SHA.fullmatch(source_sha):
-            raise RecoveryValidationError("source release SHA must be exactly 40 hex characters")
-        normalized_source_sha = source_sha.lower()
+    if source_sha is None or not _GIT_SHA.fullmatch(source_sha):
+        raise RecoveryValidationError(
+            "source release SHA is required and must be exactly 40 hex characters"
+        )
+    normalized_source_sha = source_sha.lower()
     metadata = _db_metadata(source, read_only=True)
     timestamp = created_at or _utc_now()
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T.*Z", timestamp):
@@ -379,10 +383,10 @@ def validate_backup(
     ):
         raise RecoveryValidationError("manifest source hash semantics are invalid")
     release_sha = manifest.get("source_release_sha")
-    if release_sha is not None and (
-        not isinstance(release_sha, str) or not _GIT_SHA.fullmatch(release_sha)
-    ):
-        raise RecoveryValidationError("manifest source release SHA is invalid")
+    if not isinstance(release_sha, str) or not _GIT_SHA.fullmatch(release_sha):
+        raise RecoveryValidationError(
+            "manifest source release SHA is required and invalid"
+        )
     if not isinstance(manifest["source_schema_version"], int) or not isinstance(
         manifest["backup_schema_version"], int
     ):
@@ -519,7 +523,7 @@ def _parser() -> argparse.ArgumentParser:
     backup.add_argument("--backup-root", required=True)
     backup.add_argument("--state-root")
     backup.add_argument("--retention", type=int, default=7)
-    backup.add_argument("--source-sha")
+    backup.add_argument("--source-sha", required=True)
     backup.add_argument("--backup-id")
     backup.add_argument("--created-at")
     for name, function_name in (("restore-verify", "verify"), ("restore-plan", "plan")):

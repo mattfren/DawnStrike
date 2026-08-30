@@ -13,6 +13,8 @@ from scripts.state_disaster_recovery import (
     validate_backup,
 )
 
+VALID_RELEASE_SHA = "a" * 40
+
 
 def _database(path: Path, value: str = "observed") -> None:
     with sqlite3.connect(path) as connection:
@@ -31,7 +33,13 @@ def _make_backup(tmp_path: Path, *, backup_id: str = "backup-one") -> tuple[Path
     state.mkdir()
     source = state / "shadow_real.sqlite"
     _database(source)
-    result = create_backup(source, root, state_root=state, backup_id=backup_id)
+    result = create_backup(
+        source,
+        root,
+        state_root=state,
+        backup_id=backup_id,
+        source_sha=VALID_RELEASE_SHA,
+    )
     assert result["write_performed"] is True
     assert result["created"] is True
     assert result["reused"] is False
@@ -63,7 +71,12 @@ def test_valid_sqlite_without_dawnstrike_schema_is_rejected(tmp_path: Path) -> N
     with sqlite3.connect(source) as connection:
         connection.execute("CREATE TABLE unrelated (value TEXT)")
     with pytest.raises(RecoveryValidationError, match="schema_version table is missing"):
-        create_backup(source, tmp_path / "backups", state_root=state)
+        create_backup(
+            source,
+            tmp_path / "backups",
+            state_root=state,
+            source_sha=VALID_RELEASE_SHA,
+        )
 
 
 def test_empty_dawnstrike_schema_is_rejected(tmp_path: Path) -> None:
@@ -75,7 +88,12 @@ def test_empty_dawnstrike_schema_is_rejected(tmp_path: Path) -> None:
             "CREATE TABLE schema_version (version INTEGER NOT NULL, applied_at TEXT NOT NULL)"
         )
     with pytest.raises(RecoveryValidationError, match="schema_version table is empty"):
-        create_backup(source, tmp_path / "backups", state_root=state)
+        create_backup(
+            source,
+            tmp_path / "backups",
+            state_root=state,
+            source_sha=VALID_RELEASE_SHA,
+        )
 
 
 @pytest.mark.parametrize("version", [0, CURRENT_SCHEMA_VERSION + 1, -1])
@@ -89,7 +107,29 @@ def test_incompatible_dawnstrike_schema_is_rejected(tmp_path: Path, version: int
         )
         connection.execute("INSERT INTO schema_version VALUES (?, 'fixture')", (version,))
     with pytest.raises(RecoveryValidationError, match="unsupported|empty"):
-        create_backup(source, tmp_path / "backups", state_root=state)
+        create_backup(
+            source,
+            tmp_path / "backups",
+            state_root=state,
+            source_sha=VALID_RELEASE_SHA,
+        )
+
+
+def test_source_basename_must_be_exact_and_no_bundle_is_created(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    source = state / "renamed.sqlite"
+    _database(source)
+    root = tmp_path / "backups"
+    with pytest.raises(RecoveryValidationError, match="basename"):
+        create_backup(source, root, state_root=state, source_sha=VALID_RELEASE_SHA)
+    assert not root.exists()
+
+
+def test_source_release_sha_is_required_for_backup(tmp_path: Path) -> None:
+    source, root, _ = _make_backup(tmp_path)
+    with pytest.raises(TypeError, match="source_sha"):
+        create_backup(source, root, state_root=source.parent)
 
 
 def test_tamper_and_partial_bundles_fail_closed(tmp_path: Path) -> None:
@@ -121,21 +161,37 @@ def test_roots_must_be_separate_and_outside_state(tmp_path: Path) -> None:
     source = state / "shadow_real.sqlite"
     _database(source)
     with pytest.raises(RecoveryValidationError, match="separate"):
-        create_backup(source, state / "backups", state_root=state)
+        create_backup(
+            source,
+            state / "backups",
+            state_root=state,
+            source_sha=VALID_RELEASE_SHA,
+        )
     with pytest.raises(RecoveryValidationError, match="separate"):
-        create_backup(source, state, state_root=state)
+        create_backup(source, state, state_root=state, source_sha=VALID_RELEASE_SHA)
     secret = state / "secrets"
     secret.mkdir()
-    secret_db = secret / "secret.sqlite"
+    secret_db = secret / "shadow_real.sqlite"
     _database(secret_db)
     with pytest.raises(RecoveryValidationError, match="secret"):
-        create_backup(secret_db, tmp_path / "secret-backups", state_root=state)
+        create_backup(
+            secret_db,
+            tmp_path / "secret-backups",
+            state_root=state,
+            source_sha=VALID_RELEASE_SHA,
+        )
 
 
 def test_retry_with_backup_id_is_idempotent(tmp_path: Path) -> None:
     source, root, bundle = _make_backup(tmp_path, backup_id="retry")
     first = (bundle / "manifest.json").read_bytes()
-    second = create_backup(source, root, state_root=source.parent, backup_id="retry")
+    second = create_backup(
+        source,
+        root,
+        state_root=source.parent,
+        backup_id="retry",
+        source_sha=VALID_RELEASE_SHA,
+    )
     assert Path(second["bundle_path"]) == bundle
     assert second["write_performed"] is False
     assert second["created"] is False
@@ -151,13 +207,19 @@ def test_backup_id_cannot_be_reused_for_different_source_or_release(tmp_path: Pa
     other_source = other_state / "shadow_real.sqlite"
     _database(other_source, "changed")
     with pytest.raises(RecoveryValidationError, match="different source"):
-        create_backup(other_source, root, state_root=other_state, backup_id="identity")
+        create_backup(
+            other_source,
+            root,
+            state_root=other_state,
+            backup_id="identity",
+            source_sha=VALID_RELEASE_SHA,
+        )
     create_backup(
         source,
         root,
         state_root=source.parent,
         backup_id="release",
-        source_sha="a" * 40,
+        source_sha=VALID_RELEASE_SHA,
     )
     with pytest.raises(RecoveryValidationError, match="different source"):
         create_backup(
@@ -187,6 +249,7 @@ def test_retention_never_deletes_last_good_and_ignores_invalid(tmp_path: Path) -
         root,
         state_root=state,
         backup_id="first",
+        source_sha=VALID_RELEASE_SHA,
         created_at="2026-08-30T00:00:00.000000Z",
     )
     first = root / "first"
@@ -195,6 +258,7 @@ def test_retention_never_deletes_last_good_and_ignores_invalid(tmp_path: Path) -
         root,
         state_root=source.parent,
         backup_id="second",
+        source_sha=VALID_RELEASE_SHA,
         created_at="2026-08-30T01:00:00.000000Z",
         retention=1,
     )
@@ -207,6 +271,7 @@ def test_retention_never_deletes_last_good_and_ignores_invalid(tmp_path: Path) -
         root,
         state_root=source.parent,
         backup_id="third",
+        source_sha=VALID_RELEASE_SHA,
         created_at="2026-08-30T02:00:00.000000Z",
         retention=1,
     )
