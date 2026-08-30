@@ -95,9 +95,13 @@ class CanonicalAccountLedger:
     ) -> None:
         self.db_path = Path(db_path)
         self.account_id = str(account_id or "").strip()
-        if target_return_pct <= 0:
-            raise ValueError("target_return_pct must be positive")
-        self.target_return_pct = float(target_return_pct)
+        canonical_target = float(DEFAULT_TARGET_RETURN_PCT)
+        if float(target_return_pct) != canonical_target:
+            raise ValueError(
+                "canonical account ledger target_return_pct is fixed at "
+                f"{canonical_target:.2f} percentage points"
+            )
+        self.target_return_pct = canonical_target
         self.code_sha = str(code_sha or "unknown")
 
     def build(
