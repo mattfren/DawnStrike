@@ -1664,6 +1664,7 @@ def alpha_monitor(
     dry_run: bool = False,
     current_prices: dict[str, float] | None = None,
     as_of: datetime | None = None,
+    market_date: str | None = None,
     observation_bundle_path: str | Path | None = None,
     cycle_id: str | None = None,
 ) -> dict[str, Any]:
@@ -1686,7 +1687,10 @@ def alpha_monitor(
     monitor_market_date = (
         session_gate.market_date
         if session_gate is not None
-        else (as_of.date().isoformat() if as_of is not None else None)
+        else (
+            market_date
+            or (as_of.date().isoformat() if as_of is not None else None)
+        )
     )
     _require_scheduled_notification_configuration(
         notify=notify,

@@ -362,7 +362,7 @@ try {
     if ($exitCode -eq 0) {
         $monitor = Invoke-DawnstrikeNativeProcess `
             -FilePath "py.exe" `
-            -ArgumentList @("-m", "intraday_scanner.cli", "alpha-monitor", "--db-path", $dbPath, "--notify", $Notify, "--observation-bundle", $observationBundlePath, "--cycle-id", $cycleId) `
+            -ArgumentList @("-m", "intraday_scanner.cli", "alpha-monitor", "--db-path", $dbPath, "--notify", $Notify, "--market-date", $MarketDate, "--observation-bundle", $observationBundlePath, "--cycle-id", $cycleId) `
             -LogRoot $logRoot `
             -LogName "alpha_monitor-$MarketDate"
         if ($monitor.exit_code -ne 0) {

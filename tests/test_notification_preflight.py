@@ -95,6 +95,28 @@ def test_alpha_monitor_missing_both_telegram_alias_pairs_fails_before_store_muta
     )
 
 
+def test_alpha_monitor_explicit_market_date_binds_preflight_receipt_without_as_of(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_telegram_aliases(monkeypatch)
+    # The scheduled wrapper performs the calendar gate itself and invokes the
+    # child without an observation timestamp.  Bypass the service's optional
+    # wall-clock gate here so the receipt binding path is exercised directly.
+    monkeypatch.setattr(alpha_cycle_service, "_scheduled_session_gate", lambda **_: None)
+
+    with pytest.raises(NotificationError, match="NOTIFICATION_PREFLIGHT_FAILED"):
+        alpha_cycle_service.alpha_monitor(
+            db_path=tmp_path / "shadow.sqlite",
+            notify="telegram",
+            market_date="2026-08-27",
+        )
+
+    _assert_preflight_receipt(
+        tmp_path / "receipts" / "notification-preflight-alpha_monitor-2026-08-27.json",
+        stage="alpha_monitor",
+    )
+
+
 def test_scheduled_wrappers_propagate_notification_preflight_stage_code() -> None:
     morning = Path("scripts/run_alphaops_morning.ps1").read_text(encoding="utf-8")
     monitor = Path("scripts/run_alphaops_monitor.ps1").read_text(encoding="utf-8")
@@ -105,6 +127,7 @@ def test_scheduled_wrappers_propagate_notification_preflight_stage_code() -> Non
     assert "[Parameter(Mandatory = $true)][object]$ProcessReceipt" in helper
     assert "Resolve-DawnstrikeNotificationFailureCode" in morning
     assert "Resolve-DawnstrikeNotificationFailureCode" in monitor
+    assert '"--market-date", $MarketDate' in monitor
     assert "-ProcessReceipt $alphaCycle" in morning
     assert "-ProcessReceipt $monitor" in monitor
     assert "-FallbackErrorCode \"alpha_cycle_failed\"" in morning

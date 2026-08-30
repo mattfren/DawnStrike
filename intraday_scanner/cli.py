@@ -525,6 +525,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     alpha_monitor_parser.add_argument("--notify", default="console")
     alpha_monitor_parser.add_argument("--dry-run", action="store_true")
     alpha_monitor_parser.add_argument(
+        "--market-date",
+        default=None,
+        help="Scheduled market date used for notification-preflight evidence",
+    )
+    alpha_monitor_parser.add_argument(
         "--observation-bundle",
         default=None,
         help="Immutable five-minute bars/quotes bundle shared with trade-watch",
@@ -1966,6 +1971,7 @@ def _run_alpha_monitor(args: argparse.Namespace) -> int:
         db_path=args.db_path,
         notify=args.notify,
         dry_run=args.dry_run,
+        market_date=getattr(args, "market_date", None),
         observation_bundle_path=getattr(args, "observation_bundle", None),
         cycle_id=getattr(args, "cycle_id", None),
     )
