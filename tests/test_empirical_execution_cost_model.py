@@ -45,7 +45,28 @@ def _build(monkeypatch, rows):
         source_manifest={"artifact": "closed-fills"},
         code_sha="a" * 40,
         window={"start": "2026-08-01", "end": "2026-08-05"},
+        minimum_observations=20,
+        minimum_sessions=5,
+        minimum_bucket_observations=5,
     )
+
+
+def test_production_defaults_require_forward_scale_evidence(monkeypatch) -> None:
+    monkeypatch.setattr(
+        cost, "has_authenticated_committed_fill_truth", lambda value: value.get("trusted") is True
+    )
+    rows = [_row(index) for index in range(20)]
+    for row in rows:
+        row["trusted"] = True
+    receipt = cost.build_empirical_execution_cost_model_receipt(
+        rows,
+        source_manifest={"artifact": "closed-fills"},
+        code_sha="a" * 40,
+        window={"start": "2026-08-01", "end": "2026-08-05"},
+    )
+    assert receipt["status"] == "NOT_EVALUABLE"
+    assert receipt["configuration"]["minimum_observations"] == 300
+    assert receipt["configuration"]["minimum_sessions"] == 60
 
 
 def test_model_rejects_untrusted_json_even_with_closed_status(monkeypatch) -> None:

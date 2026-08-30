@@ -19,6 +19,12 @@ fallback hierarchy and labels a sparse fallback; it never substitutes a
 universal optimistic value or the champion model. A 2x stress view is emitted
 as a shadow diagnostic.
 
+The production model is not evaluable before 300 authenticated fills spanning
+at least 60 market sessions; an individual bucket needs at least 30
+observations and still inherits the session minimum. The older 20-observation
+Cycle-2 API remains only as a legacy shadow diagnostic and is not a calibrated
+model claim.
+
 Every receipt is hash-bound to its source manifest, code SHA, window, input
 observations, configuration, and model version. `select_empirical_cost` returns
 `empirical_claim=True` only after those hashes and evidence minima validate.
