@@ -16,6 +16,7 @@ import json
 import os
 import re
 import sqlite3
+import sys
 import tempfile
 from collections.abc import Mapping
 from contextlib import closing
@@ -24,7 +25,19 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from intraday_scanner.storage.migrations import CURRENT_SCHEMA_VERSION, run_migrations
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT_TEXT = str(_REPO_ROOT)
+if _REPO_ROOT_TEXT in sys.path:
+    sys.path.remove(_REPO_ROOT_TEXT)
+sys.path.insert(0, _REPO_ROOT_TEXT)
+
+from intraday_scanner.storage import migrations as _storage_migrations  # noqa: E402
+
+_EXPECTED_MIGRATIONS = (_REPO_ROOT / "intraday_scanner" / "storage" / "migrations.py").resolve()
+if Path(_storage_migrations.__file__).resolve() != _EXPECTED_MIGRATIONS:
+    raise RuntimeError("state preparation did not load migrations from the exact candidate root")
+CURRENT_SCHEMA_VERSION = _storage_migrations.CURRENT_SCHEMA_VERSION
+run_migrations = _storage_migrations.run_migrations
 
 # Canonical SQL fragments and receipt argument vectors remain readable as
 # literals; their exact text is part of the governed contract.

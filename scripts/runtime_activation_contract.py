@@ -15,6 +15,7 @@ import json
 import os
 import re
 import sqlite3
+import sys
 import tempfile
 from collections.abc import Mapping
 from datetime import UTC, date, datetime, timedelta
@@ -22,7 +23,18 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from intraday_scanner.storage.migrations import CURRENT_SCHEMA_VERSION
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT_TEXT = str(_REPO_ROOT)
+if _REPO_ROOT_TEXT in sys.path:
+    sys.path.remove(_REPO_ROOT_TEXT)
+sys.path.insert(0, _REPO_ROOT_TEXT)
+
+from intraday_scanner.storage import migrations as _storage_migrations  # noqa: E402
+
+_EXPECTED_MIGRATIONS = (_REPO_ROOT / "intraday_scanner" / "storage" / "migrations.py").resolve()
+if Path(_storage_migrations.__file__).resolve() != _EXPECTED_MIGRATIONS:
+    raise RuntimeError("activation contract did not load migrations from the exact candidate root")
+CURRENT_SCHEMA_VERSION = _storage_migrations.CURRENT_SCHEMA_VERSION
 
 CI_SCHEMA = "dawnstrike.runtime_activation_ci_evidence.v1"
 SOL_SCHEMA = "dawnstrike.runtime_activation_sol_evidence.v1"

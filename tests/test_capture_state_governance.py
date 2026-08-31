@@ -560,6 +560,109 @@ def test_inspect_live_cli_requires_only_database_argument(tmp_path: Path) -> Non
     assert len(value["logical_snapshot_sha256"]) == 64
 
 
+def test_direct_state_clis_prefer_candidate_modules_over_stale_pythonpath(
+    tmp_path: Path,
+) -> None:
+    """A mounted runtime package must not bypass the candidate migration repair."""
+
+    db, state, proof, backup = _state_fixture(tmp_path)
+    # Reproduce the published schema-30 identity spelling from the mounted
+    # runtime without weakening any non-identity constraint or touching rows.
+    identity_columns = {
+        "expected_market_sessions": "session_id",
+        "intraday_capture_runs": "capture_run_id",
+        "committed_fill_truth_receipts": "receipt_id",
+        "no_trade_session_receipts": "receipt_id",
+        "experiment_trial_ledger": "trial_id",
+    }
+    with sqlite3.connect(db) as connection:
+        connection.execute("PRAGMA writable_schema=ON")
+        try:
+            for table, identity in identity_columns.items():
+                sql = connection.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                    (table,),
+                ).fetchone()[0]
+                weakened = str(sql).replace(
+                    f"{identity} TEXT PRIMARY KEY NOT NULL",
+                    f"{identity} TEXT PRIMARY KEY",
+                )
+                assert weakened != sql
+                connection.execute(
+                    "UPDATE sqlite_master SET sql=? WHERE type='table' AND name=?",
+                    (weakened, table),
+                )
+        finally:
+            connection.execute("PRAGMA writable_schema=OFF")
+        connection.commit()
+
+    stale = tmp_path / "stale-package"
+    stale_storage = stale / "intraday_scanner" / "storage"
+    stale_storage.mkdir(parents=True)
+    (stale / "intraday_scanner" / "__init__.py").write_text("\n", encoding="utf-8")
+    (stale_storage / "__init__.py").write_text("\n", encoding="utf-8")
+    (stale_storage / "migrations.py").write_text(
+        "raise RuntimeError('stale migration package selected')\n", encoding="utf-8"
+    )
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(stale)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str((Path.cwd() / "scripts" / "prepare_dawnstrike_state.py").resolve()),
+            "--db-path",
+            str(db),
+            "--state-root",
+            str(state),
+            "--backup-root",
+            str(backup),
+            "--candidate-sha",
+            CANDIDATE_SHA,
+            "--candidate-tree",
+            CANDIDATE_TREE,
+            "--task-proof",
+            str(proof),
+        ],
+        cwd=stale,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    preparation = json.loads(result.stdout.strip().splitlines()[-1])
+    assert preparation["status"] == "COMPLETE"
+    assert preparation["state_schema_version"] == 30
+
+    for script, arguments in (
+        ("state_preparation.py", ["--db-path", str(db), "--inspect-live"]),
+        (
+            "runtime_activation_contract.py",
+            ["inspect-state", "--db-path", str(db)],
+        ),
+    ):
+        inspected = subprocess.run(
+            [
+                sys.executable,
+                str((Path.cwd() / "scripts" / script).resolve()),
+                *arguments,
+            ],
+            cwd=stale,
+            env=environment,
+            text=True,
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+        assert inspected.returncode == 0, (script, inspected.stdout, inspected.stderr)
+        payload = json.loads(inspected.stdout.strip().splitlines()[-1])
+        assert payload["quick_check"] == "ok"
+        if script == "runtime_activation_contract.py":
+            assert payload["schema_version"] == 30
+
+
 def test_state_preparation_rejects_partial_inventory_then_repairs_idempotently(
     tmp_path: Path,
 ) -> None:

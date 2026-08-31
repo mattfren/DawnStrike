@@ -7,9 +7,21 @@ import gzip
 import hashlib
 import json
 import re
+import sys
 from pathlib import Path
 
-from scripts.public_lineage import is_lower_hex64
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT_TEXT = str(_REPO_ROOT)
+if _REPO_ROOT_TEXT in sys.path:
+    sys.path.remove(_REPO_ROOT_TEXT)
+sys.path.insert(0, _REPO_ROOT_TEXT)
+
+from scripts import public_lineage as _public_lineage  # noqa: E402
+
+_EXPECTED_LINEAGE = (_REPO_ROOT / "scripts" / "public_lineage.py").resolve()
+if Path(_public_lineage.__file__).resolve() != _EXPECTED_LINEAGE:
+    raise RuntimeError("public artifact verifier did not load the exact candidate lineage code")
+is_lower_hex64 = _public_lineage.is_lower_hex64
 
 MAX_SNAPSHOT_BYTES = 250 * 1024
 V6_SCHEMA_VERSION = "dawnstrike.alphaops_v6.public_status.v1"
