@@ -768,10 +768,15 @@ def validate_receipt(
         if not _SHA256.fullmatch(str(payload.get(field) or "")):
             raise StatePreparationError(f"state-preparation {field} is invalid")
     bundle_path = payload.get("backup_bundle_path")
+    backup_id = payload.get("backup_id")
+    if not isinstance(backup_id, str) or not re.fullmatch(
+        r"state-preparation-[0-9a-f]{16}-[0-9a-f]{16}", backup_id
+    ):
+        raise StatePreparationError("state-preparation backup identity is invalid")
     if not isinstance(bundle_path, str) or not Path(bundle_path).is_absolute():
         raise StatePreparationError("state-preparation backup bundle path is invalid")
     bundle = _assert_no_reparse_components(bundle_path)
-    if bundle.name != payload.get("backup_id") or not bundle.is_dir():
+    if bundle.name != backup_id or not bundle.is_dir():
         raise StatePreparationError("state-preparation backup bundle path is invalid")
     if payload.get("initialization_idempotent") is not True:
         raise StatePreparationError("state-preparation did not prove idempotence")

@@ -157,7 +157,10 @@ function Assert-DawnstrikeCapturePreparedRecovery {
     $candidateOccurrences = @([regex]::Matches([string]$Auxiliary.xml, [regex]::Escape($CandidateSha))).Count
     if (
         $candidateOccurrences -ne 1 -or
-        [string]$Auxiliary.action_contract_sha256 -eq [string]$prepared.action_before_sha256
+        [string]$Auxiliary.action_contract_sha256 -eq [string]$prepared.action_before_sha256 -or
+        (Get-DawnstrikeAuxiliarySectionHash ([string]$Auxiliary.xml) "Principal") -ne [string]$prepared.principal_sha256 -or
+        (Get-DawnstrikeAuxiliarySectionHash ([string]$Auxiliary.xml) "Triggers") -ne [string]$prepared.trigger_sha256 -or
+        (Get-DawnstrikeAuxiliarySectionHash ([string]$Auxiliary.xml) "Settings") -ne [string]$prepared.settings_sha256
     ) {
         throw "Ready auxiliary task does not prove the exact post-mutation PREPARED boundary."
     }

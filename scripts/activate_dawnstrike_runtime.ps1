@@ -422,6 +422,25 @@ function Get-DawnstrikeAuxiliaryCaptureTask {
     }
 }
 
+function Get-DawnstrikeAuxiliarySectionHash {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Xml,
+        [Parameter(Mandatory = $true)][ValidateSet("Principal", "Triggers", "Settings")][string]$Name
+    )
+    try {
+        $document = [System.Xml.XmlDocument]::new()
+        $document.PreserveWhitespace = $true
+        $document.LoadXml($Xml)
+        $nodes = @($document.SelectNodes("//*[local-name()='$Name']"))
+        if ($nodes.Count -ne 1) { throw "expected exactly one $Name section" }
+        return Get-DawnstrikeSha256Text ([string]$nodes[0].OuterXml)
+    }
+    catch {
+        throw "Auxiliary capture XML has an invalid $Name section."
+    }
+}
+
 function Disable-DawnstrikeAuxiliaryCaptureTask {
     [CmdletBinding()]
     param(
@@ -583,6 +602,7 @@ function Write-DawnstrikeTaskXmlFile {
         else {
             throw "Task XML declares an unsupported encoding."
         }
+        Assert-DawnstrikeNoReparseComponents $Path "Task XML backup file"
         [System.IO.File]::WriteAllText($Path, $Xml, $encoding)
         return $encodingLabel
     }
@@ -618,6 +638,7 @@ function New-DawnstrikeTaskXmlBackup {
     else {
         New-Item -ItemType Directory -Path $root -ErrorAction Stop | Out-Null
     }
+    Assert-DawnstrikeNoReparseComponents $root "Scheduler backup root"
     $final = Join-Path $root $BackupName
     Assert-DawnstrikeNoReparseComponents $final "Scheduler backup bundle"
     if (Test-Path -LiteralPath $final) {
@@ -1254,7 +1275,10 @@ function Assert-DawnstrikeCaptureRebindChain {
         [string]$capture.activation_receipt_sha256 -ne (Get-DawnstrikeSha256File $activationItem) -or
         [string]$capture.xml_after_sha256 -ne [string]$Auxiliary.xml_sha256 -or
         [string]$capture.action_after_sha256 -ne [string]$Auxiliary.action_contract_sha256 -or
-        [string]$capture.definition_after_sha256 -ne [string]$Auxiliary.definition_contract_sha256
+        [string]$capture.definition_after_sha256 -ne [string]$Auxiliary.definition_contract_sha256 -or
+        (Get-DawnstrikeAuxiliarySectionHash ([string]$Auxiliary.xml) "Principal") -ne [string]$capture.principal_sha256 -or
+        (Get-DawnstrikeAuxiliarySectionHash ([string]$Auxiliary.xml) "Triggers") -ne [string]$capture.trigger_sha256 -or
+        (Get-DawnstrikeAuxiliarySectionHash ([string]$Auxiliary.xml) "Settings") -ne [string]$capture.settings_sha256
     ) { throw "Ready auxiliary task is not bound to the exact activation receipt chain." }
     return $capture
 }
