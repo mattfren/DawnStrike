@@ -611,10 +611,12 @@ def _validate_core_contract(
         raise UniverseHandoffError("core universe contract schema is invalid")
     if str(core.get("requested_market_date") or "") != market_date:
         raise UniverseHandoffError("core universe contract market date conflicts")
-    observed_date = _iso_date(core.get("observed_at"))
-    if observed_date is None:
+    status = str(core.get("status") or "").upper()
+    observed_at = core.get("observed_at")
+    observed_date = _iso_date(observed_at)
+    if observed_date is None and (status == "READY" or observed_at is not None):
         raise UniverseHandoffError("core universe contract observation is invalid")
-    if str(core.get("status") or "").upper() not in {"READY", "DATA_UNAVAILABLE"}:
+    if status not in {"READY", "DATA_UNAVAILABLE"}:
         raise UniverseHandoffError("core universe contract status is invalid")
     if str(core.get("completeness_verdict") or "").upper() not in {
         "COMPLETE",

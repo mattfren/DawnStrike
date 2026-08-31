@@ -1,7 +1,7 @@
 import csv
 import hashlib
 import json
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -11,6 +11,7 @@ from intraday_scanner.v2.paper_ops import engine as paper_ops_engine
 from intraday_scanner.v2.paper_ops.models import PaperRunMode
 from intraday_scanner.v2.paper_ops.universe_handoff import (
     UniverseHandoffError,
+    _validate_core_contract,
     build_universe_handoff,
     load_universe_handoff,
 )
@@ -85,6 +86,19 @@ def _sync_source_summary_preserving_fleet(root: Path, summary: dict[str, object]
         "morning_strategy_adapter": prior_summary.get("morning_strategy_adapter"),
     }
     _rewrite_json(cycle_path, cycle)
+
+
+def test_missing_core_manifest_is_validated_as_lane_local_unavailable() -> None:
+    core = build_core_universe_contract(
+        None,
+        observed_at=datetime(2026, 8, 31, 13, 0, tzinfo=timezone.utc),
+        market_date=MARKET_DATE,
+    )
+
+    assert core["status"] == "DATA_UNAVAILABLE"
+    assert core["observed_at"] is None
+    assert core["membership_count"] == 0
+    assert _validate_core_contract(core, MARKET_DATE) == set()
 
 
 def test_cross_scan_mover_summary_splice_is_rejected(tmp_path: Path) -> None:
