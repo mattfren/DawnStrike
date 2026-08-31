@@ -64,6 +64,11 @@ def test_stage_builder_declares_dependency_free_python_stage() -> None:
     assert "Content-Security-Policy" in script
     assert "frame-ancestors 'none'" in script
     assert "headers = $securityHeaders" in script
+    assert "vercel_source_contract.ps1" in script
+    assert "ExpectedSourceTree" in script
+    assert "Write-VercelGitBlob" in script
+    assert "vercel-source-manifest.json" in script
+    assert "Assert-VercelGitSourceStable" in script
 
 
 def test_candidate_verifier_reads_optional_config_fields_under_strict_mode() -> None:
@@ -75,6 +80,8 @@ def test_candidate_verifier_reads_optional_config_fields_under_strict_mode() -> 
     assert "$config.crons" not in script
     assert "$null -ne $routesProperty" in script
     assert "$null -ne $cronsProperty" in script
+    assert "ExpectedSourceTree" in script
+    assert "Assert-VercelStagedSourceManifest" in script
 
 
 def test_daily_vercel_publisher_builds_once_verifies_and_can_roll_back() -> None:
@@ -131,3 +138,8 @@ def test_daily_vercel_publisher_builds_once_verifies_and_can_roll_back() -> None
     assert "Assert-PublicationState" in script
     assert "Production verification did not converge" in script
     assert "Start-Sleep -Seconds 3" in script
+    assert "vercel_source_contract.ps1" in script
+    assert "ExpectedSourceTree" in script
+    assert "Publication source HEAD changed during staging or deployment" in Path(
+        "scripts/vercel_source_contract.ps1"
+    ).read_text(encoding="utf-8")

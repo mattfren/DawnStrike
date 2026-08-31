@@ -21,9 +21,14 @@ if ($Promote -and $AllowDegraded) {
 }
 . (Join-Path $PSScriptRoot "dawnstrike_job_process.ps1")
 $resolvedRoot = (Resolve-Path $ProjectRoot).Path
+. (Join-Path $resolvedRoot "scripts\vercel_source_contract.ps1")
 $expectedSourceSha = (& git.exe -C $resolvedRoot rev-parse HEAD).Trim().ToLowerInvariant()
+$expectedSourceTree = (& git.exe -C $resolvedRoot rev-parse 'HEAD^{tree}').Trim().ToLowerInvariant()
 if ($LASTEXITCODE -ne 0 -or $expectedSourceSha -notmatch '^[0-9a-f]{40}$') {
     throw "Could not resolve the exact runtime source SHA before Vercel publication."
+}
+if ($expectedSourceTree -notmatch '^[0-9a-f]{40}$') {
+    throw "Could not resolve the exact Git tree before Vercel publication."
 }
 $stage = Join-Path $resolvedRoot $StageRoot
 $resultPath = Join-Path $resolvedRoot "build\daily-deployment-result.json"
@@ -270,15 +275,28 @@ function Assert-PublicationState {
 
 & (Join-Path $resolvedRoot "scripts\build_vercel_public_stage.ps1") `
     -ProjectRoot $resolvedRoot `
-    -StageRoot $StageRoot
+    -StageRoot $StageRoot `
+    -ExpectedSourceSha $expectedSourceSha `
+    -ExpectedSourceTree $expectedSourceTree
 & (Join-Path $resolvedRoot "scripts\verify_vercel_candidate.ps1") `
     -ProjectRoot $resolvedRoot `
     -StageRoot $StageRoot `
     -ExpectedSourceSha $expectedSourceSha `
+    -ExpectedSourceTree $expectedSourceTree `
     -AllowDegraded:$AllowDegraded
 
+Assert-VercelGitSourceStable `
+    -Root $resolvedRoot `
+    -ExpectedSourceSha $expectedSourceSha `
+    -ExpectedSourceTree $expectedSourceTree `
+    -AllowedStageRoot $stage
 Push-Location $stage
 try {
+    Assert-VercelGitSourceStable `
+        -Root $resolvedRoot `
+        -ExpectedSourceSha $expectedSourceSha `
+        -ExpectedSourceTree $expectedSourceTree `
+        -AllowedStageRoot $stage
     $buildResult = Invoke-VercelProcess `
         -Arguments @("build", "--yes", "--project", $ProjectId) `
         -Label "Vercel prebuild" `
@@ -289,6 +307,11 @@ try {
     if ($buildResult.Stderr) {
         [Console]::Error.WriteLine($buildResult.Stderr)
     }
+    Assert-VercelGitSourceStable `
+        -Root $resolvedRoot `
+        -ExpectedSourceSha $expectedSourceSha `
+        -ExpectedSourceTree $expectedSourceTree `
+        -AllowedStageRoot $stage
     $deploymentResponse = Invoke-VercelJson `
         -Arguments @("deploy", "--prebuilt", "--project", $ProjectId, "--yes", "--json") `
         -Label "Vercel prebuilt deploy"
@@ -344,6 +367,11 @@ if ($Promote) {
 
 try {
     if ($Promote) {
+        Assert-VercelGitSourceStable `
+            -Root $resolvedRoot `
+            -ExpectedSourceSha $expectedSourceSha `
+            -ExpectedSourceTree $expectedSourceTree `
+            -AllowedStageRoot $stage
         # Mark the external state as potentially mutated before starting the
         # command. A timeout can occur after Vercel accepted the promotion, so
         # every promotion failure must enter the existing rollback boundary.
