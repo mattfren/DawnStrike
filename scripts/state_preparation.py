@@ -16,6 +16,7 @@ import json
 import os
 import re
 import sqlite3
+import sys
 import tempfile
 from collections.abc import Mapping
 from contextlib import closing
@@ -24,7 +25,16 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from intraday_scanner.storage.migrations import CURRENT_SCHEMA_VERSION, run_migrations
+# A direct invocation may run with a different checkout as the current
+# directory or through PYTHONPATH.  Resolve imports from this candidate before
+# loading the migration package; otherwise a stale runtime migration can make
+# a real schema-30 snapshot fail while empty fixtures pass.
+_REPO_ROOT = str(Path(__file__).resolve().parents[1])
+if _REPO_ROOT in sys.path:
+    sys.path.remove(_REPO_ROOT)
+sys.path.insert(0, _REPO_ROOT)
+
+from intraday_scanner.storage.migrations import CURRENT_SCHEMA_VERSION, run_migrations  # noqa: E402
 
 # Canonical SQL fragments and receipt argument vectors remain readable as
 # literals; their exact text is part of the governed contract.

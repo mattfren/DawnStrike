@@ -15,6 +15,7 @@ import json
 import os
 import re
 import sqlite3
+import sys
 import tempfile
 from collections.abc import Mapping
 from datetime import UTC, date, datetime, timedelta
@@ -22,7 +23,14 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from intraday_scanner.storage.migrations import CURRENT_SCHEMA_VERSION
+# Direct activation CLIs must use the candidate's migration contract even when
+# launched from a mounted runtime checkout with a stale PYTHONPATH.
+_REPO_ROOT = str(Path(__file__).resolve().parents[1])
+if _REPO_ROOT in sys.path:
+    sys.path.remove(_REPO_ROOT)
+sys.path.insert(0, _REPO_ROOT)
+
+from intraday_scanner.storage.migrations import CURRENT_SCHEMA_VERSION  # noqa: E402
 
 CI_SCHEMA = "dawnstrike.runtime_activation_ci_evidence.v1"
 SOL_SCHEMA = "dawnstrike.runtime_activation_sol_evidence.v1"
