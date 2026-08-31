@@ -20,7 +20,7 @@ AUXILIARY_TASK_NAME = "Dawnstrike Delayed SIP Capture"
 AUXILIARY_SIDECAR_CONTRACT = "dawnstrike.account_capture_trial_sidecar.v1"
 AUXILIARY_DECLARATION_FILE = Path("config") / "state_preparation_contract.json"
 AUXILIARY_CAPTURE_RUNNER = Path("scripts") / "run_daily_intraday_capture.py"
-AUXILIARY_PYTHON_PREFIX = ("-3.13", "-u")
+AUXILIARY_PYTHON_PREFIX = ("-I", "-u")
 AUXILIARY_REQUIRED_OPTIONS = frozenset(
     {
         "--candidate-sha",
@@ -1263,9 +1263,18 @@ def _validate_auxiliary_action(
     action_text = "|".join((execute, arguments, working_directory))
     action_hash = hashlib.sha256(action_text.encode("utf-8")).hexdigest()
     action_contract_matches = action_hash == contract["action_contract_sha256"]
+    try:
+        interpreter = Path(execute)
+        interpreter_matches = (
+            interpreter.is_absolute()
+            and interpreter.name.casefold() == "python.exe"
+            and _safe_regular_path(interpreter)
+        )
+    except (OSError, RuntimeError):
+        interpreter_matches = False
     valid = all(
         (
-            execute.casefold() == "py.exe",
+            interpreter_matches,
             runner_matches,
             prefix_matches,
             required_options_present,

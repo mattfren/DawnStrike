@@ -1,5 +1,6 @@
 import hashlib
 import json
+import sys
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -385,7 +386,7 @@ def _auxiliary_task(runtime: Path, state: Path, *, candidate_sha: str = "a" * 40
     arguments = " ".join(
         f'"{token}"'
         for token in (
-            "-3.13",
+            "-I",
             "-u",
             str(runtime / "scripts" / "run_daily_intraday_capture.py"),
             "--candidate-sha",
@@ -457,7 +458,7 @@ def _auxiliary_task(runtime: Path, state: Path, *, candidate_sha: str = "a" * 40
         "symbols_manifest_sha256": input_hashes["symbols.json"],
         "entitlement_receipt_sha256": input_hashes["entitlement.json"],
         "source_config_sha256": input_hashes["web_sources.yaml"],
-        "execute": "py.exe",
+        "execute": sys.executable,
         "arguments": arguments,
         "working_directory": str(runtime),
         "last_task_result": 0,
@@ -660,11 +661,11 @@ def test_scheduler_doctor_blocks_nonoperational_ready_auxiliary(
 @pytest.mark.parametrize(
     "arguments_mutator",
     [
-        lambda args: args.replace('"-3.13" "-u"', '"-u" "-3.13"', 1),
-        lambda args: args.replace('"-3.13" "-u"', '"-3.13"', 1),
-        lambda args: args.replace('"-3.13" "-u"', '"-3.13" "-u" "-u"', 1),
+        lambda args: args.replace('"-I" "-u"', '"-u" "-I"', 1),
+        lambda args: args.replace('"-I" "-u"', '"-I"', 1),
+        lambda args: args.replace('"-I" "-u"', '"-I" "-u" "-u"', 1),
         lambda args: args.replace(
-            '"-3.13" "-u"', '"-3.13" "-u" "python.exe"', 1
+            '"-I" "-u"', '"-I" "-u" "python.exe"', 1
         ),
     ],
     ids=["reordered", "missing", "duplicate", "interpreter-shadow"],
