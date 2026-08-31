@@ -7,7 +7,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from intraday_scanner.services.luna_core_universe_service import build_core_universe_contract
+from intraday_scanner.services.luna_core_universe_service import (
+    _canonical_member_hash,
+    build_core_universe_contract,
+)
 from intraday_scanner.v2.paper_ops import engine as paper_ops_engine
 from intraday_scanner.v2.paper_ops.models import PaperRunMode
 from intraday_scanner.v2.paper_ops.universe_handoff import (
@@ -142,6 +145,37 @@ def test_data_unavailable_mixed_core_rejects_stale_or_future_observation(
 
     with pytest.raises(UniverseHandoffError, match="not fresh"):
         _validate_core_contract(core, MARKET_DATE)
+
+
+def test_data_unavailable_partial_core_rejects_member_outside_market_date() -> None:
+    core = _core_contract()
+    future = "2099-01-01"
+    core.update(status="DATA_UNAVAILABLE", completeness_verdict="INCOMPLETE")
+    core["members"][0]["valid_from"] = future
+    core["index_verdicts"]["Nasdaq-100"]["status"] = "DATA_UNAVAILABLE"
+
+    all_records: list[dict[str, object]] = []
+    for artifact in core["source_artifacts"]:
+        index = artifact["source_binding"]["index"]
+        index_records = [
+            {
+                "symbol": "AAA",
+                "provider_symbol": "AAA",
+                "asset_class": "common_stock",
+                "index": index,
+                "valid_from": future,
+                "valid_to": None,
+            }
+        ]
+        member_hash = _canonical_member_hash(index_records)
+        artifact["canonical_member_set_hash_sha256"] = member_hash
+        artifact["source_binding"]["derived_member_set_hash_sha256"] = member_hash
+        all_records.extend(index_records)
+    core["canonical_member_set_hash_sha256"] = _canonical_member_hash(all_records)
+    _rehash_core(core)
+
+    with pytest.raises(UniverseHandoffError, match="member is not valid"):
+        _validate_core_contract(core, MARKET_DATE, allow_test_override=True)
 
 
 @pytest.mark.parametrize(

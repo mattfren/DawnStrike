@@ -746,18 +746,21 @@ def _validate_core_contract(
         if isinstance(row, dict)
         for index in (row.get("index_memberships") or [])
     ]
-    if str(core.get("status") or "").upper() == "READY":
-        for row in members:
-            if not isinstance(row, dict):
-                continue
-            valid_from = _date_text(row.get("valid_from"))
-            valid_to = _date_text(row.get("valid_to"))
-            if (
-                valid_from is None
-                or valid_from > market_date
-                or (valid_to is not None and market_date > valid_to)
-            ):
-                raise UniverseHandoffError("core universe member is not valid for market date")
+    # Every admitted member must be point-in-time valid, including members
+    # retained from a surviving READY lane when the top-level core contract is
+    # DATA_UNAVAILABLE/PARTIAL.  Limiting this check to a fully READY contract
+    # lets an unavailable sibling lane mask future or expired memberships.
+    for row in members:
+        if not isinstance(row, dict):
+            continue
+        valid_from = _date_text(row.get("valid_from"))
+        valid_to = _date_text(row.get("valid_to"))
+        if (
+            valid_from is None
+            or valid_from > market_date
+            or (valid_to is not None and market_date > valid_to)
+        ):
+            raise UniverseHandoffError("core universe member is not valid for market date")
     if _canonical_member_hash(canonical_records) != declared_member_hash:
         raise UniverseHandoffError("core universe canonical member hash mismatch")
     source_ids = core.get("source_ids")
