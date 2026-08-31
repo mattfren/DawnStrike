@@ -24,6 +24,7 @@ from scripts.runtime_activation_contract import (
     self_hash,
     validate_evidence,
     validate_evidence_pair,
+    validate_state_preparation_declaration,
 )
 
 CANDIDATE_SHA = "a" * 40
@@ -87,6 +88,49 @@ def _self_seal_unsafe(payload: dict[str, object]) -> dict[str, object]:
     value = dict(payload)
     value["evidence_sha256"] = self_hash(value, "evidence_sha256")
     return value
+
+
+def _state_preparation_declaration() -> dict[str, object]:
+    return {
+        "schema_version": "dawnstrike.state_preparation_contract.v1",
+        "sidecar_contract": "dawnstrike.account_capture_trial_sidecar.v1",
+        "sidecar_version": 1,
+        "legacy_schema_marker": 30,
+        "required_before_activation": True,
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+
+
+def test_state_preparation_declaration_requires_exact_schema_and_values() -> None:
+    declaration = _state_preparation_declaration()
+    assert validate_state_preparation_declaration(declaration) == declaration
+
+    with pytest.raises(ActivationContractError, match="fields do not match"):
+        validate_state_preparation_declaration({**declaration, "unexpected": True})
+    with pytest.raises(ActivationContractError, match="violates"):
+        validate_state_preparation_declaration({**declaration, "sidecar_version": True})
+    with pytest.raises(ActivationContractError, match="violates"):
+        validate_state_preparation_declaration({**declaration, "research_only": False})
+
+
+def test_state_preparation_declaration_loader_rejects_duplicate_json_keys(
+    tmp_path: Path,
+) -> None:
+    declaration = tmp_path / "state_preparation_contract.json"
+    declaration.write_text(
+        '{"schema_version":"dawnstrike.state_preparation_contract.v1",'
+        '"schema_version":"hostile",'
+        '"sidecar_contract":"dawnstrike.account_capture_trial_sidecar.v1",'
+        '"sidecar_version":1,"legacy_schema_marker":30,'
+        '"required_before_activation":true,"research_only":true,'
+        '"broker_execution_enabled":false}\n',
+        encoding="utf-8",
+    )
+    from scripts.runtime_activation_contract import _load_object
+
+    with pytest.raises(ActivationContractError, match="duplicate JSON field"):
+        _load_object(declaration)
 
 
 def _receipt_payload(

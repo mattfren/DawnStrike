@@ -337,7 +337,11 @@ function Get-DawnstrikeTaskDefinitionText {
 
 function Get-DawnstrikeStatePreparationDeclaration {
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][string]$CandidateRoot)
+    param(
+        [Parameter(Mandatory = $true)][string]$CandidateRoot,
+        [string]$PythonPath = "",
+        [ValidateRange(30, 1800)][int]$TimeoutSeconds = 300
+    )
 
     $path = Join-Path $CandidateRoot $script:DawnstrikeStatePreparationContractFile
     Assert-DawnstrikeNoReparseComponents $path "State-preparation declaration"
@@ -346,22 +350,24 @@ function Get-DawnstrikeStatePreparationDeclaration {
         # five-task activation contract remains explicitly backward compatible.
         return [pscustomobject]@{ required = $false; path = $path }
     }
+    if ([string]::IsNullOrWhiteSpace($PythonPath)) {
+        $PythonPath = @(Get-Command py.exe -CommandType Application -ErrorAction Stop)[0].Source
+    }
+    # Validate the raw bytes through the strict Python contract loader before
+    # PowerShell parses them. ConvertFrom-Json silently accepts duplicate
+    # properties (last value wins), which would let a hostile sidecar replace
+    # an otherwise valid declaration at this activation boundary.
+    $null = Invoke-DawnstrikeContractCli `
+        -PythonPath $PythonPath `
+        -CandidateRoot $CandidateRoot `
+        -Arguments @("validate-state-preparation-declaration", "--input", $path) `
+        -Label "State-preparation declaration validation" `
+        -TimeoutSeconds $TimeoutSeconds
     try {
         $declaration = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
     }
     catch {
         throw "State-preparation declaration is invalid JSON."
-    }
-    if (
-        [string]$declaration.schema_version -ne "dawnstrike.state_preparation_contract.v1" -or
-        [string]$declaration.sidecar_contract -ne "dawnstrike.account_capture_trial_sidecar.v1" -or
-        [int]$declaration.sidecar_version -ne 1 -or
-        [int]$declaration.legacy_schema_marker -ne 30 -or
-        $declaration.required_before_activation -ne $true -or
-        $declaration.research_only -ne $true -or
-        $declaration.broker_execution_enabled -ne $false
-    ) {
-        throw "State-preparation declaration violates the sidecar contract."
     }
     return [pscustomobject]@{
         required = $true
@@ -1616,7 +1622,10 @@ function Invoke-DawnstrikeRuntimeActivation {
         -Label "Candidate origin/main refresh" `
         -TimeoutSeconds $ProcessTimeoutSeconds
     $candidateContract = Get-DawnstrikeGitContract $gitPath $candidate $ProcessTimeoutSeconds $ExpectedSha
-    $stateDeclaration = Get-DawnstrikeStatePreparationDeclaration $candidate
+    $stateDeclaration = Get-DawnstrikeStatePreparationDeclaration `
+        -CandidateRoot $candidate `
+        -PythonPath $pythonPath `
+        -TimeoutSeconds $ProcessTimeoutSeconds
     . (Join-Path $PSScriptRoot "invoke_dawnstrike_stage.ps1")
     $remoteMain = (Get-DawnstrikeGitValue $gitPath $candidate @("rev-parse", "refs/remotes/origin/main") "origin/main verification" $ProcessTimeoutSeconds).ToLowerInvariant()
     if ($remoteMain -ne $ExpectedSha) {

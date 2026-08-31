@@ -181,6 +181,17 @@ _EXTENDED_RECEIPT_KEYS = frozenset(
 )
 _ACTIVATION_RECEIPT_KEYS_EXTENDED = _ACTIVATION_RECEIPT_KEYS | _EXTENDED_RECEIPT_KEYS
 _ROLLBACK_RECEIPT_KEYS_EXTENDED = _ROLLBACK_RECEIPT_KEYS | _EXTENDED_RECEIPT_KEYS
+_STATE_PREPARATION_DECLARATION_KEYS = frozenset(
+    {
+        "schema_version",
+        "sidecar_contract",
+        "sidecar_version",
+        "legacy_schema_marker",
+        "required_before_activation",
+        "research_only",
+        "broker_execution_enabled",
+    }
+)
 
 
 class ActivationContractError(ValueError):
@@ -649,6 +660,42 @@ def _require_exact_keys(payload: Mapping[str, Any], expected: frozenset[str], la
         raise ActivationContractError(f"{label} fields do not match the strict contract")
 
 
+def validate_state_preparation_declaration(
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate the candidate's exact additive sidecar declaration.
+
+    PowerShell's ``ConvertFrom-Json`` keeps the last duplicate property.  The
+    activation boundary therefore validates the raw JSON through this strict
+    Python loader before PowerShell consumes any fields.
+    """
+
+    _require_exact_keys(
+        payload,
+        _STATE_PREPARATION_DECLARATION_KEYS,
+        "state preparation declaration",
+    )
+    if (
+        payload.get("schema_version") != "dawnstrike.state_preparation_contract.v1"
+        or payload.get("sidecar_contract")
+        != "dawnstrike.account_capture_trial_sidecar.v1"
+        or type(payload.get("sidecar_version")) is not int
+        or payload.get("sidecar_version") != 1
+        or type(payload.get("legacy_schema_marker")) is not int
+        or payload.get("legacy_schema_marker") != 30
+        or type(payload.get("required_before_activation")) is not bool
+        or payload.get("required_before_activation") is not True
+        or type(payload.get("research_only")) is not bool
+        or payload.get("research_only") is not True
+        or type(payload.get("broker_execution_enabled")) is not bool
+        or payload.get("broker_execution_enabled") is not False
+    ):
+        raise ActivationContractError(
+            "state preparation declaration violates the sidecar contract"
+        )
+    return dict(payload)
+
+
 def _reject_sensitive_keys(value: object, path: str = "$") -> None:
     if isinstance(value, Mapping):
         for key, item in value.items():
@@ -743,6 +790,9 @@ def main(argv: list[str] | None = None) -> int:
     verify.add_argument("--receipt", required=True)
     verify.add_argument("--expected-status", choices=("PREPARED", "COMPLETE", "ROLLED_BACK"))
 
+    declaration = subparsers.add_parser("validate-state-preparation-declaration")
+    declaration.add_argument("--input", required=True)
+
     args = parser.parse_args(argv)
     try:
         if args.command == "validate-evidence":
@@ -759,6 +809,8 @@ def main(argv: list[str] | None = None) -> int:
             result = inspect_state(args.db_path)
         elif args.command == "seal-receipt":
             result = seal_receipt(_load_object(args.input), args.output)
+        elif args.command == "validate-state-preparation-declaration":
+            result = validate_state_preparation_declaration(_load_object(args.input))
         else:
             result = load_receipt(args.receipt)
             if args.expected_status and result.get("status") != args.expected_status:
