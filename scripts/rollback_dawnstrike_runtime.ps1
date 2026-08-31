@@ -515,10 +515,10 @@ function Invoke-DawnstrikeRuntimeRollback {
     $preserveLocks = $false
     try {
         $lockOrigin = Convert-DawnstrikeCanonicalOriginIdentity $origin
-        $lockPythonSha = Get-DawnstrikeRuntimeLockHash $pythonPath
+        $lockInterpreter = Get-DawnstrikeApprovedLockInterpreter
         $activationLock = Enter-DawnstrikeGovernedRuntimeLock -StateRoot $state -Operation runtime_rollback `
             -CandidateSha $candidateSha -CandidateTree ([string]$activation.candidate_tree) `
-            -OriginIdentity $lockOrigin -PythonPath $pythonPath -PythonSha256 $lockPythonSha
+            -OriginIdentity $lockOrigin -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
         Assert-DawnstrikeNoDailyLocks $state
         $dailyLock = Enter-DawnstrikeDailyRunLock -StateRoot $state -MarketDate $marketDate -Owner "runtime_rollback"
         if (-not $dailyLock.acquired) {

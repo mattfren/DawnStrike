@@ -1107,8 +1107,9 @@ def test_powershell_sidecar_activation_and_rollback_keep_auxiliary_disabled(
     rollback_q = quote(candidate / "scripts" / "rollback_dawnstrike_runtime.ps1")
     prep_q = quote(candidate / "scripts" / "prepare_dawnstrike_state.ps1")
     command = rf"""
-. '{activation_q}'
-$global:MockRuntime = '{runtime_q}'
+    . '{activation_q}'
+    function Convert-DawnstrikeCanonicalOriginIdentity {{ param([string]$Origin) 'github.com/mattfren/dawnstrike' }}
+    $global:MockRuntime = '{runtime_q}'
 $global:MockState = '{state_q}'
     $global:MockAuxState = '{initial_aux_state}'
 $global:MockTaskStates = @{{}}

@@ -926,6 +926,7 @@ def test_disposable_activation_and_rollback_preserve_exact_runtime_and_state(
     }
     command = rf"""
 . '{activation_script}'
+function Convert-DawnstrikeCanonicalOriginIdentity {{ param([string]$Origin) 'github.com/mattfren/dawnstrike' }}
 $global:MockRuntime = '{values["runtime"]}'
 $global:MockState = '{values["state"]}'
 $global:MockTaskStates = @{{}}

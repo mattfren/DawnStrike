@@ -859,10 +859,10 @@ if (Test-Path -LiteralPath $receiptFull -PathType Leaf) {
 }
 
 $lockOrigin = Convert-DawnstrikeCanonicalOriginIdentity $origin
-$lockPythonSha = Get-DawnstrikeRuntimeLockHash $python
+$lockInterpreter = Get-DawnstrikeApprovedLockInterpreter
 $rebindLock = Enter-DawnstrikeGovernedRuntimeLock -StateRoot $state -Operation capture_task_rebind `
     -CandidateSha $CandidateSha -CandidateTree ([string]$runtimeContract.tree) `
-    -OriginIdentity $lockOrigin -PythonPath $python -PythonSha256 $lockPythonSha
+    -OriginIdentity $lockOrigin -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
 try {
     $lockedAuxiliary = Get-DawnstrikeAuxiliaryCaptureTask $runtime $state
     if (
