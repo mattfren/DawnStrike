@@ -6539,7 +6539,7 @@ class SQLiteScanStore:
                 connection.row_factory = sqlite3.Row
                 rows = connection.execute(
                     "SELECT payload_json FROM intraday_capture_runs "
-                    f"{where} ORDER BY created_at ASC, capture_run_id ASC LIMIT ?",
+                    f"{where} ORDER BY created_at ASC, capture_run_id ASC LIMIT ?",  # nosec B608 -- fixed clause allowlist; values remain bound parameters
                     (*params, bounded_limit),
                 ).fetchall()
                 payloads = []
