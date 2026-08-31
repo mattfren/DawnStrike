@@ -142,6 +142,17 @@ def build_alpha_run_contract(
             "WATCHER_PROOF_CODE_SHA_INVALID: watcher proof requires a full lowercase "
             "40-hex code SHA."
         )
+    if require_watcher_proof and not persisted_slate:
+        # The cycle's persisted, content-addressed slate is the authoritative
+        # cohort at the watcher/publication boundary.  Rebuilding from the
+        # current signals here can silently replace a frozen selection on a
+        # retry (or count rows that were never in the published artifact).
+        # Standalone non-watcher callers retain the explicit nonauthoritative
+        # reconstruction path below for tests and research diagnostics.
+        raise ValueError(
+            "FROZEN_SLATE_REQUIRED: watcher proof requires a validated "
+            "persisted ranked research slate."
+        )
     if persisted_slate:
         slate = validate_ranked_research_slate(
             persisted_slate,

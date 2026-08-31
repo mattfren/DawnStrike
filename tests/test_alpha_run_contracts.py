@@ -1,6 +1,5 @@
 import pytest
 
-from intraday_scanner.alpha import run_contracts as run_contracts_module
 from intraday_scanner.alpha.run_contracts import build_alpha_run_contract
 from intraday_scanner.config import load_config
 from intraday_scanner.decisioning.condition_registry import registry_for_strategy
@@ -186,45 +185,22 @@ def test_watcher_proof_requires_full_lowercase_code_sha_for_new_slate(code_sha: 
         )
 
 
-def test_watcher_proof_production_validates_newly_built_slate(monkeypatch) -> None:
-    calls: list[dict[str, object]] = []
-    original_validator = run_contracts_module.validate_ranked_research_slate
-
-    def recording_validator(slate, **kwargs):
-        calls.append(dict(kwargs))
-        return original_validator(slate, **kwargs)
-
-    monkeypatch.setattr(
-        run_contracts_module,
-        "validate_ranked_research_slate",
-        recording_validator,
-    )
-    contract = build_alpha_run_contract(
-        scan_id="scan-new-watcher-proof",
-        generated_at="2026-08-28T12:01:00+00:00",
-        ranked_count=0,
-        signals=[],
-        review={"decision": {"no_trade": True, "reason": "none"}, "watchlist": []},
-        source_summary={
-            "status": "success",
-            "code_sha": "a" * 40,
-            "require_watcher_proof": True,
-        },
-        enrichment_summary={"status": "complete"},
-        notification_stats={},
-    )
-
-    assert contract.code_sha == "a" * 40
-    assert contract.slate_market_date == "2026-08-28"
-    assert contract.slate_id.startswith("luna-slate-")
-    assert calls == [
-        {
-            "market_date": "2026-08-28",
-            "production": True,
-            "contributor_receipt_verifier": None,
-            "expected_code_sha": "a" * 40,
-        }
-    ]
+def test_watcher_proof_requires_persisted_validated_slate() -> None:
+    with pytest.raises(ValueError, match="FROZEN_SLATE_REQUIRED"):
+        build_alpha_run_contract(
+            scan_id="scan-new-watcher-proof",
+            generated_at="2026-08-28T12:01:00+00:00",
+            ranked_count=0,
+            signals=[],
+            review={"decision": {"no_trade": True, "reason": "none"}, "watchlist": []},
+            source_summary={
+                "status": "success",
+                "code_sha": "a" * 40,
+                "require_watcher_proof": True,
+            },
+            enrichment_summary={"status": "complete"},
+            notification_stats={},
+        )
 
 
 def test_contract_labels_legacy_pre_watcher_alert_count_separately_from_tier_three():
