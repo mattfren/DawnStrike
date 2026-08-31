@@ -21,6 +21,12 @@ AUXILIARY_SIDECAR_CONTRACT = "dawnstrike.account_capture_trial_sidecar.v1"
 AUXILIARY_DECLARATION_FILE = Path("config") / "state_preparation_contract.json"
 AUXILIARY_CAPTURE_RUNNER = Path("scripts") / "run_daily_intraday_capture.py"
 AUXILIARY_PYTHON_PREFIX = ("-I", "-u")
+AUXILIARY_INTERPRETER = Path(
+    r"C:\Users\MattFields\AppData\Local\Programs\Python\Python313\python.exe"
+)
+AUXILIARY_INTERPRETER_SHA256 = (
+    "ef8f51028ac5329641985112f8efb1c2d4c47c86b8011ddf7e6fae21e2b4e5a1"
+)
 AUXILIARY_REQUIRED_OPTIONS = frozenset(
     {
         "--candidate-sha",
@@ -1267,8 +1273,8 @@ def _validate_auxiliary_action(
         interpreter = Path(execute)
         interpreter_matches = (
             interpreter.is_absolute()
-            and interpreter.name.casefold() == "python.exe"
-            and _safe_regular_path(interpreter)
+            and interpreter.resolve() == AUXILIARY_INTERPRETER.resolve()
+            and _safe_file_sha256(str(interpreter), AUXILIARY_INTERPRETER_SHA256)
         )
     except (OSError, RuntimeError):
         interpreter_matches = False
