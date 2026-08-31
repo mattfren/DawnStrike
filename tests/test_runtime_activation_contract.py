@@ -308,7 +308,7 @@ def test_activation_receipt_rejects_unsafe_or_mismatched_contract(
 
 def test_activation_receipt_rejects_extra_fields_and_tampering(tmp_path: Path) -> None:
     payload = _receipt_payload()
-    payload["operator_secret"] = "forbidden"
+    payload["operator_secret"] = "forbidden"  # pragma: allowlist secret
     with pytest.raises(ActivationContractError, match="sensitive field"):
         seal_receipt(payload, tmp_path / "extra.json")
 
