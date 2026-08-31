@@ -8,6 +8,52 @@ import pytest
 
 import intraday_scanner.services.scheduler_doctor_service as scheduler_service
 
+_REAL_RUNTIME_GIT_CONTRACT = scheduler_service._runtime_git_contract
+
+
+def _stable_runtime_contract() -> dict[str, str]:
+    return {
+        "candidate_sha": "a" * 40,
+        "candidate_tree": "b" * 40,
+        "runtime_origin_sha256": "e" * 64,
+        "origin_main_sha": "a" * 40,
+    }
+
+
+@pytest.fixture(autouse=True)
+def _stub_stable_runtime_contract(monkeypatch) -> None:
+    monkeypatch.setattr(
+        scheduler_service,
+        "_runtime_git_contract",
+        lambda _runtime: _stable_runtime_contract(),
+    )
+
+
+@pytest.mark.parametrize("failure", ["dirty-after", "identity-change"])
+def test_runtime_git_contract_requires_stable_clean_identity(
+    tmp_path: Path, monkeypatch, failure: str
+) -> None:
+    stable = _stable_runtime_contract()
+    changed = {**stable, "candidate_tree": "c" * 40}
+    snapshots = iter(
+        [stable, stable, stable]
+        if failure == "dirty-after"
+        else [stable, changed]
+    )
+    clean = iter([True, False]) if failure == "dirty-after" else iter([True])
+    monkeypatch.setattr(
+        scheduler_service,
+        "_runtime_git_snapshot",
+        lambda _runtime: next(snapshots),
+    )
+    monkeypatch.setattr(
+        scheduler_service,
+        "_runtime_git_clean",
+        lambda _runtime: next(clean),
+    )
+
+    assert _REAL_RUNTIME_GIT_CONTRACT(tmp_path) is None
+
 
 def test_scheduler_query_uses_bounded_provider_side_dawnstrike_filter(
     monkeypatch,
@@ -485,6 +531,7 @@ def _prepare_auxiliary_loader_inputs(
     return capture, {
         "schema_version": "dawnstrike.runtime_activation_receipt.v1",
         "status": "COMPLETE",
+        "activation_id": activation_id,
         "candidate_sha": "a" * 40,
         "candidate_tree": "b" * 40,
         "runtime_origin_sha256": "e" * 64,
@@ -496,6 +543,49 @@ def _prepare_auxiliary_loader_inputs(
         "auxiliary_capture_definition_contract_sha256": "1" * 64,
         "auxiliary_capture_xml_sha256": "2" * 64,
     }
+
+
+def _activation_history_payload(activation_id: str) -> dict[str, object]:
+    return {
+        "status": "COMPLETE",
+        "activation_id": activation_id,
+        "candidate_sha": "a" * 40,
+        "candidate_tree": "b" * 40,
+        "runtime_origin_sha256": "e" * 64,
+        "completed_at_utc": "2026-08-31T03:00:00+00:00",
+    }
+
+
+def test_scheduler_doctor_rejects_runtime_identity_change_during_query(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    _write_required_scripts(runtime)
+    rows = _healthy_tasks(runtime, state)
+    stable = _stable_runtime_contract()
+    changed = {**stable, "candidate_tree": "c" * 40}
+    contracts = iter([stable, changed])
+    monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
+    monkeypatch.setattr(
+        scheduler_service,
+        "_load_exact_activation_completion",
+        lambda _runtime, _state: None,
+    )
+    monkeypatch.setattr(
+        scheduler_service,
+        "_runtime_git_contract",
+        lambda _runtime: next(contracts),
+    )
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    assert result["status"] == "BLOCKED_EXTERNAL"
+    assert result["runtime_identity_status"] == "FAILED"
+    assert result["runtime_identity_stable"] is False
+    assert result["runtime_identity_failed"] is True
 
 
 def test_scheduler_doctor_accepts_valid_ready_governed_auxiliary(
@@ -744,6 +834,36 @@ def test_auxiliary_loader_rejects_unbound_activation_receipt(
     assert result["reason"] == "capture sidecar receipt is invalid"
 
 
+def test_auxiliary_loader_rechecks_clean_runtime_after_receipt_validation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    capture, activation = _prepare_auxiliary_loader_inputs(runtime, state)
+    import scripts.capture_task_contract as capture_contract
+    import scripts.runtime_activation_contract as activation_contract
+
+    contracts = iter([_stable_runtime_contract(), None])
+    monkeypatch.setattr(
+        scheduler_service,
+        "_runtime_git_contract",
+        lambda _root: next(contracts),
+    )
+    monkeypatch.setattr(capture_contract, "load_receipt", lambda *_args, **_kwargs: capture)
+    monkeypatch.setattr(
+        activation_contract,
+        "load_receipt",
+        lambda *_args, **_kwargs: activation,
+    )
+
+    result = scheduler_service._load_auxiliary_contract(runtime, state)
+
+    assert result["valid"] is False
+    assert result["reason"] == "capture sidecar receipt is invalid"
+
+
 def test_scheduler_doctor_rejects_undeclared_enabled_auxiliary(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -916,6 +1036,76 @@ def test_scheduler_doctor_accepts_disabled_governed_auxiliary(
     assert result["governed_auxiliary_task"]["definition_status"] == "DISABLED"
 
 
+def test_scheduler_doctor_rejects_missing_receipt_governed_auxiliary(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    _write_required_scripts(runtime)
+    rows = _healthy_tasks(runtime, state)
+    monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
+    monkeypatch.setattr(
+        scheduler_service,
+        "_load_auxiliary_contract",
+        lambda _runtime, _state: {
+            **_auxiliary_contract(_auxiliary_task(runtime, state)),
+            "declared": True,
+            "valid": True,
+        },
+    )
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    assert result["status"] == "BLOCKED_EXTERNAL"
+    checked = result["governed_auxiliary_task"]
+    assert checked["status"] == "FAILED"
+    assert checked["definition_status"] == "MISSING"
+    assert checked["failure_reason"] == "governed auxiliary task is missing"
+
+
+@pytest.mark.parametrize(
+    ("field", "match_field"),
+    [
+        ("principal_sha256", "principal_contract_matches"),
+        ("trigger_sha256", "trigger_contract_matches"),
+        ("settings_sha256", "settings_contract_matches"),
+        ("definition_contract_sha256", "definition_contract_matches"),
+    ],
+)
+def test_scheduler_doctor_rejects_disabled_governed_auxiliary_definition_drift(
+    tmp_path: Path, monkeypatch, field: str, match_field: str
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    _write_required_scripts(runtime)
+    rows = _healthy_tasks(runtime, state)
+    auxiliary = _auxiliary_task(runtime, state)
+    contract = _auxiliary_contract(auxiliary)
+    auxiliary.update(state="Disabled", enabled=False)
+    auxiliary[field] = "0" * 64
+    rows.append(auxiliary)
+    monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
+    monkeypatch.setattr(
+        scheduler_service,
+        "_load_auxiliary_contract",
+        lambda _runtime, _state: contract,
+    )
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    assert result["status"] == "BLOCKED_EXTERNAL"
+    checked = result["governed_auxiliary_task"]
+    assert checked["status"] == "FAILED"
+    assert checked["governed"] is False
+    assert checked["definition_status"] == "INVALID"
+    assert checked["operational_status"] == "DISABLED"
+    assert checked[match_field] is False
+
+
 def test_scheduler_doctor_blocks_when_any_v5_task_is_missing(
     tmp_path: Path,
     monkeypatch,
@@ -1029,6 +1219,109 @@ def test_scheduler_doctor_blocks_failed_or_stale_task_history(
     assert all(
         row["last_run_status"] == "STALE_OR_FAILED"
         for row in result["scheduled_tasks"]
+    )
+
+
+def test_activation_history_accepts_one_exact_clean_runtime_receipt(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    activation_id = "1" * 24
+    receipt_root = state / "receipts" / "runtime-activation"
+    receipt_root.mkdir(parents=True)
+    (receipt_root / f"runtime-activation-{activation_id}.json").write_text(
+        "{}", encoding="utf-8"
+    )
+    import scripts.runtime_activation_contract as activation_contract
+
+    monkeypatch.setattr(
+        activation_contract,
+        "load_receipt",
+        lambda _path: _activation_history_payload(activation_id),
+    )
+
+    completed = scheduler_service._load_exact_activation_completion(runtime, state)
+
+    assert completed == datetime.fromisoformat("2026-08-31T03:00:00+00:00")
+
+
+def test_activation_history_requires_stable_clean_exact_origin_runtime(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    activation_id = "1" * 24
+    receipt_root = state / "receipts" / "runtime-activation"
+    receipt_root.mkdir(parents=True)
+    (receipt_root / f"runtime-activation-{activation_id}.json").write_text(
+        "{}", encoding="utf-8"
+    )
+    import scripts.runtime_activation_contract as activation_contract
+
+    monkeypatch.setattr(
+        activation_contract,
+        "load_receipt",
+        lambda _path: _activation_history_payload(activation_id),
+    )
+    contracts = iter([_stable_runtime_contract(), None])
+    monkeypatch.setattr(
+        scheduler_service,
+        "_runtime_git_contract",
+        lambda _runtime: next(contracts),
+    )
+
+    assert scheduler_service._load_exact_activation_completion(runtime, state) is None
+
+
+@pytest.mark.parametrize("failure", ["origin", "tampered", "ambiguous"])
+def test_activation_history_rejects_unbound_or_ambiguous_receipts(
+    tmp_path: Path, monkeypatch, failure: str
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    receipt_root = state / "receipts" / "runtime-activation"
+    receipt_root.mkdir(parents=True)
+    first_id = "1" * 24
+    second_id = "2" * 24
+    first_path = receipt_root / f"runtime-activation-{first_id}.json"
+    first_path.write_text("{}", encoding="utf-8")
+    if failure in {"tampered", "ambiguous"}:
+        (receipt_root / f"runtime-activation-{second_id}.json").write_text(
+            "{}", encoding="utf-8"
+        )
+    import scripts.runtime_activation_contract as activation_contract
+
+    def load_receipt(path: Path) -> dict[str, object]:
+        if failure == "tampered" and path.name.endswith(f"{second_id}.json"):
+            raise ValueError("tampered")
+        activation_id = second_id if path.name.endswith(f"{second_id}.json") else first_id
+        payload = _activation_history_payload(activation_id)
+        if failure == "origin":
+            payload["runtime_origin_sha256"] = "f" * 64
+        return payload
+
+    monkeypatch.setattr(activation_contract, "load_receipt", load_receipt)
+
+    assert scheduler_service._load_exact_activation_completion(runtime, state) is None
+
+
+@pytest.mark.parametrize(
+    "completed_at",
+    ["2026-08-31T07:59:59-05:00", "2026-08-31T08:00:00-05:00"],
+)
+def test_activation_history_does_not_supersede_newer_or_equal_failure(
+    completed_at: str,
+) -> None:
+    assert (
+        scheduler_service._history_superseded_by_exact_runtime_activation(
+            last_run_time="2026-08-31T08:00:00-05:00",
+            activation_completed_at=datetime.fromisoformat(completed_at),
+        )
+        is False
     )
 
 

@@ -143,6 +143,7 @@ def scheduler_doctor(
 
     runtime = Path(root).resolve()
     state = Path(state_root).resolve()
+    runtime_identity_before = _runtime_git_contract(runtime)
     required = {
         "morning_runner": runtime / "scripts" / "run_alphaops_morning.ps1",
         "monitor_runner": runtime / "scripts" / "run_alphaops_monitor.ps1",
@@ -239,7 +240,18 @@ def scheduler_doctor(
         for check in checks
         if str(check.get("status") or "") not in {"LOCAL_VERIFIED"}
     ]
-    if not all(present.values()) or source_config.get("ready") is not True:
+    runtime_identity_after = _runtime_git_contract(runtime)
+    runtime_identity_stable = (
+        runtime_identity_before is not None
+        and runtime_identity_after == runtime_identity_before
+    )
+    if not runtime_identity_stable:
+        status = "BLOCKED_EXTERNAL"
+        next_action = (
+            "Restore a clean runtime whose stable HEAD and tree equal origin/main, "
+            "then rerun scheduler-doctor."
+        )
+    elif not all(present.values()) or source_config.get("ready") is not True:
         status = "FAILED"
         next_action = (
             "Restore the missing V6 scheduler artifacts and a semantically valid "
@@ -276,6 +288,27 @@ def scheduler_doctor(
         "status": status,
         "runtime_root": str(runtime),
         "state_root": str(state),
+        "runtime_identity_status": (
+            "LOCAL_VERIFIED" if runtime_identity_stable else "FAILED"
+        ),
+        "runtime_identity_stable": runtime_identity_stable,
+        "runtime_identity_clean": True if runtime_identity_stable else None,
+        "runtime_identity_failed": not runtime_identity_stable,
+        "runtime_sha": (
+            runtime_identity_before.get("candidate_sha")
+            if runtime_identity_stable and runtime_identity_before is not None
+            else None
+        ),
+        "runtime_tree": (
+            runtime_identity_before.get("candidate_tree")
+            if runtime_identity_stable and runtime_identity_before is not None
+            else None
+        ),
+        "runtime_origin_sha256": (
+            runtime_identity_before.get("runtime_origin_sha256")
+            if runtime_identity_stable and runtime_identity_before is not None
+            else None
+        ),
         "required_files": present,
         "durable_source_config": source_config,
         "expected_task_names": expected_task_names,
@@ -344,7 +377,6 @@ def _task_check(
     trigger_start = _parse_aware_datetime(trigger_start_boundary)
     history_superseded = _history_superseded_by_exact_runtime_activation(
         last_run_time=str(task.get("last_run_time") or ""),
-        trigger_start=trigger_start,
         activation_completed_at=activation_completed_at,
     )
     last_run_result_acceptable = (
@@ -531,7 +563,26 @@ def _auxiliary_task_check(
     observation_date: date | None = None,
 ) -> dict[str, Any] | None:
     if not rows:
-        return None
+        contract = _load_auxiliary_contract(runtime, state)
+        if not contract["declared"]:
+            return None
+        return {
+            "name": AUXILIARY_TASK_NAME,
+            "task_path": "\\",
+            "state": "missing",
+            "enabled": None,
+            "status": "FAILED",
+            "governed": False,
+            "definition_status": "MISSING",
+            "operational_ready": False,
+            "operational_status": "DISABLED",
+            "failure_reason": (
+                "governed auxiliary task is missing"
+                if contract["valid"]
+                else contract["reason"]
+            ),
+            "last_task_result": None,
+        }
     if len(rows) != 1:
         return {
             "name": AUXILIARY_TASK_NAME,
@@ -584,17 +635,23 @@ def _auxiliary_task_check(
         row, enabled, contract, observation_date=observation_date
     )
     health_valid = health["valid"]
-    operational_ready = enabled and action["valid"] and health_valid
+    definition_integrity_valid = (
+        action["valid"] and health["definition_integrity_valid"]
+    )
+    verified = action["valid"] and health_valid
+    operational_ready = enabled and verified
     failure_reason = action["reason"] or health["reason"]
     return {
         **row,
-        "status": (
-            "LOCAL_VERIFIED"
-            if action["valid"] and (not enabled or health_valid)
-            else "FAILED"
+        "status": "LOCAL_VERIFIED" if verified else "FAILED",
+        "governed": definition_integrity_valid,
+        "definition_status": (
+            "READY"
+            if enabled and definition_integrity_valid
+            else "DISABLED"
+            if not enabled and definition_integrity_valid
+            else "INVALID"
         ),
-        "governed": action["valid"],
-        "definition_status": "READY" if enabled and action["valid"] else "DISABLED",
         "operational_ready": operational_ready,
         "operational_status": (
             "READY"
@@ -654,18 +711,12 @@ def _load_auxiliary_contract(runtime: Path, state: Path) -> dict[str, Any]:
     }
     if declaration != expected:
         return {"declared": True, "valid": False, "reason": "sidecar declaration is invalid"}
-    runtime_sha = _runtime_git_sha(runtime)
-    runtime_tree = _runtime_git_tree(runtime)
-    runtime_origin_sha = _runtime_git_origin_sha(runtime)
-    runtime_origin_main = _runtime_git_origin_main(runtime)
-    if (
-        runtime_sha is None
-        or runtime_tree is None
-        or runtime_origin_sha is None
-        or runtime_origin_main != runtime_sha
-        or not _runtime_git_clean(runtime)
-    ):
+    runtime_contract = _runtime_git_contract(runtime)
+    if runtime_contract is None:
         return {"declared": True, "valid": False, "reason": "runtime SHA is unavailable"}
+    runtime_sha = runtime_contract["candidate_sha"]
+    runtime_tree = runtime_contract["candidate_tree"]
+    runtime_origin_sha = runtime_contract["runtime_origin_sha256"]
     receipt_root = state / "receipts" / "capture-task"
     receipt_paths = sorted(receipt_root.glob(f"capture-task-rebind-{runtime_sha}.json"))
     if len(receipt_paths) != 1:
@@ -727,12 +778,7 @@ def _load_auxiliary_contract(runtime: Path, state: Path) -> dict[str, Any]:
             != receipt.get("xml_before_sha256")
         ):
             raise ValueError("activation receipt is not bound to the runtime")
-        if (
-            _runtime_git_sha(runtime) != runtime_sha
-            or _runtime_git_tree(runtime) != runtime_tree
-            or _runtime_git_origin_sha(runtime) != runtime_origin_sha
-            or _runtime_git_origin_main(runtime) != runtime_origin_main
-        ):
+        if _runtime_git_contract(runtime) != runtime_contract:
             raise ValueError("runtime identity changed during contract validation")
     except (ImportError, KeyError, OSError, TypeError, ValueError):
         return {
@@ -745,7 +791,7 @@ def _load_auxiliary_contract(runtime: Path, state: Path) -> dict[str, Any]:
         "valid": True,
         "candidate_sha": runtime_sha,
         "candidate_tree": runtime_tree,
-            "runtime_origin_sha256": runtime_origin_sha,
+        "runtime_origin_sha256": runtime_origin_sha,
         "activation_id": str(receipt["activation_id"]),
         "action_contract_sha256": str(receipt["action_after_sha256"]),
         "definition_contract_sha256": str(receipt["definition_after_sha256"]),
@@ -769,7 +815,7 @@ def _runtime_git_tree(runtime: Path) -> str | None:
 def _runtime_git_origin_sha(runtime: Path) -> str | None:
     try:
         completed = subprocess.run(  # nosec B603, B607
-            ["git", "-C", str(runtime), "config", "--get", "remote.origin.url"],
+            ["git", "-C", str(runtime), "remote", "get-url", "origin"],
             capture_output=True,
             check=True,
             text=True,
@@ -787,6 +833,39 @@ def _runtime_git_origin_main(runtime: Path) -> str | None:
     return _runtime_git_value(runtime, "refs/remotes/origin/main")
 
 
+def _runtime_git_snapshot(runtime: Path) -> dict[str, str] | None:
+    candidate_sha = _runtime_git_sha(runtime)
+    candidate_tree = _runtime_git_tree(runtime)
+    runtime_origin_sha256 = _runtime_git_origin_sha(runtime)
+    origin_main_sha = _runtime_git_origin_main(runtime)
+    if (
+        candidate_sha is None
+        or candidate_tree is None
+        or runtime_origin_sha256 is None
+        or origin_main_sha != candidate_sha
+    ):
+        return None
+    return {
+        "candidate_sha": candidate_sha,
+        "candidate_tree": candidate_tree,
+        "runtime_origin_sha256": runtime_origin_sha256,
+        "origin_main_sha": origin_main_sha,
+    }
+
+
+def _runtime_git_contract(runtime: Path) -> dict[str, str] | None:
+    """Return only a stable, clean exact-origin runtime identity."""
+
+    before = _runtime_git_snapshot(runtime)
+    if before is None or not _runtime_git_clean(runtime):
+        return None
+    after = _runtime_git_snapshot(runtime)
+    if after != before or not _runtime_git_clean(runtime):
+        return None
+    final = _runtime_git_snapshot(runtime)
+    return before if final == before else None
+
+
 def _runtime_git_clean(runtime: Path) -> bool:
     """Match the release checkout cleanliness contract without exposing paths."""
 
@@ -799,6 +878,7 @@ def _runtime_git_clean(runtime: Path) -> bool:
                 "status",
                 "--porcelain=v1",
                 "--untracked-files=all",
+                "--ignore-submodules=none",
             ],
             capture_output=True,
             check=True,
@@ -992,7 +1072,9 @@ def _validate_auxiliary_health(
         if name.endswith("_contract_matches")
     }
     structural_valid = all(structural_checks.values())
-    checks["operational_health_valid"] = enabled and all(checks.values())
+    operational_health_valid = enabled and all(checks.values())
+    checks["definition_integrity_valid"] = structural_valid
+    checks["operational_health_valid"] = operational_health_valid
     if not enabled:
         return {
             "valid": structural_valid,
@@ -1466,7 +1548,6 @@ def _missing_task(name: str) -> dict[str, Any]:
 def _history_superseded_by_exact_runtime_activation(
     *,
     last_run_time: str,
-    trigger_start: datetime | None,
     activation_completed_at: datetime | None,
 ) -> bool:
     """Return true only for failure history superseded by exact activation."""
@@ -1487,11 +1568,12 @@ def _load_exact_activation_completion(
     until the runtime activation itself provides a fresh, exact proof.
     """
 
-    runtime_sha = _runtime_git_sha(runtime)
-    runtime_tree = _runtime_git_tree(runtime)
-    runtime_origin_sha = _runtime_git_origin_sha(runtime)
-    if runtime_sha is None or runtime_tree is None:
+    runtime_contract = _runtime_git_contract(runtime)
+    if runtime_contract is None:
         return None
+    runtime_sha = runtime_contract["candidate_sha"]
+    runtime_tree = runtime_contract["candidate_tree"]
+    runtime_origin_sha = runtime_contract["runtime_origin_sha256"]
     try:
         from scripts.runtime_activation_contract import (
             _assert_no_reparse_components,
@@ -1509,22 +1591,25 @@ def _load_exact_activation_completion(
         try:
             _assert_no_reparse_components(path)
             payload = load_receipt(path)
+            activation_id = str(payload.get("activation_id") or "")
+            if path.name != f"runtime-activation-{activation_id}.json":
+                return None
             if (
                 payload.get("status") != "COMPLETE"
                 or payload.get("candidate_sha") != runtime_sha
                 or payload.get("candidate_tree") != runtime_tree
             ):
                 continue
-            if (
-                runtime_origin_sha is not None
-                and payload.get("runtime_origin_sha256") != runtime_origin_sha
-            ):
+            if payload.get("runtime_origin_sha256") != runtime_origin_sha:
                 continue
             completed = _parse_aware_datetime(str(payload.get("completed_at_utc") or ""))
-            if completed is not None:
-                matches.append(completed)
+            if completed is None:
+                return None
+            matches.append(completed)
         except (OSError, TypeError, ValueError):
-            continue
+            return None
+    if _runtime_git_contract(runtime) != runtime_contract:
+        return None
     return matches[0] if len(matches) == 1 else None
 
 
