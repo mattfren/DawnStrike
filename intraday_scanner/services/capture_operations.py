@@ -13,7 +13,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -81,6 +81,17 @@ class CapturePlan:
             "env_file": _resolve_regular_file(self.env_file, "env_file"),
         }
         source_config = _resolve_regular_file(self.source_config, "source_config")
+
+        for label, raw_path in {
+            "db_path": self.db_path,
+            "evidence_root": self.evidence_root,
+            "run_root": self.run_root,
+            "output_root": self.output_root,
+        }.items():
+            if _under_windows_path(raw_path, r"C:\r\dawnstrike-runtime"):
+                raise CapturePlanError(f"{label} must not be under the active runtime")
+            if _under_windows_path(raw_path, r"C:\r\dawnstrike-state"):
+                raise CapturePlanError(f"{label} must not be under the active state")
 
         db = self.db_path.resolve(strict=False)
         evidence = self.evidence_root.resolve(strict=False)
@@ -330,6 +341,16 @@ def _utc(value: datetime) -> datetime:
 def _under(path: Path, parent: Path) -> bool:
     try:
         path.relative_to(parent.resolve(strict=False))
+        return True
+    except ValueError:
+        return False
+
+
+def _under_windows_path(path: Path, parent: str) -> bool:
+    """Compare fixed Windows safety roots independently of the CI host OS."""
+
+    try:
+        PureWindowsPath(str(path)).relative_to(PureWindowsPath(parent))
         return True
     except ValueError:
         return False
