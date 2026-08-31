@@ -312,6 +312,10 @@ try {
         -ExpectedSourceSha $expectedSourceSha `
         -ExpectedSourceTree $expectedSourceTree `
         -AllowedStageRoot $stage
+    Assert-VercelStagedSourceManifest `
+        -StageRoot $stage `
+        -ExpectedSourceSha $expectedSourceSha `
+        -ExpectedSourceTree $expectedSourceTree
     $deploymentResponse = Invoke-VercelJson `
         -Arguments @("deploy", "--prebuilt", "--project", $ProjectId, "--yes", "--json") `
         -Label "Vercel prebuilt deploy"
@@ -372,6 +376,10 @@ try {
             -ExpectedSourceSha $expectedSourceSha `
             -ExpectedSourceTree $expectedSourceTree `
             -AllowedStageRoot $stage
+        Assert-VercelStagedSourceManifest `
+            -StageRoot $stage `
+            -ExpectedSourceSha $expectedSourceSha `
+            -ExpectedSourceTree $expectedSourceTree
         # Mark the external state as potentially mutated before starting the
         # command. A timeout can occur after Vercel accepted the promotion, so
         # every promotion failure must enter the existing rollback boundary.

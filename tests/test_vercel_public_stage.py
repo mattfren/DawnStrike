@@ -56,6 +56,7 @@ def test_stage_builder_declares_dependency_free_python_stage() -> None:
     assert "calendar_b64" not in script
     assert "static_file_hashes_verified" in script
     assert "api\\public_state.py" in script
+    assert "Copy-Item -LiteralPath (Join-Path $resolvedRoot \"api\\public_state.py\")" not in script
     assert "System.Text.Json" not in script
     assert "StageRoot must resolve inside the project build directory" in script
     assert "StageRoot must not overlap the source public artifact" in script
@@ -143,3 +144,4 @@ def test_daily_vercel_publisher_builds_once_verifies_and_can_roll_back() -> None
     assert "Publication source HEAD changed during staging or deployment" in Path(
         "scripts/vercel_source_contract.ps1"
     ).read_text(encoding="utf-8")
+    assert script.count("Assert-VercelStagedSourceManifest") >= 2
