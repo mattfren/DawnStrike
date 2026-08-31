@@ -94,29 +94,35 @@ $EntitlementReceipt = Assert-DawnstrikeCaptureInputBindingFile `
     -Path $EntitlementReceipt -ExpectedSha256 $EntitlementReceiptSha256 -Label "Entitlement receipt"
 $SourceConfig = Assert-DawnstrikeCaptureInputBindingFile `
     -Path $SourceConfig -ExpectedSha256 $SourceConfigSha256 -Label "Source config"
-if ([string]::IsNullOrWhiteSpace($Python)) {
-    $Python = "C:\Users\MattFields\AppData\Local\Programs\Python\Python313\python.exe"
-    $PythonSha256 = "ef8f51028ac5329641985112f8efb1c2d4c47c86b8011ddf7e6fae21e2b4e5a1"
-}
+$approvedPython = "C:\Users\MattFields\AppData\Local\Programs\Python\Python313\python.exe"
+$approvedPythonSha256 = "ef8f51028ac5329641985112f8efb1c2d4c47c86b8011ddf7e6fae21e2b4e5a1"
+if ([string]::IsNullOrWhiteSpace($Python)) { $Python = $approvedPython }
 $Python = [System.IO.Path]::GetFullPath($Python)
+if (-not [string]::Equals($Python, $approvedPython, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Capture interpreter path is not the exact approved identity."
+}
+if ($PythonSha256 -and $PythonSha256.ToLowerInvariant() -ne $approvedPythonSha256) {
+    throw "Supplied capture interpreter SHA-256 is not the approved identity."
+}
 $pythonItem = Get-Item -LiteralPath $Python -Force -ErrorAction Stop
 if ($pythonItem.PSIsContainer -or ($pythonItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
     throw "Capture interpreter must be a regular non-reparse file."
 }
-$pythonVersion = @(& $Python -I -c "import sys; print('.'.join(map(str, sys.version_info[:3])))" 2>$null)
-if ($LASTEXITCODE -ne 0 -or $pythonVersion.Count -ne 1 -or [string]$pythonVersion[0] -notmatch '^3\.13\.') {
-    throw "Capture interpreter must be exact Python 3.13."
-}
-$pythonSha256 = (Get-FileHash -LiteralPath $Python -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
-if ([string]::IsNullOrWhiteSpace($PythonSha256) -or $pythonSha256 -ne $PythonSha256.ToLowerInvariant()) {
+$pythonFileSha256 = (Get-FileHash -LiteralPath $Python -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+if ($pythonFileSha256 -ne $approvedPythonSha256) {
     throw "Capture interpreter hash is not the exact approved identity."
 }
 $pythonSignature = Get-AuthenticodeSignature -LiteralPath $Python -ErrorAction Stop
 if (
     [string]$pythonSignature.Status -ne "Valid" -or
     $null -eq $pythonSignature.SignerCertificate -or
-    [string]$pythonSignature.SignerCertificate.Subject -ne "CN=Python Software Foundation, O=Python Software Foundation, L=Beaverton, S=Oregon, C=US"
+    [string]$pythonSignature.SignerCertificate.Subject -ne "CN=Python Software Foundation, O=Python Software Foundation, L=Beaverton, S=Oregon, C=US" -or
+    [string]$pythonSignature.SignerCertificate.Thumbprint -ne "9BA3C2E210C7E8296C5056515BFC0B0BBA78AC48"
 ) { throw "Capture interpreter Authenticode identity is not approved." }
+$pythonVersion = @(& $Python -I -c "import sys; print('.'.join(map(str, sys.version_info[:3])))" 2>$null)
+if ($LASTEXITCODE -ne 0 -or $pythonVersion.Count -ne 1 -or [string]$pythonVersion[0] -notmatch '^3\.13\.') {
+    throw "Capture interpreter must be exact Python 3.13."
+}
 $pythonPrefix = @("-I", "-u")
 if ([string]::IsNullOrWhiteSpace($EnvFile)) {
     $EnvFile = Join-Path $StateRoot "secrets\runtime.env"
@@ -147,7 +153,7 @@ $preview = [ordered]@{
     action = @{
         execute = $Python
         execute_version = [string]$pythonVersion[0]
-        execute_sha256 = $pythonSha256
+        execute_sha256 = $pythonFileSha256
         execute_signer_thumbprint = [string]$pythonSignature.SignerCertificate.Thumbprint
         arguments = $actionArguments
         working_directory = $RuntimeRoot

@@ -54,17 +54,21 @@ def _fixture(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     xml = tmp_path / "task.xml"
     xml.write_text(
         f'''<?xml version="1.0" encoding="UTF-16"?>
-<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task" version="1.3">
+  <RegistrationInfo>
+    <Description>Dawnstrike delayed SIP research capture; no broker execution.</Description>
+    <URI>\\Dawnstrike Delayed SIP Capture</URI>
+  </RegistrationInfo>
   <Principals><Principal id="Author">
     <UserId>S-1-5-18</UserId><LogonType>Password</LogonType>
     <RunLevel>LeastPrivilege</RunLevel>
   </Principal></Principals>
+  <Settings><Enabled>false</Enabled></Settings>
   <Triggers><CalendarTrigger><StartBoundary>2026-08-31T15:20:00-05:00</StartBoundary>
     <ScheduleByWeek><WeeksInterval>1</WeeksInterval><DaysOfWeek>
       <Monday/><Tuesday/><Wednesday/><Thursday/><Friday/>
     </DaysOfWeek></ScheduleByWeek>
   </CalendarTrigger></Triggers>
-  <Settings><Enabled>false</Enabled></Settings>
   <Actions Context="Author"><Exec><Command>py.exe</Command>
     <Arguments>{arguments}</Arguments><WorkingDirectory>{runtime}</WorkingDirectory>
   </Exec></Actions>

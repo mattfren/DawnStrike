@@ -104,6 +104,7 @@ function Assert-DawnstrikeCaptureTaskSafety {
         [string]$ExpectedConfigRoot = "C:\r\dawnstrike-capture-config-20260830",
         [string]$ExpectedInterpreterPath = "",
         [string]$ExpectedInterpreterSha256 = "",
+        [string]$ExpectedInterpreterSignerThumbprint = "9BA3C2E210C7E8296C5056515BFC0B0BBA78AC48",
         [switch]$AllowLegacyLauncher,
         [switch]$RequirePasswordPrincipal,
         [switch]$RequireRunner
@@ -117,6 +118,18 @@ function Assert-DawnstrikeCaptureTaskSafety {
     catch { throw "Capture task safety validation requires valid XML." }
     if ($document.DocumentElement.LocalName -ne "Task" -or $document.DocumentElement.NamespaceURI -ne "http://schemas.microsoft.com/windows/2004/02/mit/task") {
         throw "Capture task root or namespace is invalid."
+    }
+    if ([string]$document.DocumentElement.GetAttribute("version") -ne "1.3") { throw "Capture task version must be 1.3." }
+    if (@($document.SelectNodes("//comment()|//processing-instruction()")).Count -ne 0) { throw "Capture task cannot contain comments or processing instructions." }
+    $allNodes = @($document.SelectNodes("//*") | ForEach-Object { $_.ChildNodes } | ForEach-Object { $_ })
+    if (@($allNodes | Where-Object { $_.NodeType -eq [System.Xml.XmlNodeType]::CDATA }).Count -ne 0) { throw "Capture task cannot contain CDATA." }
+    $top = @($document.DocumentElement.ChildNodes | Where-Object { $_.NodeType -eq 'Element' } | ForEach-Object { $_.LocalName })
+    if (($top -join ',') -ne 'RegistrationInfo,Principals,Settings,Triggers,Actions') { throw "Capture task top-level contract is invalid." }
+    $registration = @($document.SelectNodes("//*[local-name()='RegistrationInfo']"))
+    if ($registration.Count -ne 1) { throw "Capture task RegistrationInfo is invalid." }
+    $registrationChildren = @($registration[0].ChildNodes | Where-Object { $_.NodeType -eq 'Element' })
+    if (($registrationChildren.LocalName -join ',') -ne 'Description,URI' -or [string]$registrationChildren[0].InnerText -ne 'Dawnstrike delayed SIP research capture; no broker execution.' -or [string]$registrationChildren[1].InnerText -ne '\Dawnstrike Delayed SIP Capture') {
+        throw "Capture task registration identity is invalid."
     }
     $principals = @($document.SelectNodes("//*[local-name()='Principals']"))
     if ($principals.Count -ne 1) { throw "Capture task must contain exactly one Principals section." }
@@ -220,6 +233,12 @@ function Assert-DawnstrikeCaptureTaskSafety {
         }
         $interpreterSha = Get-DawnstrikeCaptureFileSha256 $interpreter
         if ($interpreterSha -ne $ExpectedInterpreterSha256) { throw "Capture interpreter hash changed." }
+        $signature = Get-AuthenticodeSignature -LiteralPath $interpreter -ErrorAction Stop
+        if (
+            [string]$signature.Status -ne "Valid" -or $null -eq $signature.SignerCertificate -or
+            [string]$signature.SignerCertificate.Subject -ne "CN=Python Software Foundation, O=Python Software Foundation, L=Beaverton, S=Oregon, C=US" -or
+            [string]$signature.SignerCertificate.Thumbprint -ne $ExpectedInterpreterSignerThumbprint
+        ) { throw "Capture interpreter Authenticode identity is not approved." }
         $versionOutput = @(& $interpreter -I -c "import sys; print('.'.join(map(str, sys.version_info[:3])))" 2>$null)
         if ($LASTEXITCODE -ne 0 -or $versionOutput.Count -ne 1 -or [string]$versionOutput[0] -notmatch '^3\.13\.') { throw "Capture interpreter is not Python 3.13." }
     }
