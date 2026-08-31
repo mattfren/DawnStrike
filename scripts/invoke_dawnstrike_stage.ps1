@@ -37,6 +37,33 @@ function Enter-DawnstrikeDailyRunLock {
     $lockPath = Join-Path $lockRoot ("dawnstrike-daily-" + $MarketDate + ".lock")
     if (Test-Path -LiteralPath $lockPath -PathType Leaf) {
         $age = ((Get-Date).ToUniversalTime() - (Get-Item -LiteralPath $lockPath).LastWriteTimeUtc).TotalMinutes
+        $existingPayload = $null
+        try {
+            $existingPayload = Get-Content -LiteralPath $lockPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        }
+        catch {
+            # Owner-state validation below remains the fail-closed result for
+            # malformed or otherwise ambiguous lock payloads.
+        }
+        $bindingStatus = [string]$existingPayload.receipt_binding_status
+        $isReceiptBoundActivation =
+            [string]$existingPayload.schema_version -eq "dawnstrike.daily_run_lock.v4" -and
+            (
+                [string]$existingPayload.owner -eq "runtime_activation" -or
+                $bindingStatus -in @("BOUND", "UNBOUND")
+            )
+        if ($isReceiptBoundActivation) {
+            # A v4 activation lock is a crash-recovery boundary, including the
+            # short sequential-binding transition where one lock is UNBOUND.
+            # Normal stages may not archive or supersede it; only the exact
+            # receipt-bound rollback path may prove and archive the pair.
+            return [pscustomobject]@{
+                acquired = $false
+                lock_path = $lockPath
+                reason = "receipt_bound_activation_requires_rollback"
+                age_minutes = [math]::Round($age, 2)
+            }
+        }
         $ownerState = Get-DawnstrikeLockOwnerState -LockPath $lockPath
         # Wall-clock age is diagnostic only.  A long-running owner must never
         # be evicted merely because it crossed StaleAfterMinutes; doing so
@@ -64,6 +91,8 @@ function Enter-DawnstrikeDailyRunLock {
         process_id = $PID
         process_started_at_utc = (Get-Process -Id $PID).StartTime.ToUniversalTime().ToString("o")
         lock_token = $lockToken
+        research_only = $true
+        broker_execution_enabled = $false
     }
     if (-not [string]::IsNullOrWhiteSpace($ActivationId)) {
         $payloadObject.activation_id = $ActivationId

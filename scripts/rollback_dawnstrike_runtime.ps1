@@ -172,17 +172,21 @@ function Invoke-DawnstrikeRuntimeRollback {
             throw "Active runtime is neither the activated candidate nor the recorded previous SHA."
         }
     }
+    $rollbackCheckoutExists = Test-Path -LiteralPath $rollbackCheckout -PathType Container
     if ($null -ne $currentContract -and $currentContract.head -eq $previousSha) {
         if ($currentContract.tree -ne $previousTree) {
             throw "Restored runtime tree does not match the activation receipt."
         }
+        if ($rollbackCheckoutExists) {
+            throw "Restored previous runtime cannot coexist with a rollback checkout."
+        }
     }
-    elseif (-not (Test-Path -LiteralPath $rollbackCheckout -PathType Container)) {
+    elseif (-not $rollbackCheckoutExists) {
         throw "Previous runtime checkout is missing; rollback cannot recover its approved origin."
     }
 
     $origin = ""
-    if (Test-Path -LiteralPath $rollbackCheckout -PathType Container) {
+    if ($rollbackCheckoutExists) {
         $previous = Get-DawnstrikeGitContract $gitPath $rollbackCheckout $ProcessTimeoutSeconds $previousSha
         if ($previous.tree -ne $previousTree) {
             throw "Previous runtime checkout tree does not match the activation receipt."
@@ -243,15 +247,19 @@ function Invoke-DawnstrikeRuntimeRollback {
     if ([int]$stateInfo.schema_version -ne [int]$activation.state_schema_version) {
         throw "Current durable state schema is incompatible with the previous runtime."
     }
-    $null = Assert-DawnstrikeReceiptRecoveryArtifacts `
-        -Receipt $activation `
-        -StateRoot $state `
-        -BackupRoot $safeBackupRoot `
-        -ToolRoot $contract `
-        -GitPath $gitPath `
-        -PythonPath $pythonPath `
-        -TimeoutSeconds $ProcessTimeoutSeconds `
-        -RequireRollbackCheckout
+    $recoveryArtifactArguments = @{
+        Receipt = $activation
+        StateRoot = $state
+        BackupRoot = $safeBackupRoot
+        ToolRoot = $contract
+        GitPath = $gitPath
+        PythonPath = $pythonPath
+        TimeoutSeconds = $ProcessTimeoutSeconds
+    }
+    if ($null -eq $currentContract -or $currentContract.head -eq $candidateSha) {
+        $recoveryArtifactArguments.RequireRollbackCheckout = $true
+    }
+    $null = Assert-DawnstrikeReceiptRecoveryArtifacts @recoveryArtifactArguments
     $null = Archive-DawnstrikeReceiptBoundStaleLocks `
         -StateRoot $state `
         -ActivationReceiptPath $receiptPath `

@@ -867,6 +867,7 @@ function Enter-DawnstrikeRuntimeActivationLock {
         broker_execution_enabled = $false
     }
     if (-not [string]::IsNullOrWhiteSpace($ActivationId)) {
+        $payloadObject.owner = "runtime_activation"
         $payloadObject.activation_id = $ActivationId
         $payloadObject.prepared_receipt_name = $PreparedReceiptName
         $payloadObject.prepared_receipt_sha256 = if ([string]::IsNullOrWhiteSpace($PreparedReceiptSha256)) { $null } else { $PreparedReceiptSha256 }
@@ -1009,7 +1010,8 @@ function Assert-DawnstrikeReceiptBoundLock {
         [Parameter(Mandatory = $true)][object]$Receipt,
         [Parameter(Mandatory = $true)][string]$PreparedReceiptPath,
         [Parameter(Mandatory = $true)][string]$ActivationId,
-        [Parameter(Mandatory = $true)][string]$Kind
+        [Parameter(Mandatory = $true)][string]$Kind,
+        [switch]$AllowUnbound
     )
 
     if ($Snapshot.owner_state -ne "DEAD") {
@@ -1027,22 +1029,75 @@ function Assert-DawnstrikeReceiptBoundLock {
     if ([string]$payload.prepared_receipt_name -ne $receiptName) {
         throw "Receipt-bound $Kind lock receipt name mismatch."
     }
-    if ([string]$payload.receipt_binding_status -ne "BOUND") {
+    if ([string]$payload.receipt_binding_status -eq "BOUND") {
+        if ([string]$payload.prepared_receipt_sha256 -ne [string]$Receipt.receipt_sha256) {
+            throw "Receipt-bound $Kind lock receipt self-hash mismatch."
+        }
+        $receiptFileSha = Get-DawnstrikeSha256File $PreparedReceiptPath
+        if ([string]$payload.prepared_receipt_file_sha256 -ne $receiptFileSha) {
+            throw "Receipt-bound $Kind lock receipt file hash mismatch."
+        }
+    }
+    elseif (-not $AllowUnbound -or [string]$payload.receipt_binding_status -ne "UNBOUND") {
         throw "Receipt-bound $Kind lock is not bound to a sealed PREPARED receipt."
     }
-    if ([string]$payload.prepared_receipt_sha256 -ne [string]$Receipt.receipt_sha256) {
-        throw "Receipt-bound $Kind lock receipt self-hash mismatch."
-    }
-    $receiptFileSha = Get-DawnstrikeSha256File $PreparedReceiptPath
-    if ([string]$payload.prepared_receipt_file_sha256 -ne $receiptFileSha) {
-        throw "Receipt-bound $Kind lock receipt file hash mismatch."
+    else {
+        # During the two-lock binding transition, the exact activation id and
+        # receipt name are already present but the sealed receipt hashes are
+        # intentionally empty. Recovery may complete this one lock binding
+        # before archival, but only after the dead-owner and receipt checks
+        # above have passed.
+        if (
+            $null -ne $payload.prepared_receipt_sha256 -or
+            $null -ne $payload.prepared_receipt_file_sha256
+        ) {
+            throw "Receipt-bound $Kind lock has partial or tampered receipt hashes."
+        }
     }
     if ([string]$payload.research_only -ne "True" -or [string]$payload.broker_execution_enabled -ne "False") {
         throw "Receipt-bound $Kind lock violates research-only safety."
     }
+    if ([string]$payload.owner -ne "runtime_activation") {
+        throw "Receipt-bound $Kind lock owner is not runtime_activation."
+    }
     if ($Kind -eq "daily" -and [string]$payload.market_date -ne [string]$Receipt.market_date) {
         throw "Receipt-bound daily lock market date mismatch."
     }
+}
+
+function Complete-DawnstrikeReceiptBindingTransition {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][object]$Snapshot,
+        [Parameter(Mandatory = $true)][object]$Receipt,
+        [Parameter(Mandatory = $true)][string]$PreparedReceiptPath,
+        [Parameter(Mandatory = $true)][string]$ActivationId,
+        [Parameter(Mandatory = $true)][string]$Kind
+    )
+
+    Assert-DawnstrikeReceiptBoundLock `
+        -Snapshot $Snapshot `
+        -Receipt $Receipt `
+        -PreparedReceiptPath $PreparedReceiptPath `
+        -ActivationId $ActivationId `
+        -Kind $Kind `
+        -AllowUnbound
+    if ([string]$Snapshot.payload.receipt_binding_status -eq "UNBOUND") {
+        Set-DawnstrikeReceiptBoundLock `
+            -LockPath $Snapshot.path `
+            -LockToken ([string]$Snapshot.payload.lock_token) `
+            -ActivationId $ActivationId `
+            -PreparedReceiptPath $PreparedReceiptPath `
+            -Receipt $Receipt
+        $Snapshot = Get-DawnstrikeLockSnapshot $Snapshot.path
+    }
+    Assert-DawnstrikeReceiptBoundLock `
+        -Snapshot $Snapshot `
+        -Receipt $Receipt `
+        -PreparedReceiptPath $PreparedReceiptPath `
+        -ActivationId $ActivationId `
+        -Kind $Kind
+    return $Snapshot
 }
 
 function Find-DawnstrikeArchivedLock {
@@ -1062,7 +1117,7 @@ function Find-DawnstrikeArchivedLock {
         try {
             $snapshot = Get-DawnstrikeLockSnapshot $candidate.FullName
             if ([string]$snapshot.payload.activation_id -eq $ActivationId) {
-                Assert-DawnstrikeReceiptBoundLock $snapshot $Receipt $PreparedReceiptPath $ActivationId $Kind
+                Assert-DawnstrikeReceiptBoundLock $snapshot $Receipt $PreparedReceiptPath $ActivationId $Kind -AllowUnbound
                 $matches += $snapshot
             }
         }
@@ -1132,8 +1187,18 @@ function Archive-DawnstrikeReceiptBoundStaleLocks {
     }
     $activationSnapshot = if ($null -ne $activationCurrent) { $activationCurrent } else { $activationArchived }
     $dailySnapshot = if ($null -ne $dailyCurrent) { $dailyCurrent } else { $dailyArchived }
-    Assert-DawnstrikeReceiptBoundLock $activationSnapshot $Receipt $ActivationReceiptPath ([string]$Receipt.activation_id) "activation"
-    Assert-DawnstrikeReceiptBoundLock $dailySnapshot $Receipt $ActivationReceiptPath ([string]$Receipt.activation_id) "daily"
+    $activationSnapshot = Complete-DawnstrikeReceiptBindingTransition `
+        -Snapshot $activationSnapshot `
+        -Receipt $Receipt `
+        -PreparedReceiptPath $ActivationReceiptPath `
+        -ActivationId ([string]$Receipt.activation_id) `
+        -Kind "activation"
+    $dailySnapshot = Complete-DawnstrikeReceiptBindingTransition `
+        -Snapshot $dailySnapshot `
+        -Receipt $Receipt `
+        -PreparedReceiptPath $ActivationReceiptPath `
+        -ActivationId ([string]$Receipt.activation_id) `
+        -Kind "daily"
     if (
         [int]$activationSnapshot.payload.process_id -ne [int]$dailySnapshot.payload.process_id -or
         [string]$activationSnapshot.payload.process_started_at_utc -ne [string]$dailySnapshot.payload.process_started_at_utc
@@ -1145,14 +1210,14 @@ function Archive-DawnstrikeReceiptBoundStaleLocks {
     if ($null -ne $activationCurrent) {
         $entries += [pscustomobject]@{
             kind = "activation"
-            snapshot = $activationCurrent
+            snapshot = $activationSnapshot
             destination = "$activationPath.archived.$timestamp.$([guid]::NewGuid().ToString('N'))"
         }
     }
     if ($null -ne $dailyCurrent) {
         $entries += [pscustomobject]@{
             kind = "daily"
-            snapshot = $dailyCurrent
+            snapshot = $dailySnapshot
             destination = "$dailyPath.archived.$timestamp.$([guid]::NewGuid().ToString('N'))"
         }
     }

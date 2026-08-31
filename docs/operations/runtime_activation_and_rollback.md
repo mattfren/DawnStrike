@@ -35,7 +35,13 @@ The tool fails closed unless all of the following are true:
   `PREPARED` receipt may leave both receipt-bound locks behind; rollback may
   proceed only after proving the recorded PID and exact process-start identity
   are dead and archiving both lock files. Live, unbound, mismatched, or
-  tampered locks remain a hard stop.
+  tampered locks remain a hard stop. An unbound lock without that exact
+  transition identity remains a hard stop. During the short two-file binding
+  transition, a lock may be `UNBOUND` but must already carry the exact
+  activation id and PREPARED receipt name; governed rollback completes its
+  hash binding before archiving the pair. Ordinary daily stages never archive
+  or supersede a v4 activation-owned lock and must direct the operator to
+  rollback.
 - `shadow_real.sqlite` passes read-only `PRAGMA quick_check`, and its schema is
   exactly the candidate application's current schema. Activation never runs a
   migration.
@@ -188,8 +194,10 @@ For a crash before the complete receipt, pass the matching `.prepared.json`.
 The tool verifies the bundle hash, exact previous commit/tree/origin, current
 schema compatibility, all task definitions, persisted scheduler XML evidence,
 and both locks. If both locks are present, it verifies their exact activation
-and PREPARED-receipt hashes plus PID/start identity, then moves them into the
-durable `locks` archive; it never blindly deletes or age-evicts them. It then
+and PREPARED-receipt identity plus PID/start identity. A finite `UNBOUND`
+binding transition is completed against that exact sealed receipt before the
+pair is moved into the durable `locks` archive; it never blindly deletes or
+age-evicts them. It then
 stages the previous commit from the sealed Git bundle,
 captures and disables exact-`Ready` tasks, requires exact `Disabled` state
 throughout the swap, preserves the deactivated candidate, restores exact task
