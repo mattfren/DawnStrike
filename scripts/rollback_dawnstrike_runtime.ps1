@@ -151,6 +151,10 @@ function Invoke-DawnstrikeRuntimeRollback {
             -GitPath $gitPath `
             -PythonPath $pythonPath `
             -TimeoutSeconds $ProcessTimeoutSeconds
+        $null = Archive-DawnstrikeReceiptBoundStaleLocks `
+            -StateRoot $state `
+            -ActivationReceiptPath $receiptPath `
+            -Receipt $activation
         return $existing
     }
     if (-not (Test-Path -LiteralPath $rollbackBundle -PathType Leaf)) {
@@ -193,7 +197,6 @@ function Invoke-DawnstrikeRuntimeRollback {
         throw "Rollback origin does not match the activation receipt."
     }
 
-    Assert-DawnstrikeNoDailyLocks $state
     $taskBefore = Get-DawnstrikeTaskContract $runtime $state -AllowDisabled
     if ($taskBefore.task_action_contract_sha256 -ne [string]$activation.task_action_contract_sha256) {
         throw "Task actions do not match the activation receipt."
@@ -240,6 +243,19 @@ function Invoke-DawnstrikeRuntimeRollback {
     if ([int]$stateInfo.schema_version -ne [int]$activation.state_schema_version) {
         throw "Current durable state schema is incompatible with the previous runtime."
     }
+    $null = Assert-DawnstrikeReceiptRecoveryArtifacts `
+        -Receipt $activation `
+        -StateRoot $state `
+        -BackupRoot $safeBackupRoot `
+        -ToolRoot $contract `
+        -GitPath $gitPath `
+        -PythonPath $pythonPath `
+        -TimeoutSeconds $ProcessTimeoutSeconds `
+        -RequireRollbackCheckout
+    $null = Archive-DawnstrikeReceiptBoundStaleLocks `
+        -StateRoot $state `
+        -ActivationReceiptPath $receiptPath `
+        -Receipt $activation
 
     if ($null -ne $currentContract -and $currentContract.head -eq $candidateSha) {
         if (Test-Path -LiteralPath $rollbackStage) {
@@ -262,9 +278,22 @@ function Invoke-DawnstrikeRuntimeRollback {
     $taskBackup = $null
     $preserveLocks = $false
     try {
-        $activationLock = Enter-DawnstrikeRuntimeActivationLock $state
+        $lockBinding = @{}
+        if ($activation.status -eq "PREPARED") {
+            $lockBinding = @{
+                ActivationId = $activationId
+                PreparedReceiptName = Split-Path -Leaf $receiptPath
+                PreparedReceiptSha256 = [string]$activation.receipt_sha256
+                PreparedReceiptFileSha256 = Get-DawnstrikeSha256File $receiptPath
+            }
+        }
+        $activationLock = Enter-DawnstrikeRuntimeActivationLock -StateRoot $state @lockBinding
         Assert-DawnstrikeNoDailyLocks $state
-        $dailyLock = Enter-DawnstrikeDailyRunLock -StateRoot $state -MarketDate $marketDate -Owner "runtime_rollback"
+        $dailyLock = Enter-DawnstrikeDailyRunLock `
+            -StateRoot $state `
+            -MarketDate $marketDate `
+            -Owner "runtime_rollback" `
+            @lockBinding
         if (-not $dailyLock.acquired) {
             throw "Runtime rollback could not acquire the daily run lock."
         }

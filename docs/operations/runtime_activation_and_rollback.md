@@ -31,7 +31,11 @@ The tool fails closed unless all of the following are true:
 - The current runtime is a clean, self-contained Git checkout.
 - All five canonical scheduled tasks are present, enabled, not running, and
   still bind the fixed runtime and durable-state roots.
-- No daily lock or runtime-activation lock exists.
+- No daily lock or runtime-activation lock exists. A crash after the sealed
+  `PREPARED` receipt may leave both receipt-bound locks behind; rollback may
+  proceed only after proving the recorded PID and exact process-start identity
+  are dead and archiving both lock files. Live, unbound, mismatched, or
+  tampered locks remain a hard stop.
 - `shadow_real.sqlite` passes read-only `PRAGMA quick_check`, and its schema is
   exactly the candidate application's current schema. Activation never runs a
   migration.
@@ -183,7 +187,10 @@ Rollback is permitted from a valid `PREPARED` or `COMPLETE` activation receipt:
 For a crash before the complete receipt, pass the matching `.prepared.json`.
 The tool verifies the bundle hash, exact previous commit/tree/origin, current
 schema compatibility, all task definitions, persisted scheduler XML evidence,
-and both locks. It stages the previous commit from the sealed Git bundle,
+and both locks. If both locks are present, it verifies their exact activation
+and PREPARED-receipt hashes plus PID/start identity, then moves them into the
+durable `locks` archive; it never blindly deletes or age-evicts them. It then
+stages the previous commit from the sealed Git bundle,
 captures and disables exact-`Ready` tasks, requires exact `Disabled` state
 throughout the swap, preserves the deactivated candidate, restores exact task
 XML before re-enabling, and writes an idempotent `ROLLED_BACK` receipt under

@@ -333,6 +333,10 @@ def test_windows_activation_scripts_preserve_nonpublishing_fail_closed_boundary(
     assert "same_volume_two_rename_with_immediate_restore" in combined
     assert "Get-DawnstrikeTaskContract" in combined
     assert "Enter-DawnstrikeDailyRunLock" in combined
+    assert "Archive-DawnstrikeReceiptBoundStaleLocks" in rollback
+    assert "prepared_receipt_file_sha256" in combined
+    assert "Get-DawnstrikeLockOwnerState" in combined
+    assert ".archived." in combined
     assert "broker_execution_enabled = $false" in combined
     assert "research_only = $true" in combined
     assert "publish_vercel" not in combined.lower()
@@ -353,6 +357,186 @@ def test_windows_activation_scripts_preserve_nonpublishing_fail_closed_boundary(
     rollback_swap = rollback.index("[System.IO.Directory]::Move($runtime, $deactivatedCandidate)")
     rollback_enable = rollback.index("        Enable-DawnstrikeCanonicalTasks", rollback_swap)
     assert rollback_disable < rollback_swap < rollback_enable
+
+
+def _write_stale_activation_lock_fixture(
+    tmp_path: Path,
+    *,
+    activation_id: str = "e" * 24,
+    process_id: int = 2_147_483_647,
+    process_started_at: str = "2020-01-01T00:00:00.0000000Z",
+) -> tuple[Path, Path]:
+    state = tmp_path / "state"
+    locks = state / "locks"
+    receipt = state / "receipts" / "runtime-activation" / (
+        f"runtime-activation-{activation_id}.prepared.json"
+    )
+    locks.mkdir(parents=True)
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text(
+        json.dumps(
+            {
+                "status": "PREPARED",
+                "activation_id": activation_id,
+                "market_date": "2026-08-31",
+                "receipt_sha256": "a" * 64,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    receipt_file_sha = hashlib.sha256(receipt.read_bytes()).hexdigest()
+    common = {
+        "process_id": process_id,
+        "process_started_at_utc": process_started_at,
+        "activation_id": activation_id,
+        "prepared_receipt_name": receipt.name,
+        "prepared_receipt_sha256": "a" * 64,
+        "prepared_receipt_file_sha256": receipt_file_sha,
+        "receipt_binding_status": "BOUND",
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+    activation = {
+        "schema_version": "dawnstrike.runtime_activation_lock.v2",
+        "lock_token": "b" * 32,
+        **common,
+    }
+    daily = {
+        "schema_version": "dawnstrike.daily_run_lock.v4",
+        "lock_token": "c" * 32,
+        "market_date": "2026-08-31",
+        **common,
+    }
+    _write_json(locks / "dawnstrike-runtime-activation.lock", activation)
+    _write_json(locks / "dawnstrike-daily-2026-08-31.lock", daily)
+    return state, receipt
+
+
+def _run_stale_lock_recovery(
+    state: Path,
+    receipt: Path,
+    *,
+    active_owner: bool = False,
+) -> dict[str, object]:
+    activation_script = str(Path("scripts/activate_dawnstrike_runtime.ps1").resolve()).replace(
+        "'", "''"
+    )
+    stage_script = str(Path("scripts/invoke_dawnstrike_stage.ps1").resolve()).replace(
+        "'", "''"
+    )
+    state_text = str(state).replace("'", "''")
+    receipt_text = str(receipt).replace("'", "''")
+    owner_setup = ""
+    if active_owner:
+        owner_setup = rf"""
+    $owner = Get-Process -Id $PID
+    $ownerStart = $owner.StartTime.ToUniversalTime().ToString('o')
+    foreach ($name in @(
+        'dawnstrike-runtime-activation.lock',
+        'dawnstrike-daily-2026-08-31.lock'
+    )) {{
+        $path = Join-Path '{state_text}' ('locks\\' + $name)
+        $payload = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        $payload.process_id = $PID
+        $payload.process_started_at_utc = $ownerStart
+        $payload | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $path
+    }}
+    """
+    command = rf"""
+    . '{activation_script}'
+    . '{stage_script}'
+    {owner_setup}
+    $receipt = [pscustomobject]@{{
+        status='PREPARED'; activation_id=('e' * 24); market_date='2026-08-31';
+        receipt_sha256=('a' * 64)
+    }}
+    $ok = $false
+    $message = ''
+    try {{
+        $result = Archive-DawnstrikeReceiptBoundStaleLocks `
+            -StateRoot '{state_text}' -ActivationReceiptPath '{receipt_text}' -Receipt $receipt
+        $ok = $true
+    }} catch {{ $message = $_.Exception.Message }}
+    [pscustomobject]@{{
+        ok=$ok; message=$message;
+        current_activation=Test-Path -LiteralPath (
+            Join-Path '{state_text}' 'locks\\dawnstrike-runtime-activation.lock'
+        ) -PathType Leaf
+        current_daily=Test-Path -LiteralPath (
+            Join-Path '{state_text}' 'locks\\dawnstrike-daily-2026-08-31.lock'
+        ) -PathType Leaf
+        archives=@(Get-ChildItem -LiteralPath (Join-Path '{state_text}' 'locks') `
+            -Filter '*.archived.*' -File -Force -ErrorAction SilentlyContinue).Count
+    }} | ConvertTo-Json -Compress
+    """
+    completed = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=Path.cwd(),
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert completed.returncode == 0, (completed.stdout, completed.stderr)
+    return json.loads(completed.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
+@pytest.mark.parametrize("kill_point", ["pre_rename", "between_renames", "post_swap_pre_restore"])
+def test_receipt_bound_stale_lock_recovery_kill_points(tmp_path: Path, kill_point: str) -> None:
+    state, receipt = _write_stale_activation_lock_fixture(tmp_path)
+    runtime = tmp_path / "runtime"
+    rollback = state / "runtime-rollbacks" / ("e" * 24)
+    runtime.mkdir()
+    (runtime / "boundary.txt").write_text(kill_point, encoding="utf-8")
+    if kill_point == "between_renames":
+        rollback.mkdir(parents=True)
+        runtime.rename(rollback / "previous-runtime")
+    elif kill_point == "post_swap_pre_restore":
+        rollback.mkdir(parents=True)
+        (rollback / "previous-runtime").mkdir()
+        (rollback / "previous-runtime" / "previous.txt").write_text("previous", encoding="utf-8")
+
+    result = _run_stale_lock_recovery(state, receipt)
+
+    assert result == {
+        "ok": True,
+        "message": "",
+        "current_activation": False,
+        "current_daily": False,
+        "archives": 2,
+    }
+    assert _run_stale_lock_recovery(state, receipt) == result
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
+@pytest.mark.parametrize(
+    "hostile_case", ["live_owner", "mismatched_owner", "mismatched_receipt", "tampered_receipt"]
+)
+def test_receipt_bound_stale_lock_recovery_rejects_hostile_state(
+    tmp_path: Path, hostile_case: str
+) -> None:
+    state, receipt = _write_stale_activation_lock_fixture(tmp_path)
+    if hostile_case == "mismatched_owner":
+        daily = state / "locks" / "dawnstrike-daily-2026-08-31.lock"
+        payload = json.loads(daily.read_text(encoding="utf-8"))
+        payload["process_started_at_utc"] = "2021-01-01T00:00:00.0000000Z"
+        _write_json(daily, payload)
+    elif hostile_case == "mismatched_receipt":
+        activation = state / "locks" / "dawnstrike-runtime-activation.lock"
+        payload = json.loads(activation.read_text(encoding="utf-8"))
+        payload["activation_id"] = "f" * 24
+        _write_json(activation, payload)
+    elif hostile_case == "tampered_receipt":
+        receipt.write_text(receipt.read_text(encoding="utf-8") + "tampered\n", encoding="utf-8")
+
+    result = _run_stale_lock_recovery(state, receipt, active_owner=hostile_case == "live_owner")
+
+    assert result["ok"] is False
+    assert result["current_activation"] is True
+    assert result["current_daily"] is True
+    assert result["archives"] == 0
 
 
 @pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
