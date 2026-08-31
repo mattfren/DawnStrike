@@ -41,6 +41,10 @@ def _fixture(tmp_path: Path) -> tuple[Path, str, str]:
     (repo / "api" / "readiness.py").write_bytes(b"READINESS-COMMITTED\n")
     (repo / "scripts").mkdir()
     shutil.copy2(HELPER, repo / "scripts" / HELPER.name)
+    shutil.copy2(
+        ROOT / "scripts" / "dawnstrike_job_process.ps1",
+        repo / "scripts" / "dawnstrike_job_process.ps1",
+    )
     _git(repo, "add", ".")
     _git(repo, "commit", "-m", "fixture")
     return repo, _git(repo, "rev-parse", "HEAD"), _git(repo, "rev-parse", "HEAD^{tree}")
@@ -119,3 +123,16 @@ def test_staged_api_byte_mismatch_is_rejected(tmp_path: Path) -> None:
     result = _powershell(command)
     assert result.returncode != 0
     assert "staged api bytes" in result.stderr.lower()
+
+
+def test_git_blob_extraction_is_byte_exact_under_windows_powershell(tmp_path: Path) -> None:
+    repo, commit, _tree = _fixture(tmp_path)
+    destination = tmp_path / "extracted-health.py"
+    command = (
+        f". '{repo / 'scripts' / HELPER.name}'; "
+        f"Write-VercelGitBlob -Root '{repo}' -Commit '{commit}' "
+        f"-RelativePath 'api/health.py' -Destination '{destination}'"
+    )
+    result = _powershell(command)
+    assert result.returncode == 0, result.stderr
+    assert destination.read_bytes() == b"HEALTH-COMMITTED\n"

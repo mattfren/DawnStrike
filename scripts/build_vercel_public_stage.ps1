@@ -63,8 +63,6 @@ foreach ($apiPath in @("api/health.py", "api/readiness.py")) {
         -RelativePath $apiPath `
         -Destination (Join-Path $stage ($apiPath -replace "/", "\"))
 }
-Copy-Item -LiteralPath (Join-Path $resolvedRoot "api\public_state.py") -Destination (Join-Path $stage "api\public_state.py") -Force
-
 # The API reads the exact packaged files under api/public.  Keep this module
 # metadata-only: embedding snapshots or manifests creates duplicate sources of
 # truth and can let a stale caller/environment state shadow packaged bytes.

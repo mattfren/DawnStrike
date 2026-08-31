@@ -4,6 +4,10 @@ param()
 # Publication is built from a generated artifact, but the function entrypoints
 # are executable source.  Keep their identity tied to one clean, immutable Git
 # commit so a dirty/racing checkout cannot silently change the deployed code.
+$jobProcessScript = Join-Path $PSScriptRoot "dawnstrike_job_process.ps1"
+if (Test-Path -LiteralPath $jobProcessScript -PathType Leaf) {
+    . $jobProcessScript
+}
 
 function Invoke-VercelGitText {
     param(
@@ -112,34 +116,39 @@ function Write-VercelGitBlob {
         [Parameter(Mandatory = $true)][string]$RelativePath,
         [Parameter(Mandatory = $true)][string]$Destination
     )
-    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    if (-not ("Dawnstrike.Native.JobProcessRunner" -as [type])) {
+        throw "The bounded Dawnstrike process helper is unavailable for Git blob extraction."
+    }
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     $startInfo.FileName = "git.exe"
+    $startInfo.Arguments = (
+        @("-C", $Root, "cat-file", "blob", "$Commit`:$RelativePath") |
+            ForEach-Object {
+                [Dawnstrike.Native.JobProcessRunner]::QuoteArgument([string]$_)
+            }
+    ) -join " "
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
-    $startInfo.ArgumentList.Add("-C")
-    $startInfo.ArgumentList.Add($Root)
-    $startInfo.ArgumentList.Add("cat-file")
-    $startInfo.ArgumentList.Add("blob")
-    $startInfo.ArgumentList.Add("$Commit`:$RelativePath")
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
     if (-not $process.Start()) { throw "Could not start Git blob extraction for $RelativePath." }
     try {
-        $destinationStream = [System.IO.File]::Open(
-            $Destination,
-            [System.IO.FileMode]::Create,
-            [System.IO.FileAccess]::Write,
-            [System.IO.FileShare]::None
-        )
-        try { $process.StandardOutput.BaseStream.CopyTo($destinationStream) }
-        finally { $destinationStream.Dispose() }
-        $stderr = $process.StandardError.ReadToEnd()
-        $process.WaitForExit()
+        $bytes = [System.IO.MemoryStream]::new()
+        $stdoutTask = $process.StandardOutput.BaseStream.CopyToAsync($bytes)
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit(30000)) {
+            try { $process.Kill() } catch { }
+            throw "Git blob extraction timed out for $RelativePath."
+        }
+        [System.Threading.Tasks.Task]::WaitAll(@($stdoutTask, $stderrTask), 30000)
+        $stderr = $stderrTask.Result
         if ($process.ExitCode -ne 0) {
             throw "Git blob extraction failed for $RelativePath`: $stderr"
         }
+        [System.IO.File]::WriteAllBytes($Destination, $bytes.ToArray())
+        $bytes.Dispose()
     }
     finally { $process.Dispose() }
 }
