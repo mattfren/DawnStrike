@@ -27,7 +27,7 @@ $script:DawnstrikeStatePreparationContractFile = "config\state_preparation_contr
 
 function Get-DawnstrikeSha256Text {
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][string]$Text)
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text)
 
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try {
