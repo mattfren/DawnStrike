@@ -278,11 +278,13 @@ def test_legacy_lock_uses_acquired_at_and_rejects_pid_reuse(tmp_path: Path):
     $ownerPid = $PID;
     $owner = Get-Process -Id $ownerPid;
     $active = @{{schema_version='dawnstrike.daily_run_lock.v2'; process_id=$ownerPid;
-        acquired_at=$owner.StartTime.ToUniversalTime().AddSeconds(1).ToString('o')}} |
+        acquired_at=$owner.StartTime.ToUniversalTime().AddSeconds(1).ToString('o');
+        lock_token='legacy-active'; research_only=$true; broker_execution_enabled=$false}} |
         ConvertTo-Json | Set-Content -LiteralPath '{quoted_path}';
     $activeResult = Test-DawnstrikeLockOwnerActive -LockPath '{quoted_path}';
     $reused = @{{schema_version='dawnstrike.daily_run_lock.v2'; process_id=$ownerPid;
-        acquired_at=$owner.StartTime.ToUniversalTime().AddSeconds(-10).ToString('o')}} |
+        acquired_at=$owner.StartTime.ToUniversalTime().AddSeconds(-10).ToString('o');
+        lock_token='legacy-reused'; research_only=$true; broker_execution_enabled=$false}} |
         ConvertTo-Json | Set-Content -LiteralPath '{quoted_path}';
     $reusedResult = Test-DawnstrikeLockOwnerActive -LockPath '{quoted_path}';
     [pscustomobject]@{{active=$activeResult; reused=$reusedResult}} | ConvertTo-Json -Compress
@@ -306,6 +308,69 @@ def test_legacy_lock_uses_acquired_at_and_rejects_pid_reuse(tmp_path: Path):
     assert completed.returncode == 0, completed.stderr
     result = json.loads(completed.stdout.strip().splitlines()[-1])
     assert result == {"active": True, "reused": False}
+
+
+@pytest.mark.parametrize("process_id", ["not-a-pid", "2147483647"])
+@pytest.mark.skipif(sys.platform != "win32", reason="PowerShell process identity requires Windows")
+def test_ambiguous_v3_lock_identity_is_never_archived(tmp_path: Path, process_id: str):
+    state_root = tmp_path / "state"
+    lock_root = state_root / "locks"
+    lock_root.mkdir(parents=True)
+    lock_path = lock_root / "dawnstrike-daily-2026-08-31.lock"
+    quoted_state = str(state_root).replace("'", "''")
+    quoted_path = str(lock_path).replace("'", "''")
+    command = f"""
+    . '{str(ROOT / 'scripts' / 'invoke_dawnstrike_stage.ps1').replace("'", "''")}';
+    $payload = @{{
+        schema_version='dawnstrike.daily_run_lock.v3';
+        market_date='2026-08-31'; owner='morning';
+        acquired_at=[DateTimeOffset]::UtcNow.ToString('o');
+        process_id='{process_id}'; process_started_at_utc='not-a-time';
+        lock_token='ambiguous-owner'; research_only=$true;
+        broker_execution_enabled=$false
+    }} | ConvertTo-Json;
+    [System.IO.File]::WriteAllText(
+        '{quoted_path}', $payload, [System.Text.UTF8Encoding]::new($false)
+    );
+    $blocked = $false;
+    $message = '';
+    try {{
+        Enter-DawnstrikeDailyRunLockCore -StateRoot '{quoted_state}' `
+            -MarketDate '2026-08-31' -Owner 'closing' | Out-Null;
+    }} catch {{
+        $blocked = $true;
+        $message = $_.Exception.Message;
+    }};
+    [pscustomobject]@{{
+        blocked=$blocked;
+        message=$message;
+        current_exists=(Test-Path -LiteralPath '{quoted_path}' -PathType Leaf);
+        archived_count=@(Get-ChildItem -LiteralPath '{quoted_state}\\locks' `
+            -Filter 'dawnstrike-daily-2026-08-31.lock.stale.*' -File).Count
+    }} | ConvertTo-Json -Compress
+    """
+    completed = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            command,
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout.strip().splitlines()[-1])
+    assert result["blocked"] is True
+    assert "ambiguous; refusing stale recovery" in result["message"]
+    assert result["current_exists"] is True
+    assert result["archived_count"] == 0
 
 
 def test_monitor_gap_receipt_is_idempotent_across_late_observation(tmp_path):

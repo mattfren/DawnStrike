@@ -407,33 +407,56 @@ function Test-DawnstrikeLockOwnerActive {
         $payload = $snapshot.payload
         $processId = 0
         if (-not [int]::TryParse([string]$payload.process_id, [ref]$processId) -or $processId -le 0) {
-            return $false
+            throw "Lock owner process_id is invalid."
         }
-        $ownerProcess = Get-Process -Id $processId -ErrorAction SilentlyContinue
-        if ($null -eq $ownerProcess) { return $false }
-        $processStarted = [DateTimeOffset]$ownerProcess.StartTime.ToUniversalTime()
-        $startedProperty = $payload.PSObject.Properties["process_started_at_utc"]
-        if ($null -ne $startedProperty -and -not [string]::IsNullOrWhiteSpace([string]$startedProperty.Value)) {
+        $schemaVersion = [string]$payload.schema_version
+        $recordedIdentity = [DateTimeOffset]::MinValue
+        if ($schemaVersion -eq "dawnstrike.daily_run_lock.v3") {
+            $startedProperty = $payload.PSObject.Properties["process_started_at_utc"]
+            if (
+                $null -eq $startedProperty -or
+                [string]::IsNullOrWhiteSpace([string]$startedProperty.Value) -or
+                -not [DateTimeOffset]::TryParse(
+                    [string]$startedProperty.Value,
+                    [ref]$recordedIdentity
+                )
+            ) {
+                throw "Lock owner process-start identity is invalid."
+            }
             # A reused PID has a different creation time.  Compare exact
             # process start identity rather than mutable lock-file age.
-            $recordedStart = [DateTimeOffset]::Parse([string]$startedProperty.Value).ToUniversalTime()
-            return $processStarted.UtcDateTime.Ticks -eq $recordedStart.UtcDateTime.Ticks
         }
-        # v2 locks (dawnstrike.daily_run_lock.v2) predate the exact
-        # process-start field.  Retain the old
-        # acquired_at relationship for compatibility, but never age-evict a
-        # live PID.  A process that started after acquired_at is a reused PID;
-        # an unparseable acquired_at is ambiguous and therefore fail-closed.
+        elseif ($schemaVersion -eq "dawnstrike.daily_run_lock.v2") {
+            # v2 locks predate the exact process-start field.  Retain the old
+            # acquired_at relationship for compatibility, but require that
+            # timestamp to be valid before deciding whether an owner is dead.
+            if (-not [DateTimeOffset]::TryParse(
+                [string]$payload.acquired_at,
+                [ref]$recordedIdentity
+            )) {
+                throw "Legacy lock owner acquisition identity is invalid."
+            }
+        }
+        else {
+            throw "Daily run lock schema is unsupported for owner recovery."
+        }
         try {
-            $acquiredAt = [DateTimeOffset]::Parse([string]$payload.acquired_at).ToUniversalTime()
-            return $processStarted.UtcDateTime.Ticks -le $acquiredAt.UtcDateTime.AddTicks([TimeSpan]::TicksPerSecond * 5).Ticks
+            $ownerProcess = [System.Diagnostics.Process]::GetProcessById($processId)
         }
-        catch {
-            return $true
+        catch [System.ArgumentException] {
+            return $false
         }
+        $processStarted = [DateTimeOffset]$ownerProcess.StartTime.ToUniversalTime()
+        $recordedIdentity = $recordedIdentity.ToUniversalTime()
+        if ($schemaVersion -eq "dawnstrike.daily_run_lock.v3") {
+            return $processStarted.UtcDateTime.Ticks -eq $recordedIdentity.UtcDateTime.Ticks
+        }
+        return $processStarted.UtcDateTime.Ticks -le $recordedIdentity.UtcDateTime.AddTicks(
+            [TimeSpan]::TicksPerSecond * 5
+        ).Ticks
     }
     catch {
-        return $false
+        throw "Lock owner identity is ambiguous; refusing stale recovery. $($_.Exception.Message)"
     }
 }
 
