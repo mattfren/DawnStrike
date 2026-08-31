@@ -29,7 +29,7 @@ def _receipt() -> dict[str, object]:
             "principal_before_sha256",
             "principal_after_sha256",
             "settings_before_sha256",
-        "settings_after_sha256",
+            "settings_after_sha256",
         )
     }
     payload: dict[str, object] = {
@@ -42,8 +42,14 @@ def _receipt() -> dict[str, object]:
         "original_state": "Ready",
         "final_state": "Disabled",
         "backup_name": "Dawnstrike_Delayed_SIP_Capture.xml",
-        "backup_relative_path": "scheduler-backups/capture-hardening/Dawnstrike_Delayed_SIP_Capture.xml",
-        "prepared_relative_path": "scheduler-backups/capture-hardening/capture-task-hardening-prepared.json",
+        "backup_relative_path": (
+            "scheduler-backups/capture-hardening/"
+            "Dawnstrike_Delayed_SIP_Capture.xml"
+        ),
+        "prepared_relative_path": (
+            "scheduler-backups/capture-hardening/"
+            "capture-task-hardening-prepared.json"
+        ),
         **hashes,
         "changed_fields": ["principal", "settings"],
         "preserved_action": True,
