@@ -3,6 +3,7 @@ param(
     [string]$TaskName = "Dawnstrike Delayed SIP Capture",
     [string]$RuntimeRoot = "C:\r\dawnstrike-runtime",
     [ValidatePattern('^[0-9a-f]{40}$')][string]$CandidateSha,
+    [ValidatePattern('^[0-9a-f]{40}$')][string]$CandidateTree,
     [ValidateSet("forward_observed", "retrospective_research")]
     [string]$Mode = "forward_observed",
     [string]$DbPath = "C:\r\dawnstrike-forward-db\staging.sqlite",
@@ -21,11 +22,39 @@ param(
     [string]$Python = "",
     [datetime]$StartAt = (Get-Date).Date.AddDays(1).AddHours(15).AddMinutes(20),
     [switch]$Create,
+    [switch]$ReplaceExisting,
     [switch]$InteractiveCurrentUser,
-    [pscredential]$RunAsCredential
+    [pscredential]$RunAsCredential,
+    [string]$HardeningBackupRoot = "",
+    [string]$HardeningReceiptPath = ""
 )
 
 $ErrorActionPreference = "Stop"
+if ($ReplaceExisting) {
+    if ($Create -or $InteractiveCurrentUser) {
+        throw "ReplaceExisting is the governed hardening path; do not combine it with Create or InteractiveCurrentUser."
+    }
+    $hardener = Join-Path $PSScriptRoot "harden_intraday_capture_task.ps1"
+    if (-not (Test-Path -LiteralPath $hardener -PathType Leaf)) {
+        throw "Delayed SIP hardening script is missing: $hardener"
+    }
+    $hardeningArgs = @{
+        TaskName = $TaskName
+        StateRoot = $StateRoot
+        CandidateSha = $CandidateSha
+        CandidateTree = $CandidateTree
+        RunAsCredential = $RunAsCredential
+    }
+    if (-not [string]::IsNullOrWhiteSpace($HardeningBackupRoot)) {
+        $hardeningArgs.BackupRoot = $HardeningBackupRoot
+    }
+    if (-not [string]::IsNullOrWhiteSpace($HardeningReceiptPath)) {
+        $hardeningArgs.ReceiptPath = $HardeningReceiptPath
+    }
+    & $hardener @hardeningArgs
+    if ($LASTEXITCODE -ne 0) { throw "Delayed SIP hardening did not complete." }
+    return
+}
 if ([string]::IsNullOrWhiteSpace($CandidateSha)) { throw "CandidateSha is required." }
 if ($Mode -ne "forward_observed") { throw "Scheduled capture registration is only for forward_observed." }
 foreach ($name in @("SymbolsManifest", "SymbolsManifestSha256", "EntitlementReceipt", "EntitlementReceiptSha256", "SourceConfig", "SourceConfigSha256")) {

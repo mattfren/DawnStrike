@@ -9,6 +9,7 @@ param(
     [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')][string]$EntitlementReceiptSha256,
     [Parameter(Mandatory = $true)][string]$SourceConfig,
     [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')][string]$SourceConfigSha256,
+    [pscredential]$RunAsCredential,
     [string]$ReceiptPath = "",
     [switch]$Enable,
     [switch]$InjectFailureAfterMutation,
@@ -26,12 +27,27 @@ if (
 $captureRebindRuntimeRoot = $RuntimeRoot
 $captureRebindStateRoot = $StateRoot
 $captureRebindTimeout = $ProcessTimeoutSeconds
+. (Join-Path $PSScriptRoot "resolve_dawnstrike_task_principal.ps1")
 . (Join-Path $PSScriptRoot "activate_dawnstrike_runtime.ps1")
 . (Join-Path $PSScriptRoot "dawnstrike_job_process.ps1")
 . (Join-Path $PSScriptRoot "invoke_dawnstrike_stage.ps1")
 $RuntimeRoot = $captureRebindRuntimeRoot
 $StateRoot = $captureRebindStateRoot
 $ProcessTimeoutSeconds = $captureRebindTimeout
+if ($null -eq $RunAsCredential -or [string]::IsNullOrWhiteSpace($RunAsCredential.UserName)) {
+    throw "Rebind requires the locally prompted RunAsCredential for the Password auxiliary task."
+}
+$rebindPassword = $RunAsCredential.GetNetworkCredential().Password
+if ([string]::IsNullOrWhiteSpace($rebindPassword)) { throw "Rebind credential is incomplete." }
+function Get-DawnstrikePrincipalSid([string]$Value) {
+    if ($Value -match '^S-\d-\d+') { return $Value.ToUpperInvariant() }
+    try {
+        return ([System.Security.Principal.NTAccount]::new($Value)).Translate(
+            [System.Security.Principal.SecurityIdentifier]
+        ).Value.ToUpperInvariant()
+    }
+    catch { throw "Unable to canonicalize the hardened auxiliary principal SID." }
+}
 
 function Get-DawnstrikeAuxiliarySectionHash {
     [CmdletBinding()]
@@ -45,6 +61,152 @@ function Get-DawnstrikeAuxiliarySectionHash {
         return Get-DawnstrikeSha256Text ([string]$nodes[0].OuterXml)
     }
     catch { throw "Auxiliary task XML has an invalid $Name section." }
+}
+
+function Get-DawnstrikeHardeningSectionHash {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Xml,
+        [Parameter(Mandatory = $true)][ValidateSet("Principal", "Triggers", "Settings", "Actions")][string]$Name,
+        [string]$NormalizeEnabledTo = ""
+    )
+    try {
+        $document = [System.Xml.XmlDocument]::new()
+        $document.PreserveWhitespace = $true
+        $document.LoadXml($Xml)
+        $nodes = @($document.SelectNodes("//*[local-name()='$Name']"))
+        if ($nodes.Count -ne 1) { throw "expected one $Name section" }
+        if ($Name -eq "Settings" -and $NormalizeEnabledTo) {
+            $enabled = @($nodes[0].ChildNodes | Where-Object { $_.LocalName -eq "Enabled" })
+            if ($enabled.Count -gt 1) { throw "duplicate Enabled setting" }
+            if ($enabled.Count -eq 1) { $enabled[0].InnerText = $NormalizeEnabledTo }
+        }
+        return Get-DawnstrikeSha256Text ([string]$nodes[0].OuterXml)
+    }
+    catch { throw "Auxiliary task hardening section is invalid." }
+}
+
+function Get-DawnstrikeHardeningReceipt {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$StateRoot,
+        [Parameter(Mandatory = $true)][string]$PythonPath,
+        [Parameter(Mandatory = $true)][string]$ContractPath,
+        [Parameter(Mandatory = $true)][string]$CandidateSha,
+        [Parameter(Mandatory = $true)][string]$CandidateTree,
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds
+    )
+    $root = Join-Path $StateRoot "receipts\capture-task"
+    Assert-DawnstrikeNoReparseComponents $root "Capture-task hardening receipt root"
+    $paths = @(Get-ChildItem -LiteralPath $root -Filter "capture-task-hardening-*.json" -File -ErrorAction SilentlyContinue)
+    $matches = @()
+    foreach ($path in $paths) {
+        try {
+            Assert-DawnstrikeNoReparseComponents $path.FullName "Capture-task hardening receipt"
+            $result = Invoke-DawnstrikeActivationProcess $PythonPath @(
+                $ContractPath, "verify-hardening", "--receipt", $path.FullName,
+                "--candidate-sha", $CandidateSha, "--candidate-tree", $CandidateTree
+            ) $PSScriptRoot "Capture-task hardening receipt verification" $TimeoutSeconds
+            $payload = [string]$result.Stdout | ConvertFrom-Json
+            $matches += [pscustomobject]@{ path = $path.FullName; payload = $payload }
+        }
+        catch { }
+    }
+    if ($matches.Count -ne 1) {
+        throw "Exactly one valid exact-candidate delayed-SIP hardening receipt is required before enablement."
+    }
+    return $matches[0]
+}
+
+function Assert-DawnstrikeCaptureHardeningBoundary {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][object]$Current,
+        [Parameter(Mandatory = $true)][string]$OriginalXml,
+        [Parameter(Mandatory = $true)][string]$StateRoot,
+        [Parameter(Mandatory = $true)][string]$PythonPath,
+        [Parameter(Mandatory = $true)][string]$ContractPath,
+        [Parameter(Mandatory = $true)][string]$CandidateSha,
+        [Parameter(Mandatory = $true)][string]$CandidateTree,
+        [Parameter(Mandatory = $true)][string]$OriginUrl,
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds
+    )
+    $receiptRecord = Get-DawnstrikeHardeningReceipt `
+        -StateRoot $StateRoot -PythonPath $PythonPath -ContractPath $ContractPath `
+        -CandidateSha $CandidateSha -CandidateTree $CandidateTree -TimeoutSeconds $TimeoutSeconds
+    $receipt = $receiptRecord.payload
+    if ([string]$receipt.task_name -ne $script:DawnstrikeAuxiliaryCaptureTaskName -or [string]$receipt.task_path -ne "\") {
+        throw "Hardening receipt task identity is invalid."
+    }
+    foreach ($field in @("backup_relative_path", "prepared_relative_path")) {
+        $relative = [string]$receipt.$field
+        if (
+            [string]::IsNullOrWhiteSpace($relative) -or
+            [System.IO.Path]::IsPathRooted($relative) -or
+            $relative -match '(^|[\\/])\.\.?([\\/]|$)'
+        ) { throw "Hardening receipt contains an unsafe durable path." }
+        $statePrefix = ([System.IO.Path]::GetFullPath($StateRoot)).TrimEnd('\') + '\'
+        $resolved = [System.IO.Path]::GetFullPath((Join-Path $StateRoot ($relative -replace '/', '\')))
+        if (-not $resolved.StartsWith($statePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Hardening receipt durable path escaped StateRoot."
+        }
+        Assert-DawnstrikeNoReparseComponents $resolved "Hardening durable record"
+        if (-not (Test-Path -LiteralPath $resolved -PathType Leaf)) {
+            throw "Hardening receipt durable record is missing."
+        }
+        if ($field -eq "backup_relative_path" -and (Get-DawnstrikeSha256File $resolved) -ne [string]$receipt.backup_xml_file_sha256) {
+            throw "Hardening XML backup hash does not match the receipt."
+        }
+        if ($field -eq "backup_relative_path") {
+            $backupText = [System.IO.File]::ReadAllText($resolved, [System.Text.UTF8Encoding]::new($false))
+            if (
+                (Get-DawnstrikeSha256Text $backupText) -ne [string]$receipt.backup_xml_sha256 -or
+                (Get-DawnstrikeSha256Text $backupText) -ne [string]$receipt.xml_before_sha256
+            ) { throw "Hardening XML backup content does not match the receipt." }
+        }
+        if ($field -eq "prepared_relative_path" -and (Get-DawnstrikeSha256File $resolved) -ne [string]$receipt.prepared_record_sha256) {
+            throw "Hardening PREPARED record hash does not match the receipt."
+        }
+    }
+    if ([string]$receipt.xml_after_sha256 -ne (Get-DawnstrikeSha256Text $OriginalXml)) {
+        throw "Hardening receipt is not bound to the activation-original task XML."
+    }
+    if (
+        [string]$receipt.origin_url_sha256 -ne (Get-DawnstrikeSha256Text $OriginUrl) -or
+        [string]$receipt.origin_url -ne $OriginUrl
+    ) { throw "Hardening receipt origin binding does not match the activation runtime origin." }
+    if ([string]$receipt.action_sha256 -ne (Get-DawnstrikeHardeningSectionHash $OriginalXml "Actions")) {
+        throw "Hardening receipt action binding does not match the activation-original task."
+    }
+    if ([string]$receipt.trigger_sha256 -ne (Get-DawnstrikeHardeningSectionHash $Current.xml "Triggers")) {
+        throw "Hardening receipt trigger binding does not match the current task."
+    }
+    if ([string]$receipt.principal_after_sha256 -ne (Get-DawnstrikeHardeningSectionHash $Current.xml "Principal")) {
+        throw "Hardening receipt principal binding does not match the current task."
+    }
+    $originalSettings = [System.Xml.XmlDocument]::new()
+    $originalSettings.PreserveWhitespace = $true
+    $originalSettings.LoadXml($OriginalXml)
+    $originalSettingsNode = @($originalSettings.SelectNodes("//*[local-name()='Settings']"))
+    if ($originalSettingsNode.Count -ne 1) { throw "Activation-original task has no unique Settings section." }
+    $originalEnabled = @($originalSettingsNode[0].ChildNodes | Where-Object { $_.LocalName -eq "Enabled" })
+    $normalizeEnabledTo = if ($originalEnabled.Count -eq 1) { [string]$originalEnabled[0].InnerText } else { "" }
+    if ([string]$receipt.settings_after_sha256 -ne (Get-DawnstrikeHardeningSectionHash $Current.xml "Settings" $normalizeEnabledTo)) {
+        throw "Hardening receipt settings binding does not match the current task."
+    }
+    if ([string]$receipt.logon_type -ne "Password" -or $receipt.network_capable -ne $true) {
+        throw "Hardening receipt does not attest a network-capable Password principal."
+    }
+    if ($receipt.start_when_available -ne $true -or $receipt.wake_to_run -ne $true -or $receipt.battery_safe -ne $true) {
+        throw "Hardening receipt availability or battery contract is invalid."
+    }
+    if ($receipt.restart_count -ne 3 -or [string]$receipt.restart_interval -ne "PT15M" -or [string]$receipt.execution_time_limit -ne "PT3H" -or [string]$receipt.multiple_instances -ne "IgnoreNew") {
+        throw "Hardening receipt restart or execution contract is invalid."
+    }
+    if ($receipt.research_only -ne $true -or $receipt.broker_execution_enabled -ne $false) {
+        throw "Hardening receipt safety boundary is invalid."
+    }
+    return $receipt
 }
 
 function Get-DawnstrikeNormalizedAuxiliaryXml {
@@ -654,6 +816,8 @@ if (-not $receiptFull.StartsWith($receiptRoot, [System.StringComparison]::Ordina
 $auxiliary = Get-DawnstrikeAuxiliaryCaptureTask $runtime $state
 if (-not $auxiliary.present) { throw "Auxiliary capture task is absent; registration and rebind are separate governed actions." }
 $captureContract = Join-Path $PSScriptRoot "capture_task_contract.py"
+$hardeningContract = Join-Path $PSScriptRoot "capture_task_hardening_contract.py"
+$hardeningReceipt = $null
 $preparedPath = Join-Path $state ("receipts\capture-task\capture-task-rebind-" + $CandidateSha + ".prepared.json")
 $failurePath = Join-Path $state ("receipts\capture-task\capture-task-rebind-" + $CandidateSha + ".failed.json")
 Assert-DawnstrikeNoReparseComponents $preparedPath "Capture-task prepared record"
@@ -739,6 +903,17 @@ try {
         throw "Post-lock capture-task receipt does not match the current task or supplied input bindings."
     }
     $original = Get-DawnstrikeCaptureOriginalFromActivationBackup $state $activationReceipt.payload
+    $hardeningReceipt = Assert-DawnstrikeCaptureHardeningBoundary `
+        -Current $auxiliary -OriginalXml ([string]$original.xml) -StateRoot $state `
+        -PythonPath $python -ContractPath $hardeningContract -CandidateSha $CandidateSha `
+        -CandidateTree ([string]$runtimeContract.tree) -OriginUrl $origin -TimeoutSeconds $ProcessTimeoutSeconds
+    $resolvedRebindPrincipal = Resolve-DawnstrikeTaskPrincipal -Credential $RunAsCredential
+    $principalDocument = [System.Xml.XmlDocument]::new()
+    $principalDocument.LoadXml([string]$auxiliary.xml)
+    $principalUserNodes = @($principalDocument.SelectNodes("//*[local-name()='Principal']/*[local-name()='UserId']"))
+    if ($principalUserNodes.Count -ne 1 -or (Get-DawnstrikePrincipalSid ([string]$principalUserNodes[0].InnerText)) -ne (Get-DawnstrikePrincipalSid $resolvedRebindPrincipal)) {
+        throw "RunAsCredential does not match the hardened auxiliary task principal."
+    }
 
     $task = @(Get-ScheduledTask -TaskName $script:DawnstrikeAuxiliaryCaptureTaskName -ErrorAction Stop)
     if ($task.Count -ne 1) { throw "Auxiliary capture task name is not unique." }
@@ -782,7 +957,8 @@ try {
             catch {
                 try {
                     $null = Restore-DawnstrikeAuxiliaryCaptureTask `
-                        -Expected $original -RuntimeRoot $runtime -StateRoot $state
+                        -Expected $original -RuntimeRoot $runtime -StateRoot $state `
+                        -RunAsCredential $RunAsCredential
                     $recoveredDisabled = Get-DawnstrikeAuxiliaryCaptureTask $runtime $state
                     if (
                         $recoveredDisabled.state -ne "Disabled" -or
@@ -817,7 +993,7 @@ try {
                 -SymbolsManifest $SymbolsManifest -SymbolsManifestSha256 $SymbolsManifestSha256 `
                 -EntitlementReceipt $EntitlementReceipt -EntitlementReceiptSha256 $EntitlementReceiptSha256 `
                 -SourceConfig $SourceConfig -SourceConfigSha256 $SourceConfigSha256 | Out-Null
-            $null = Restore-DawnstrikeAuxiliaryCaptureTask -Expected $original -RuntimeRoot $runtime -StateRoot $state
+            $null = Restore-DawnstrikeAuxiliaryCaptureTask -Expected $original -RuntimeRoot $runtime -StateRoot $state -RunAsCredential $RunAsCredential
             $auxiliary = Get-DawnstrikeAuxiliaryCaptureTask $runtime $state
             if (
                 $auxiliary.state -ne "Disabled" -or
@@ -916,7 +1092,8 @@ try {
             -EntitlementReceipt $EntitlementReceipt -EntitlementReceiptSha256 $EntitlementReceiptSha256 `
             -SourceConfig $SourceConfig -SourceConfigSha256 $SourceConfigSha256
         Set-ScheduledTask -TaskName $script:DawnstrikeAuxiliaryCaptureTaskName `
-            -TaskPath ([string]$auxiliary.task_path) -Action $newActions -ErrorAction Stop | Out-Null
+            -TaskPath ([string]$auxiliary.task_path) -Action $newActions `
+            -User $resolvedRebindPrincipal -Password $rebindPassword -ErrorAction Stop | Out-Null
         $boundDisabled = Get-DawnstrikeAuxiliaryCaptureTask $runtime $state
         if ($boundDisabled.state -ne "Disabled") { throw "Capture task became enabled before rebind verification." }
         Assert-DawnstrikeCaptureActionTransformation `
@@ -928,6 +1105,10 @@ try {
         if ($boundDisabled.action_contract_sha256 -eq [string]$preparedRecord.action_before_sha256) {
             throw "Capture-task action SHA was not changed."
         }
+        $null = Assert-DawnstrikeCaptureHardeningBoundary `
+            -Current $boundDisabled -OriginalXml ([string]$original.xml) -StateRoot $state `
+            -PythonPath $python -ContractPath $hardeningContract -CandidateSha $CandidateSha `
+            -CandidateTree ([string]$runtimeContract.tree) -OriginUrl $origin -TimeoutSeconds $ProcessTimeoutSeconds
         if ($InjectFailureAfterMutation) { throw "Injected capture-task post-mutation failure." }
         Enable-ScheduledTask -TaskName $script:DawnstrikeAuxiliaryCaptureTaskName `
             -TaskPath ([string]$boundDisabled.task_path) -ErrorAction Stop | Out-Null
@@ -960,7 +1141,7 @@ try {
             throw "Capture-task rebind receipt is COMPLETE but prepared-record cleanup failed; operator recovery is required."
         }
         try {
-            $null = Restore-DawnstrikeAuxiliaryCaptureTask -Expected $original -RuntimeRoot $runtime -StateRoot $state
+            $null = Restore-DawnstrikeAuxiliaryCaptureTask -Expected $original -RuntimeRoot $runtime -StateRoot $state -RunAsCredential $RunAsCredential
             $restored = Get-DawnstrikeAuxiliaryCaptureTask $runtime $state
             if (
                 $restored.state -ne "Disabled" -or

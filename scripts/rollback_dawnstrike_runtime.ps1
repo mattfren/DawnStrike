@@ -205,7 +205,8 @@ function Invoke-DawnstrikeRuntimeRollback {
         [Parameter(Mandatory = $true)][string]$RuntimeRoot,
         [Parameter(Mandatory = $true)][string]$StateRoot,
         [Parameter(Mandatory = $true)][string]$BackupRoot,
-        [Parameter(Mandatory = $true)][int]$ProcessTimeoutSeconds
+        [Parameter(Mandatory = $true)][int]$ProcessTimeoutSeconds,
+        [pscredential]$RunAsCredential
     )
 
     $contract = Resolve-DawnstrikeActivationRoot $ContractRoot "ContractRoot"
@@ -618,7 +619,8 @@ function Invoke-DawnstrikeRuntimeRollback {
                 $null = Restore-DawnstrikeAuxiliaryCaptureTask `
                     -Expected $expectedAuxiliary `
                     -RuntimeRoot $runtime `
-                    -StateRoot $state
+                    -StateRoot $state `
+                    -RunAsCredential $RunAsCredential
             }
             $auxiliaryDisabled = $false
         }
@@ -764,7 +766,8 @@ function Invoke-DawnstrikeRuntimeRollback {
                     $null = Restore-DawnstrikeAuxiliaryCaptureTask `
                         -Expected $auxiliaryBefore `
                         -RuntimeRoot $runtime `
-                        -StateRoot $state
+                        -StateRoot $state `
+                        -RunAsCredential $RunAsCredential
                     $auxiliaryDisabled = $false
                 }
                 Enable-DawnstrikeCanonicalTasks
