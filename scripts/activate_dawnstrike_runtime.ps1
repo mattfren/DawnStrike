@@ -339,16 +339,75 @@ function Get-DawnstrikeStatePreparationDeclaration {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$CandidateRoot,
+        [string]$GitPath = "",
+        [string]$CandidateSha = "",
+        [string]$CandidateTree = "",
         [string]$PythonPath = "",
         [ValidateRange(30, 1800)][int]$TimeoutSeconds = 300
     )
 
+    if ([string]::IsNullOrWhiteSpace($GitPath)) {
+        $GitPath = @(Get-Command git.exe -CommandType Application -ErrorAction Stop)[0].Source
+    }
+    if ([string]::IsNullOrWhiteSpace($CandidateSha) -or [string]::IsNullOrWhiteSpace($CandidateTree)) {
+        $identity = Get-DawnstrikeGitContract $GitPath $CandidateRoot $TimeoutSeconds
+        if ([string]::IsNullOrWhiteSpace($CandidateSha)) { $CandidateSha = [string]$identity.head }
+        if ([string]::IsNullOrWhiteSpace($CandidateTree)) { $CandidateTree = [string]$identity.tree }
+    }
+    if ($CandidateSha -notmatch '^[0-9a-f]{40}$' -or $CandidateTree -notmatch '^[0-9a-f]{40}$') {
+        throw "State-preparation declaration requires an exact candidate commit and tree."
+    }
+    $declaredTree = (Get-DawnstrikeGitValue $GitPath $CandidateRoot @(
+        "rev-parse", ($CandidateSha + "^{tree}")
+    ) "State-preparation declaration tree identity" $TimeoutSeconds).ToLowerInvariant()
+    if ($declaredTree -ne $CandidateTree) {
+        throw "State-preparation declaration candidate tree identity is invalid."
+    }
     $path = Join-Path $CandidateRoot $script:DawnstrikeStatePreparationContractFile
     Assert-DawnstrikeNoReparseComponents $path "State-preparation declaration"
+
+    # The working tree is not the authority for declaration presence.  A
+    # delete/restore between the clean-check and this read must not turn a
+    # sidecar-bearing commit into an implicit legacy activation (or substitute
+    # a hostile declaration).  Bind both presence and the raw file bytes to
+    # the exact commit object recorded by the exact tree.
+    $relativePath = $script:DawnstrikeStatePreparationContractFile.Replace('\', '/')
+    $treePaths = @(@(Get-DawnstrikeGitValue $GitPath $CandidateRoot @(
+        "ls-tree", "-r", "--full-tree", "--name-only", $CandidateSha, "--", $relativePath
+    ) "State-preparation declaration tree binding" $TimeoutSeconds) |
+        ForEach-Object { ([string]$_).Split("`n", [System.StringSplitOptions]::RemoveEmptyEntries) } |
+        Where-Object { $_ -ne "" })
+    if ($treePaths.Count -eq 0) {
+        if (Test-Path -LiteralPath $path) {
+            throw "Candidate declaration exists but the exact candidate commit does not track it."
+        }
+        # Older runtimes predate the account/capture/trial sidecar.  Legacy
+        # compatibility is valid only when the exact candidate commit truly
+        # lacks the declaration.
+        return [pscustomobject]@{
+            required = $false
+            path = $path
+            declaration_present = $false
+            declaration_blob_sha = ""
+        }
+    }
+    if ($treePaths.Count -ne 1 -or $treePaths[0] -ne $relativePath) {
+        throw "State-preparation declaration tree binding is not unique."
+    }
+    $declarationBlobSha = (Get-DawnstrikeGitValue $GitPath $CandidateRoot @(
+        "rev-parse", ("{0}:{1}" -f $CandidateSha, $relativePath)
+    ) "State-preparation declaration blob binding" $TimeoutSeconds).ToLowerInvariant()
+    if ($declarationBlobSha -notmatch '^[0-9a-f]{40}$') {
+        throw "State-preparation declaration blob identity is invalid."
+    }
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-        # Older runtimes predate the account/capture/trial sidecar.  Their
-        # five-task activation contract remains explicitly backward compatible.
-        return [pscustomobject]@{ required = $false; path = $path }
+        throw "State-preparation declaration is missing from the exact candidate checkout."
+    }
+    $workingBlobSha = (Get-DawnstrikeGitValue $GitPath $CandidateRoot @(
+        "hash-object", ("--path={0}" -f $relativePath), "--", $path
+    ) "State-preparation declaration working-tree binding" $TimeoutSeconds).ToLowerInvariant()
+    if ($workingBlobSha -ne $declarationBlobSha) {
+        throw "State-preparation declaration bytes do not match the exact candidate commit."
     }
     if ([string]::IsNullOrWhiteSpace($PythonPath)) {
         $PythonPath = @(Get-Command py.exe -CommandType Application -ErrorAction Stop)[0].Source
@@ -367,11 +426,51 @@ function Get-DawnstrikeStatePreparationDeclaration {
     # reread the path with ConvertFrom-Json: a concurrent replacement between
     # reads would otherwise create a time-of-check/time-of-use gap.
     $declaration = $validated
+    $workingBlobAfterValidation = (Get-DawnstrikeGitValue $GitPath $CandidateRoot @(
+        "hash-object", ("--path={0}" -f $relativePath), "--", $path
+    ) "State-preparation declaration post-validation binding" $TimeoutSeconds).ToLowerInvariant()
+    if ($workingBlobAfterValidation -ne $declarationBlobSha) {
+        throw "State-preparation declaration changed during strict validation."
+    }
     return [pscustomobject]@{
         required = $true
         path = $path
+        declaration_present = $true
+        declaration_blob_sha = $declarationBlobSha
         sidecar_contract = [string]$declaration.sidecar_contract
     }
+}
+
+function Assert-DawnstrikeCandidateIdentityAndDeclaration {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$GitPath,
+        [Parameter(Mandatory = $true)][string]$CandidateRoot,
+        [Parameter(Mandatory = $true)][string]$CandidateSha,
+        [Parameter(Mandatory = $true)][string]$CandidateTree,
+        [Parameter(Mandatory = $true)][object]$Declaration,
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds
+    )
+
+    $identity = Get-DawnstrikeGitContract $GitPath $CandidateRoot $TimeoutSeconds $CandidateSha
+    if ($identity.tree -ne $CandidateTree) {
+        throw "Candidate checkout tree changed during activation."
+    }
+    $current = Get-DawnstrikeStatePreparationDeclaration `
+        -CandidateRoot $CandidateRoot `
+        -GitPath $GitPath `
+        -CandidateSha $CandidateSha `
+        -CandidateTree $CandidateTree `
+        -PythonPath (Get-Command py.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1 -ExpandProperty Source) `
+        -TimeoutSeconds $TimeoutSeconds
+    if (
+        [bool]$current.required -ne [bool]$Declaration.required -or
+        [bool]$current.declaration_present -ne [bool]$Declaration.declaration_present -or
+        [string]$current.declaration_blob_sha -ne [string]$Declaration.declaration_blob_sha
+    ) {
+        throw "Candidate declaration identity changed during activation."
+    }
+    return $identity
 }
 
 function Get-DawnstrikeAuxiliaryCaptureTask {
@@ -1622,6 +1721,9 @@ function Invoke-DawnstrikeRuntimeActivation {
     $candidateContract = Get-DawnstrikeGitContract $gitPath $candidate $ProcessTimeoutSeconds $ExpectedSha
     $stateDeclaration = Get-DawnstrikeStatePreparationDeclaration `
         -CandidateRoot $candidate `
+        -GitPath $gitPath `
+        -CandidateSha $candidateContract.head `
+        -CandidateTree $candidateContract.tree `
         -PythonPath $pythonPath `
         -TimeoutSeconds $ProcessTimeoutSeconds
     . (Join-Path $PSScriptRoot "invoke_dawnstrike_stage.ps1")
@@ -1659,6 +1761,13 @@ function Invoke-DawnstrikeRuntimeActivation {
             -PythonPath $pythonPath `
             -TimeoutSeconds $ProcessTimeoutSeconds
     }
+    $null = Assert-DawnstrikeCandidateIdentityAndDeclaration `
+        -GitPath $gitPath `
+        -CandidateRoot $candidate `
+        -CandidateSha $ExpectedSha `
+        -CandidateTree $candidateContract.tree `
+        -Declaration $stateDeclaration `
+        -TimeoutSeconds $ProcessTimeoutSeconds
 
     $runtimeContract = Get-DawnstrikeGitContract $gitPath $runtime $ProcessTimeoutSeconds
     if ($runtimeContract.head -eq $ExpectedSha) {
@@ -1748,6 +1857,13 @@ function Invoke-DawnstrikeRuntimeActivation {
 
     $dbPath = Join-Path $state "shadow_real.sqlite"
     $stateInfo = Invoke-DawnstrikeContractCli $pythonPath $candidate @("inspect-state", "--db-path", $dbPath) "Durable state validation" $ProcessTimeoutSeconds
+    $null = Assert-DawnstrikeCandidateIdentityAndDeclaration `
+        -GitPath $gitPath `
+        -CandidateRoot $candidate `
+        -CandidateSha $ExpectedSha `
+        -CandidateTree $candidateContract.tree `
+        -Declaration $stateDeclaration `
+        -TimeoutSeconds $ProcessTimeoutSeconds
     Assert-DawnstrikeNoDailyLocks $state
     $taskBefore = Get-DawnstrikeTaskContract $runtime $state
     # Inventory the auxiliary independently of the candidate declaration.  A
@@ -1785,6 +1901,13 @@ function Invoke-DawnstrikeRuntimeActivation {
     $activationSeed = "$ExpectedSha`:$($runtimeContract.head)`:$MarketDate`:$($evidence.ci_evidence_sha256)`:$($evidence.sol_evidence_sha256)"
     $activationId = (Get-DawnstrikeSha256Text $activationSeed).Substring(0, 24)
     $stage = "$runtime.stage-$activationId"
+    $null = Assert-DawnstrikeCandidateIdentityAndDeclaration `
+        -GitPath $gitPath `
+        -CandidateRoot $candidate `
+        -CandidateSha $ExpectedSha `
+        -CandidateTree $candidateContract.tree `
+        -Declaration $stateDeclaration `
+        -TimeoutSeconds $ProcessTimeoutSeconds
     $rollbackRoot = Join-Path $state "runtime-rollbacks\$activationId"
     $rollbackCheckout = Join-Path $rollbackRoot "previous-runtime"
     $rollbackBundle = Join-Path $rollbackRoot "previous-runtime.bundle"
@@ -2195,6 +2318,18 @@ function Invoke-DawnstrikeRuntimeActivation {
                 -ExpectedTaskContractSha256 ([string]$taskLocked.task_contract_sha256) `
                 -ExpectedTaskDefinitionContractSha256 ([string]$taskLocked.task_definition_contract_sha256) `
                 -ExpectedTaskActionContractSha256 ([string]$taskLocked.task_action_contract_sha256)
+
+            # The candidate checkout remains the source of executable tools
+            # until the exact staged checkout is installed. Reassert its
+            # commit/tree and declaration binding at the last pre-swap
+            # boundary so a delete/restore cannot alter activation semantics.
+            $null = Assert-DawnstrikeCandidateIdentityAndDeclaration `
+                -GitPath $gitPath `
+                -CandidateRoot $candidate `
+                -CandidateSha $ExpectedSha `
+                -CandidateTree $candidateContract.tree `
+                -Declaration $stateDeclaration `
+                -TimeoutSeconds $ProcessTimeoutSeconds
 
             $swapStarted = $true
             [System.IO.Directory]::Move($runtime, $rollbackCheckout)
