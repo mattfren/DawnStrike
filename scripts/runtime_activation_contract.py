@@ -16,6 +16,7 @@ import os
 import re
 import sqlite3
 import tempfile
+import unicodedata
 from collections.abc import Mapping
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -486,11 +487,28 @@ def _load_object(path: str | Path) -> dict[str, Any]:
     if not source.is_file():
         raise ActivationContractError("activation JSON input is missing or unsafe")
     try:
-        value = json.loads(source.read_text(encoding="utf-8"))
+        value = json.loads(
+            source.read_text(encoding="utf-8"),
+            object_pairs_hook=_strict_object_pairs,
+        )
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ActivationContractError("activation JSON input is invalid") from exc
     if not isinstance(value, dict):
         raise ActivationContractError("activation JSON input must be an object")
+    return value
+
+
+def _strict_object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Reject decoded semantic duplicate names before dict last-write wins."""
+
+    seen: set[str] = set()
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        normalized = unicodedata.normalize("NFC", key).upper()
+        if normalized in seen:
+            raise ActivationContractError("activation JSON contains duplicate properties")
+        seen.add(normalized)
+        value[key] = item
     return value
 
 

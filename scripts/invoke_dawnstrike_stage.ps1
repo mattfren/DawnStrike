@@ -249,10 +249,82 @@ function Assert-DawnstrikeJsonUniqueProperties {
     }
 }
 
+function Get-DawnstrikeStageLockSnapshot {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    Assert-DawnstrikeNoReparsePath $Path $Label
+    $stream = $null
+    $bytes = $null
+    try {
+        $stream = [System.IO.File]::Open(
+            $Path,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::Read
+        )
+        $bytes = [byte[]]::new($stream.Length)
+        $offset = 0
+        while ($offset -lt $bytes.Length) {
+            $read = $stream.Read($bytes, $offset, $bytes.Length - $offset)
+            if ($read -le 0) { throw "$Label could not be read completely." }
+            $offset += $read
+        }
+    }
+    finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $fileSha256 = ([System.BitConverter]::ToString($sha.ComputeHash($bytes))).Replace("-", "").ToLowerInvariant()
+    }
+    finally { $sha.Dispose() }
+    try {
+        $raw = [System.Text.Encoding]::UTF8.GetString($bytes)
+        Assert-DawnstrikeJsonUniqueProperties $raw
+        $payload = $raw | ConvertFrom-Json
+    }
+    catch {
+        throw "$Label payload is not valid JSON."
+    }
+    return [pscustomobject]@{ bytes = $bytes; file_sha256 = $fileSha256; payload = $payload }
+}
+
+function Test-DawnstrikeStageLockSnapshotEqual {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][object]$Left,
+        [Parameter(Mandatory = $true)][object]$Right
+    )
+
+    if ($Left.file_sha256 -ne $Right.file_sha256 -or $Left.bytes.Length -ne $Right.bytes.Length) {
+        return $false
+    }
+    for ($index = 0; $index -lt $Left.bytes.Length; $index++) {
+        if ($Left.bytes[$index] -ne $Right.bytes[$index]) { return $false }
+    }
+    return $true
+}
+
+function Assert-DawnstrikeSupportedRecoveryEngine {
+    [CmdletBinding()]
+    param()
+
+    if ([string]$PSVersionTable.PSEdition -ne "Desktop") {
+        throw "Receipt-bound lock recovery requires Windows PowerShell Desktop."
+    }
+}
+
 function Get-DawnstrikeLockOwnerStateFromPayload {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][object]$Payload)
 
+    if ([string]$PSVersionTable.PSEdition -ne "Desktop") {
+        return "UNKNOWN"
+    }
     try {
         $processId = 0
         if (-not [int]::TryParse([string]$Payload.process_id, [ref]$processId) -or $processId -le 0) {
@@ -318,11 +390,11 @@ function Enter-DawnstrikeDailyRunLock {
     Assert-DawnstrikeNoReparsePath $lockPath "Daily lock" -AllowMissingLeaf
     if (Test-Path -LiteralPath $lockPath -PathType Leaf) {
         $age = ((Get-Date).ToUniversalTime() - (Get-Item -LiteralPath $lockPath).LastWriteTimeUtc).TotalMinutes
+        $existingSnapshot = $null
         $existingPayload = $null
         try {
-            $existingRaw = Get-Content -LiteralPath $lockPath -Raw -Encoding UTF8
-            Assert-DawnstrikeJsonUniqueProperties $existingRaw
-            $existingPayload = $existingRaw | ConvertFrom-Json
+            $existingSnapshot = Get-DawnstrikeStageLockSnapshot $lockPath "Daily lock"
+            $existingPayload = $existingSnapshot.payload
         }
         catch {
             # Owner-state validation below remains the fail-closed result for
@@ -355,6 +427,22 @@ function Enter-DawnstrikeDailyRunLock {
         # the payload cannot prove any owner exists).
         if ($ownerState -eq "DEAD") {
             $stalePath = "$lockPath.archived.$([DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')).$([guid]::NewGuid().ToString('N'))"
+            if ($null -eq $existingSnapshot) {
+                throw "Daily lock changed during stale recovery."
+            }
+            # Revalidate the same strict byte snapshot immediately before the
+            # rename. A dead v3 decision must never apply to a replacement v4
+            # receipt-bound recovery boundary.
+            Assert-DawnstrikeNoReparsePath $StateRoot "StateRoot"
+            Assert-DawnstrikeNoReparsePath $lockRoot "Daily lock directory"
+            $currentSnapshot = Get-DawnstrikeStageLockSnapshot $lockPath "Daily lock"
+            if (
+                [string]$currentSnapshot.payload.schema_version -eq "dawnstrike.daily_run_lock.v4" -or
+                -not (Test-DawnstrikeStageLockSnapshotEqual $currentSnapshot $existingSnapshot) -or
+                (Get-DawnstrikeLockOwnerStateFromPayload $currentSnapshot.payload) -ne "DEAD"
+            ) {
+                throw "Daily lock changed during stale recovery."
+            }
             Assert-DawnstrikeNoReparsePath $lockPath "Daily lock"
             Assert-DawnstrikeNoReparsePath $stalePath "Daily lock archive" -AllowMissingLeaf
             Move-Item -LiteralPath $lockPath -Destination $stalePath -ErrorAction Stop
@@ -388,7 +476,13 @@ function Enter-DawnstrikeDailyRunLock {
         $payloadObject.receipt_binding_status = if ([string]::IsNullOrWhiteSpace($PreparedReceiptSha256)) { "UNBOUND" } else { "BOUND" }
     }
     $payload = $payloadObject | ConvertTo-Json -Depth 4
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
     try {
+        # Recheck the complete containment chain immediately before opening
+        # the create-new path; the post-write snapshot proves its exact bytes.
+        Assert-DawnstrikeNoReparsePath $StateRoot "StateRoot"
+        Assert-DawnstrikeNoReparsePath $lockRoot "Daily lock directory"
+        Assert-DawnstrikeNoReparsePath $lockPath "Daily lock" -AllowMissingLeaf
         $handle = [System.IO.File]::Open(
             $lockPath,
             [System.IO.FileMode]::CreateNew,
@@ -396,8 +490,8 @@ function Enter-DawnstrikeDailyRunLock {
             [System.IO.FileShare]::None
         )
         try {
-            $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
             $handle.Write($bytes, 0, $bytes.Length)
+            $handle.Flush($true)
         } finally {
             $handle.Dispose()
         }
@@ -409,12 +503,30 @@ function Enter-DawnstrikeDailyRunLock {
             age_minutes = $null
         }
     }
+    Assert-DawnstrikeNoReparsePath $StateRoot "StateRoot"
+    Assert-DawnstrikeNoReparsePath $lockRoot "Daily lock directory"
+    Assert-DawnstrikeNoReparsePath $lockPath "Daily lock"
+    $createdSnapshot = Get-DawnstrikeStageLockSnapshot $lockPath "Daily lock"
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $expectedSha = ([System.BitConverter]::ToString($sha.ComputeHash($bytes))).Replace("-", "").ToLowerInvariant()
+    }
+    finally { $sha.Dispose() }
+    if (
+        $createdSnapshot.file_sha256 -ne $expectedSha -or
+        [string]$createdSnapshot.payload.lock_token -ne $lockToken -or
+        [string]$createdSnapshot.payload.schema_version -ne [string]$payloadObject.schema_version
+    ) {
+        throw "Daily lock changed during creation."
+    }
     return [pscustomobject]@{
         acquired = $true
         lock_path = $lockPath
         reason = "acquired"
         age_minutes = 0
         lock_token = $lockToken
+        schema_version = [string]$payloadObject.schema_version
+        owner = $Owner
     }
 }
 
@@ -424,10 +536,10 @@ function Test-DawnstrikeLockOwnerActive {
 
     # Legacy dawnstrike.daily_run_lock.v2 payloads remain diagnostic-only;
     # receipt-bound stale recovery requires the v4 process-start contract.
+    if ([string]$PSVersionTable.PSEdition -ne "Desktop") { return $false }
     try {
-        $raw = Get-Content -LiteralPath $LockPath -Raw -ErrorAction Stop
-        Assert-DawnstrikeJsonUniqueProperties $raw
-        $payload = $raw | ConvertFrom-Json
+        $snapshot = Get-DawnstrikeStageLockSnapshot $LockPath "Daily lock"
+        $payload = $snapshot.payload
         $processId = 0
         if (-not [int]::TryParse([string]$payload.process_id, [ref]$processId) -or $processId -le 0) {
             return $false
@@ -458,10 +570,8 @@ function Get-DawnstrikeLockOwnerState {
         if (($lockItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
             return "UNKNOWN"
         }
-        $raw = Get-Content -LiteralPath $LockPath -Raw -ErrorAction Stop
-        Assert-DawnstrikeJsonUniqueProperties $raw
-        $payload = $raw | ConvertFrom-Json
-        return Get-DawnstrikeLockOwnerStateFromPayload $payload
+        $snapshot = Get-DawnstrikeStageLockSnapshot $LockPath "Daily lock"
+        return Get-DawnstrikeLockOwnerStateFromPayload $snapshot.payload
     }
     catch {
         return "UNKNOWN"
@@ -472,16 +582,28 @@ function Exit-DawnstrikeDailyRunLock {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][object]$Lock)
 
-    if ($Lock.acquired -and (Test-Path -LiteralPath $Lock.lock_path -PathType Leaf)) {
+    if ($Lock.acquired) {
         try {
-            Assert-DawnstrikeNoReparsePath $Lock.lock_path "Daily lock"
-            $raw = Get-Content -LiteralPath $Lock.lock_path -Raw -ErrorAction Stop
-            Assert-DawnstrikeJsonUniqueProperties $raw
-            $payload = $raw | ConvertFrom-Json
-            if ([string]$payload.lock_token -eq [string]$Lock.lock_token) {
-                Assert-DawnstrikeNoReparsePath $Lock.lock_path "Daily lock"
-                Remove-Item -LiteralPath $Lock.lock_path -Force
+            if (-not (Test-Path -LiteralPath $Lock.lock_path -PathType Leaf)) { return }
+            $first = Get-DawnstrikeStageLockSnapshot $Lock.lock_path "Daily lock"
+            $expectedSchema = [string]$Lock.schema_version
+            if ([string]::IsNullOrWhiteSpace($expectedSchema)) {
+                $expectedSchema = [string]$first.payload.schema_version
             }
+            $expectedOwner = [string]$Lock.owner
+            if (
+                [string]$first.payload.lock_token -ne [string]$Lock.lock_token -or
+                [string]$first.payload.schema_version -ne $expectedSchema -or
+                (-not [string]::IsNullOrWhiteSpace($expectedOwner) -and [string]$first.payload.owner -ne $expectedOwner)
+            ) {
+                return
+            }
+            $second = Get-DawnstrikeStageLockSnapshot $Lock.lock_path "Daily lock"
+            if (-not (Test-DawnstrikeStageLockSnapshotEqual $first $second)) {
+                return
+            }
+            Assert-DawnstrikeNoReparsePath $Lock.lock_path "Daily lock"
+            Remove-Item -LiteralPath $Lock.lock_path -Force
         }
         catch {
             # Never delete a lock whose ownership cannot be proven.
@@ -517,9 +639,13 @@ function Write-DawnstrikeLockDenialReceipt {
         $name = "$MarketDate-$Owner-$($recordedAt.ToString('yyyyMMddTHHmmssfffZ')).json"
         $path = Join-Path $receiptRoot $name
         $temporary = "$path.$([guid]::NewGuid().ToString('N')).tmp"
+        Assert-DawnstrikeNoReparsePath $StateRoot "StateRoot"
+        Assert-DawnstrikeNoReparsePath $receiptRoot "Lock denial receipt directory"
         Assert-DawnstrikeNoReparsePath $path "Lock denial receipt" -AllowMissingLeaf
         Assert-DawnstrikeNoReparsePath $temporary "Lock denial receipt temporary file" -AllowMissingLeaf
         [System.IO.File]::WriteAllText($temporary, $payload, [System.Text.UTF8Encoding]::new($false))
+        Assert-DawnstrikeNoReparsePath $StateRoot "StateRoot"
+        Assert-DawnstrikeNoReparsePath $receiptRoot "Lock denial receipt directory"
         Assert-DawnstrikeNoReparsePath $temporary "Lock denial receipt temporary file"
         Assert-DawnstrikeNoReparsePath $path "Lock denial receipt" -AllowMissingLeaf
         Move-Item -LiteralPath $temporary -Destination $path

@@ -22,6 +22,9 @@ function Invoke-DawnstrikeRuntimeRollback {
         [Parameter(Mandatory = $true)][int]$ProcessTimeoutSeconds
     )
 
+    # Do not let a PowerShell Core DateTime coercion reach receipt-bound
+    # process identity recovery. Fail before resolving or mutating artifacts.
+    Assert-DawnstrikeSupportedRecoveryEngine
     $contract = Resolve-DawnstrikeActivationRoot $ContractRoot "ContractRoot"
     $state = Resolve-DawnstrikeActivationRoot $StateRoot "StateRoot"
     $safeBackupRoot = Resolve-DawnstrikeActivationRoot $BackupRoot "BackupRoot"
