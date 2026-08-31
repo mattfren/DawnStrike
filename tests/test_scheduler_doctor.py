@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -309,6 +310,221 @@ def _healthy_tasks(runtime: Path, state: Path, *, last_result: int = 0):
         }
         for name, script in scheduler_service.EXPECTED_TASKS.items()
     ]
+
+
+def _auxiliary_task(runtime: Path, state: Path, *, candidate_sha: str = "a" * 40):
+    arguments = " ".join(
+        f'"{token}"'
+        for token in (
+            str(runtime / "scripts" / "run_daily_intraday_capture.py"),
+            "--candidate-sha",
+            candidate_sha,
+            "--repo-root",
+            str(runtime),
+            "--db-path",
+            str(state / "shadow_real.sqlite"),
+            "--source-config",
+            str(state / "config" / "web_sources.yaml"),
+            "--execute",
+        )
+    )
+    return {
+        "name": scheduler_service.AUXILIARY_TASK_NAME,
+        "task_path": "\\",
+        "state": "Ready",
+        "enabled": True,
+        "action_count": 1,
+        "execute": "py.exe",
+        "arguments": arguments,
+        "working_directory": str(runtime),
+        "last_task_result": 1,
+    }
+
+
+def _auxiliary_contract(row: dict[str, object]) -> dict[str, object]:
+    action_text = "|".join(
+        str(row.get(field) or "")
+        for field in ("execute", "arguments", "working_directory")
+    )
+    return {
+        "declared": True,
+        "valid": True,
+        "candidate_sha": "a" * 40,
+        "action_contract_sha256": hashlib.sha256(action_text.encode("utf-8")).hexdigest(),
+    }
+
+
+def test_scheduler_doctor_accepts_valid_ready_governed_auxiliary(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    _write_required_scripts(runtime)
+    rows = _healthy_tasks(runtime, state)
+    auxiliary = _auxiliary_task(runtime, state)
+    rows.append(auxiliary)
+    monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
+    monkeypatch.setattr(
+        scheduler_service,
+        "_load_auxiliary_contract",
+        lambda _runtime, _state: _auxiliary_contract(auxiliary),
+    )
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    assert result["status"] == "LOCAL_VERIFIED"
+    assert result["unexpected_enabled_tasks"] == []
+    assert scheduler_service.AUXILIARY_TASK_NAME in result["expected_task_names"]
+    assert result["governed_auxiliary_task"]["status"] == "LOCAL_VERIFIED"
+    assert result["governed_auxiliary_task"]["last_task_result"] == 1
+
+
+def test_scheduler_doctor_rejects_undeclared_enabled_auxiliary(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    _write_required_scripts(runtime)
+    rows = _healthy_tasks(runtime, state)
+    auxiliary = _auxiliary_task(runtime, state)
+    rows.append(auxiliary)
+    monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
+    monkeypatch.setattr(
+        scheduler_service,
+        "_load_auxiliary_contract",
+        lambda _runtime, _state: {
+            "declared": False,
+            "valid": False,
+            "reason": "sidecar declaration is missing",
+        },
+    )
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    assert result["status"] == "BLOCKED_EXTERNAL"
+    assert result["unexpected_enabled_tasks"] == [auxiliary]
+    assert result["governed_auxiliary_task"]["failure_reason"] == (
+        "sidecar declaration is missing"
+    )
+
+
+def test_scheduler_doctor_rejects_missing_auxiliary_sidecar(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    _write_required_scripts(runtime)
+    rows = _healthy_tasks(runtime, state)
+    auxiliary = _auxiliary_task(runtime, state)
+    rows.append(auxiliary)
+    monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
+    monkeypatch.setattr(
+        scheduler_service,
+        "_load_auxiliary_contract",
+        lambda _runtime, _state: {
+            "declared": True,
+            "valid": False,
+            "reason": "capture sidecar receipt is missing or ambiguous",
+        },
+    )
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    assert result["status"] == "BLOCKED_EXTERNAL"
+    assert result["unexpected_enabled_tasks"] == [auxiliary]
+
+
+@pytest.mark.parametrize("drift", ["root", "sha", "hash"])
+def test_scheduler_doctor_rejects_auxiliary_contract_drift(
+    tmp_path: Path, monkeypatch, drift: str
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    _write_required_scripts(runtime)
+    rows = _healthy_tasks(runtime, state)
+    auxiliary = _auxiliary_task(runtime, state)
+    contract = _auxiliary_contract(auxiliary)
+    if drift == "root":
+        auxiliary["working_directory"] = str(tmp_path / "other-runtime")
+    elif drift == "sha":
+        auxiliary["arguments"] = str(auxiliary["arguments"]).replace("a" * 40, "b" * 40)
+    else:
+        contract["action_contract_sha256"] = "b" * 64
+    rows.append(auxiliary)
+    monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
+    monkeypatch.setattr(
+        scheduler_service,
+        "_load_auxiliary_contract",
+        lambda _runtime, _state: contract,
+    )
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    assert result["status"] == "BLOCKED_EXTERNAL"
+    assert result["unexpected_enabled_tasks"] == [auxiliary]
+    assert result["governed_auxiliary_task"]["status"] == "FAILED"
+
+
+def test_scheduler_doctor_rejects_duplicate_auxiliary_definitions(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    _write_required_scripts(runtime)
+    rows = _healthy_tasks(runtime, state)
+    auxiliary = _auxiliary_task(runtime, state)
+    rows.extend([auxiliary, {**auxiliary, "arguments": auxiliary["arguments"] + " "+'"duplicate"'}])
+    monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    assert result["status"] == "BLOCKED_EXTERNAL"
+    assert result["governed_auxiliary_task"]["failure_reason"] == (
+        "auxiliary task is duplicated"
+    )
+    assert result["unexpected_enabled_tasks"] == rows[-2:]
+
+
+def test_scheduler_doctor_allows_disabled_undeclared_auxiliary(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    _write_required_scripts(runtime)
+    rows = _healthy_tasks(runtime, state)
+    auxiliary = _auxiliary_task(runtime, state)
+    auxiliary.update(state="Disabled", enabled=False)
+    rows.append(auxiliary)
+    monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
+    monkeypatch.setattr(
+        scheduler_service,
+        "_load_auxiliary_contract",
+        lambda _runtime, _state: {
+            "declared": False,
+            "valid": False,
+            "reason": "sidecar declaration is missing",
+        },
+    )
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    assert result["status"] == "LOCAL_VERIFIED"
+    assert result["unexpected_enabled_tasks"] == []
+    assert result["governed_auxiliary_task"]["definition_status"] == (
+        "DISABLED_UNDECLARED"
+    )
 
 
 def test_scheduler_doctor_blocks_when_any_v5_task_is_missing(

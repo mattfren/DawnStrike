@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
-import subprocess
+import shlex
+import subprocess  # nosec B404
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -13,6 +15,10 @@ from zoneinfo import ZoneInfo
 from intraday_scanner.providers.web_source_base import validate_web_source_config
 
 CANONICAL_TASK_NAME = "Dawnstrike 10of10 Daily Finalize"
+AUXILIARY_TASK_NAME = "Dawnstrike Delayed SIP Capture"
+AUXILIARY_SIDECAR_CONTRACT = "dawnstrike.account_capture_trial_sidecar.v1"
+AUXILIARY_DECLARATION_FILE = Path("config") / "state_preparation_contract.json"
+AUXILIARY_CAPTURE_RUNNER = Path("scripts") / "run_daily_intraday_capture.py"
 PUBLICATION_CONTRACT = {
     "schema_version": "dawnstrike.publication_schedule.v1",
     "timezone": "America/Chicago",
@@ -151,6 +157,13 @@ def scheduler_doctor(
                 observation_date=observation_date,
             )
         )
+    auxiliary_rows = [
+        row for row in task_rows if str(row.get("name") or "") == AUXILIARY_TASK_NAME
+    ]
+    auxiliary_check = _auxiliary_task_check(auxiliary_rows, runtime, state)
+    if auxiliary_check is not None:
+        checks.append(auxiliary_check)
+    auxiliary_unexpected = _auxiliary_unexpected_rows(auxiliary_rows, auxiliary_check)
     unexpected_enabled = [
         row
         for row in task_rows
@@ -159,10 +172,26 @@ def scheduler_doctor(
             or str(row.get("state") or "") in {"Queued", "Running"}
         )
         and (
-            str(row.get("name") or "") not in EXPECTED_TASKS
+            (
+                str(row.get("name") or "") not in EXPECTED_TASKS
+                and str(row.get("name") or "") != AUXILIARY_TASK_NAME
+            )
             or str(row.get("task_path") or "\\") != "\\"
         )
     ]
+    unexpected_enabled.extend(auxiliary_unexpected)
+    # Preserve the first-seen order while preventing a duplicate auxiliary
+    # row from being reported twice through the generic name filter.
+    seen_rows: set[int] = set()
+    deduped_unexpected: list[dict[str, Any]] = []
+    for row in unexpected_enabled:
+        if id(row) not in seen_rows:
+            seen_rows.add(id(row))
+            deduped_unexpected.append(row)
+    unexpected_enabled = deduped_unexpected
+    expected_task_names = list(EXPECTED_TASKS)
+    if auxiliary_check is not None and auxiliary_check.get("governed") is True:
+        expected_task_names.append(AUXILIARY_TASK_NAME)
     failed_checks = [
         check
         for check in checks
@@ -207,7 +236,9 @@ def scheduler_doctor(
         "state_root": str(state),
         "required_files": present,
         "durable_source_config": source_config,
-        "expected_task_names": list(EXPECTED_TASKS),
+        "expected_task_names": expected_task_names,
+        "governed_auxiliary_task_name": AUXILIARY_TASK_NAME,
+        "governed_auxiliary_task": auxiliary_check,
         "scheduled_tasks": checks,
         "scheduled_task": finalize,
         "expected_task_name": CANONICAL_TASK_NAME,
@@ -447,6 +478,221 @@ def _task_check(
     }
 
 
+def _auxiliary_task_check(
+    rows: list[dict[str, Any]], runtime: Path, state: Path
+) -> dict[str, Any] | None:
+    if not rows:
+        return None
+    if len(rows) != 1:
+        return {
+            "name": AUXILIARY_TASK_NAME,
+            "status": "FAILED",
+            "governed": False,
+            "failure_reason": "auxiliary task is duplicated",
+            "duplicate_count": len(rows),
+        }
+    row = rows[0]
+    enabled = row.get("enabled") is True or str(row.get("state") or "") in {
+        "Queued",
+        "Running",
+    }
+    contract = _load_auxiliary_contract(runtime, state)
+    if not enabled and not contract["declared"]:
+        return {
+            **row,
+            "status": "LOCAL_VERIFIED",
+            "governed": False,
+            "definition_status": "DISABLED_UNDECLARED",
+            "last_task_result": row.get("last_task_result"),
+        }
+    if not contract["valid"]:
+        return {
+            **row,
+            "status": "FAILED",
+            "governed": False,
+            "definition_status": "INVALID",
+            "failure_reason": contract["reason"],
+            "last_task_result": row.get("last_task_result"),
+        }
+    action = _validate_auxiliary_action(row, runtime, state, contract)
+    return {
+        **row,
+        "status": "LOCAL_VERIFIED" if action["valid"] else "FAILED",
+        "governed": action["valid"],
+        "definition_status": "READY" if enabled and action["valid"] else "DISABLED",
+        "sidecar_contract_matches": True,
+        "action_contract_matches": action["action_contract_matches"],
+        "runtime_root_matches": action["runtime_root_matches"],
+        "state_root_matches": action["state_root_matches"],
+        "candidate_sha_matches": action["candidate_sha_matches"],
+        "runner_matches": action["runner_matches"],
+        "task_path_matches": action["task_path_matches"],
+        "action_count_matches": action["action_count_matches"],
+        "state_matches": action["state_matches"],
+        "failure_reason": action["reason"],
+        "last_task_result": row.get("last_task_result"),
+    }
+
+
+def _auxiliary_unexpected_rows(
+    rows: list[dict[str, Any]], check: dict[str, Any] | None
+) -> list[dict[str, Any]]:
+    if not rows or check is None:
+        return []
+    if len(rows) != 1:
+        return rows
+    enabled = rows[0].get("enabled") is True or str(rows[0].get("state") or "") in {
+        "Queued",
+        "Running",
+    }
+    return rows if enabled and check.get("status") != "LOCAL_VERIFIED" else []
+
+
+def _load_auxiliary_contract(runtime: Path, state: Path) -> dict[str, Any]:
+    declaration_path = runtime / AUXILIARY_DECLARATION_FILE
+    if not declaration_path.is_file():
+        return {"declared": False, "valid": False, "reason": "sidecar declaration is missing"}
+    try:
+        declaration = json.loads(declaration_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return {"declared": True, "valid": False, "reason": "sidecar declaration is invalid"}
+    expected = {
+        "schema_version": "dawnstrike.state_preparation_contract.v1",
+        "sidecar_contract": AUXILIARY_SIDECAR_CONTRACT,
+        "sidecar_version": 1,
+        "legacy_schema_marker": 30,
+        "required_before_activation": True,
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+    if declaration != expected:
+        return {"declared": True, "valid": False, "reason": "sidecar declaration is invalid"}
+    runtime_sha = _runtime_git_sha(runtime)
+    if runtime_sha is None:
+        return {"declared": True, "valid": False, "reason": "runtime SHA is unavailable"}
+    receipt_root = state / "receipts" / "capture-task"
+    receipt_paths = sorted(receipt_root.glob(f"capture-task-rebind-{runtime_sha}.json"))
+    if len(receipt_paths) != 1:
+        return {
+            "declared": True,
+            "valid": False,
+            "reason": "capture sidecar receipt is missing or ambiguous",
+        }
+    try:
+        from scripts.capture_task_contract import load_receipt
+
+        receipt = load_receipt(receipt_paths[0], candidate_sha=runtime_sha)
+    except (ImportError, KeyError, OSError, TypeError, ValueError):
+        return {
+            "declared": True,
+            "valid": False,
+            "reason": "capture sidecar receipt is invalid",
+        }
+    return {
+        "declared": True,
+        "valid": True,
+        "candidate_sha": runtime_sha,
+        "action_contract_sha256": str(receipt["action_after_sha256"]),
+    }
+
+
+def _runtime_git_sha(runtime: Path) -> str | None:
+    try:
+        completed = subprocess.run(  # nosec B603, B607
+            ["git", "-C", str(runtime), "rev-parse", "HEAD"],
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=SCHEDULER_QUERY_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    value = completed.stdout.strip().lower()
+    return (
+        value
+        if len(value) == 40 and all(char in "0123456789abcdef" for char in value)
+        else None
+    )
+
+
+def _action_option(tokens: list[str], option: str) -> str | None:
+    try:
+        index = tokens.index(option)
+    except ValueError:
+        return None
+    return tokens[index + 1] if index + 1 < len(tokens) else None
+
+
+def _validate_auxiliary_action(
+    row: dict[str, Any], runtime: Path, state: Path, contract: dict[str, Any]
+) -> dict[str, Any]:
+    execute = str(row.get("execute") or "")
+    arguments = str(row.get("arguments") or "")
+    working_directory = str(row.get("working_directory") or "")
+    try:
+        tokens = [token.strip('"') for token in shlex.split(arguments, posix=False)]
+    except ValueError:
+        tokens = []
+    candidate = _action_option(tokens, "--candidate-sha")
+    repo_root = _action_option(tokens, "--repo-root")
+    db_path = _action_option(tokens, "--db-path")
+    source_config = _action_option(tokens, "--source-config")
+    runner = tokens[0] if tokens else None
+    task_path_matches = str(row.get("task_path") or "\\") == "\\"
+    action_count_matches = row.get("action_count") == 1
+    state_matches = str(row.get("state") or "") in {"Ready", "Running", "Queued"}
+    try:
+        runtime_root_matches = (
+            Path(working_directory).resolve() == runtime
+            and repo_root is not None
+            and Path(repo_root).resolve() == runtime
+        )
+        state_root_matches = (
+            db_path is not None
+            and Path(db_path).resolve() == state / "shadow_real.sqlite"
+            and source_config is not None
+            and Path(source_config).resolve() == state / "config" / "web_sources.yaml"
+        )
+        runner_matches = (
+            runner is not None
+            and Path(runner).resolve() == runtime / AUXILIARY_CAPTURE_RUNNER
+        )
+    except (OSError, RuntimeError):
+        runtime_root_matches = False
+        state_root_matches = False
+        runner_matches = False
+    candidate_sha_matches = candidate == contract["candidate_sha"]
+    action_text = "|".join((execute, arguments, working_directory))
+    action_hash = hashlib.sha256(action_text.encode("utf-8")).hexdigest()
+    action_contract_matches = action_hash == contract["action_contract_sha256"]
+    valid = all(
+        (
+            execute.casefold() == "py.exe",
+            runner_matches,
+            "--execute" in tokens,
+            runtime_root_matches,
+            state_root_matches,
+            task_path_matches,
+            action_count_matches,
+            state_matches,
+            candidate_sha_matches,
+            action_contract_matches,
+        )
+    )
+    return {
+        "valid": valid,
+        "reason": "" if valid else "auxiliary action/root/SHA contract is invalid",
+        "action_contract_matches": action_contract_matches,
+        "runtime_root_matches": runtime_root_matches,
+        "state_root_matches": state_root_matches,
+        "candidate_sha_matches": candidate_sha_matches,
+        "runner_matches": runner_matches,
+        "task_path_matches": task_path_matches,
+        "action_count_matches": action_count_matches,
+        "state_matches": state_matches,
+    }
+
+
 def _expected_action_arguments(
     task_name: str,
     *,
@@ -566,7 +812,7 @@ def _query_scheduled_tasks() -> list[dict[str, Any]] | dict[str, Any]:
         ]
     script = _scheduler_query_script()
     try:
-        completed = subprocess.run(
+        completed = subprocess.run(  # nosec B603, B607
             ["powershell.exe", "-NoProfile", "-Command", script],
             capture_output=True,
             check=False,
