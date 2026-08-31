@@ -492,6 +492,15 @@ def _auxiliary_declaration() -> dict[str, object]:
         "sidecar_version": 1,
         "legacy_schema_marker": 30,
         "required_before_activation": True,
+        "capture_interpreter_path": str(scheduler_service.AUXILIARY_INTERPRETER),
+        "capture_interpreter_version": scheduler_service.AUXILIARY_INTERPRETER_VERSION,
+        "capture_interpreter_sha256": scheduler_service.AUXILIARY_INTERPRETER_SHA256,
+        "capture_interpreter_signer_subject": (
+            scheduler_service.AUXILIARY_INTERPRETER_SIGNER_SUBJECT
+        ),
+        "capture_interpreter_signer_thumbprint": (
+            scheduler_service.AUXILIARY_INTERPRETER_SIGNER_THUMBPRINT
+        ),
         "research_only": True,
         "broker_execution_enabled": False,
     }

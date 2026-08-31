@@ -27,6 +27,12 @@ AUXILIARY_INTERPRETER = Path(
 AUXILIARY_INTERPRETER_SHA256 = (
     "ef8f51028ac5329641985112f8efb1c2d4c47c86b8011ddf7e6fae21e2b4e5a1"
 )
+AUXILIARY_INTERPRETER_VERSION = "3.13.14"
+AUXILIARY_INTERPRETER_SIGNER_SUBJECT = (
+    "CN=Python Software Foundation, O=Python Software Foundation, L=Beaverton, "
+    "S=Oregon, C=US"
+)
+AUXILIARY_INTERPRETER_SIGNER_THUMBPRINT = "9BA3C2E210C7E8296C5056515BFC0B0BBA78AC48"
 AUXILIARY_REQUIRED_OPTIONS = frozenset(
     {
         "--candidate-sha",
@@ -712,6 +718,11 @@ def _load_auxiliary_contract(runtime: Path, state: Path) -> dict[str, Any]:
         "sidecar_version": 1,
         "legacy_schema_marker": 30,
         "required_before_activation": True,
+        "capture_interpreter_path": str(AUXILIARY_INTERPRETER),
+        "capture_interpreter_version": AUXILIARY_INTERPRETER_VERSION,
+        "capture_interpreter_sha256": AUXILIARY_INTERPRETER_SHA256,
+        "capture_interpreter_signer_subject": AUXILIARY_INTERPRETER_SIGNER_SUBJECT,
+        "capture_interpreter_signer_thumbprint": AUXILIARY_INTERPRETER_SIGNER_THUMBPRINT,
         "research_only": True,
         "broker_execution_enabled": False,
     }
@@ -807,6 +818,15 @@ def _load_auxiliary_contract(runtime: Path, state: Path) -> dict[str, Any]:
         "symbols_manifest_sha256": str(receipt["symbols_manifest_sha256"]),
         "entitlement_receipt_sha256": str(receipt["entitlement_receipt_sha256"]),
         "source_config_sha256": str(receipt["source_config_sha256"]),
+        "capture_interpreter_path": declaration["capture_interpreter_path"],
+        "capture_interpreter_version": declaration["capture_interpreter_version"],
+        "capture_interpreter_sha256": declaration["capture_interpreter_sha256"],
+        "capture_interpreter_signer_subject": declaration[
+            "capture_interpreter_signer_subject"
+        ],
+        "capture_interpreter_signer_thumbprint": declaration[
+            "capture_interpreter_signer_thumbprint"
+        ],
     }
 
 
