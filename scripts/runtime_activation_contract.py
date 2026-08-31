@@ -142,6 +142,35 @@ _ROLLBACK_RECEIPT_KEYS = frozenset(
     }
 )
 
+# Receipts created for the one-percent sidecar carry an explicit state
+# preparation proof and an auxiliary delayed-SIP task disposition.  Keep the
+# historical key sets above accepted for older runtimes that do not declare
+# the sidecar contract; activation itself requires the extended set whenever
+# the candidate declaration is present.
+_EXTENDED_RECEIPT_KEYS = frozenset(
+    {
+        "state_preparation_required",
+        "state_preparation_contract",
+        "state_preparation_receipt_sha256",
+        "state_preparation_after_db_sha256",
+        "state_preparation_after_wal_sha256",
+        "state_preparation_after_shm_sha256",
+        "state_preparation_inventory_sha256",
+        "auxiliary_capture_present",
+        "auxiliary_capture_state_before",
+        "auxiliary_capture_state_after",
+        "auxiliary_capture_action",
+        "auxiliary_capture_xml_sha256",
+        "auxiliary_capture_xml_file_sha256",
+        "auxiliary_capture_definition_contract_sha256",
+        "auxiliary_capture_action_contract_sha256",
+        "auxiliary_capture_backup_name",
+        "auxiliary_capture_backup_manifest_sha256",
+    }
+)
+_ACTIVATION_RECEIPT_KEYS_EXTENDED = _ACTIVATION_RECEIPT_KEYS | _EXTENDED_RECEIPT_KEYS
+_ROLLBACK_RECEIPT_KEYS_EXTENDED = _ROLLBACK_RECEIPT_KEYS | _EXTENDED_RECEIPT_KEYS
+
 
 class ActivationContractError(ValueError):
     """A supplied activation artifact is invalid or unsafe."""
@@ -309,11 +338,17 @@ def validate_receipt(payload: Mapping[str, Any]) -> dict[str, Any]:
     schema = payload.get("schema_version")
     if schema not in {ACTIVATION_SCHEMA, ROLLBACK_SCHEMA}:
         raise ActivationContractError("unsupported runtime receipt schema")
-    _require_exact_keys(
-        payload,
-        _ACTIVATION_RECEIPT_KEYS if schema == ACTIVATION_SCHEMA else _ROLLBACK_RECEIPT_KEYS,
-        "runtime receipt",
+    extended = "state_preparation_contract" in payload
+    expected_keys = (
+        _ACTIVATION_RECEIPT_KEYS_EXTENDED
+        if schema == ACTIVATION_SCHEMA and extended
+        else _ROLLBACK_RECEIPT_KEYS_EXTENDED
+        if schema == ROLLBACK_SCHEMA and extended
+        else _ACTIVATION_RECEIPT_KEYS
+        if schema == ACTIVATION_SCHEMA
+        else _ROLLBACK_RECEIPT_KEYS
     )
+    _require_exact_keys(payload, expected_keys, "runtime receipt")
     if payload.get("receipt_sha256") != self_hash(payload, "receipt_sha256"):
         raise ActivationContractError("runtime receipt self-hash mismatch")
     if not _ACTIVATION_ID.fullmatch(str(payload.get("activation_id") or "")):
@@ -364,6 +399,8 @@ def validate_receipt(payload: Mapping[str, Any]) -> dict[str, Any]:
         raise ActivationContractError("runtime receipt is not research-only")
     if payload.get("broker_execution_enabled") is not False:
         raise ActivationContractError("runtime receipt enables broker execution")
+    if extended:
+        _validate_extended_receipt(payload)
     backup_id = payload.get("state_backup_id")
     expected_backup_id = "runtime-activation-" + str(payload.get("activation_id"))
     if not isinstance(backup_id, str) or backup_id != expected_backup_id:
@@ -419,6 +456,54 @@ def validate_receipt(payload: Mapping[str, Any]) -> dict[str, Any]:
         if _parse_utc(completed_at) < prepared_at:
             raise ActivationContractError("rollback completion predates preparation")
     return dict(payload)
+
+
+def _validate_extended_receipt(payload: Mapping[str, Any]) -> None:
+    """Validate the sidecar and auxiliary-task portion of a runtime receipt."""
+
+    if payload.get("state_preparation_required") is not True:
+        raise ActivationContractError("sidecar runtime receipt does not require state preparation")
+    if payload.get("state_preparation_contract") != (
+        "dawnstrike.account_capture_trial_sidecar.v1"
+    ):
+        raise ActivationContractError("runtime state-preparation contract is invalid")
+    for field in (
+        "state_preparation_receipt_sha256",
+        "state_preparation_after_db_sha256",
+        "state_preparation_after_wal_sha256",
+        "state_preparation_after_shm_sha256",
+        "state_preparation_inventory_sha256",
+        "auxiliary_capture_xml_sha256",
+        "auxiliary_capture_xml_file_sha256",
+        "auxiliary_capture_definition_contract_sha256",
+        "auxiliary_capture_action_contract_sha256",
+        "auxiliary_capture_backup_manifest_sha256",
+    ):
+        if not _SHA256.fullmatch(str(payload.get(field) or "")):
+            raise ActivationContractError(f"runtime receipt {field} is invalid")
+    if payload.get("auxiliary_capture_present") not in {True, False}:
+        raise ActivationContractError("runtime receipt auxiliary capture presence is invalid")
+    before = payload.get("auxiliary_capture_state_before")
+    after = payload.get("auxiliary_capture_state_after")
+    action = payload.get("auxiliary_capture_action")
+    if payload.get("auxiliary_capture_present") is True:
+        if before not in {"Ready", "Disabled"}:
+            raise ActivationContractError("runtime receipt auxiliary capture state is invalid")
+        if payload.get("schema_version") == ACTIVATION_SCHEMA:
+            if after != "Disabled" or action != "DISABLED_UNTIL_EXACT_SHA_REBIND":
+                raise ActivationContractError("activation auxiliary capture disposition is invalid")
+        elif after not in {"Ready", "Disabled"} or action != "RESTORED_EXACT":
+            raise ActivationContractError("rollback auxiliary capture disposition is invalid")
+        backup_name = payload.get("auxiliary_capture_backup_name")
+        if not isinstance(backup_name, str) or not re.fullmatch(
+            r"runtime-(?:activation|rollback)-[0-9a-f]{24}", backup_name
+        ):
+            raise ActivationContractError("runtime receipt auxiliary backup name is invalid")
+    else:
+        if before != "ABSENT" or after != "ABSENT" or action != "ABSENT_ALLOWED":
+            raise ActivationContractError("runtime receipt has an inconsistent absent auxiliary task")
+        if payload.get("auxiliary_capture_backup_name") != "NONE":
+            raise ActivationContractError("absent auxiliary task must not have a backup name")
 
 
 def load_receipt(path: str | Path) -> dict[str, Any]:
