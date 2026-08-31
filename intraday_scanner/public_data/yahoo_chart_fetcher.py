@@ -46,7 +46,10 @@ _READ_CHUNK_BYTES = 64 * 1024
 # worker horizon. Anything farther ahead is treated as poisoned state so a
 # stale lock file cannot consume the entire EOD admission window.
 _MAX_PERSISTED_RATE_AHEAD_SECONDS = 5 * 60
-_RATE_RESERVATION_SAFETY_SECONDS = 0.1
+# Cross-process callers can be descheduled briefly after admission while the
+# host is under load. Reserve a conservative cushion so their actual request
+# starts still respect the configured provider rate ceiling.
+_RATE_RESERVATION_SAFETY_SECONDS = 0.5
 _CACHE_WRITE_LOCK = threading.RLock()
 _PROCESS_RATE_LOCK = threading.Lock()
 _PROCESS_NEXT_REQUEST_AT = 0.0

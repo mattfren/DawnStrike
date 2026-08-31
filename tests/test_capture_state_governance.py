@@ -9,6 +9,7 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -548,7 +549,7 @@ def test_state_inventory_requires_canonical_indexes_and_live_snapshot(tmp_path: 
 def test_inspect_live_cli_requires_only_database_argument(tmp_path: Path) -> None:
     _receipt, db, _state, _proof, _backup = _prepare(tmp_path)
     result = subprocess.run(
-        ["py", "-3.13", "scripts/state_preparation.py", "--db-path", str(db), "--inspect-live"],
+        [sys.executable, "scripts/state_preparation.py", "--db-path", str(db), "--inspect-live"],
         cwd=Path.cwd(),
         check=True,
         capture_output=True,
