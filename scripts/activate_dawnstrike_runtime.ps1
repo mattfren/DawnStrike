@@ -1688,7 +1688,12 @@ function Invoke-DawnstrikeRuntimeActivation {
             ) {
                 throw "Task definitions changed across the runtime swap."
             }
-            $auxiliaryAfterDisabled = Get-DawnstrikeAuxiliaryCaptureTask $runtime $state
+            $auxiliaryAfterDisabled = if ($stateDeclaration.required) {
+                Get-DawnstrikeAuxiliaryCaptureTask $runtime $state
+            }
+            else {
+                $auxiliaryBefore
+            }
             if ($auxiliaryBefore.present) {
                 if (
                     -not $auxiliaryAfterDisabled.present -or
@@ -1714,7 +1719,12 @@ function Invoke-DawnstrikeRuntimeActivation {
             if ($taskAfter.task_contract_sha256 -ne $taskLocked.task_contract_sha256) {
                 throw "Task XML was not restored exactly after runtime activation."
             }
-            $auxiliaryAfter = Get-DawnstrikeAuxiliaryCaptureTask $runtime $state
+            $auxiliaryAfter = if ($stateDeclaration.required) {
+                Get-DawnstrikeAuxiliaryCaptureTask $runtime $state
+            }
+            else {
+                $auxiliaryBefore
+            }
             if ($auxiliaryBefore.present) {
                 if ($auxiliaryAfter.state -ne "Disabled" -or $auxiliaryAfter.definition_contract_sha256 -ne $auxiliaryBefore.definition_contract_sha256) {
                     throw "Auxiliary capture task must remain Disabled until exact-SHA rebind."

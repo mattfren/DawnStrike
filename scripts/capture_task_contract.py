@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import tempfile
 from collections.abc import Mapping
@@ -153,14 +154,16 @@ def seal_receipt(payload: Mapping[str, Any], output_path: str | Path) -> dict[st
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
     )
+    temporary = Path(temporary_name)
     try:
-        import os
-
         os.close(descriptor)
-        Path(temporary_name).write_bytes(canonical_json(validated))
-        Path(temporary_name).replace(path)
+        temporary.write_bytes(canonical_json(validated))
+        with temporary.open("r+b") as handle:
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.link(temporary, path)
     finally:
-        Path(temporary_name).unlink(missing_ok=True)
+        temporary.unlink(missing_ok=True)
     return validated
 
 

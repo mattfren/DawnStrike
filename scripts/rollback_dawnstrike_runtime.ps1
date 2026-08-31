@@ -430,7 +430,12 @@ function Invoke-DawnstrikeRuntimeRollback {
         ) {
             throw "Task definitions changed across the rollback swap."
         }
-        $auxiliaryAfterDisabled = Get-DawnstrikeAuxiliaryCaptureTask $runtime $state
+        $auxiliaryAfterDisabled = if ($stateDeclaration.required) {
+            Get-DawnstrikeAuxiliaryCaptureTask $runtime $state
+        }
+        else {
+            $auxiliaryBefore
+        }
         if ($auxiliaryBefore.present -and (
             $auxiliaryAfterDisabled.state -ne "Disabled" -or
             $auxiliaryAfterDisabled.definition_contract_sha256 -ne $auxiliaryBefore.definition_contract_sha256
