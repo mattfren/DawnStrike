@@ -210,7 +210,11 @@ def record_daily_stage(
         "status": run_status,
         "current_stage": stage_name,
         "started_at": str(prior.get("started_at") or start),
-        "completed_at": now if run_status == "COMPLETE" else None,
+        "completed_at": (
+            now
+            if run_status in {"COMPLETE", "SKIPPED_NOT_APPLICABLE"}
+            else None
+        ),
         "last_attempted_at": now,
         "failed_stage": failed_stage,
         "failure_reason": failure_reason,

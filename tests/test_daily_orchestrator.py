@@ -167,3 +167,72 @@ def test_daily_orchestrator_interprets_closed_terminal_run_without_readiness(
     assert status["status"] == "SKIPPED_NOT_APPLICABLE"
     assert status["terminal_state"] == "SKIPPED_NOT_APPLICABLE"
     assert status["heartbeat_stale"] is False
+    assert status["latest_run"]["completed_at"] == now.isoformat()
+
+
+def test_daily_orchestrator_keeps_closed_terminal_run_fresh_after_heartbeat_ttl(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 29, 21, 0, tzinfo=timezone.utc)
+    state = tmp_path / "state"
+    state.mkdir()
+    DailyFinalizeService(
+        state / "state.sqlite",
+        state / "public",
+        runtime_root=tmp_path,
+        state_root=state,
+        release_sha="c" * 40,
+    ).run(market_date="2026-08-29", now=now.isoformat())
+
+    status = daily_orchestration_status(
+        SQLiteScanStore(state / "state.sqlite"),
+        market_date="2026-08-29",
+        state_root=state,
+        now=now + timedelta(minutes=31),
+    )
+
+    assert status["status"] == "SKIPPED_NOT_APPLICABLE"
+    assert status["terminal_state"] == "SKIPPED_NOT_APPLICABLE"
+    assert status["heartbeat_stale"] is False
+    assert status["latest_run"]["completed_at"] == now.isoformat()
+
+
+def test_daily_orchestrator_keeps_expired_in_progress_run_stale(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 29, 21, 0, tzinfo=timezone.utc)
+    market_date = "2026-08-29"
+    state = tmp_path / "state"
+    runtime = tmp_path / "runtime"
+    state.mkdir()
+    runtime.mkdir()
+    observed_at = now - timedelta(minutes=31)
+    record_daily_stage(
+        db_path=state / "state.sqlite",
+        market_date=market_date,
+        stage_name="morning_collection",
+        status="IN_PROGRESS",
+        runtime_root=runtime,
+        state_root=state,
+        release_sha="d" * 40,
+        observed_at=observed_at.isoformat(),
+    )
+    write_heartbeat(
+        state_root=state,
+        market_date=market_date,
+        stage="morning_collection",
+        run_id="daily-in-progress",
+        status="RUNNING",
+        now=observed_at,
+    )
+
+    status = daily_orchestration_status(
+        SQLiteScanStore(state / "state.sqlite"),
+        market_date=market_date,
+        state_root=state,
+        now=now,
+    )
+
+    assert status["latest_run"]["status"] == "IN_PROGRESS"
+    assert status["heartbeat_stale"] is True
+    assert status["status"] == "STALE_HEARTBEAT"
