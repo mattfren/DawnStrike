@@ -144,20 +144,30 @@ $approved=Get-DawnstrikeApprovedLockInterpreter
 $path='{lock_q}'
 [IO.File]::WriteAllText($path,('x'*17000))
 $before=Get-DawnstrikeRuntimeLockHash $path
-$rejected=$false;try{{$null=Get-DawnstrikeStrictRuntimeLock $path $approved.path $approved.sha256}}catch{{$rejected=$true}}
+$rejected=$false
+try{{$null=Get-DawnstrikeStrictRuntimeLock $path $approved.path $approved.sha256}}
+catch{{$rejected=$true}}
 if(-not $rejected){{throw 'huge accepted'}}
 if((Get-DawnstrikeRuntimeLockHash $path)-ne $before){{throw 'huge changed'}}
 [IO.File]::WriteAllText($path,'{{"schema_version":"x","schema_version":"y"}}')
 $before=Get-DawnstrikeRuntimeLockHash $path
-$rejected=$false;try{{$null=Get-DawnstrikeStrictRuntimeLock $path $approved.path $approved.sha256}}catch{{$rejected=$true}}
+$rejected=$false
+try{{$null=Get-DawnstrikeStrictRuntimeLock $path $approved.path $approved.sha256}}
+catch{{$rejected=$true}}
 if(-not $rejected){{throw 'tamper accepted'}}
 if((Get-DawnstrikeRuntimeLockHash $path)-ne $before){{throw 'tamper changed'}}
 Remove-Item $path -Force
 [IO.File]::WriteAllText('{target_q}','x')
-try{{New-Item -ItemType SymbolicLink -Path $path -Target '{target_q}' -ErrorAction Stop|Out-Null}}catch{{'SKIP_REPARSE';exit 0}}
-$rejected=$false;try{{$null=Get-DawnstrikeStrictRuntimeLock $path $approved.path $approved.sha256}}catch{{$rejected=$true}}
+try{{
+ New-Item -ItemType SymbolicLink -Path $path -Target '{target_q}' `
+  -ErrorAction Stop|Out-Null
+}}catch{{'SKIP_REPARSE';exit 0}}
+$rejected=$false
+try{{$null=Get-DawnstrikeStrictRuntimeLock $path $approved.path $approved.sha256}}
+catch{{$rejected=$true}}
 if(-not $rejected){{throw 'reparse accepted'}}
-if(-not ((Get-Item $path -Force).Attributes-band [IO.FileAttributes]::ReparsePoint)){{throw 'reparse changed'}}
+if(-not ((Get-Item $path -Force).Attributes-band `
+ [IO.FileAttributes]::ReparsePoint)){{throw 'reparse changed'}}
 'OK'
 """
     result = subprocess.run(
