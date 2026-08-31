@@ -32,6 +32,18 @@ _STRATEGY_RECEIPT_TRIGGERS = (
     "research_episode_outcome_bridges_no_update",
     "research_episode_outcome_bridges_no_delete",
 )
+_ACCOUNT_TRUTH_TRIGGERS = (
+    "expected_market_sessions_no_update",
+    "expected_market_sessions_no_delete",
+    "intraday_capture_runs_no_update",
+    "intraday_capture_runs_no_delete",
+    "committed_fill_truth_receipts_no_update",
+    "committed_fill_truth_receipts_no_delete",
+    "no_trade_session_receipts_no_update",
+    "no_trade_session_receipts_no_delete",
+    "experiment_trial_ledger_no_update",
+    "experiment_trial_ledger_no_delete",
+)
 
 Migration = Callable[[sqlite3.Connection], None]
 
@@ -104,9 +116,36 @@ def run_migrations(connection: sqlite3.Connection) -> int:
                 ).fetchone()
                 is None
             }
+            account_truth_tables = {
+                "expected_market_sessions",
+                "intraday_capture_runs",
+                "committed_fill_truth_receipts",
+                "no_trade_session_receipts",
+                "experiment_trial_ledger",
+            }
+            missing_account_truth_tables = {
+                name
+                for name in account_truth_tables
+                if connection.execute(
+                    """SELECT 1 FROM sqlite_master
+                    WHERE type = 'table' AND name = ? LIMIT 1""",
+                    (name,),
+                ).fetchone()
+                is None
+            }
             missing_triggers = {
                 name
                 for name in _STRATEGY_RECEIPT_TRIGGERS
+                if connection.execute(
+                    """SELECT 1 FROM sqlite_master
+                    WHERE type = 'trigger' AND name = ? LIMIT 1""",
+                    (name,),
+                ).fetchone()
+                is None
+            }
+            missing_account_truth_triggers = {
+                name
+                for name in _ACCOUNT_TRUTH_TRIGGERS
                 if connection.execute(
                     """SELECT 1 FROM sqlite_master
                     WHERE type = 'trigger' AND name = ? LIMIT 1""",
@@ -137,11 +176,19 @@ def run_migrations(connection: sqlite3.Connection) -> int:
             )
             if (
                 not missing_tables
+                and not missing_account_truth_tables
                 and not missing_triggers
+                and not missing_account_truth_triggers
                 and not missing_v6_availability
                 and not missing_bridge_logical_key
             ):
                 continue
+            # A store may already carry the legacy marker 31/32/33 from a
+            # prior sidecar rollout. Apply the account/session sidecar through
+            # its own idempotent helper before the version-specific repair so
+            # it cannot be skipped merely because the marker is advanced.
+            if missing_account_truth_tables or missing_account_truth_triggers:
+                _migration_031_account_session_truth(connection)
             migration(connection)
             # Do not advance schema_version: older governed stores validate
             # the 29/30 marker and the receipt tables are independently additive.
@@ -2447,6 +2494,247 @@ def _migration_031_strategy_decision_receipts(connection: sqlite3.Connection) ->
         END;
         """
     )
+    _migration_031_account_session_truth(connection)
+
+
+def _migration_031_account_session_truth(connection: sqlite3.Connection) -> None:
+    """Add immutable session completeness, capture, fill, and trial truth.
+
+    This is deliberately part of the existing additive migration-31 sidecar.
+    Governed stores retain their legacy schema marker (30); the sidecar is
+    independently idempotent and can be applied to stores at any later point.
+    """
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS expected_market_sessions (
+            session_id TEXT PRIMARY KEY,
+            market_date TEXT NOT NULL UNIQUE,
+            exchange TEXT NOT NULL,
+            session_open_utc TEXT NOT NULL,
+            session_close_utc TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN (
+                'EXPECTED', 'OPEN', 'CLOSED', 'CANCELLED', 'QUARANTINED'
+            )),
+            calendar_source TEXT NOT NULL,
+            calendar_source_hash_sha256 TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            research_only INTEGER NOT NULL CHECK (research_only = 1),
+            broker_execution_enabled INTEGER NOT NULL CHECK (
+                broker_execution_enabled = 0
+            ),
+            payload_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_expected_market_sessions_date
+        ON expected_market_sessions(market_date, status);
+
+        CREATE TABLE IF NOT EXISTS intraday_capture_runs (
+            capture_run_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            market_date TEXT NOT NULL,
+            evidence_mode TEXT NOT NULL CHECK (evidence_mode IN (
+                'forward_observed', 'retrospective_research'
+            )),
+            provider TEXT NOT NULL,
+            feed TEXT NOT NULL,
+            source_identity TEXT NOT NULL,
+            requested_start_utc TEXT NOT NULL,
+            requested_end_utc TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            status TEXT NOT NULL CHECK (status IN (
+                'PENDING', 'RUNNING', 'COMPLETE', 'PARTIAL', 'FAILED',
+                'SOURCE_CONFLICT', 'QUARANTINED'
+            )),
+            coverage_status TEXT NOT NULL,
+            code_sha TEXT NOT NULL,
+            source_config_hash_sha256 TEXT NOT NULL,
+            raw_artifact_hash_sha256 TEXT,
+            normalized_artifact_hash_sha256 TEXT,
+            receipt_hash_sha256 TEXT NOT NULL UNIQUE,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            research_only INTEGER NOT NULL CHECK (research_only = 1),
+            broker_execution_enabled INTEGER NOT NULL CHECK (
+                broker_execution_enabled = 0
+            ),
+            FOREIGN KEY (session_id) REFERENCES expected_market_sessions(session_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_intraday_capture_runs_session
+        ON intraday_capture_runs(market_date, session_id, status);
+
+        CREATE TABLE IF NOT EXISTS committed_fill_truth_receipts (
+            receipt_id TEXT PRIMARY KEY,
+            receipt_hash_sha256 TEXT NOT NULL UNIQUE,
+            account_id TEXT NOT NULL,
+            strategy_id TEXT NOT NULL,
+            strategy_version TEXT NOT NULL,
+            experiment_id TEXT,
+            arm_id TEXT,
+            decision_id TEXT,
+            selection_id TEXT,
+            intent_id TEXT,
+            position_id TEXT,
+            order_id TEXT,
+            side TEXT,
+            market_date TEXT NOT NULL,
+            execution_status TEXT NOT NULL CHECK (execution_status IN (
+                'PENDING', 'PARTIAL', 'FILLED', 'REJECTED', 'CANCELLED',
+                'CLOSED', 'QUARANTINED'
+            )),
+            entry_at TEXT,
+            exit_at TEXT,
+            quantity REAL,
+            entry_price REAL,
+            exit_price REAL,
+            spread_cost_cents INTEGER,
+            slippage_cost_cents INTEGER,
+            fees_cents INTEGER,
+            regulatory_cost_cents INTEGER,
+            borrow_cost_cents INTEGER,
+            source_artifact_hash_sha256 TEXT NOT NULL,
+            code_sha TEXT NOT NULL,
+            frozen_window TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            research_only INTEGER NOT NULL CHECK (research_only = 1),
+            broker_execution_enabled INTEGER NOT NULL CHECK (
+                broker_execution_enabled = 0
+            )
+        );
+        CREATE INDEX IF NOT EXISTS idx_committed_fill_truth_account_day
+        ON committed_fill_truth_receipts(account_id, market_date, receipt_id);
+        CREATE INDEX IF NOT EXISTS idx_committed_fill_truth_experiment
+        ON committed_fill_truth_receipts(experiment_id, arm_id, market_date);
+
+        CREATE TABLE IF NOT EXISTS no_trade_session_receipts (
+            receipt_id TEXT PRIMARY KEY,
+            receipt_hash_sha256 TEXT NOT NULL UNIQUE,
+            account_id TEXT NOT NULL,
+            strategy_id TEXT NOT NULL,
+            strategy_version TEXT NOT NULL,
+            experiment_id TEXT,
+            arm_id TEXT,
+            market_date TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status = 'FINALIZED'),
+            decision TEXT NOT NULL CHECK (decision = 'NO_TRADE'),
+            no_entry INTEGER NOT NULL CHECK (no_entry = 1),
+            source_artifact_hash_sha256 TEXT NOT NULL,
+            source_config_hash_sha256 TEXT NOT NULL,
+            calendar_source_hash_sha256 TEXT NOT NULL,
+            code_sha TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            research_only INTEGER NOT NULL CHECK (research_only = 1),
+            broker_execution_enabled INTEGER NOT NULL CHECK (
+                broker_execution_enabled = 0
+            )
+        );
+        CREATE INDEX IF NOT EXISTS idx_no_trade_session_receipts_identity
+        ON no_trade_session_receipts(account_id, market_date, session_id, run_id);
+
+        CREATE TABLE IF NOT EXISTS experiment_trial_ledger (
+            trial_id TEXT PRIMARY KEY,
+            trial_number INTEGER NOT NULL UNIQUE CHECK (trial_number > 0),
+            experiment_id TEXT NOT NULL,
+            arm_id TEXT NOT NULL,
+            strategy_id TEXT NOT NULL,
+            strategy_version TEXT NOT NULL,
+            configuration_hash_sha256 TEXT NOT NULL,
+            feature_set_hash_sha256 TEXT NOT NULL,
+            cost_model_version TEXT NOT NULL,
+            validation_window TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN (
+                'ATTEMPTED', 'COMPLETE', 'FAILED', 'QUARANTINED'
+            )),
+            code_sha TEXT NOT NULL,
+            source_hash_sha256 TEXT NOT NULL,
+            attempted_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            research_only INTEGER NOT NULL CHECK (research_only = 1),
+            broker_execution_enabled INTEGER NOT NULL CHECK (
+                broker_execution_enabled = 0
+            )
+        );
+        CREATE INDEX IF NOT EXISTS idx_experiment_trial_ledger_experiment
+        ON experiment_trial_ledger(experiment_id, arm_id, trial_number);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_experiment_trial_ledger_attempt
+        ON experiment_trial_ledger(json_extract(payload_json, '$.attempt_id'));
+
+        CREATE TRIGGER IF NOT EXISTS expected_market_sessions_no_update
+        BEFORE UPDATE ON expected_market_sessions BEGIN
+            SELECT RAISE(ABORT, 'expected_market_sessions is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS expected_market_sessions_no_delete
+        BEFORE DELETE ON expected_market_sessions BEGIN
+            SELECT RAISE(ABORT, 'expected_market_sessions is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS intraday_capture_runs_no_update
+        BEFORE UPDATE ON intraday_capture_runs BEGIN
+            SELECT RAISE(ABORT, 'intraday_capture_runs is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS intraday_capture_runs_no_delete
+        BEFORE DELETE ON intraday_capture_runs BEGIN
+            SELECT RAISE(ABORT, 'intraday_capture_runs is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS committed_fill_truth_receipts_no_update
+        BEFORE UPDATE ON committed_fill_truth_receipts BEGIN
+            SELECT RAISE(ABORT, 'committed_fill_truth_receipts is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS committed_fill_truth_receipts_no_delete
+        BEFORE DELETE ON committed_fill_truth_receipts BEGIN
+            SELECT RAISE(ABORT, 'committed_fill_truth_receipts is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS no_trade_session_receipts_no_update
+        BEFORE UPDATE ON no_trade_session_receipts BEGIN
+            SELECT RAISE(ABORT, 'no_trade_session_receipts is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS no_trade_session_receipts_no_delete
+        BEFORE DELETE ON no_trade_session_receipts BEGIN
+            SELECT RAISE(ABORT, 'no_trade_session_receipts is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS experiment_trial_ledger_no_update
+        BEFORE UPDATE ON experiment_trial_ledger BEGIN
+            SELECT RAISE(ABORT, 'experiment_trial_ledger is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS experiment_trial_ledger_no_delete
+        BEFORE DELETE ON experiment_trial_ledger BEGIN
+            SELECT RAISE(ABORT, 'experiment_trial_ledger is append-only');
+        END;
+        """
+    )
+    if connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = "
+        "'paper_account_daily_ledger'"
+    ).fetchone():
+        for column in (
+            "target_return_pct REAL NOT NULL DEFAULT 1.0",
+            "target_status TEXT NOT NULL DEFAULT 'PENDING'",
+            "expected_session_id TEXT",
+            "experiment_id TEXT",
+            "arm_id TEXT",
+            "evidence_mode TEXT NOT NULL DEFAULT 'forward_observed'",
+            "lineage_sha256 TEXT",
+            "target_shortfall_pct REAL",
+            "target_excess_pct REAL",
+            "spread_cost_cents INTEGER",
+            "slippage_cost_cents INTEGER",
+            "fees_cents INTEGER",
+            "regulatory_cost_cents INTEGER",
+            "borrow_cost_cents INTEGER",
+        ):
+            _add_column_if_missing(connection, "paper_account_daily_ledger", column)
+        connection.executescript(
+            """
+            CREATE INDEX IF NOT EXISTS idx_paper_account_ledger_target_status
+            ON paper_account_daily_ledger(account_id, market_date, target_status);
+            CREATE INDEX IF NOT EXISTS idx_paper_account_ledger_session
+            ON paper_account_daily_ledger(expected_session_id, market_date);
+            """
+        )
+    _add_column_if_missing(connection, "committed_fill_truth_receipts", "side TEXT")
 
 
 def _migration_032_v6_decision_availability(connection: sqlite3.Connection) -> None:

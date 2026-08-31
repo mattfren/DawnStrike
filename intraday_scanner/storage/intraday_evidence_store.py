@@ -18,6 +18,7 @@ from intraday_scanner.alpha.path_replay import (
     canonical_path_return_eligible,
 )
 from intraday_scanner.errors import StorageError
+from intraday_scanner.market_calendar import canonical_regular_session_id
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 from intraday_scanner.v2.data_truth.intraday import (
     IntradayArtifactManifest,
@@ -65,6 +66,66 @@ class IntradayEvidenceStore:
     def initialize(self) -> None:
         self._sqlite_store.initialize()
 
+    def persist_committed_fill_truth_receipt(self, receipt: dict[str, Any]) -> bool:
+        """Persist one immutable committed FillTruth envelope."""
+
+        return self._sqlite_store.persist_committed_fill_truth_receipt(receipt)
+
+    def load_committed_fill_truth_receipt_record(
+        self, receipt_id: str
+    ) -> dict[str, Any] | None:
+        """Load an unmerged receipt record for CommitBridge validation."""
+
+        return self._sqlite_store.load_committed_fill_truth_receipt_record(receipt_id)
+
+    def load_committed_fill_truth_receipt(
+        self, receipt_id: str
+    ) -> dict[str, Any] | None:
+        """Load the canonical committed FillTruth payload."""
+
+        return self._sqlite_store.load_committed_fill_truth_receipt(receipt_id)
+
+    def persist_no_trade_session_receipt(self, receipt: dict[str, Any]) -> bool:
+        """Persist one immutable finalized no-entry session receipt."""
+
+        return self._sqlite_store.persist_no_trade_session_receipt(receipt)
+
+    def load_no_trade_session_receipt_record(
+        self, receipt_id: str
+    ) -> dict[str, Any] | None:
+        return self._sqlite_store.load_no_trade_session_receipt_record(receipt_id)
+
+    def load_no_trade_session_receipt(self, receipt_id: str) -> dict[str, Any] | None:
+        return self._sqlite_store.load_no_trade_session_receipt(receipt_id)
+
+    def persist_capture_run(self, receipt: dict[str, Any]) -> bool:
+        """Append one immutable, hash-bound capture-run receipt."""
+
+        return self._sqlite_store.persist_intraday_capture_run(receipt)
+
+    def persist_expected_market_session(self, session: dict[str, Any]) -> bool:
+        """Append one checked-calendar expected-session denominator."""
+
+        return self._sqlite_store.persist_expected_market_session(session)
+
+    def load_capture_run_record(self, run_id: str) -> dict[str, Any] | None:
+        return self._sqlite_store.load_intraday_capture_run_record(run_id)
+
+    def load_capture_runs(
+        self,
+        *,
+        market_date: str | None = None,
+        session_id: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        return self._sqlite_store.load_intraday_capture_runs(
+            market_date=market_date,
+            session_id=session_id,
+            status=status,
+            limit=limit,
+        )
+
     def store_artifact(
         self,
         *,
@@ -95,6 +156,15 @@ class IntradayEvidenceStore:
         if not retention_allowed:
             raise RetentionNotPermittedError(
                 "intraday artifact retention is not permitted for this source"
+            )
+        try:
+            canonical_session_id = canonical_regular_session_id(market_date)
+        except ValueError as exc:
+            raise EvidenceStoreError(str(exc)) from exc
+        if exchange_session_id != canonical_session_id:
+            raise EvidenceStoreError(
+                "intraday artifact exchange_session_id must be canonical "
+                "XNYS:<market_date>:regular"
             )
         self.initialize()
         _require_utc(request_start, "request_start")

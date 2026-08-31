@@ -316,10 +316,27 @@ def persist_v5_account_ledger(
         """,
         {**account, "payload_json": json.dumps(account, sort_keys=True)},
     )
+    # The account-session ledger shares this table but carries an immutable
+    # expected_session_id.  Rebuilding the legacy V5 view must not erase those
+    # canonical rows (or rows belonging to another account partition).  Only
+    # rows with no canonical session identity are owned by this legacy writer.
     connection.execute(
-        "DELETE FROM paper_account_daily_ledger WHERE account_id = ?",
+        "DELETE FROM paper_account_daily_ledger "
+        "WHERE account_id = ? AND expected_session_id IS NULL",
         (ALPHAOPS_V5_ACCOUNT_ID,),
     )
+    legacy_rows: list[dict[str, Any]] = []
+    for row in rows:
+        existing = connection.execute(
+            "SELECT expected_session_id FROM paper_account_daily_ledger "
+            "WHERE account_id = ? AND market_date = ?",
+            (ALPHAOPS_V5_ACCOUNT_ID, row["market_date"]),
+        ).fetchone()
+        # A canonical account/session row owns this account/date partition and
+        # is never overwritten by the older strategy-specific reconciliation.
+        if existing is not None and existing[0] is not None:
+            continue
+        legacy_rows.append(row)
     connection.executemany(
         """
         INSERT INTO paper_account_daily_ledger
@@ -353,7 +370,7 @@ def persist_v5_account_ledger(
                 "source_refs_json": json.dumps(row["source_refs"], sort_keys=True),
                 "payload_json": json.dumps(row, sort_keys=True),
             }
-            for row in rows
+            for row in legacy_rows
         ],
     )
 

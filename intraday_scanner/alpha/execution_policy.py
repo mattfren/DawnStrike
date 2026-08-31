@@ -7,6 +7,12 @@ from datetime import datetime, time
 from typing import Any
 
 from intraday_scanner.risk.policy import RiskInput, evaluate_risk
+from intraday_scanner.risk.portfolio import (
+    PortfolioOrderProposal,
+    PortfolioRiskLimits,
+    PortfolioRiskSnapshot,
+    evaluate_portfolio_risk,
+)
 
 EXECUTION_POLICY_VERSION = "dawnstrike-execution-policy-v1"
 
@@ -30,6 +36,15 @@ class ExecutionPolicyInput:
     source_quality_status: str | None
     spread_bps: float | None
     live_execution_requested: bool = False
+    # Optional aggregate account context. When supplied, this is the only
+    # admission authority used for a paper proposal.
+    portfolio_snapshot: PortfolioRiskSnapshot | None = None
+    portfolio_limits: PortfolioRiskLimits | None = None
+    quantity: int | None = None
+    sector: str | None = None
+    theme: str | None = None
+    price_observed_at: str | None = None
+    metadata_complete: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +81,31 @@ def evaluate_execution_policy(request: ExecutionPolicyInput) -> ExecutionPolicyD
         )
     )
     reasons = list(risk.reasons)
+    computed = risk.computed
+    if request.portfolio_snapshot is not None:
+        portfolio = evaluate_portfolio_risk(
+            PortfolioOrderProposal(
+                symbol=request.ticker,
+                side="long",
+                quantity=request.quantity or 0,
+                price=request.entry_price,
+                stop_price=request.stop_price,
+                strategy_id="execution_policy",
+                sector=request.sector,
+                theme=request.theme,
+                price_observed_at=request.price_observed_at,
+                metadata_complete=request.metadata_complete,
+                live_execution_requested=request.live_execution_requested,
+            ),
+            request.portfolio_snapshot,
+            limits=request.portfolio_limits,
+        )
+        # Portfolio admission is an additional aggregate gate.  It must not
+        # replace the per-proposal truth gates above: the portfolio authority
+        # intentionally has no knowledge of halt, source, corporate-action,
+        # SEC, or spread fields carried by this policy input.
+        reasons.extend(portfolio.reason_codes)
+        computed = portfolio.computed
     expected_exit = _parse_time(request.expected_exit_time)
     session_close = _parse_time(request.session_close_time)
     if request.expected_exit_time is None or request.session_close_time is None:
@@ -81,7 +121,7 @@ def evaluate_execution_policy(request: ExecutionPolicyInput) -> ExecutionPolicyD
         reasons=unique_reasons,
         policy_version=EXECUTION_POLICY_VERSION,
         risk_policy_version=str(risk.policy_version),
-        computed=risk.computed,
+        computed=computed,
     )
 
 

@@ -8,6 +8,7 @@ Observer stores fail closed before connecting when the database is absent, an ac
 | `free-shadow-report` | observer | read-only | `--persist` writes shadow report |
 | `web-source-doctor` | filesystem/input-only | no SQLite | n/a |
 | `daily-orchestrator-status` | observer | read-only | none |
+| `account-session-report` | observer | read-only | none |
 | `alpha-status` | observer | read-only | none |
 | `alpha-doctor` | filesystem/input-only | no SQLite | n/a |
 | `alpha-report` | observer | read-only | none |

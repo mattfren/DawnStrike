@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 from intraday_scanner.v2.backtest.intraday_engine import (
     CausalMarketEvent,
+    IntradayBacktestSettings,
     build_expanding_walk_forward_folds,
     run_intraday_backtest,
 )
@@ -20,6 +21,24 @@ def _event(index: int, **payload: object) -> CausalMarketEvent:
         payload=payload,
         source_artifact_identity="fixture:bars:NOVA:2026-08-03",
         source_artifact_hash_sha256="bars-hash",
+        exchange_session_id="XNYS:2026-08-03:regular",
+    )
+
+
+def _symbol_event(
+    symbol: str,
+    index: int,
+    *,
+    kind: str = "bar",
+    **payload: object,
+) -> CausalMarketEvent:
+    return CausalMarketEvent(
+        timestamp=START + timedelta(minutes=index),
+        symbol=symbol,
+        kind=kind,
+        payload=payload,
+        source_artifact_identity=f"fixture:bars:{symbol}:2026-08-03",
+        source_artifact_hash_sha256=f"bars-hash-{symbol}",
         exchange_session_id="XNYS:2026-08-03:regular",
     )
 
@@ -98,3 +117,148 @@ def test_walk_forward_folds_are_expanding_and_disjoint() -> None:
         )
         assert all_sets[0].isdisjoint(set().union(*all_sets[1:]))
         assert fold.no_lookahead is True
+
+
+def _two_position_events(
+    *, reverse_same_clock_bars: bool = False
+) -> tuple[CausalMarketEvent, ...]:
+    decisions = (
+        _symbol_event(
+            "ALFA",
+            0,
+            kind="decision",
+            signal={
+                "policy_eligible": True,
+                "direction": "long",
+                "stop": 0.0,
+                "target": 100.0,
+                "quantity": 1,
+            },
+        ),
+        _symbol_event(
+            "BRAVO",
+            0,
+            kind="decision",
+            signal={
+                "policy_eligible": True,
+                "direction": "short",
+                "stop": 100.0,
+                "target": 1.0,
+                "quantity": 1,
+            },
+        ),
+    )
+    bars = (
+        _symbol_event("ALFA", 1, open=10.0, high=11.0, low=9.5, close=11.0),
+        _symbol_event("BRAVO", 1, open=20.0, high=20.5, low=17.5, close=18.0),
+    )
+    if reverse_same_clock_bars:
+        bars = tuple(reversed(bars))
+    return decisions + bars
+
+
+def test_mark_to_market_includes_simultaneous_long_and_short_positions() -> None:
+    result = run_intraday_backtest(
+        _two_position_events(),
+        settings=IntradayBacktestSettings(
+            entry_slippage_bps=0.0,
+            exit_slippage_bps=0.0,
+            commission_per_share_per_side=0.0,
+        ),
+    )
+
+    # The old event.symbol-only mark omitted ALFA at BRAVO's event and
+    # produced 100002.  Both open positions now contribute: +1 and +2.
+    assert result.equity_curve[-1].equity == 100003.0
+    assert result.equity_curve[-1].open_positions == 2
+
+
+def test_same_clock_mark_order_is_deterministic() -> None:
+    settings = IntradayBacktestSettings(
+        entry_slippage_bps=0.0,
+        exit_slippage_bps=0.0,
+        commission_per_share_per_side=0.0,
+    )
+    forward = run_intraday_backtest(_two_position_events(), settings=settings)
+    reverse = run_intraday_backtest(
+        _two_position_events(reverse_same_clock_bars=True), settings=settings
+    )
+
+    assert forward.equity_curve == reverse.equity_curve
+    assert forward.trades == reverse.trades
+
+
+def test_mark_uses_latest_causal_price_and_keeps_missing_price_unmarked() -> None:
+    events = (
+        _symbol_event(
+            "ALFA",
+            0,
+            kind="decision",
+            signal={
+                "policy_eligible": True,
+                "direction": "long",
+                "stop": 0.0,
+                "target": 100.0,
+            },
+        ),
+        _symbol_event(
+            "BRAVO",
+            0,
+            kind="decision",
+            signal={
+                "policy_eligible": True,
+                "direction": "short",
+                "stop": 100.0,
+                "target": 1.0,
+            },
+        ),
+        _symbol_event("ALFA", 1, open=10.0, high=11.0, low=9.5, close=11.0),
+        # BRAVO has an open position but no close mark at this event.  Its
+        # missing price must not be replaced by zero or its entry price.
+        _symbol_event("BRAVO", 1, open=20.0, high=20.5, low=17.5),
+        # The ALFA mark is stale but still causally available and remains in
+        # the account equity until ALFA receives a newer mark or closes.
+        _symbol_event("BRAVO", 2, open=18.0, high=18.5, low=17.5, close=18.0),
+    )
+    result = run_intraday_backtest(
+        events,
+        settings=IntradayBacktestSettings(
+            entry_slippage_bps=0.0,
+            exit_slippage_bps=0.0,
+            commission_per_share_per_side=0.0,
+        ),
+    )
+
+    assert result.equity_curve[1].equity == 100001.0
+    assert result.equity_curve[1].open_positions == 2
+    assert result.equity_curve[2].equity == 100003.0
+
+
+def test_closed_position_is_removed_and_its_mark_is_not_double_counted() -> None:
+    events = (
+        _symbol_event(
+            "ALFA",
+            0,
+            kind="decision",
+            signal={
+                "policy_eligible": True,
+                "direction": "long",
+                "stop": 0.0,
+                "target": 12.0,
+            },
+        ),
+        _symbol_event("ALFA", 1, open=10.0, high=10.5, low=9.5, close=11.0),
+        _symbol_event("ALFA", 2, open=11.0, high=12.1, low=10.5, close=12.0),
+    )
+    result = run_intraday_backtest(
+        events,
+        settings=IntradayBacktestSettings(
+            entry_slippage_bps=0.0,
+            exit_slippage_bps=0.0,
+            commission_per_share_per_side=0.0,
+        ),
+    )
+
+    assert result.equity_curve[-1].equity == 100002.0
+    assert result.equity_curve[-1].open_positions == 0
+    assert len(result.trades) == 1
