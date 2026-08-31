@@ -9,6 +9,12 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if (
+    [int]$PSVersionTable.PSVersion.Major -lt 5 -or
+    [string]$PSVersionTable.PSEdition -ne "Desktop"
+) {
+    throw "Dawnstrike rollback requires Windows PowerShell 5.1 or later (Desktop edition)."
+}
 $rollbackRuntimeRoot = $RuntimeRoot
 $rollbackStateRoot = $StateRoot
 $rollbackBackupRoot = $BackupRoot
@@ -60,6 +66,10 @@ function Get-DawnstrikeActivationAuxiliaryRecoveryContract {
         throw "Activation auxiliary capture XML file is missing."
     }
     $xml = [System.IO.File]::ReadAllText($xmlPath)
+    Assert-DawnstrikeNoReparseComponents $xmlPath "Activation auxiliary XML backup"
+    if ((Get-DawnstrikeSha256File $xmlPath) -ne [string]$auxiliary.xml_file_sha256) {
+        throw "Activation auxiliary capture XML backup changed during read."
+    }
     if (
         (Get-DawnstrikeSha256File $xmlPath) -ne [string]$auxiliary.xml_file_sha256 -or
         (Get-DawnstrikeSha256Text $xml) -ne [string]$auxiliary.xml_sha256 -or
@@ -73,6 +83,9 @@ function Get-DawnstrikeActivationAuxiliaryRecoveryContract {
         task_path = [string]$auxiliary.task_path
         xml = $xml
         xml_sha256 = [string]$auxiliary.xml_sha256
+        xml_file_sha256 = [string]$auxiliary.xml_file_sha256
+        definition_contract_sha256 = [string]$auxiliary.definition_contract_sha256
+        action_contract_sha256 = [string]$auxiliary.action_contract_sha256
         enabled = ([string]$Activation.auxiliary_capture_state_before -eq "Ready")
     }
 }
@@ -84,7 +97,8 @@ function Assert-DawnstrikeCapturePreparedRecovery {
         [Parameter(Mandatory = $true)][object]$Auxiliary,
         [Parameter(Mandatory = $true)][string]$StateRoot,
         [Parameter(Mandatory = $true)][string]$CandidateSha,
-        [Parameter(Mandatory = $true)][string]$CandidateTree
+        [Parameter(Mandatory = $true)][string]$CandidateTree,
+        [Parameter(Mandatory = $true)][string]$PythonPath
     )
 
     if (-not $Auxiliary.present -or $Auxiliary.state -ne "Ready") {
@@ -97,24 +111,7 @@ function Assert-DawnstrikeCapturePreparedRecovery {
     if (-not (Test-Path -LiteralPath $preparedPath -PathType Leaf)) {
         throw "Ready auxiliary capture task has no COMPLETE or PREPARED recovery chain."
     }
-    try {
-        $prepared = Get-Content -LiteralPath $preparedPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    }
-    catch {
-        throw "Capture-task PREPARED recovery record is invalid JSON."
-    }
-    $expectedFields = @(
-        "schema_version", "status", "task_name", "candidate_sha", "candidate_tree",
-        "activation_id", "activation_receipt_name", "activation_receipt_sha256",
-        "previous_candidate_sha", "xml_before_sha256", "action_before_sha256",
-        "definition_before_sha256", "principal_sha256", "trigger_sha256", "settings_sha256",
-        "enablement_before", "compensation", "research_only", "broker_execution_enabled"
-    )
-    $expectedFieldText = (@($expectedFields | Sort-Object) -join "|")
-    $actualFieldText = (@($prepared.PSObject.Properties.Name | Sort-Object) -join "|")
-    if ($expectedFieldText -ne $actualFieldText) {
-        throw "Capture-task PREPARED recovery record fields are not exact."
-    }
+    $captureContract = Join-Path $PSScriptRoot "capture_task_contract.py"
     $activationPath = Join-Path $StateRoot ("receipts\runtime-activation\runtime-activation-" + [string]$Activation.activation_id + ".json")
     Assert-DawnstrikeNoReparseComponents $activationPath "Prepared recovery activation receipt"
     if (-not (Test-Path -LiteralPath $activationPath -PathType Leaf)) {
@@ -123,8 +120,20 @@ function Assert-DawnstrikeCapturePreparedRecovery {
     $activationItem = Get-Item -LiteralPath $activationPath -Force -ErrorAction Stop
     $hashFields = @(
         "activation_receipt_sha256", "xml_before_sha256", "action_before_sha256",
-        "definition_before_sha256", "principal_sha256", "trigger_sha256", "settings_sha256"
+        "definition_before_sha256", "normalized_definition_before_sha256",
+        "principal_sha256", "trigger_sha256", "settings_sha256",
+        "symbols_manifest_sha256", "entitlement_receipt_sha256", "source_config_sha256"
     )
+    try {
+        $preparedResult = Invoke-DawnstrikeActivationProcess $PythonPath @(
+            $captureContract, "verify-prepared", "--prepared", $preparedPath,
+            "--candidate-sha", $CandidateSha, "--candidate-tree", $CandidateTree
+        ) $PSScriptRoot "Capture-task PREPARED recovery verification" $ProcessTimeoutSeconds
+        $prepared = [string]$preparedResult.Stdout | ConvertFrom-Json
+    }
+    catch {
+        throw "Capture-task PREPARED recovery record is not a strict self-hashed contract."
+    }
     foreach ($field in $hashFields) {
         if ([string]$prepared.$field -notmatch '^[0-9a-f]{64}$') {
             throw "Capture-task PREPARED recovery hash is invalid: $field"
@@ -153,6 +162,27 @@ function Assert-DawnstrikeCapturePreparedRecovery {
     }
     if ([string]$prepared.previous_candidate_sha -notmatch '^[0-9a-f]{40}$') {
         throw "Capture-task PREPARED previous candidate SHA is invalid."
+    }
+    $original = Get-DawnstrikeActivationAuxiliaryRecoveryContract -Activation $Activation -StateRoot $StateRoot
+    if (
+        [string]$prepared.xml_before_sha256 -ne [string]$original.xml_sha256 -or
+        [string]$prepared.action_before_sha256 -ne [string]$original.action_contract_sha256 -or
+        [string]$prepared.definition_before_sha256 -ne [string]$original.definition_contract_sha256
+    ) { throw "Capture-task PREPARED original XML is not bound to the activation backup." }
+    foreach ($input in @(
+        @("symbols_manifest_path", "symbols_manifest_sha256"),
+        @("entitlement_receipt_path", "entitlement_receipt_sha256"),
+        @("source_config_path", "source_config_sha256")
+    )) {
+        $inputPath = [string]$prepared.($input[0])
+        Assert-DawnstrikeNoReparseComponents $inputPath "Capture-task PREPARED input"
+        $inputItem = Get-Item -LiteralPath $inputPath -Force -ErrorAction Stop
+        if ($inputItem.PSIsContainer -or ($inputItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Capture-task PREPARED input is not a regular file."
+        }
+        if ((Get-DawnstrikeSha256File $inputPath) -ne [string]$prepared.($input[1])) {
+            throw "Capture-task PREPARED input hash does not match the supplied file."
+        }
     }
     $candidateOccurrences = @([regex]::Matches([string]$Auxiliary.xml, [regex]::Escape($CandidateSha))).Count
     if (
@@ -184,7 +214,7 @@ function Invoke-DawnstrikeRuntimeRollback {
     $runtime = Get-DawnstrikeFutureActivationRoot $RuntimeRoot "RuntimeRoot"
     Assert-DawnstrikeRootIsolation $safeBackupRoot @($contract, $runtime, $state) "BackupRoot"
     Assert-DawnstrikeNoReparseComponents $ActivationReceipt "Activation receipt"
-    $receiptPath = (Resolve-Path -LiteralPath $ActivationReceipt -ErrorAction Stop).Path
+    $receiptPath = [System.IO.Path]::GetFullPath($ActivationReceipt)
     $approvedReceiptRoot = [System.IO.Path]::GetFullPath(
         (Join-Path $state "receipts\runtime-activation")
     ).TrimEnd('\') + '\'
@@ -193,9 +223,13 @@ function Invoke-DawnstrikeRuntimeRollback {
     }
     Assert-DawnstrikeNoReparseComponents $receiptPath "Activation receipt"
     $receiptItem = Get-Item -LiteralPath $receiptPath -Force
-    if (($receiptItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+    if (
+        $receiptItem.PSIsContainer -or
+        ($receiptItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
+    ) {
         throw "Activation receipt cannot be a reparse point."
     }
+    Assert-DawnstrikeNoReparseComponents $receiptPath "Activation receipt"
 
     $gitCommand = @(Get-Command git.exe -CommandType Application -ErrorAction Stop)[0]
     $pythonCommand = @(Get-Command py.exe -CommandType Application -ErrorAction Stop)[0]
@@ -263,9 +297,12 @@ function Invoke-DawnstrikeRuntimeRollback {
     $rollbackReceipt = Join-Path $rollbackReceiptRoot "runtime-rollback-$activationId.json"
     $rollbackSchedulerBackupName = "runtime-rollback-$activationId"
     $rollbackSchedulerBackupPath = Join-Path $state "scheduler-backups\$rollbackSchedulerBackupName"
+    Assert-DawnstrikeNoReparseComponents $rollbackReceiptRoot "Rollback receipt root"
+    Assert-DawnstrikeNoReparseComponents $rollbackReceipt "Rollback receipt"
     Assert-DawnstrikeSameVolume @($runtime, $rollbackStage, $rollbackRoot)
 
     if (Test-Path -LiteralPath $rollbackReceipt -PathType Leaf) {
+        Assert-DawnstrikeNoReparseComponents $rollbackReceipt "Existing rollback receipt"
         $existing = Invoke-DawnstrikeContractCli $pythonPath $contract @("verify-receipt", "--receipt", $rollbackReceipt, "--expected-status", "ROLLED_BACK") "Existing rollback receipt verification" $ProcessTimeoutSeconds
         if (-not (Test-Path -LiteralPath $runtime -PathType Container)) {
             throw "Rollback receipt exists but the runtime is missing."
@@ -386,7 +423,7 @@ function Invoke-DawnstrikeRuntimeRollback {
                     $null = Assert-DawnstrikeCapturePreparedRecovery `
                         -Activation $activation -Auxiliary $auxiliaryBefore `
                         -StateRoot $state -CandidateSha $candidateSha `
-                        -CandidateTree $activation.candidate_tree
+                        -CandidateTree $activation.candidate_tree -PythonPath $pythonPath
                 }
             }
             else { throw "Rollback auxiliary capture task is in an ambiguous state." }
@@ -466,6 +503,8 @@ function Invoke-DawnstrikeRuntimeRollback {
         if (-not $dailyLock.acquired) {
             throw "Runtime rollback could not acquire the daily run lock."
         }
+        Confirm-DawnstrikeActivationDailyLockHandshake `
+            -StateRoot $state -ActivationLock $activationLock -DailyLock $dailyLock | Out-Null
         $taskLocked = Get-DawnstrikeTaskContract $runtime $state -AllowDisabled
         if ($taskLocked.task_action_contract_sha256 -ne $taskBefore.task_action_contract_sha256) {
             throw "Task definitions changed during rollback preflight."
@@ -623,6 +662,10 @@ function Invoke-DawnstrikeRuntimeRollback {
             $payload.state_preparation_backup_db_sha256 = [string]$activation.state_preparation_backup_db_sha256
             $payload.state_preparation_backup_manifest_sha256 = [string]$activation.state_preparation_backup_manifest_sha256
             $payload.state_preparation_backup_manifest_file_sha256 = [string]$activation.state_preparation_backup_manifest_file_sha256
+            $payload.state_backup_bundle_path = [string]$activation.state_backup_bundle_path
+            $payload.state_backup_manifest_sha256 = [string]$activation.state_backup_manifest_sha256
+            $payload.state_backup_logical_snapshot_sha256 = [string]$activation.state_backup_logical_snapshot_sha256
+            $payload.state_backup_source_logical_snapshot_sha256 = [string]$activation.state_backup_source_logical_snapshot_sha256
             $payload.auxiliary_capture_present = [bool]$activation.auxiliary_capture_present
             $payload.auxiliary_capture_state_before = "Disabled"
             $payload.auxiliary_capture_state_after = [string]$activation.auxiliary_capture_state_before

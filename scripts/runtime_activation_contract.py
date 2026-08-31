@@ -36,6 +36,7 @@ _MARKET_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _GITHUB_RUN = re.compile(r"^https://github\.com/[^/?#]+/[^/?#]+/actions/runs/[1-9][0-9]*$")
 _FORBIDDEN_KEY_PARTS = ("secret", "password", "credential", "private_key", "token")
 _MAX_EVIDENCE_AGE = timedelta(days=30)
+_REPARSE_POINT = 0x400
 
 _CI_KEYS = frozenset(
     {
@@ -162,6 +163,10 @@ _EXTENDED_RECEIPT_KEYS = frozenset(
         "state_preparation_backup_db_sha256",
         "state_preparation_backup_manifest_sha256",
         "state_preparation_backup_manifest_file_sha256",
+        "state_backup_bundle_path",
+        "state_backup_logical_snapshot_sha256",
+        "state_backup_source_logical_snapshot_sha256",
+        "state_backup_manifest_sha256",
         "auxiliary_capture_present",
         "auxiliary_capture_state_before",
         "auxiliary_capture_state_after",
@@ -189,6 +194,37 @@ def canonical_json(value: object) -> bytes:
 def self_hash(payload: Mapping[str, Any], field: str) -> str:
     unsigned = {key: value for key, value in payload.items() if key != field}
     return hashlib.sha256(canonical_json(unsigned)).hexdigest()
+
+
+def _is_reparse_point(path: Path) -> bool:
+    try:
+        attributes = int(getattr(path.lstat(), "st_file_attributes", 0))
+    except OSError:
+        return False
+    return path.is_symlink() or bool(attributes & _REPARSE_POINT)
+
+
+def _assert_no_reparse_components(path: str | Path) -> Path:
+    """Reject links/junctions in the complete path before any I/O boundary."""
+
+    absolute = Path(os.path.abspath(Path(path).expanduser()))
+    current = Path(absolute.anchor)
+    for component in absolute.parts[1:]:
+        current /= component
+        if (os.path.lexists(current) or current.is_symlink()) and _is_reparse_point(current):
+            raise ActivationContractError(
+                f"reparse-point path component is forbidden: {current}"
+            )
+    return absolute
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ActivationContractError(f"duplicate JSON field is forbidden: {key}")
+        result[key] = value
+    return result
 
 
 def seal_evidence(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -282,11 +318,12 @@ def validate_evidence_pair(
 def inspect_state(db_path: str | Path) -> dict[str, Any]:
     """Inspect the durable database without creating or migrating it."""
 
-    supplied = Path(db_path)
-    if supplied.is_symlink():
-        raise ActivationContractError("durable state database is missing or unsafe")
-    path = supplied.resolve()
-    if path.name != "shadow_real.sqlite" or not path.is_file():
+    path = _assert_no_reparse_components(db_path)
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise ActivationContractError("durable state database is missing or unsafe") from exc
+    if _is_reparse_point(path) or path.name != "shadow_real.sqlite" or not path.is_file():
         raise ActivationContractError("durable state database is missing or unsafe")
     uri = f"file:{quote(path.as_posix(), safe='/:')}?mode=ro"
     try:
@@ -313,7 +350,29 @@ def inspect_state(db_path: str | Path) -> dict[str, Any]:
         raise ActivationContractError(
             "durable state schema does not exactly match the candidate runtime"
         )
+    _assert_no_reparse_components(path)
+    try:
+        after = path.lstat()
+    except OSError as exc:
+        raise ActivationContractError("durable state database changed during inspection") from exc
+    if (
+        _is_reparse_point(path)
+        or after.st_size != before.st_size
+        or after.st_mtime_ns != before.st_mtime_ns
+    ):
+        raise ActivationContractError("durable state database changed during inspection")
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    _assert_no_reparse_components(path)
+    try:
+        final = path.lstat()
+    except OSError as exc:
+        raise ActivationContractError("durable state database changed during inspection") from exc
+    if (
+        _is_reparse_point(path)
+        or final.st_size != before.st_size
+        or final.st_mtime_ns != before.st_mtime_ns
+    ):
+        raise ActivationContractError("durable state database changed during inspection")
     return {
         "status": "PASS",
         "database_name": path.name,
@@ -490,6 +549,9 @@ def _validate_extended_receipt(payload: Mapping[str, Any]) -> None:
         "state_preparation_backup_db_sha256",
         "state_preparation_backup_manifest_sha256",
         "state_preparation_backup_manifest_file_sha256",
+        "state_backup_logical_snapshot_sha256",
+        "state_backup_source_logical_snapshot_sha256",
+        "state_backup_manifest_sha256",
     ):
         if not _SHA256.fullmatch(str(payload.get(field) or "")):
             raise ActivationContractError(f"runtime receipt {field} is invalid")
@@ -505,6 +567,16 @@ def _validate_extended_receipt(payload: Mapping[str, Any]) -> None:
         raise ActivationContractError(
             "runtime receipt state-preparation backup identity is invalid"
         )
+    direct_backup_id = payload.get("state_backup_id")
+    direct_backup_path = payload.get("state_backup_bundle_path")
+    if (
+        not isinstance(direct_backup_id, str)
+        or not re.fullmatch(r"runtime-activation-[0-9a-f]{24}", direct_backup_id)
+        or not isinstance(direct_backup_path, str)
+        or not Path(direct_backup_path).is_absolute()
+        or Path(direct_backup_path).name != direct_backup_id
+    ):
+        raise ActivationContractError("runtime receipt durable-state backup identity is invalid")
     if payload.get("auxiliary_capture_present") not in {True, False}:
         raise ActivationContractError("runtime receipt auxiliary capture presence is invalid")
     before = payload.get("auxiliary_capture_state_before")
@@ -590,14 +662,26 @@ def _reject_sensitive_keys(value: object, path: str = "$") -> None:
 
 
 def _load_object(path: str | Path) -> dict[str, Any]:
-    supplied = Path(path)
-    if supplied.is_symlink():
-        raise ActivationContractError("activation JSON input is missing or unsafe")
-    source = supplied.resolve()
-    if not source.is_file():
+    source = _assert_no_reparse_components(path)
+    try:
+        before = source.lstat()
+    except OSError as exc:
+        raise ActivationContractError("activation JSON input is missing or unsafe") from exc
+    if _is_reparse_point(source) or not source.is_file():
         raise ActivationContractError("activation JSON input is missing or unsafe")
     try:
-        value = json.loads(source.read_text(encoding="utf-8"))
+        raw = source.read_bytes()
+        _assert_no_reparse_components(source)
+        after = source.lstat()
+        if (
+            _is_reparse_point(source)
+            or after.st_size != before.st_size
+            or after.st_mtime_ns != before.st_mtime_ns
+        ):
+            raise ActivationContractError("activation JSON input changed during read")
+        value = json.loads(raw.decode("utf-8"), object_pairs_hook=_reject_duplicate_keys)
+    except ActivationContractError:
+        raise
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ActivationContractError("activation JSON input is invalid") from exc
     if not isinstance(value, dict):
@@ -606,19 +690,26 @@ def _load_object(path: str | Path) -> dict[str, Any]:
 
 
 def _atomic_write(path: Path, payload: Mapping[str, Any]) -> None:
+    path = _assert_no_reparse_components(path)
+    _assert_no_reparse_components(path.parent)
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists() or path.is_symlink():
+    _assert_no_reparse_components(path.parent)
+    if os.path.lexists(path):
         raise ActivationContractError("activation output already exists")
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
     )
     temporary = Path(temporary_name)
     try:
+        _assert_no_reparse_components(temporary)
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(canonical_json(payload))
             handle.flush()
             os.fsync(handle.fileno())
+        _assert_no_reparse_components(path.parent)
+        _assert_no_reparse_components(path)
         os.link(temporary, path)
+        _assert_no_reparse_components(path)
     finally:
         temporary.unlink(missing_ok=True)
 

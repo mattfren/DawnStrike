@@ -2,7 +2,7 @@
 param(
     [string]$TaskName = "Dawnstrike Delayed SIP Capture",
     [string]$RuntimeRoot = "C:\r\dawnstrike-runtime",
-    [string]$CandidateSha,
+    [ValidatePattern('^[0-9a-f]{40}$')][string]$CandidateSha,
     [ValidateSet("forward_observed", "retrospective_research")]
     [string]$Mode = "forward_observed",
     [string]$DbPath = "C:\r\dawnstrike-forward-db\staging.sqlite",
@@ -31,6 +31,39 @@ if ($Mode -ne "forward_observed") { throw "Scheduled capture registration is onl
 foreach ($name in @("SymbolsManifest", "SymbolsManifestSha256", "EntitlementReceipt", "EntitlementReceiptSha256", "SourceConfig", "SourceConfigSha256")) {
     if ([string]::IsNullOrWhiteSpace((Get-Variable -Name $name -ValueOnly))) { throw "$name is required." }
 }
+
+function Assert-DawnstrikeCaptureInputBindingFile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')][string]$ExpectedSha256,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    $full = [System.IO.Path]::GetFullPath($Path)
+    $item = Get-Item -LiteralPath $full -Force -ErrorAction Stop
+    if (
+        $item.PSIsContainer -or
+        ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
+    ) { throw "$Label must be a regular non-reparse file." }
+    $before = Get-Item -LiteralPath $full -Force -ErrorAction Stop
+    $actual = (Get-FileHash -LiteralPath $full -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+    $after = Get-Item -LiteralPath $full -Force -ErrorAction Stop
+    if (
+        $after.PSIsContainer -or
+        ($after.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $before.Length -ne $after.Length -or
+        $before.LastWriteTimeUtc -ne $after.LastWriteTimeUtc
+    ) { throw "$Label changed during identity capture." }
+    if ($actual -ne $ExpectedSha256.ToLowerInvariant()) { throw "$Label hash does not match the supplied identity." }
+    return $full
+}
+
+$SymbolsManifest = Assert-DawnstrikeCaptureInputBindingFile `
+    -Path $SymbolsManifest -ExpectedSha256 $SymbolsManifestSha256 -Label "Symbols manifest"
+$EntitlementReceipt = Assert-DawnstrikeCaptureInputBindingFile `
+    -Path $EntitlementReceipt -ExpectedSha256 $EntitlementReceiptSha256 -Label "Entitlement receipt"
+$SourceConfig = Assert-DawnstrikeCaptureInputBindingFile `
+    -Path $SourceConfig -ExpectedSha256 $SourceConfigSha256 -Label "Source config"
 if ([string]::IsNullOrWhiteSpace($Python)) {
     # The active runtime may intentionally have no project-local venv.  Use
     # the governed launcher and pin the interpreter family explicitly.
@@ -69,9 +102,15 @@ $preview = [ordered]@{
     mode = $Mode
     feed = "sip"
     candidate_sha = $CandidateSha
+    input_bindings = @(
+        @{ name = "symbols_manifest"; path = $SymbolsManifest; sha256 = $SymbolsManifestSha256.ToLowerInvariant() },
+        @{ name = "entitlement_receipt"; path = $EntitlementReceipt; sha256 = $EntitlementReceiptSha256.ToLowerInvariant() },
+        @{ name = "source_config"; path = $SourceConfig; sha256 = $SourceConfigSha256.ToLowerInvariant() }
+    )
     expected_session_policy = "dynamic_checked_in_market_calendar"
     session_root = $SessionRoot
     research_only = $true
+    broker_execution_enabled = $false
     broker_execution = "disabled"
 }
 Write-Output ($preview | ConvertTo-Json -Depth 6 -Compress)
