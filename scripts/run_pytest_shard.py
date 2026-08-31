@@ -61,19 +61,23 @@ def main() -> int:
         "selected_count": len(selected),
         "selected_nodes": selected,
     }
+    summary = {key: value for key, value in payload.items() if key != "selected_nodes"}
+    print(json.dumps(summary, sort_keys=True))
+    return_code = 0
+    if not args.collect_only:
+        return_code = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *selected],
+            check=False,
+        ).returncode
     if args.manifest is not None:
+        # Governance tests inspect the checkout's Git cleanliness.  Emit the
+        # CI upload artifact only after pytest has finished so the harness
+        # cannot make its own candidate dirty while those tests execute.
         args.manifest.parent.mkdir(parents=True, exist_ok=True)
         args.manifest.write_text(
             json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8"
         )
-    summary = {key: value for key, value in payload.items() if key != "selected_nodes"}
-    print(json.dumps(summary, sort_keys=True))
-    if args.collect_only:
-        return 0
-    return subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *selected],
-        check=False,
-    ).returncode
+    return return_code
 
 
 if __name__ == "__main__":
