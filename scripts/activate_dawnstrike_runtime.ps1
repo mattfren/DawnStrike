@@ -357,18 +357,16 @@ function Get-DawnstrikeStatePreparationDeclaration {
     # PowerShell parses them. ConvertFrom-Json silently accepts duplicate
     # properties (last value wins), which would let a hostile sidecar replace
     # an otherwise valid declaration at this activation boundary.
-    $null = Invoke-DawnstrikeContractCli `
+    $validated = Invoke-DawnstrikeContractCli `
         -PythonPath $PythonPath `
         -CandidateRoot $CandidateRoot `
         -Arguments @("validate-state-preparation-declaration", "--input", $path) `
         -Label "State-preparation declaration validation" `
         -TimeoutSeconds $TimeoutSeconds
-    try {
-        $declaration = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
-    }
-    catch {
-        throw "State-preparation declaration is invalid JSON."
-    }
+    # Use the validated object returned by the same strict read.  Do not
+    # reread the path with ConvertFrom-Json: a concurrent replacement between
+    # reads would otherwise create a time-of-check/time-of-use gap.
+    $declaration = $validated
     return [pscustomobject]@{
         required = $true
         path = $path
