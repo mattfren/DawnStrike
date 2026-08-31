@@ -390,7 +390,20 @@ function Invoke-DawnstrikeRuntimeRollback {
 
     Assert-DawnstrikeNoDailyLocks $state
     $taskBefore = Get-DawnstrikeTaskContract $runtime $state -AllowDisabled
-    $stateDeclaration = Get-DawnstrikeStatePreparationDeclaration $contract
+    $stateDeclaration = Get-DawnstrikeStatePreparationDeclaration `
+        -CandidateRoot $contract `
+        -GitPath $gitPath `
+        -CandidateSha $candidateSha `
+        -CandidateTree $activation.candidate_tree `
+        -PythonPath $pythonPath `
+        -TimeoutSeconds $ProcessTimeoutSeconds
+    $null = Assert-DawnstrikeCandidateIdentityAndDeclaration `
+        -GitPath $gitPath `
+        -CandidateRoot $contract `
+        -CandidateSha $candidateSha `
+        -CandidateTree $activation.candidate_tree `
+        -Declaration $stateDeclaration `
+        -TimeoutSeconds $ProcessTimeoutSeconds
     # Always inventory the auxiliary.  A task present during rollback without
     # an explicit governed sidecar declaration is an ungoverned task and must
     # fail closed rather than being silently carried through a legacy path.

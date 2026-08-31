@@ -149,6 +149,250 @@ def test_powershell_declaration_boundary_has_no_second_unvalidated_read() -> Non
     assert "$declaration = $validated" in body
 
 
+def test_powershell_declaration_is_bound_to_exact_commit_and_rechecked() -> None:
+    script = Path("scripts/activate_dawnstrike_runtime.ps1").read_text(encoding="utf-8")
+    declaration = script.split(
+        "function Get-DawnstrikeStatePreparationDeclaration", 1
+    )[1].split("function Get-DawnstrikeAuxiliaryCaptureTask", 1)[0]
+    assert '"ls-tree"' in declaration
+    assert '"rev-parse"' in declaration
+    assert '"hash-object"' in declaration
+    assert "exact candidate commit" in declaration
+    assert "post-validation binding" in declaration
+    assert "Assert-DawnstrikeCandidateIdentityAndDeclaration" in script
+    assert script.count("Assert-DawnstrikeCandidateIdentityAndDeclaration") >= 4
+    for companion in (
+        "scripts/prepare_dawnstrike_state.ps1",
+        "scripts/rollback_dawnstrike_runtime.ps1",
+    ):
+        assert "Assert-DawnstrikeCandidateIdentityAndDeclaration" in Path(
+            companion
+        ).read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
+def test_powershell_activation_script_has_valid_ast() -> None:
+    script = str(Path("scripts/activate_dawnstrike_runtime.ps1").resolve()).replace("'", "''")
+    command = rf"""
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    '{script}', [ref]$tokens, [ref]$errors
+)
+if ($errors.Count -gt 0) {{ throw (($errors | ForEach-Object {{ $_.Message }}) -join '; ') }}
+$functions = @($ast.FindAll(
+    {{ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }},
+    $true
+) | ForEach-Object Name)
+[pscustomobject]@{{
+    valid = ($null -ne $ast)
+    declaration = ($functions -contains 'Get-DawnstrikeStatePreparationDeclaration')
+    identity = ($functions -contains 'Assert-DawnstrikeCandidateIdentityAndDeclaration')
+}} | ConvertTo-Json -Compress
+"""
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=Path.cwd(), text=True, capture_output=True, timeout=30, check=False,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert json.loads(result.stdout.strip().splitlines()[-1]) == {
+        "valid": True, "declaration": True, "identity": True
+    }
+
+
+def _declaration_checkout(
+    tmp_path: Path, *, tracked: bool, declaration_text: str | None = None
+) -> tuple[Path, str, str]:
+    checkout = tmp_path / ("tracked" if tracked else "legacy")
+    (checkout / "config").mkdir(parents=True)
+    (checkout / "scripts").mkdir()
+    shutil.copy2(
+        Path("scripts/runtime_activation_contract.py"),
+        checkout / "scripts/runtime_activation_contract.py",
+    )
+    (checkout / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
+    if tracked:
+        destination = checkout / "config/state_preparation_contract.json"
+        if declaration_text is None:
+            shutil.copy2(Path("config/state_preparation_contract.json"), destination)
+        else:
+            destination.write_text(declaration_text, encoding="utf-8")
+    subprocess.run(
+        ["git", "init", "--initial-branch=main", str(checkout)],
+        check=True, capture_output=True,
+    )
+    _git(checkout, "config", "user.email", "activation-test@example.invalid")
+    _git(checkout, "config", "user.name", "Activation Test")
+    _git(checkout, "add", ".")
+    _git(checkout, "commit", "-m", "declaration fixture")
+    return checkout, _git(checkout, "rev-parse", "HEAD"), _git(
+        checkout, "rev-parse", "HEAD^{tree}"
+    )
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
+@pytest.mark.parametrize("mutation", ["delete", "hostile_restore"])
+def test_powershell_declaration_cannot_be_deleted_or_restored_after_clean_check(
+    tmp_path: Path, mutation: str
+) -> None:
+    checkout, candidate_sha, candidate_tree = _declaration_checkout(tmp_path, tracked=True)
+    declaration = checkout / "config/state_preparation_contract.json"
+    if mutation == "delete":
+        declaration.unlink()
+    else:
+        declaration.write_text(
+            '{"schema_version":"dawnstrike.state_preparation_contract.v1",'
+            '"schema_version":"hostile","sidecar_contract":"dawnstrike.account_capture_trial_sidecar.v1",'
+            '"sidecar_version":1,"legacy_schema_marker":30,"required_before_activation":true,'
+            '"research_only":true,"broker_execution_enabled":false}\n',
+            encoding="utf-8",
+        )
+    source = str(Path("scripts/activate_dawnstrike_runtime.ps1").resolve()).replace("'", "''")
+    runner = str(Path("scripts/dawnstrike_job_process.ps1").resolve()).replace("'", "''")
+    root = str(checkout).replace("'", "''")
+    command = rf"""
+. '{source}'
+. '{runner}'
+$git = (Get-Command git.exe -CommandType Application)[0].Source
+$py = (Get-Command py.exe -CommandType Application)[0].Source
+$blocked = $false
+try {{
+    $null = Get-DawnstrikeStatePreparationDeclaration -CandidateRoot '{root}' `
+        -GitPath $git -CandidateSha '{candidate_sha}' -CandidateTree '{candidate_tree}' `
+        -PythonPath $py -TimeoutSeconds 30
+}}
+catch {{ $blocked = $true }}
+$blocked | ConvertTo-Json -Compress
+"""
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=Path.cwd(), text=True, capture_output=True, timeout=60, check=False,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert json.loads(result.stdout.strip().splitlines()[-1]) is True
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
+def test_powershell_strict_loader_rejects_duplicate_tracked_declaration(tmp_path: Path) -> None:
+    duplicate = (
+        '{"schema_version":"dawnstrike.state_preparation_contract.v1",'
+        '"schema_version":"hostile","sidecar_contract":"dawnstrike.account_capture_trial_sidecar.v1",'
+        '"sidecar_version":1,"legacy_schema_marker":30,"required_before_activation":true,'
+        '"research_only":true,"broker_execution_enabled":false}\n'
+    )
+    checkout, candidate_sha, candidate_tree = _declaration_checkout(
+        tmp_path, tracked=True, declaration_text=duplicate
+    )
+    source = str(Path("scripts/activate_dawnstrike_runtime.ps1").resolve()).replace("'", "''")
+    runner = str(Path("scripts/dawnstrike_job_process.ps1").resolve()).replace("'", "''")
+    root = str(checkout).replace("'", "''")
+    command = rf"""
+. '{source}'
+. '{runner}'
+$git = (Get-Command git.exe -CommandType Application)[0].Source
+$py = (Get-Command py.exe -CommandType Application)[0].Source
+$blocked = $false
+try {{
+    $null = Get-DawnstrikeStatePreparationDeclaration -CandidateRoot '{root}' `
+        -GitPath $git -CandidateSha '{candidate_sha}' -CandidateTree '{candidate_tree}' `
+        -PythonPath $py -TimeoutSeconds 30
+}}
+catch {{ $blocked = $_.Exception.Message -match 'validation' }}
+$blocked | ConvertTo-Json -Compress
+"""
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=Path.cwd(), text=True, capture_output=True, timeout=60, check=False,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert json.loads(result.stdout.strip().splitlines()[-1]) is True
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
+def test_powershell_declaration_restore_race_is_rejected_after_strict_read(
+    tmp_path: Path,
+) -> None:
+    checkout, candidate_sha, candidate_tree = _declaration_checkout(tmp_path, tracked=True)
+    declaration = checkout / "config/state_preparation_contract.json"
+    hostile = (
+        '{"schema_version":"dawnstrike.state_preparation_contract.v1",'
+        '"schema_version":"hostile","sidecar_contract":"dawnstrike.account_capture_trial_sidecar.v1",'
+        '"sidecar_version":1,"legacy_schema_marker":30,"required_before_activation":true,'
+        '"research_only":true,"broker_execution_enabled":false}\n'
+    ).replace("'", "''")
+    source = str(Path("scripts/activate_dawnstrike_runtime.ps1").resolve()).replace("'", "''")
+    runner = str(Path("scripts/dawnstrike_job_process.ps1").resolve()).replace("'", "''")
+    root = str(checkout).replace("'", "''")
+    declaration_path = str(declaration).replace("'", "''")
+    command = rf"""
+. '{source}'
+. '{runner}'
+    $originalGitValue = (Get-Command Get-DawnstrikeGitValue).ScriptBlock
+    $racePath = '{declaration_path}'
+    $racePayload = '{hostile}'
+    $global:RaceMutated = $false
+function Get-DawnstrikeGitValue {{
+    param([string]$GitPath,[string]$Root,[string[]]$Arguments,[string]$Label,[int]$TimeoutSeconds)
+    $value = & $originalGitValue @PSBoundParameters
+    if ($Label -eq 'State-preparation declaration working-tree binding') {{
+        [System.IO.File]::Delete($racePath)
+        [System.IO.File]::WriteAllText(
+            $racePath, $racePayload, [System.Text.UTF8Encoding]::new($false)
+        )
+        $global:RaceMutated = $true
+    }}
+    return $value
+}}
+$git = (Get-Command git.exe -CommandType Application)[0].Source
+$py = (Get-Command py.exe -CommandType Application)[0].Source
+$blocked = $false
+try {{
+    $null = Get-DawnstrikeStatePreparationDeclaration -CandidateRoot '{root}' `
+        -GitPath $git -CandidateSha '{candidate_sha}' -CandidateTree '{candidate_tree}' `
+        -PythonPath $py -TimeoutSeconds 30
+}}
+catch {{
+    $blocked = $_.Exception.Message -match (
+        'failed with exit code|changed during strict validation|bytes do not match'
+    )
+}}
+    [pscustomobject]@{{blocked=$blocked; mutated=$global:RaceMutated}} | ConvertTo-Json -Compress
+"""
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=Path.cwd(), text=True, capture_output=True, timeout=60, check=False,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert json.loads(result.stdout.strip().splitlines()[-1]) == {
+        "blocked": True, "mutated": True
+    }
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
+def test_powershell_legacy_compatibility_requires_exact_commit_absence(tmp_path: Path) -> None:
+    checkout, candidate_sha, candidate_tree = _declaration_checkout(tmp_path, tracked=False)
+    source = str(Path("scripts/activate_dawnstrike_runtime.ps1").resolve()).replace("'", "''")
+    runner = str(Path("scripts/dawnstrike_job_process.ps1").resolve()).replace("'", "''")
+    root = str(checkout).replace("'", "''")
+    command = rf"""
+. '{source}'
+. '{runner}'
+$git = (Get-Command git.exe -CommandType Application)[0].Source
+$result = Get-DawnstrikeStatePreparationDeclaration -CandidateRoot '{root}' `
+    -GitPath $git -CandidateSha '{candidate_sha}' -CandidateTree '{candidate_tree}'
+[pscustomobject]@{{required=$result.required; present=$result.declaration_present}} |
+    ConvertTo-Json -Compress
+"""
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=Path.cwd(), text=True, capture_output=True, timeout=60, check=False,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert json.loads(result.stdout.strip().splitlines()[-1]) == {
+        "required": False, "present": False
+    }
+
+
 def _receipt_payload(
     *, schema: str = ACTIVATION_SCHEMA, status: str = "COMPLETE"
 ) -> dict[str, object]:

@@ -38,7 +38,20 @@ $origin = Get-DawnstrikeGitValue $git $candidate @("remote", "get-url", "origin"
 Assert-DawnstrikeSafeOrigin $origin
 $remoteMain = Get-DawnstrikeGitValue $git $candidate @("rev-parse", "refs/remotes/origin/main") "State-preparation origin/main verification" $ProcessTimeoutSeconds
 if ($remoteMain.ToLowerInvariant() -ne $CandidateSha) { throw "Candidate is not the exact clean origin/main SHA." }
-$null = Get-DawnstrikeStatePreparationDeclaration $candidate
+$stateDeclaration = Get-DawnstrikeStatePreparationDeclaration `
+    -CandidateRoot $candidate `
+    -GitPath $git `
+    -CandidateSha $candidateContract.head `
+    -CandidateTree $candidateContract.tree `
+    -PythonPath $python `
+    -TimeoutSeconds $ProcessTimeoutSeconds
+$null = Assert-DawnstrikeCandidateIdentityAndDeclaration `
+    -GitPath $git `
+    -CandidateRoot $candidate `
+    -CandidateSha $candidateContract.head `
+    -CandidateTree $candidateContract.tree `
+    -Declaration $stateDeclaration `
+    -TimeoutSeconds $ProcessTimeoutSeconds
 $canonical = Get-DawnstrikeTaskContract $runtime $state
 $canonicalBeforePreparation = $canonical
 $auxiliary = Get-DawnstrikeAuxiliaryCaptureTask $runtime $state
