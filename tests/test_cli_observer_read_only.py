@@ -16,6 +16,7 @@ OBSERVER_COMMANDS = {
     "free-shadow-report",
     "web-source-doctor",
     "daily-orchestrator-status",
+    "account-session-report",
     "alpha-status",
     "alpha-doctor",
     "alpha-report",
