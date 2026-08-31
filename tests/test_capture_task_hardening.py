@@ -10,10 +10,66 @@ import pytest
 from scripts.capture_task_hardening_contract import (
     CAPTURE_TASK_HARDENING_RECEIPT_SCHEMA,
     CaptureTaskHardeningContractError,
+    load_prepared,
+    seal_prepared,
     seal_receipt,
     self_hash,
     validate_receipt,
 )
+
+
+def _prepared() -> dict[str, object]:
+    sha = "a" * 64
+    payload: dict[str, object] = {
+        "schema_version": "dawnstrike.capture_task_hardening_prepared.v2",
+        "status": "PREPARED",
+        "task_name": "Dawnstrike Delayed SIP Capture",
+        "task_path": "\\",
+        "candidate_sha": "a" * 40,
+        "candidate_tree": "b" * 40,
+        "original_state": "Ready",
+        "backup_path": r"C:\state\scheduler-backups\capture-hardening-aaaaaaaa\task.xml",
+        "backup_xml_sha256": sha,
+        "backup_xml_file_sha256": sha,
+        "xml_before_sha256": sha,
+        "xml_after_sha256": "c" * 64,
+        "action_sha256": sha,
+        "trigger_sha256": sha,
+        "principal_sha256": sha,
+        "settings_sha256": sha,
+        "action_before_sha256": sha,
+        "action_after_sha256": "c" * 64,
+        "runtime_head": "a" * 40,
+        "runtime_tree": "b" * 40,
+        "runtime_origin": "https://github.com/mattfren/DawnStrike.git",
+        "runtime_origin_sha256": hashlib.sha256(
+            b"https://github.com/mattfren/DawnStrike.git"
+        ).hexdigest(),
+        "lock_token": "d" * 32,
+        "lock_bytes_sha256": sha,
+        "interpreter_path": r"C:\Python313\python.exe",
+        "interpreter_sha256": sha,
+        "interpreter_version": "3.13.7",
+        "interpreter_signer_subject": (
+            "CN=Python Software Foundation, O=Python Software Foundation, "
+            "L=Beaverton, S=Oregon, C=US"
+        ),
+        "interpreter_signer_thumbprint": "E" * 40,
+        "runner_before_sha256": sha,
+        "runner_target_sha256": "c" * 64,
+        "old_last_task_result": 2147942402,
+        "old_last_run_time": "2026-08-31T15:20:00.0000000Z",
+        "intended_receipt_path": (
+            r"C:\state\receipts\capture-task-hardening-"
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"
+        ),
+        "rollback_contract": "RESTORE_EXACT_XML_AND_ENABLEMENT_HISTORY_NOT_RESTORED",
+        "research_only": True,
+        "broker_execution_enabled": False,
+        "prepared_at_utc": "2026-08-31T23:59:00.0000000Z",
+    }
+    payload["prepared_record_sha256"] = self_hash(payload, "prepared_record_sha256")
+    return payload
 
 
 def _receipt() -> dict[str, object]:
@@ -43,12 +99,10 @@ def _receipt() -> dict[str, object]:
         "final_state": "Disabled",
         "backup_name": "Dawnstrike_Delayed_SIP_Capture.xml",
         "backup_relative_path": (
-            "scheduler-backups/capture-hardening/"
-            "Dawnstrike_Delayed_SIP_Capture.xml"
+            "scheduler-backups/capture-hardening/Dawnstrike_Delayed_SIP_Capture.xml"
         ),
         "prepared_relative_path": (
-            "scheduler-backups/capture-hardening/"
-            "capture-task-hardening-prepared.json"
+            "scheduler-backups/capture-hardening/capture-task-hardening-prepared.json"
         ),
         **hashes,
         "changed_fields": ["principal", "settings"],
@@ -58,9 +112,7 @@ def _receipt() -> dict[str, object]:
         "prepared_record_sha256": hashlib.sha256(b"prepared").hexdigest(),
         "origin_main_refreshed_at_utc": "2026-08-31T23:59:00.0000000Z",
         "origin_url": "https://example.invalid/dawnstrike.git",
-        "origin_url_sha256": hashlib.sha256(
-            b"https://example.invalid/dawnstrike.git"
-        ).hexdigest(),
+        "origin_url_sha256": hashlib.sha256(b"https://example.invalid/dawnstrike.git").hexdigest(),
         "old_last_task_result": 2147942402,
         "old_last_run_time": "2026-08-31T15:20:00.0000000Z",
         "new_last_task_result": 267011,
@@ -119,10 +171,13 @@ def test_hardening_receipt_rejects_sensitive_keys() -> None:
         validate_receipt(payload)
 
 
-@pytest.mark.parametrize("origin", [
-    "https://user:password@example.invalid/repo.git",
-    "https://example.invalid/repo.git?access_token=secret",
-])
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "https://user:password@example.invalid/repo.git",
+        "https://example.invalid/repo.git?access_token=secret",
+    ],
+)
 def test_hardening_receipt_rejects_credentialed_origin(origin: str) -> None:
     payload = _receipt()
     payload["origin_url"] = origin
@@ -134,20 +189,36 @@ def test_hardening_receipt_rejects_credentialed_origin(origin: str) -> None:
 
 def test_hardening_receipt_rejects_duplicate_json_fields(tmp_path: Path) -> None:
     path = tmp_path / "duplicate.json"
-    path.write_text(
-        '{"schema_version":"x","schema_version":"y"}', encoding="utf-8"
-    )
+    path.write_text('{"schema_version":"x","schema_version":"y"}', encoding="utf-8")
     from scripts.capture_task_hardening_contract import load_receipt
 
     with pytest.raises(CaptureTaskHardeningContractError, match="duplicate JSON field"):
         load_receipt(path)
 
 
+def test_prepared_v2_is_strict_self_hashed_and_tamper_evident(tmp_path: Path) -> None:
+    path = tmp_path / "prepared.json"
+    payload = _prepared()
+    assert seal_prepared(payload, path) == payload
+    assert load_prepared(path) == payload
+    path.write_text(
+        path.read_text(encoding="utf-8").replace('"status":"PREPARED"', '"status":"BROKEN"'),
+        encoding="utf-8",
+    )
+    with pytest.raises(CaptureTaskHardeningContractError):
+        load_prepared(path)
+
+
+def test_prepared_v2_rejects_duplicate_keys(tmp_path: Path) -> None:
+    path = tmp_path / "prepared-duplicate.json"
+    path.write_text('{"status":"PREPARED","status":"BROKEN"}', encoding="utf-8")
+    with pytest.raises(CaptureTaskHardeningContractError, match="duplicate JSON field"):
+        load_prepared(path)
+
+
 def test_hardening_script_is_explicit_and_preserves_capture_bindings() -> None:
     script = Path("scripts/harden_intraday_capture_task.ps1").read_text(encoding="utf-8")
-    registration = Path("scripts/register_intraday_capture_task.ps1").read_text(
-        encoding="utf-8"
-    )
+    registration = Path("scripts/register_intraday_capture_task.ps1").read_text(encoding="utf-8")
     for setting in (
         '"Password"',
         '"LeastPrivilege"',
@@ -211,9 +282,6 @@ def test_hardening_script_fails_closed_without_credential() -> None:
     )
     assert result.returncode != 0
     assert any(
-        marker in (result.stdout + result.stderr)
-        for marker in ("RunAsCredential", "CandidateSha")
+        marker in (result.stdout + result.stderr) for marker in ("RunAsCredential", "CandidateSha")
     )
-    assert "password" not in (result.stdout + result.stderr).lower().replace(
-        "runascredential", ""
-    )
+    assert "password" not in (result.stdout + result.stderr).lower().replace("runascredential", "")
