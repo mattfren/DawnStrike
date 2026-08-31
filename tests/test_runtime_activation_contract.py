@@ -133,6 +133,22 @@ def test_state_preparation_declaration_loader_rejects_duplicate_json_keys(
         _load_object(declaration)
 
 
+def test_powershell_declaration_boundary_has_no_second_unvalidated_read() -> None:
+    script_path = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "activate_dawnstrike_runtime.ps1"
+    )
+    script = script_path.read_text(encoding="utf-8")
+    body = script.split(
+        "function Get-DawnstrikeStatePreparationDeclaration",
+        1,
+    )[1].split("function Get-DawnstrikeAuxiliaryCaptureTask", 1)[0]
+    assert body.count("Invoke-DawnstrikeContractCli") == 1
+    assert "Get-Content" not in body
+    assert "$declaration = $validated" in body
+
+
 def _receipt_payload(
     *, schema: str = ACTIVATION_SCHEMA, status: str = "COMPLETE"
 ) -> dict[str, object]:
