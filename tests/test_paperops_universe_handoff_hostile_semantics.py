@@ -3,6 +3,7 @@ import hashlib
 import json
 from datetime import date, datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,7 +12,9 @@ from intraday_scanner.v2.paper_ops import engine as paper_ops_engine
 from intraday_scanner.v2.paper_ops.models import PaperRunMode
 from intraday_scanner.v2.paper_ops.universe_handoff import (
     UniverseHandoffError,
+    _iso_date,
     _validate_core_contract,
+    _validate_runtime_release_sha,
     build_universe_handoff,
     load_universe_handoff,
 )
@@ -99,6 +102,130 @@ def test_missing_core_manifest_is_validated_as_lane_local_unavailable() -> None:
     assert core["observed_at"] is None
     assert core["membership_count"] == 0
     assert _validate_core_contract(core, MARKET_DATE) == set()
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "2026-08-28",
+        "2026-08-28garbage",
+        "garbage2026-08-28",
+        "2026-08-2",
+        "2026-08-28T13:00",
+        "2026-08-28T13:00:00",
+        "2026-02-30",
+    ],
+)
+def test_iso_date_rejects_malformed_dates_and_timestamps(value: str) -> None:
+    assert _iso_date(value) is None
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "2026-08-28T13:00:00Z",
+        "2026-08-28T13:00:00+00:00",
+        "2026-08-28T08:00:00-05:00",
+        "2026-08-28T13:00:00.1234567Z",
+        "2026-08-28T23:59:59-12:00",
+    ],
+)
+def test_iso_date_accepts_canonical_date_and_timezone_timestamps(value: str) -> None:
+    expected = "2026-08-29" if "23:59:59-12:00" in value else MARKET_DATE
+    assert _iso_date(value) == expected
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["READY", "DATA_UNAVAILABLE"],
+)
+@pytest.mark.parametrize(
+    "observed_at",
+    [
+        "2026-08-28garbage",
+        "garbage2026-08-28",
+        "2026-08-2",
+        "2026-08-28T13:00",
+        "2026-08-28T13:00:00",
+        "2026-02-30",
+    ],
+)
+def test_core_contract_rejects_malformed_non_null_observation(
+    status: str, observed_at: str
+) -> None:
+    if status == "READY":
+        core = _core_contract()
+    else:
+        core = build_core_universe_contract(
+            None,
+            observed_at=datetime(2026, 8, 31, 13, 0, tzinfo=timezone.utc),
+            market_date=MARKET_DATE,
+        )
+    core["status"] = status
+    core["observed_at"] = observed_at
+    _rehash_core(core)
+
+    with pytest.raises(UniverseHandoffError, match="observation is invalid"):
+        _validate_core_contract(core, MARKET_DATE)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("research_only", False),
+        ("broker_execution", "enabled"),
+        ("missing_truth_is_zero", True),
+    ],
+)
+def test_core_safety_claims_are_verified_end_to_end(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    root = _morning_root(tmp_path)
+    core_path = root / "core_universe_contract.json"
+    core = json.loads(core_path.read_text(encoding="utf-8"))
+    core[field] = value
+    _rehash_core(core)
+    _rewrite_json(core_path, core)
+
+    with pytest.raises(UniverseHandoffError, match="core universe safety binding"):
+        build_universe_handoff(root, MARKET_DATE, allow_test_override=True)
+
+
+def test_production_builder_rejects_cycle_sha_not_matching_executing_runtime(
+    tmp_path: Path,
+) -> None:
+    root = _morning_root(tmp_path)
+
+    with pytest.raises(
+        UniverseHandoffError, match="does not match executing runtime HEAD"
+    ):
+        build_universe_handoff(root, MARKET_DATE)
+
+
+def test_production_builder_rejects_dirty_tracked_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(args: list[str], **_: object) -> SimpleNamespace:
+        if args[-2:] == ["rev-parse", "HEAD"]:
+            return SimpleNamespace(stdout="a" * 40)
+        return SimpleNamespace(stdout=" M tracked.py\n")
+
+    monkeypatch.setattr("intraday_scanner.v2.paper_ops.universe_handoff.subprocess.run", fake_run)
+
+    with pytest.raises(UniverseHandoffError, match="worktree is dirty"):
+        _validate_runtime_release_sha({"code_sha": "a" * 40}, allow_test_override=False)
+
+
+@pytest.mark.parametrize("generated_at", ["2026-08-28garbage", "2026-08-28T13:00:00"])
+def test_cycle_generated_at_rejects_malformed_non_null_timestamp(
+    tmp_path: Path, generated_at: str
+) -> None:
+    root = _morning_root(tmp_path)
+    cycle_path = root / "alpha_cycle.json"
+    cycle = json.loads(cycle_path.read_text(encoding="utf-8"))
+    cycle["generated_at"] = generated_at
+    _rewrite_json(cycle_path, cycle)
+
+    with pytest.raises(UniverseHandoffError, match="cycle artifact is stale or cross-date"):
+        build_universe_handoff(root, MARKET_DATE, allow_test_override=True)
 
 
 def test_cross_scan_mover_summary_splice_is_rejected(tmp_path: Path) -> None:

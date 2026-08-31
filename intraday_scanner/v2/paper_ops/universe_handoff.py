@@ -14,8 +14,9 @@ import csv
 import hashlib
 import json
 import re
+import subprocess
 from collections.abc import Iterable
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,9 @@ from intraday_scanner.v2.strategies import build_strategy_catalog
 SCHEMA_VERSION = "dawnstrike.paperops.universe_handoff.v1"
 _SYMBOL_PATTERN = re.compile(r"^[A-Z][A-Z0-9.-]{0,14}$")
 _SHA_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_ISO_TIMESTAMP_PATTERN = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$"
+)
 _ALLOWED_SOURCE_STATUSES = {"success", "no_data", "empty", "partial", "failed"}
 
 
@@ -75,6 +79,7 @@ def build_universe_handoff(
         cycle_contract,
         require_production=not allow_test_override,
     )
+    _validate_runtime_release_sha(cycle_contract, allow_test_override=allow_test_override)
     _validate_core_claims(
         cycle,
         cycle_contract,
@@ -412,8 +417,9 @@ def _validate_cycle_identity(
     scan_id = str(cycle.get("scan_id") or "")
     if not scan_id or scan_id != str(contract.get("producer_run_id") or ""):
         raise UniverseHandoffError("Morning scan identity is missing or inconsistent")
-    cycle_date = _iso_date(cycle.get("generated_at"))
-    if cycle_date is not None and cycle_date != market_date:
+    cycle_generated_at = cycle.get("generated_at")
+    cycle_date = _iso_date(cycle_generated_at)
+    if str(cycle_generated_at or "").strip() and cycle_date != market_date:
         raise UniverseHandoffError("Morning cycle artifact is stale or cross-date")
     if str(contract.get("source_status") or "") not in {
         "success",
@@ -466,6 +472,50 @@ def _validate_release_claims(
         raise UniverseHandoffError("Morning release SHA claims are inconsistent")
     if present and any(not value for value in values.values()):
         raise UniverseHandoffError("Morning release SHA claims are incomplete")
+
+
+def _validate_runtime_release_sha(
+    cycle_contract: dict[str, Any], *, allow_test_override: bool
+) -> None:
+    """Bind production handoff construction to the executing Git worktree."""
+
+    if allow_test_override:
+        return
+    claimed = str(cycle_contract.get("code_sha") or "").strip()
+    runtime_root = Path(__file__).resolve().parents[3]
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(runtime_root), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise UniverseHandoffError("executing runtime Git HEAD is unavailable") from exc
+    actual = result.stdout.strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", actual) or claimed != actual:
+        raise UniverseHandoffError("Morning release SHA does not match executing runtime HEAD")
+    try:
+        status = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(runtime_root),
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=no",
+                "--ignore-submodules=none",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise UniverseHandoffError("executing runtime Git cleanliness is unavailable") from exc
+    if status.stdout.strip():
+        raise UniverseHandoffError("executing runtime worktree is dirty")
 
 
 def _validate_core_claims(
@@ -609,6 +659,12 @@ def _validate_core_contract(
 ) -> set[str]:
     if str(core.get("schema_version") or "") != "dawnstrike.luna.core_universe.v1":
         raise UniverseHandoffError("core universe contract schema is invalid")
+    if (
+        core.get("research_only") is not True
+        or core.get("broker_execution") != "disabled"
+        or core.get("missing_truth_is_zero") is not False
+    ):
+        raise UniverseHandoffError("core universe safety binding is invalid")
     if str(core.get("requested_market_date") or "") != market_date:
         raise UniverseHandoffError("core universe contract market date conflicts")
     status = str(core.get("status") or "").upper()
@@ -1416,10 +1472,16 @@ def _iso_date(value: Any) -> str | None:
     text = str(value or "").strip()
     if not text:
         return None
+    if not _ISO_TIMESTAMP_PATTERN.fullmatch(text):
+        return None
     try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00")).date().isoformat()
+        normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
+        parsed = datetime.fromisoformat(normalized)
     except ValueError:
-        return _date_text(text[:10])
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc).date().isoformat()
 
 
 def _first_text(*values: Any) -> str:
