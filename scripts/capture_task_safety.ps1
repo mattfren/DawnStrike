@@ -82,6 +82,146 @@ function Get-DawnstrikeCaptureFileSha256 {
     }
 }
 
+function Assert-DawnstrikeCaptureCanonicalXml {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][System.Xml.XmlDocument]$Document,
+        [switch]$AllowLegacySettings
+    )
+
+    # Task Scheduler XML is a small, closed vocabulary for this governed task.
+    # Keep the map explicit: accepting an unknown element/attribute here would
+    # allow a migration input to smuggle in an alternate execution surface.
+    $namespace = "http://schemas.microsoft.com/windows/2004/02/mit/task"
+    $allowed = @{
+        Task = @("RegistrationInfo", "Principals", "Settings", "Triggers", "Actions")
+        RegistrationInfo = @("Description", "URI")
+        Description = @()
+        URI = @()
+        Principals = @("Principal")
+        Principal = @("UserId", "LogonType", "RunLevel")
+        UserId = @()
+        LogonType = @()
+        RunLevel = @()
+        Settings = @("Enabled", "StartWhenAvailable", "WakeToRun", "DisallowStartIfOnBatteries", "StopIfGoingOnBatteries", "ExecutionTimeLimit", "MultipleInstancesPolicy", "RestartOnFailure", "UseUnifiedSchedulingEngine", "IdleSettings")
+        Enabled = @()
+        StartWhenAvailable = @()
+        WakeToRun = @()
+        DisallowStartIfOnBatteries = @()
+        StopIfGoingOnBatteries = @()
+        ExecutionTimeLimit = @()
+        MultipleInstancesPolicy = @()
+        RestartOnFailure = @("Interval", "Count")
+        UseUnifiedSchedulingEngine = @()
+        IdleSettings = @("Duration", "WaitTimeout", "StopOnIdleEnd", "RestartOnIdle")
+        Duration = @()
+        WaitTimeout = @()
+        StopOnIdleEnd = @()
+        RestartOnIdle = @()
+        Interval = @()
+        Count = @()
+        Triggers = @("CalendarTrigger")
+        CalendarTrigger = @("StartBoundary", "Enabled", "ScheduleByWeek")
+        StartBoundary = @()
+        ScheduleByWeek = @("WeeksInterval", "DaysOfWeek")
+        WeeksInterval = @()
+        DaysOfWeek = @("Monday", "Tuesday", "Wednesday", "Thursday", "Friday")
+        Monday = @()
+        Tuesday = @()
+        Wednesday = @()
+        Thursday = @()
+        Friday = @()
+        Actions = @("Exec")
+        Exec = @("Command", "Arguments", "WorkingDirectory")
+        Command = @()
+        Arguments = @()
+        WorkingDirectory = @()
+    }
+    if ($null -eq $Document.DocumentElement -or $Document.DocumentElement.LocalName -ne "Task" -or $Document.DocumentElement.NamespaceURI -ne $namespace) {
+        throw "Capture task root or namespace is invalid."
+    }
+    foreach ($node in @($Document.SelectNodes("//*"))) {
+        if ($node.NamespaceURI -ne $namespace -or -not $allowed.ContainsKey([string]$node.LocalName)) {
+            throw "Capture task contains an unknown element or namespace: $($node.LocalName)."
+        }
+        $expectedChildren = @($allowed[[string]$node.LocalName])
+        if ($node.LocalName -eq "Settings" -and $AllowLegacySettings) {
+            $expectedChildren = @("DisallowStartIfOnBatteries", "StopIfGoingOnBatteries", "ExecutionTimeLimit", "MultipleInstancesPolicy", "StartWhenAvailable", "IdleSettings", "UseUnifiedSchedulingEngine")
+        }
+        $actualChildren = @($node.ChildNodes | Where-Object { $_.NodeType -eq [System.Xml.XmlNodeType]::Element } | ForEach-Object { [string]$_.LocalName })
+        foreach ($child in $actualChildren) {
+            if ($child -notin $expectedChildren) { throw "Capture task contains an unknown child element: $child." }
+        }
+        # Optional children remain optional, but their relative order is
+        # canonical.  This prevents an attacker from hiding a second action,
+        # trigger, or setting behind an otherwise valid element sequence.
+        $lastIndex = -1
+        foreach ($child in $actualChildren) {
+            $childIndex = [array]::IndexOf($expectedChildren, $child)
+            if ($childIndex -le $lastIndex) { throw "Capture task child order or cardinality is invalid under $($node.LocalName)." }
+            $lastIndex = $childIndex
+        }
+        foreach ($attribute in @($node.Attributes)) {
+            if ($attribute.Name -eq "xmlns") {
+                if ($node -ne $Document.DocumentElement -or [string]$attribute.Value -ne $namespace) { throw "Capture task contains an unexpected namespace declaration." }
+                continue
+            }
+            if ($attribute.Prefix -eq "xmlns") { throw "Capture task contains an unexpected namespace declaration." }
+            $valid = ($node.LocalName -eq "Task" -and $attribute.LocalName -eq "version") -or
+                ($node.LocalName -eq "Principal" -and $attribute.LocalName -eq "id") -or
+                ($node.LocalName -eq "Actions" -and $attribute.LocalName -eq "Context")
+            if (-not $valid -or $attribute.NamespaceURI -notin @("", $namespace)) {
+                throw "Capture task contains an unknown attribute: $($attribute.Name)."
+            }
+        }
+        $requiredChildren = @{
+            Task = @("RegistrationInfo", "Principals", "Settings", "Triggers", "Actions")
+            RegistrationInfo = @("Description", "URI")
+            Principals = @("Principal")
+            Principal = @("UserId", "LogonType")
+            Settings = @()
+            RestartOnFailure = @("Interval", "Count")
+            Triggers = @("CalendarTrigger")
+            CalendarTrigger = @("StartBoundary", "ScheduleByWeek")
+            ScheduleByWeek = @("WeeksInterval", "DaysOfWeek")
+            DaysOfWeek = @("Monday", "Tuesday", "Wednesday", "Thursday", "Friday")
+            Actions = @("Exec")
+            Exec = @("Command", "Arguments", "WorkingDirectory")
+        }
+        if ($requiredChildren.ContainsKey([string]$node.LocalName)) {
+            foreach ($requiredChild in @($requiredChildren[[string]$node.LocalName])) {
+                if (@($node.ChildNodes | Where-Object { $_.NodeType -eq [System.Xml.XmlNodeType]::Element -and $_.LocalName -eq $requiredChild }).Count -ne 1) {
+                    throw "Capture task must contain exactly one $requiredChild under $($node.LocalName)."
+                }
+            }
+        }
+        $exactAttributes = @{
+            Task = @("version")
+            Principal = @("id")
+            Actions = @("Context")
+        }
+        if ($exactAttributes.ContainsKey([string]$node.LocalName)) {
+            $actualAttributes = @($node.Attributes | Where-Object { $_.Name -ne "xmlns" } | ForEach-Object { [string]$_.LocalName })
+            $expectedAttributes = @($exactAttributes[[string]$node.LocalName])
+            if (($actualAttributes -join ',') -ne ($expectedAttributes -join ',')) {
+                throw "Capture task attributes are not exact under $($node.LocalName)."
+            }
+        }
+        foreach ($child in @($node.ChildNodes)) {
+            if ($child.NodeType -in @([System.Xml.XmlNodeType]::Comment, [System.Xml.XmlNodeType]::ProcessingInstruction, [System.Xml.XmlNodeType]::CDATA)) {
+                throw "Capture task cannot contain comments, processing instructions, or CDATA."
+            }
+            if ($child.NodeType -eq [System.Xml.XmlNodeType]::Text -and -not [string]::IsNullOrWhiteSpace([string]$child.Value)) {
+                if ($node.LocalName -notin @("Description", "URI", "UserId", "LogonType", "RunLevel", "Enabled", "StartWhenAvailable", "WakeToRun", "DisallowStartIfOnBatteries", "StopIfGoingOnBatteries", "ExecutionTimeLimit", "MultipleInstancesPolicy", "Interval", "Count", "StartBoundary", "WeeksInterval", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Command", "Arguments", "WorkingDirectory", "UseUnifiedSchedulingEngine", "Duration", "WaitTimeout", "StopOnIdleEnd", "RestartOnIdle")) {
+                    throw "Capture task contains non-whitespace text outside a governed value."
+                }
+            }
+        }
+    }
+    $top = @($Document.DocumentElement.ChildNodes | Where-Object { $_.NodeType -eq 'Element' } | ForEach-Object { $_.LocalName })
+    if (($top -join ',') -ne 'RegistrationInfo,Principals,Settings,Triggers,Actions') { throw "Capture task top-level contract is invalid." }
+}
+
 function Assert-DawnstrikeCaptureTaskSafety {
     [CmdletBinding()]
     param(
@@ -105,17 +245,70 @@ function Assert-DawnstrikeCaptureTaskSafety {
         [string]$ExpectedInterpreterPath = "",
         [string]$ExpectedInterpreterSha256 = "",
         [string]$ExpectedInterpreterSignerThumbprint = "9BA3C2E210C7E8296C5056515BFC0B0BBA78AC48",
+        [ValidateSet("", "true", "false")][string]$ExpectedEnabled = "",
+        [switch]$AllowLegacySettings,
         [switch]$AllowLegacyLauncher,
         [switch]$RequirePasswordPrincipal,
         [switch]$RequireRunner
     )
 
+    if ($Xml.Length -gt 1048576) { throw "Capture task XML exceeds the bounded safety limit." }
     try {
         $document = [System.Xml.XmlDocument]::new()
         $document.PreserveWhitespace = $true
-        $document.LoadXml($Xml)
+        $settings = [System.Xml.XmlReaderSettings]::new()
+        $settings.DtdProcessing = [System.Xml.DtdProcessing]::Prohibit
+        $settings.XmlResolver = $null
+        $settings.MaxCharactersInDocument = 1048576
+        $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($Xml), $settings)
+        try { $document.Load($reader) } finally { $reader.Dispose() }
     }
     catch { throw "Capture task safety validation requires valid XML." }
+    Assert-DawnstrikeCaptureCanonicalXml -Document $document -AllowLegacySettings:$AllowLegacySettings
+    $settingsForStage = @($document.SelectNodes("//*[local-name()='Settings']"))
+    $idleSettings = if ($settingsForStage.Count -eq 1) { @($settingsForStage[0].ChildNodes | Where-Object { $_.LocalName -eq "IdleSettings" }) } else { @() }
+    if ($idleSettings.Count -gt 0 -and -not $AllowLegacySettings) {
+        throw "IdleSettings are permitted only on a validated migration input."
+    }
+    foreach ($idle in $idleSettings) {
+        if ($idle.Attributes.Count -ne 0) { throw "Legacy IdleSettings cannot carry attributes." }
+        $idleChildren = @($idle.ChildNodes | Where-Object { $_.NodeType -eq 'Element' } | ForEach-Object { $_.LocalName })
+        if (($idleChildren -join ',') -ne 'Duration,WaitTimeout,StopOnIdleEnd,RestartOnIdle') {
+            throw "Legacy IdleSettings cardinality or order is not the exact migration contract."
+        }
+        $idleValues = @($idle.ChildNodes | Where-Object { $_.NodeType -eq 'Element' } | ForEach-Object { [string]$_.InnerText })
+        if (($idleValues -join ',') -ne 'PT10M,PT1H,true,false') {
+            throw "Legacy IdleSettings values are not the exact migration contract."
+        }
+    }
+    if ($AllowLegacySettings) {
+        if ($settingsForStage.Count -ne 1) { throw "Legacy migration input Settings section is missing." }
+        $legacyChildren = @($settingsForStage[0].ChildNodes | Where-Object { $_.NodeType -eq 'Element' } | ForEach-Object { $_.LocalName })
+        if (($legacyChildren -join ',') -ne 'DisallowStartIfOnBatteries,StopIfGoingOnBatteries,ExecutionTimeLimit,MultipleInstancesPolicy,StartWhenAvailable,IdleSettings,UseUnifiedSchedulingEngine') {
+            throw "Legacy migration input Settings are not the exact live contract."
+        }
+        $legacyValues = @($settingsForStage[0].ChildNodes | Where-Object { $_.NodeType -eq 'Element' } | ForEach-Object { [string]$_.InnerText })
+        if (($legacyValues[0..4] -join ',') -ne 'true,true,PT3H,IgnoreNew,true' -or [string]$legacyValues[6] -ne 'true') {
+            throw "Legacy migration input Settings values are not the exact live contract."
+        }
+    }
+    elseif (-not $AllowLegacyLauncher) {
+        if ($settingsForStage.Count -ne 1) { throw "Canonical Settings section is missing." }
+        $canonicalChildren = @($settingsForStage[0].ChildNodes | Where-Object { $_.NodeType -eq 'Element' } | ForEach-Object { $_.LocalName })
+        if (($canonicalChildren -join ',') -ne 'Enabled,StartWhenAvailable,WakeToRun,DisallowStartIfOnBatteries,StopIfGoingOnBatteries,ExecutionTimeLimit,MultipleInstancesPolicy,RestartOnFailure,UseUnifiedSchedulingEngine') {
+            throw "Canonical Settings cardinality or order is invalid."
+        }
+        $canonicalValues = @($settingsForStage[0].ChildNodes | Where-Object { $_.NodeType -eq 'Element' } | ForEach-Object { [string]$_.InnerText })
+        if ($canonicalValues[0] -notin @('true', 'false') -or $canonicalValues[1] -ne 'true' -or $canonicalValues[2] -ne 'true' -or $canonicalValues[3] -ne 'false' -or $canonicalValues[4] -ne 'false' -or $canonicalValues[5] -ne 'PT3H' -or $canonicalValues[6] -ne 'IgnoreNew' -or $canonicalValues[8] -ne 'true') {
+            throw "Canonical Settings values are invalid."
+        }
+        $restartSettings = @($settingsForStage[0].ChildNodes | Where-Object { $_.LocalName -eq 'RestartOnFailure' })
+        if ($restartSettings.Count -ne 1 -or @($restartSettings[0].ChildNodes | Where-Object { $_.LocalName -eq 'Interval' }).Count -ne 1 -or [string](@($restartSettings[0].ChildNodes | Where-Object { $_.LocalName -eq 'Interval' })[0].InnerText) -ne 'PT15M' -or @($restartSettings[0].ChildNodes | Where-Object { $_.LocalName -eq 'Count' }).Count -ne 1 -or [string](@($restartSettings[0].ChildNodes | Where-Object { $_.LocalName -eq 'Count' })[0].InnerText) -ne '3') {
+            throw "Canonical RestartOnFailure values are invalid."
+        }
+        if ($ExpectedEnabled -and $canonicalValues[0] -ne $ExpectedEnabled) { throw "Canonical task enablement is not the expected stage."
+        }
+    }
     if ($document.DocumentElement.LocalName -ne "Task" -or $document.DocumentElement.NamespaceURI -ne "http://schemas.microsoft.com/windows/2004/02/mit/task") {
         throw "Capture task root or namespace is invalid."
     }
@@ -345,11 +538,10 @@ function Assert-DawnstrikeCaptureTaskSafety {
         @("--entitlement-receipt", "--entitlement-receipt-sha256", $ExpectedEntitlementReceiptSha256),
         @("--source-config", "--source-config-sha256", $ExpectedSourceConfigSha256)
     )) {
-        if ([string]::IsNullOrWhiteSpace([string]$inputBinding[2])) { continue }
         $inputPath = [System.IO.Path]::GetFullPath([string]$values[$inputBinding[0]])
         $null = Assert-DawnstrikeCaptureRegularPath $inputPath "Capture action input file"
         $actualHash = Get-DawnstrikeCaptureFileSha256 $inputPath
-        if ($actualHash -ne [string]$values[$inputBinding[1]] -or $actualHash -ne [string]$inputBinding[2]) {
+        if ($actualHash -ne [string]$values[$inputBinding[1]] -or (-not [string]::IsNullOrWhiteSpace([string]$inputBinding[2]) -and $actualHash -ne [string]$inputBinding[2])) {
             throw "Capture action input file hash does not match its exact binding."
         }
     }
