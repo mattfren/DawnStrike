@@ -1,7 +1,157 @@
 [CmdletBinding()]
 param()
 
-function Enter-DawnstrikeDailyRunLock {
+if (
+    [int]$PSVersionTable.PSVersion.Major -lt 5 -or
+    [string]$PSVersionTable.PSEdition -ne "Desktop"
+) {
+    throw "Dawnstrike stage locking requires Windows PowerShell 5.1 or later (Desktop edition)."
+}
+
+function Enter-DawnstrikeLockOperationMutex {
+    [CmdletBinding()]
+    param([int]$TimeoutMilliseconds = 60000)
+
+    $mutex = New-Object System.Threading.Mutex($false, "Global\Dawnstrike.LockHandshake.v1")
+    try {
+        if (-not $mutex.WaitOne($TimeoutMilliseconds)) {
+            $mutex.Dispose()
+            throw "Dawnstrike lock handshake mutex could not be acquired."
+        }
+        return $mutex
+    }
+    catch {
+        $mutex.Dispose()
+        throw
+    }
+}
+
+function Exit-DawnstrikeLockOperationMutex {
+    [CmdletBinding()]
+    param([AllowNull()][object]$Mutex)
+
+    if ($null -eq $Mutex) { return }
+    try { $Mutex.ReleaseMutex() } catch { }
+    $Mutex.Dispose()
+}
+
+function Assert-DawnstrikeLockNoReparseComponents {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    $full = [System.IO.Path]::GetFullPath($Path)
+    $item = Get-Item -LiteralPath $full -Force -ErrorAction SilentlyContinue
+    if ($null -ne $item -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "$Label contains a reparse-point path component."
+    }
+    $parentPath = if ($null -ne $item -and $item.PSIsContainer) {
+        $item.FullName
+    }
+    else {
+        Split-Path -Parent $full
+    }
+    $current = [System.IO.DirectoryInfo]::new($parentPath)
+    while ($null -ne $current) {
+        $currentItem = Get-Item -LiteralPath $current.FullName -Force -ErrorAction SilentlyContinue
+        if ($null -ne $currentItem -and ($currentItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "$Label contains a reparse-point path component."
+        }
+        if ([string]::Equals(
+            $current.FullName.TrimEnd('\'),
+            $current.Root.FullName.TrimEnd('\'),
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) { break }
+        $current = $current.Parent
+    }
+}
+
+function Get-DawnstrikeLockBytesSha256 {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][byte[]]$Bytes)
+
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString($sha.ComputeHash($Bytes))).Replace('-', '').ToLowerInvariant()
+    }
+    finally { $sha.Dispose() }
+}
+
+function Get-DawnstrikeLockSnapshot {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [switch]$AllowMissing
+    )
+
+    $full = [System.IO.Path]::GetFullPath($Path)
+    Assert-DawnstrikeLockNoReparseComponents $full $Label
+    $item = Get-Item -LiteralPath $full -Force -ErrorAction SilentlyContinue
+    if ($null -eq $item) {
+        if ($AllowMissing) {
+            return [pscustomobject]@{
+                path = $full
+                present = $false
+                bytes_sha256 = $null
+                byte_count = 0
+                lock_token = $null
+                payload = $null
+            }
+        }
+        throw "$Label is missing."
+    }
+    if (
+        $item.PSIsContainer -or
+        ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
+    ) { throw "$Label is not a regular non-reparse file." }
+    $first = [System.IO.File]::ReadAllBytes($full)
+    $firstHash = Get-DawnstrikeLockBytesSha256 $first
+    Assert-DawnstrikeLockNoReparseComponents $full $Label
+    $second = [System.IO.File]::ReadAllBytes($full)
+    $secondHash = Get-DawnstrikeLockBytesSha256 $second
+    if ($firstHash -ne $secondHash -or $first.Length -ne $second.Length) {
+        throw "$Label changed while taking its same-byte snapshot."
+    }
+    try {
+        $payload = [System.Text.Encoding]::UTF8.GetString($first) | ConvertFrom-Json
+    }
+    catch { throw "$Label is not valid JSON." }
+    if (
+        $null -eq $payload -or
+        [string]::IsNullOrWhiteSpace([string]$payload.lock_token) -or
+        [string]$payload.research_only -ne 'True' -or
+        [string]$payload.broker_execution_enabled -ne 'False'
+    ) { throw "$Label does not carry the exact safety identity." }
+    return [pscustomobject]@{
+        path = $full
+        present = $true
+        bytes_sha256 = $firstHash
+        byte_count = $first.Length
+        lock_token = [string]$payload.lock_token
+        payload = $payload
+    }
+}
+
+function Remove-DawnstrikeOwnedLock {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][object]$Lock, [Parameter(Mandatory = $true)][string]$Label)
+
+    if (-not [bool]$Lock.acquired) { return }
+    $current = Get-DawnstrikeLockSnapshot -Path ([string]$Lock.lock_path) -Label $Label
+    if (
+        -not $current.present -or
+        [string]$current.lock_token -ne [string]$Lock.lock_token -or
+        [string]$current.bytes_sha256 -ne [string]$Lock.bytes_sha256
+    ) { throw "$Label ownership changed; refusing to remove it." }
+    Remove-Item -LiteralPath ([string]$Lock.lock_path) -Force -ErrorAction Stop
+    $after = Get-DawnstrikeLockSnapshot -Path ([string]$Lock.lock_path) -Label $Label -AllowMissing
+    if ($after.present) { throw "$Label could not be removed after ownership was proven." }
+}
+
+function Enter-DawnstrikeDailyRunLockCore {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$StateRoot,
@@ -14,28 +164,46 @@ function Enter-DawnstrikeDailyRunLock {
         throw "StaleAfterMinutes must be positive."
     }
     $lockRoot = Join-Path $StateRoot "locks"
+    Assert-DawnstrikeLockNoReparseComponents $lockRoot "Daily lock root"
     New-Item -ItemType Directory -Path $lockRoot -Force | Out-Null
+    Assert-DawnstrikeLockNoReparseComponents $lockRoot "Daily lock root"
     $activationLockPath = Join-Path $lockRoot "dawnstrike-runtime-activation.lock"
-    if ($Owner -notin @("runtime_activation", "runtime_rollback") -and (Test-Path -LiteralPath $activationLockPath -PathType Leaf)) {
+    $lockPath = Join-Path $lockRoot ("dawnstrike-daily-" + $MarketDate + ".lock")
+    $lockPathFull = [System.IO.Path]::GetFullPath($lockPath)
+    $activationBefore = Get-DawnstrikeLockSnapshot -Path $activationLockPath -Label "Runtime activation lock" -AllowMissing
+    if ($Owner -notin @("runtime_activation", "runtime_rollback") -and $activationBefore.present) {
         return [pscustomobject]@{
             acquired = $false
-            lock_path = Join-Path $lockRoot ("dawnstrike-daily-" + $MarketDate + ".lock")
+            lock_path = $lockPath
             reason = "runtime_activation_lock"
             age_minutes = $null
         }
     }
-    $lockPath = Join-Path $lockRoot ("dawnstrike-daily-" + $MarketDate + ".lock")
-    if (Test-Path -LiteralPath $lockPath -PathType Leaf) {
+    $existingDaily = Get-DawnstrikeLockSnapshot -Path $lockPath -Label "Daily run lock" -AllowMissing
+    if ($existingDaily.present) {
         $age = ((Get-Date).ToUniversalTime() - (Get-Item -LiteralPath $lockPath).LastWriteTimeUtc).TotalMinutes
         $ownerActive = Test-DawnstrikeLockOwnerActive -LockPath $lockPath
         # Wall-clock age is diagnostic only.  A long-running owner must never
         # be evicted merely because it crossed StaleAfterMinutes; doing so
         # permits two daily runs to mutate the same research ledger.  Recovery
-        # is allowed only when PID/start-time proof says the owner is dead (or
-        # the payload cannot prove any owner exists).
+        # is allowed only when PID/start-time proof says the owner is dead.
         if (-not $ownerActive) {
             $stalePath = "$lockPath.stale.$([DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ'))"
+            Assert-DawnstrikeLockNoReparseComponents $stalePath "Stale daily lock"
+            $again = Get-DawnstrikeLockSnapshot -Path $lockPath -Label "Daily run lock"
+            if ($again.bytes_sha256 -ne $existingDaily.bytes_sha256) {
+                return [pscustomobject]@{
+                    acquired = $false
+                    lock_path = $lockPath
+                    reason = "concurrent_lock_change"
+                    age_minutes = [math]::Round($age, 2)
+                }
+            }
             Move-Item -LiteralPath $lockPath -Destination $stalePath -ErrorAction Stop
+            if (Test-Path -LiteralPath $lockPath) {
+                throw "Daily lock archival did not remove the original lock path."
+            }
+            Assert-DawnstrikeLockNoReparseComponents $stalePath "Stale daily lock"
         } else {
             return [pscustomobject]@{
                 acquired = $false
@@ -54,6 +222,8 @@ function Enter-DawnstrikeDailyRunLock {
         process_id = $PID
         process_started_at_utc = (Get-Process -Id $PID).StartTime.ToUniversalTime().ToString("o")
         lock_token = $lockToken
+        research_only = $true
+        broker_execution_enabled = $false
     } | ConvertTo-Json -Depth 3
     try {
         $handle = [System.IO.File]::Open(
@@ -65,6 +235,7 @@ function Enter-DawnstrikeDailyRunLock {
         try {
             $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
             $handle.Write($bytes, 0, $bytes.Length)
+            $handle.Flush($true)
         } finally {
             $handle.Dispose()
         }
@@ -76,12 +247,154 @@ function Enter-DawnstrikeDailyRunLock {
             age_minutes = $null
         }
     }
+    Assert-DawnstrikeLockNoReparseComponents $lockPath "Daily run lock"
+    $own = Get-DawnstrikeLockSnapshot -Path $lockPath -Label "Daily run lock"
+    if (-not $own.present -or $own.lock_token -ne $lockToken) {
+        throw "Daily run lock could not be read back with its own token."
+    }
+    # Cooperative two-lock handshake: the pre-create check is only a
+    # fast-path.  The post-create same-byte snapshot is authoritative.  If a
+    # runtime activation/rollback lock appeared in the race window, release
+    # only this unchanged daily lock and fail before any stage work begins.
+    $activationAfter = Get-DawnstrikeLockSnapshot -Path $activationLockPath -Label "Runtime activation lock" -AllowMissing
+    if ($activationAfter.present -and $Owner -notin @("runtime_activation", "runtime_rollback")) {
+        Remove-DawnstrikeOwnedLock -Lock $([pscustomobject]@{
+                acquired = $true
+                lock_path = $lockPath
+                lock_token = $lockToken
+                bytes_sha256 = $own.bytes_sha256
+            }) -Label "Daily run lock"
+        return [pscustomobject]@{
+            acquired = $false
+            lock_path = $lockPath
+            reason = "runtime_activation_lock_race"
+            age_minutes = $null
+        }
+    }
+    if ($Owner -in @("runtime_activation", "runtime_rollback") -and -not $activationAfter.present) {
+        Remove-DawnstrikeOwnedLock -Lock $([pscustomobject]@{
+                acquired = $true
+                lock_path = $lockPath
+                lock_token = $lockToken
+                bytes_sha256 = $own.bytes_sha256
+            }) -Label "Daily run lock"
+        throw "Runtime activation lock disappeared during the daily lock handshake."
+    }
+    $foreignDaily = @(
+        Get-ChildItem -LiteralPath $lockRoot -Filter "dawnstrike-daily-*.lock" -File -Force |
+            Where-Object {
+                [System.IO.Path]::GetFullPath($_.FullName) -ne $lockPathFull
+            }
+    )
+    if ($foreignDaily.Count -gt 0) {
+        foreach ($foreign in $foreignDaily) {
+            # Reading every counterpart from one strict snapshot means an
+            # active daily stage cannot be mistaken for a stale filename.
+            $null = Get-DawnstrikeLockSnapshot -Path $foreign.FullName -Label "Counterpart daily run lock"
+        }
+        Remove-DawnstrikeOwnedLock -Lock $([pscustomobject]@{
+                acquired = $true
+                lock_path = $lockPath
+                lock_token = $lockToken
+                bytes_sha256 = $own.bytes_sha256
+            }) -Label "Daily run lock"
+        return [pscustomobject]@{
+            acquired = $false
+            lock_path = $lockPath
+            reason = "counterpart_daily_lock_race"
+            age_minutes = $null
+        }
+    }
     return [pscustomobject]@{
         acquired = $true
         lock_path = $lockPath
         reason = "acquired"
         age_minutes = 0
         lock_token = $lockToken
+        bytes_sha256 = $own.bytes_sha256
+    }
+}
+
+function Enter-DawnstrikeDailyRunLock {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$StateRoot,
+        [Parameter(Mandatory = $true)][string]$MarketDate,
+        [Parameter(Mandatory = $true)][string]$Owner,
+        [int]$StaleAfterMinutes = 240
+    )
+
+    $mutex = Enter-DawnstrikeLockOperationMutex
+    try {
+        return Enter-DawnstrikeDailyRunLockCore @PSBoundParameters
+    }
+    finally {
+        Exit-DawnstrikeLockOperationMutex $mutex
+    }
+}
+
+function Confirm-DawnstrikeActivationDailyLockHandshakeCore {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$StateRoot,
+        [Parameter(Mandatory = $true)][object]$ActivationLock,
+        [Parameter(Mandatory = $true)][object]$DailyLock
+    )
+
+    if (-not $ActivationLock.acquired -or -not $DailyLock.acquired) {
+        throw "Activation/daily lock handshake requires both owned locks."
+    }
+    $lockRoot = Join-Path $StateRoot "locks"
+    Assert-DawnstrikeLockNoReparseComponents $lockRoot "Activation lock root"
+    $activation = Get-DawnstrikeLockSnapshot `
+        -Path ([string]$ActivationLock.path) `
+        -Label "Runtime activation lock"
+    if (
+        $activation.lock_token -ne [string]$ActivationLock.token -or
+        $activation.bytes_sha256 -ne [string]$ActivationLock.bytes_sha256
+    ) {
+        throw "Runtime activation lock changed during the lock handshake."
+    }
+    $daily = Get-DawnstrikeLockSnapshot `
+        -Path ([string]$DailyLock.lock_path) `
+        -Label "Daily run lock"
+    if (
+        $daily.lock_token -ne [string]$DailyLock.lock_token -or
+        $daily.bytes_sha256 -ne [string]$DailyLock.bytes_sha256
+    ) {
+        throw "Daily run lock changed during the lock handshake."
+    }
+    $foreign = @(
+        Get-ChildItem -LiteralPath $lockRoot -Filter "dawnstrike-daily-*.lock" -File -Force |
+            Where-Object {
+                [System.IO.Path]::GetFullPath($_.FullName) -ne
+                    [System.IO.Path]::GetFullPath([string]$DailyLock.lock_path)
+            }
+    )
+    foreach ($item in $foreign) {
+        $null = Get-DawnstrikeLockSnapshot -Path $item.FullName -Label "Counterpart daily run lock"
+    }
+    if ($foreign.Count -gt 0) {
+        Remove-DawnstrikeOwnedLock -Lock $DailyLock -Label "Daily run lock"
+        throw "A counterpart daily run lock appeared during the activation handshake."
+    }
+    return $true
+}
+
+function Confirm-DawnstrikeActivationDailyLockHandshake {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$StateRoot,
+        [Parameter(Mandatory = $true)][object]$ActivationLock,
+        [Parameter(Mandatory = $true)][object]$DailyLock
+    )
+
+    $mutex = Enter-DawnstrikeLockOperationMutex
+    try {
+        return Confirm-DawnstrikeActivationDailyLockHandshakeCore @PSBoundParameters
+    }
+    finally {
+        Exit-DawnstrikeLockOperationMutex $mutex
     }
 }
 
@@ -90,11 +403,8 @@ function Test-DawnstrikeLockOwnerActive {
     param([Parameter(Mandatory = $true)][string]$LockPath)
 
     try {
-        $lockItem = Get-Item -LiteralPath $LockPath -ErrorAction Stop
-        if (($lockItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-            return $false
-        }
-        $payload = Get-Content -LiteralPath $LockPath -Raw -ErrorAction Stop | ConvertFrom-Json
+        $snapshot = Get-DawnstrikeLockSnapshot -Path $LockPath -Label "Lock owner record"
+        $payload = $snapshot.payload
         $processId = 0
         if (-not [int]::TryParse([string]$payload.process_id, [ref]$processId) -or $processId -le 0) {
             return $false
@@ -127,20 +437,29 @@ function Test-DawnstrikeLockOwnerActive {
     }
 }
 
+function Exit-DawnstrikeDailyRunLockCore {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][object]$Lock)
+
+    try {
+        if (-not $Lock.acquired) { return }
+        Remove-DawnstrikeOwnedLock -Lock $Lock -Label "Daily run lock"
+    }
+    catch {
+        # Never delete a lock whose ownership cannot be proven.
+    }
+}
+
 function Exit-DawnstrikeDailyRunLock {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][object]$Lock)
 
-    if ($Lock.acquired -and (Test-Path -LiteralPath $Lock.lock_path -PathType Leaf)) {
-        try {
-            $payload = Get-Content -LiteralPath $Lock.lock_path -Raw | ConvertFrom-Json
-            if ([string]$payload.lock_token -eq [string]$Lock.lock_token) {
-                Remove-Item -LiteralPath $Lock.lock_path -Force
-            }
-        }
-        catch {
-            # Never delete a lock whose ownership cannot be proven.
-        }
+    $mutex = Enter-DawnstrikeLockOperationMutex
+    try {
+        Exit-DawnstrikeDailyRunLockCore @PSBoundParameters
+    }
+    finally {
+        Exit-DawnstrikeLockOperationMutex $mutex
     }
 }
 

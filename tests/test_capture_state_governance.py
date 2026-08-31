@@ -18,10 +18,15 @@ from intraday_scanner.storage.migrations import run_migrations
 from scripts.capture_task_contract import (
     CAPTURE_TASK_NAME,
     CaptureTaskContractError,
+    load_prepared,
+    seal_prepared,
     seal_receipt,
 )
 from scripts.capture_task_contract import (
     self_hash as capture_self_hash,
+)
+from scripts.capture_task_contract import (
+    validate_prepared as validate_capture_prepared,
 )
 from scripts.capture_task_contract import (
     validate_receipt as validate_capture_receipt,
@@ -446,6 +451,101 @@ def test_capture_receipt_writer_rejects_reparse_output_root(tmp_path: Path) -> N
         _remove_directory_reparse(link)
 
 
+def _capture_prepared(tmp_path: Path) -> dict[str, object]:
+    return {
+        "schema_version": "dawnstrike.capture_task_rebind_prepared.v1",
+        "status": "PREPARED",
+        "task_name": CAPTURE_TASK_NAME,
+        "candidate_sha": CANDIDATE_SHA,
+        "candidate_tree": CANDIDATE_TREE,
+        "activation_id": "1" * 24,
+        "activation_receipt_name": "runtime-activation-" + ("1" * 24) + ".json",
+        "activation_receipt_sha256": _sha("activation-receipt"),
+        "previous_candidate_sha": "c" * 40,
+        "xml_before_sha256": _sha("xml-before"),
+        "action_before_sha256": _sha("action-before"),
+        "definition_before_sha256": _sha("definition-before"),
+        "normalized_definition_before_sha256": _sha("normalized-definition-before"),
+        "principal_sha256": _sha("principal"),
+        "trigger_sha256": _sha("trigger"),
+        "settings_sha256": _sha("settings"),
+        "symbols_manifest_path": str((tmp_path / "symbols.json").resolve()),
+        "symbols_manifest_sha256": _sha("symbols"),
+        "entitlement_receipt_path": str((tmp_path / "entitlement.json").resolve()),
+        "entitlement_receipt_sha256": _sha("entitlement"),
+        "source_config_path": str((tmp_path / "source-config.json").resolve()),
+        "source_config_sha256": _sha("source"),
+        "enablement_before": "Disabled",
+        "compensation": "RESTORE_EXACT_XML_AND_DISABLED",
+        "prepared_at_utc": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+
+
+def test_capture_prepared_contract_is_self_hashed_and_exact(tmp_path: Path) -> None:
+    payload = _capture_prepared(tmp_path)
+    prepared_path = tmp_path / "capture.prepared.json"
+    sealed = seal_prepared(payload, prepared_path)
+    assert sealed["prepared_sha256"]
+    assert load_prepared(
+        prepared_path, candidate_sha=CANDIDATE_SHA, candidate_tree=CANDIDATE_TREE
+    )["status"] == "PREPARED"
+    tampered = dict(sealed)
+    tampered["source_config_sha256"] = _sha("hostile-mismatch")
+    with pytest.raises(CaptureTaskContractError, match="self-hash"):
+        validate_capture_prepared(tampered)
+
+
+def test_capture_contract_rejects_duplicate_json_fields(tmp_path: Path) -> None:
+    duplicate = tmp_path / "duplicate.json"
+    duplicate.write_text('{"status":"COMPLETE","status":"PREPARED"}\n', encoding="utf-8")
+    with pytest.raises(CaptureTaskContractError, match="duplicate JSON field"):
+        load_prepared(duplicate)
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
+def test_powershell_lock_handshake_rejects_both_lock_orders(tmp_path: Path) -> None:
+    source = Path.cwd()
+    stage_q = str(source / "scripts" / "invoke_dawnstrike_stage.ps1").replace("'", "''")
+    activation_q = str(source / "scripts" / "activate_dawnstrike_runtime.ps1").replace("'", "''")
+    state_q = str(tmp_path / "state").replace("'", "''")
+    command = rf"""
+. '{activation_q}'
+. '{stage_q}'
+$state = '{state_q}'
+New-Item -ItemType Directory -Path $state -Force | Out-Null
+try {{
+    $dailyFirst = Enter-DawnstrikeDailyRunLock -StateRoot $state -MarketDate '2026-08-31' -Owner 'normal_stage'
+    if (-not $dailyFirst.acquired) {{ throw 'daily-first lock was not acquired' }}
+    $dailyFirstFailure = ''
+    try {{ $null = Enter-DawnstrikeRuntimeActivationLock -StateRoot $state; throw 'activation acquired during daily-first order' }} catch {{ $dailyFirstFailure = $_.Exception.Message }}
+    if ($dailyFirstFailure -notmatch 'daily run lock') {{ throw ('unexpected daily-first failure: ' + $dailyFirstFailure) }}
+    Exit-DawnstrikeDailyRunLock $dailyFirst
+    $activationFirst = Enter-DawnstrikeRuntimeActivationLock -StateRoot $state
+    $normalAfterActivation = Enter-DawnstrikeDailyRunLock -StateRoot $state -MarketDate '2026-08-31' -Owner 'normal_stage'
+    if ($normalAfterActivation.acquired -or $normalAfterActivation.reason -notmatch 'runtime_activation') {{ throw 'normal stage acquired during activation-first order' }}
+    Exit-DawnstrikeRuntimeActivationLock $activationFirst
+    [pscustomobject]@{{ daily_first = $dailyFirst.acquired; activation_first = $activationFirst.acquired; activation_reason = $normalAfterActivation.reason }} | ConvertTo-Json -Compress
+}} finally {{ if (Test-Path -LiteralPath $state) {{ Remove-Item -LiteralPath $state -Recurse -Force }} }}
+"""
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=source,
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert payload == {
+        "daily_first": True,
+        "activation_first": True,
+        "activation_reason": "runtime_activation_lock",
+    }
+
+
 def test_state_receipt_candidate_and_broker_tamper_fail_closed(tmp_path: Path) -> None:
     receipt, _db, _state, _proof, _backup = _prepare(tmp_path)
     with pytest.raises(StatePreparationError, match="candidate SHA"):
@@ -696,10 +796,11 @@ function Disable-ScheduledTask {{
         $rebound = & $rebindScript -RuntimeRoot '{runtime_q}' -StateRoot '{state_q}' -CandidateSha '{candidate_sha}' -SymbolsManifest '{symbols_q}' -SymbolsManifestSha256 '{symbols_sha}' -EntitlementReceipt '{entitlement_q}' -EntitlementReceiptSha256 '{entitlement_sha}' -SourceConfig '{source_config_q}' -SourceConfigSha256 '{source_config_sha}' -Enable -ProcessTimeoutSeconds 120
     $rebindReceiptPath = Join-Path '{state_q}' ('receipts\capture-task\capture-task-rebind-' + '{candidate_sha}' + '.json')
     $rebindReceipt = Get-Content -LiteralPath $rebindReceiptPath -Raw | ConvertFrom-Json
+    $rebindActionArguments = $global:MockAuxArguments
     . '{rollback_q}'
 $receiptPath = Join-Path '{state_q}' ('receipts\runtime-activation\runtime-activation-' + $activated.activation_id + '.json')
 $rolledBack = Invoke-DawnstrikeRuntimeRollback -ActivationReceipt $receiptPath -ContractRoot '{candidate_q}' -RuntimeRoot '{runtime_q}' -StateRoot '{state_q}' -BackupRoot '{backup_q}' -ProcessTimeoutSeconds 120
-    $output = [pscustomobject]@{{ activated=$activated; rebound=$rebindReceipt; rebind_failure=$rebindFailure; rebind_failure_caught=$rebindFailureCaught; rolled_back=$rolledBack; activation_aux_state=$activationAuxState; final_aux_state=$global:MockAuxState; task_events=$global:TaskEvents }}
+    $output = [pscustomobject]@{{ activated=$activated; rebound=$rebindReceipt; rebind_failure=$rebindFailure; rebind_failure_caught=$rebindFailureCaught; rebind_action_arguments=$rebindActionArguments; rolled_back=$rolledBack; activation_aux_state=$activationAuxState; final_aux_state=$global:MockAuxState; task_events=$global:TaskEvents }}
     $output | ConvertTo-Json -Depth 12 -Compress
 """
     result = subprocess.run(
@@ -721,6 +822,17 @@ $rolledBack = Invoke-DawnstrikeRuntimeRollback -ActivationReceipt $receiptPath -
     assert payload["rebind_failure_caught"] is True
     assert payload["rebind_failure"]["status"] == "FAILED_RESTORED_EXACT_DISABLED"
     assert payload["rebound"]["status"] == "COMPLETE"
+    assert payload["rebound"]["changed_field"] == "candidate_sha_and_input_bindings"
+    for binding in (
+        "--candidate-sha " + candidate_sha,
+        '--symbols-manifest "' + str(symbols_manifest) + '"',
+        '--symbols-manifest-sha256 "' + symbols_sha + '"',
+        '--entitlement-receipt "' + str(entitlement_receipt) + '"',
+        '--entitlement-receipt-sha256 "' + entitlement_sha + '"',
+        '--source-config "' + str(source_config) + '"',
+        '--source-config-sha256 "' + source_config_sha + '"',
+    ):
+        assert binding in payload["rebind_action_arguments"]
     assert payload["rolled_back"]["status"] == "ROLLED_BACK"
     assert payload["rolled_back"]["auxiliary_capture_action"] == "RESTORED_EXACT"
     assert payload["final_aux_state"] == initial_aux_state

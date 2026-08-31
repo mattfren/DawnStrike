@@ -14,6 +14,12 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if (
+    [int]$PSVersionTable.PSVersion.Major -lt 5 -or
+    [string]$PSVersionTable.PSEdition -ne "Desktop"
+) {
+    throw "Dawnstrike activation requires Windows PowerShell 5.1 or later (Desktop edition)."
+}
 
 $script:DawnstrikeCanonicalTaskNames = @(
     "Dawnstrike AlphaOps Morning",
@@ -603,7 +609,20 @@ function Write-DawnstrikeTaskXmlFile {
             throw "Task XML declares an unsupported encoding."
         }
         Assert-DawnstrikeNoReparseComponents $Path "Task XML backup file"
+        $parent = Split-Path -Parent ([System.IO.Path]::GetFullPath($Path))
+        Assert-DawnstrikeNoReparseComponents $parent "Task XML backup root"
+        if (Test-Path -LiteralPath $Path) {
+            $existing = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+            if ($existing.PSIsContainer -or ($existing.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Task XML backup destination is not a regular file."
+            }
+        }
         [System.IO.File]::WriteAllText($Path, $Xml, $encoding)
+        Assert-DawnstrikeNoReparseComponents $Path "Task XML backup file"
+        $written = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        if ($written.PSIsContainer -or ($written.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Task XML backup destination is not a regular file after write."
+        }
         return $encodingLabel
     }
     catch {
@@ -685,11 +704,8 @@ function New-DawnstrikeTaskXmlBackup {
         if ($AuxiliaryCapture.present) {
             $auxiliaryFileName = "Dawnstrike_Delayed_SIP_Capture.xml"
             $auxiliaryPath = Join-Path $temporary $auxiliaryFileName
-            [System.IO.File]::WriteAllText(
-                $auxiliaryPath,
-                [string]$AuxiliaryCapture.xml,
-                [System.Text.UTF8Encoding]::new($false)
-            )
+            $null = Write-DawnstrikeTaskXmlFile `
+                -Xml ([string]$AuxiliaryCapture.xml) -Path $auxiliaryPath
             $auxiliaryEntry.file_name = $auxiliaryFileName
             $auxiliaryEntry.xml_sha256 = [string]$AuxiliaryCapture.xml_sha256
             $auxiliaryEntry.xml_file_sha256 = Get-DawnstrikeSha256File $auxiliaryPath
@@ -713,7 +729,10 @@ function New-DawnstrikeTaskXmlBackup {
         $manifestPath = Join-Path $temporary "manifest.json"
         Assert-DawnstrikeNoReparseComponents $manifestPath "Scheduler backup manifest"
         Write-DawnstrikeActivationJson $manifest $manifestPath
+        Assert-DawnstrikeNoReparseComponents $temporary "Temporary scheduler backup bundle"
+        Assert-DawnstrikeNoReparseComponents $final "Scheduler backup bundle"
         [System.IO.Directory]::Move($temporary, $final)
+        Assert-DawnstrikeNoReparseComponents $final "Scheduler backup bundle"
         $finalManifest = Join-Path $final "manifest.json"
         $result = [pscustomobject]@{
             backup_name = $BackupName
@@ -781,6 +800,10 @@ function Assert-DawnstrikeTaskXmlBackup {
     }
     try {
         $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        Assert-DawnstrikeNoReparseComponents $manifestPath "Scheduler backup manifest"
+        if ((Get-DawnstrikeSha256File $manifestPath) -ne $ExpectedManifestSha256) {
+            throw "Scheduler backup manifest changed during read."
+        }
     }
     catch {
         throw "Scheduler XML backup manifest is invalid JSON."
@@ -833,6 +856,10 @@ function Assert-DawnstrikeTaskXmlBackup {
         ) {
             throw "Scheduler XML backup auxiliary task file does not match its manifest."
         }
+        Assert-DawnstrikeNoReparseComponents $auxiliaryXmlPath "Auxiliary scheduler XML backup"
+        if ((Get-DawnstrikeSha256File $auxiliaryXmlPath) -ne [string]$auxiliary.xml_file_sha256) {
+            throw "Scheduler XML backup auxiliary task file changed during read."
+        }
     }
     elseif (
         $auxiliary.present -ne $false -or
@@ -880,6 +907,10 @@ function Assert-DawnstrikeTaskXmlBackup {
             throw "Scheduler XML backup task file does not match its manifest."
         }
         $xml = [System.IO.File]::ReadAllText($xmlPath)
+        Assert-DawnstrikeNoReparseComponents $xmlPath "Scheduler task XML backup"
+        if ((Get-DawnstrikeSha256File $xmlPath) -ne [string]$entry.xml_file_sha256) {
+            throw "Scheduler task XML backup changed during read."
+        }
         if ((Get-DawnstrikeSha256Text $xml) -ne [string]$entry.xml_sha256) {
             throw "Scheduler XML backup task text does not match its manifest."
         }
@@ -980,6 +1011,27 @@ function Assert-DawnstrikeReceiptRecoveryArtifacts {
         $stateResult.automatic_overwrite -ne $false
     ) {
         throw "Receipt-bound durable-state backup does not match the activation receipt."
+    }
+    if ($Receipt.PSObject.Properties.Name -contains "state_backup_bundle_path") {
+        Assert-DawnstrikeNoReparseComponents ([string]$Receipt.state_backup_bundle_path) `
+            "Receipt-bound durable-state backup path"
+        $receiptStateBundle = Resolve-DawnstrikeActivationRoot `
+            ([string]$Receipt.state_backup_bundle_path) `
+            "Receipt-bound durable-state backup path"
+        if (
+            -not [string]::Equals(
+                $receiptStateBundle,
+                $stateBundle,
+                [System.StringComparison]::OrdinalIgnoreCase
+            ) -or
+            [string]$stateResult.manifest_sha256 -ne [string]$Receipt.state_backup_manifest_sha256 -or
+            [string]$stateResult.backup_logical_snapshot_sha256 -ne
+                [string]$Receipt.state_backup_logical_snapshot_sha256 -or
+            [string]$stateResult.source_logical_snapshot_sha256 -ne
+                [string]$Receipt.state_backup_source_logical_snapshot_sha256
+        ) {
+            throw "Receipt-bound durable-state backup manifest or logical lineage does not match the activation receipt."
+        }
     }
 
     if ($RequireRollbackCheckout) {
@@ -1089,8 +1141,21 @@ function Write-DawnstrikeActivationJson {
             $json,
             [System.Text.UTF8Encoding]::new($false)
         )
+        Assert-DawnstrikeNoReparseComponents $temporary "Temporary receipt output"
+        $temporaryItem = Get-Item -LiteralPath $temporary -Force -ErrorAction Stop
+        if ($temporaryItem.PSIsContainer -or ($temporaryItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Temporary receipt output is not a regular file."
+        }
         Assert-DawnstrikeNoReparseComponents $Path "Receipt output"
+        if (Test-Path -LiteralPath $Path) {
+            throw "Receipt output already exists."
+        }
         [System.IO.File]::Move($temporary, $Path)
+        Assert-DawnstrikeNoReparseComponents $Path "Receipt output"
+        $writtenItem = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        if ($writtenItem.PSIsContainer -or ($writtenItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Receipt output is not a regular file after move."
+        }
     }
     finally {
         if (Test-Path -LiteralPath $temporary -PathType Leaf) {
@@ -1280,20 +1345,46 @@ function Assert-DawnstrikeCaptureRebindChain {
         (Get-DawnstrikeAuxiliarySectionHash ([string]$Auxiliary.xml) "Triggers") -ne [string]$capture.trigger_sha256 -or
         (Get-DawnstrikeAuxiliarySectionHash ([string]$Auxiliary.xml) "Settings") -ne [string]$capture.settings_sha256
     ) { throw "Ready auxiliary task is not bound to the exact activation receipt chain." }
+    if ([string]$capture.changed_field -ne "candidate_sha_and_input_bindings") {
+        throw "Ready auxiliary task receipt does not attest the permitted input-binding transformation."
+    }
+    foreach ($binding in @(
+        @("symbols-manifest-sha256", [string]$capture.symbols_manifest_sha256),
+        @("entitlement-receipt-sha256", [string]$capture.entitlement_receipt_sha256),
+        @("source-config-sha256", [string]$capture.source_config_sha256)
+    )) {
+        $bindingPattern = '(?i)(?<![A-Za-z0-9_-])--' + [regex]::Escape($binding[0]) + '(?:=|\s+)(?:"' + [regex]::Escape($binding[1]) + '"|' + [regex]::Escape($binding[1]) + ')(?![A-Za-z0-9])'
+        if (@([regex]::Matches([string]$Auxiliary.xml, $bindingPattern)).Count -ne 1) {
+            throw "Ready auxiliary task does not bind the supplied $($binding[0]) receipt hash."
+        }
+    }
     return $capture
 }
 
-function Enter-DawnstrikeRuntimeActivationLock {
+function Enter-DawnstrikeRuntimeActivationLockCore {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string]$StateRoot)
 
     $lockRoot = Join-Path $StateRoot "locks"
     Assert-DawnstrikeNoReparseComponents $lockRoot "Runtime activation lock root"
     New-Item -ItemType Directory -Path $lockRoot -Force | Out-Null
+    Assert-DawnstrikeNoReparseComponents $lockRoot "Runtime activation lock root"
     $path = Join-Path $lockRoot "dawnstrike-runtime-activation.lock"
     Assert-DawnstrikeNoReparseComponents $path "Runtime activation lock"
     if (Test-Path -LiteralPath $path) {
         throw "A runtime activation lock already exists and requires review."
+    }
+    if (Get-Command Get-DawnstrikeLockSnapshot -ErrorAction SilentlyContinue) {
+        $dailyBefore = @(
+            Get-ChildItem -LiteralPath $lockRoot -Filter "dawnstrike-daily-*.lock" -File -Force |
+                ForEach-Object {
+                    $null = Get-DawnstrikeLockSnapshot -Path $_.FullName -Label "Counterpart daily run lock"
+                    $_
+                }
+        )
+        if ($dailyBefore.Count -gt 0) {
+            throw "A daily run lock exists; runtime activation is not permitted."
+        }
     }
     $token = [guid]::NewGuid().ToString("N")
     $payload = [ordered]@{
@@ -1320,10 +1411,68 @@ function Enter-DawnstrikeRuntimeActivationLock {
     finally {
         if ($null -ne $handle) { $handle.Dispose() }
     }
-    return [pscustomobject]@{ path = $path; token = $token }
+    Assert-DawnstrikeNoReparseComponents $path "Runtime activation lock"
+    $snapshot = if (Get-Command Get-DawnstrikeLockSnapshot -ErrorAction SilentlyContinue) {
+        Get-DawnstrikeLockSnapshot -Path $path -Label "Runtime activation lock"
+    }
+    else { $null }
+    if (
+        $null -ne $snapshot -and
+        (-not $snapshot.present -or $snapshot.lock_token -ne $token)
+    ) { throw "Runtime activation lock could not be read back with its own token." }
+    if ($null -ne $snapshot) {
+        $dailyAfter = @(
+            Get-ChildItem -LiteralPath $lockRoot -Filter "dawnstrike-daily-*.lock" -File -Force |
+                ForEach-Object {
+                    $null = Get-DawnstrikeLockSnapshot -Path $_.FullName -Label "Counterpart daily run lock"
+                    $_
+                }
+        )
+        if ($dailyAfter.Count -gt 0) {
+            $owned = [pscustomobject]@{
+                acquired = $true
+                path = $path
+                token = $token
+                bytes_sha256 = $snapshot.bytes_sha256
+            }
+            $current = Get-DawnstrikeLockSnapshot -Path $path -Label "Runtime activation lock"
+            if (
+                $current.present -and
+                $current.lock_token -eq $token -and
+                $current.bytes_sha256 -eq $snapshot.bytes_sha256
+            ) {
+                Remove-Item -LiteralPath $path -Force -ErrorAction Stop
+                $removed = Get-DawnstrikeLockSnapshot -Path $path -Label "Runtime activation lock" -AllowMissing
+                if ($removed.present) { throw "Runtime activation lock could not be relinquished after a conflict." }
+            }
+            throw "A daily run lock appeared during runtime activation lock acquisition."
+        }
+    }
+    return [pscustomobject]@{
+        path = $path
+        token = $token
+        bytes_sha256 = if ($null -ne $snapshot) { [string]$snapshot.bytes_sha256 } else { $null }
+        acquired = $true
+    }
 }
 
-function Exit-DawnstrikeRuntimeActivationLock {
+function Enter-DawnstrikeRuntimeActivationLock {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$StateRoot)
+
+    if (-not (Get-Command Enter-DawnstrikeLockOperationMutex -ErrorAction SilentlyContinue)) {
+        return Enter-DawnstrikeRuntimeActivationLockCore @PSBoundParameters
+    }
+    $mutex = Enter-DawnstrikeLockOperationMutex
+    try {
+        return Enter-DawnstrikeRuntimeActivationLockCore @PSBoundParameters
+    }
+    finally {
+        Exit-DawnstrikeLockOperationMutex $mutex
+    }
+}
+
+function Exit-DawnstrikeRuntimeActivationLockCore {
     [CmdletBinding()]
     param([AllowNull()][object]$Lock)
 
@@ -1333,13 +1482,46 @@ function Exit-DawnstrikeRuntimeActivationLock {
     try { Assert-DawnstrikeNoReparseComponents $Lock.path "Runtime activation lock" }
     catch { return }
     try {
-        $payload = Get-Content -LiteralPath $Lock.path -Raw | ConvertFrom-Json
-        if ([string]$payload.lock_token -eq [string]$Lock.token) {
-            Remove-Item -LiteralPath $Lock.path -Force
+        if (Get-Command Get-DawnstrikeLockSnapshot -ErrorAction SilentlyContinue) {
+            $snapshot = Get-DawnstrikeLockSnapshot -Path $Lock.path -Label "Runtime activation lock"
+            if (
+                $snapshot.present -and
+                [string]$snapshot.lock_token -eq [string]$Lock.token -and
+                (
+                    [string]::IsNullOrWhiteSpace([string]$Lock.bytes_sha256) -or
+                    [string]$snapshot.bytes_sha256 -eq [string]$Lock.bytes_sha256
+                )
+            ) {
+                Remove-Item -LiteralPath $Lock.path -Force
+                $after = Get-DawnstrikeLockSnapshot -Path $Lock.path -Label "Runtime activation lock" -AllowMissing
+                if ($after.present) { return }
+            }
+        }
+        else {
+            $payload = Get-Content -LiteralPath $Lock.path -Raw | ConvertFrom-Json
+            if ([string]$payload.lock_token -eq [string]$Lock.token) {
+                Remove-Item -LiteralPath $Lock.path -Force
+            }
         }
     }
     catch {
         # Never delete a lock whose ownership cannot be proven.
+    }
+}
+
+function Exit-DawnstrikeRuntimeActivationLock {
+    [CmdletBinding()]
+    param([AllowNull()][object]$Lock)
+
+    if (-not (Get-Command Enter-DawnstrikeLockOperationMutex -ErrorAction SilentlyContinue)) {
+        return Exit-DawnstrikeRuntimeActivationLockCore @PSBoundParameters
+    }
+    $mutex = Enter-DawnstrikeLockOperationMutex
+    try {
+        Exit-DawnstrikeRuntimeActivationLockCore @PSBoundParameters
+    }
+    finally {
+        Exit-DawnstrikeLockOperationMutex $mutex
     }
 }
 
@@ -1349,7 +1531,16 @@ function Assert-DawnstrikeNoDailyLocks {
 
     $lockRoot = Join-Path $StateRoot "locks"
     if (-not (Test-Path -LiteralPath $lockRoot -PathType Container)) { return }
-    $dailyLocks = @(Get-ChildItem -LiteralPath $lockRoot -Filter "dawnstrike-daily-*.lock" -File -Force)
+    Assert-DawnstrikeNoReparseComponents $lockRoot "Daily lock root"
+    $dailyLocks = @(
+        Get-ChildItem -LiteralPath $lockRoot -Filter "dawnstrike-daily-*.lock" -File -Force |
+            ForEach-Object {
+                if (Get-Command Get-DawnstrikeLockSnapshot -ErrorAction SilentlyContinue) {
+                    $null = Get-DawnstrikeLockSnapshot -Path $_.FullName -Label "Daily run lock"
+                }
+                $_
+            }
+    )
     if ($dailyLocks.Count -gt 0) {
         throw "A daily run lock exists; runtime activation is not permitted."
     }
@@ -1459,7 +1650,14 @@ function Invoke-DawnstrikeRuntimeActivation {
     $runtimeContract = Get-DawnstrikeGitContract $gitPath $runtime $ProcessTimeoutSeconds
     if ($runtimeContract.head -eq $ExpectedSha) {
         $receiptRoot = Join-Path $state "receipts\runtime-activation"
-        $existing = @(Get-ChildItem -LiteralPath $receiptRoot -Filter "runtime-activation-*.json" -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTimeUtc -Descending)
+        Assert-DawnstrikeNoReparseComponents $receiptRoot "Activation receipt root"
+        $existing = @(
+            Get-ChildItem -LiteralPath $receiptRoot -Filter "runtime-activation-*.json" -File -ErrorAction SilentlyContinue |
+                ForEach-Object {
+                    Assert-DawnstrikeNoReparseComponents $_.FullName "Activation receipt"
+                    $_
+                } | Sort-Object LastWriteTimeUtc -Descending
+        )
         foreach ($item in $existing) {
             try {
                 $receipt = Invoke-DawnstrikeContractCli $pythonPath $candidate @("verify-receipt", "--receipt", $item.FullName, "--expected-status", "COMPLETE") "Existing activation receipt verification" $ProcessTimeoutSeconds
@@ -1582,6 +1780,9 @@ function Invoke-DawnstrikeRuntimeActivation {
     $schedulerBackupPath = Join-Path $state "scheduler-backups\$schedulerBackupName"
     $preparedReceipt = Join-Path $receiptRoot "runtime-activation-$activationId.prepared.json"
     $completeReceipt = Join-Path $receiptRoot "runtime-activation-$activationId.json"
+    Assert-DawnstrikeNoReparseComponents $receiptRoot "Activation receipt root"
+    Assert-DawnstrikeNoReparseComponents $preparedReceipt "Prepared activation receipt"
+    Assert-DawnstrikeNoReparseComponents $completeReceipt "Complete activation receipt"
     Assert-DawnstrikeSameVolume @($runtime, $stage, $rollbackCheckout)
 
     if (Test-Path -LiteralPath $completeReceipt -PathType Leaf) {
@@ -1684,6 +1885,8 @@ function Invoke-DawnstrikeRuntimeActivation {
             if (-not $dailyLock.acquired) {
                 throw "Runtime activation could not acquire the daily run lock."
             }
+            Confirm-DawnstrikeActivationDailyLockHandshake `
+                -StateRoot $state -ActivationLock $activationLock -DailyLock $dailyLock | Out-Null
             $otherDailyLocks = @(Get-ChildItem -LiteralPath (Join-Path $state "locks") -Filter "dawnstrike-daily-*.lock" -File -Force | Where-Object { $_.FullName -ne $dailyLock.lock_path })
             if ($otherDailyLocks.Count -gt 0) {
                 throw "Another daily run lock appeared during runtime activation."
@@ -1745,14 +1948,42 @@ function Invoke-DawnstrikeRuntimeActivation {
             }
 
             $backupId = "runtime-activation-$activationId"
+            $backupTool = Join-Path $candidate "scripts\state_disaster_recovery.py"
+            Assert-DawnstrikeNoReparseComponents $backupTool "Durable-state backup tool"
+            if (-not (Test-Path -LiteralPath $backupTool -PathType Leaf)) {
+                throw "Durable-state backup tool is missing."
+            }
+            $backupArguments = @(
+                $backupTool,
+                "backup", "--source-db", $dbPath, "--backup-root", $backupRoot,
+                "--state-root", $state, "--retention", [string]$BackupRetention,
+                "--source-sha", $runtimeContract.head, "--backup-id", $backupId
+            )
+            if ($stateDeclaration.required) {
+                if ($null -eq $statePreparationLocked) {
+                    throw "Locked state-preparation proof is required before the activation backup."
+                }
+                foreach ($lockedHash in @(
+                    $statePreparationLocked.after_db_sha256,
+                    $statePreparationLocked.after_wal_sha256,
+                    $statePreparationLocked.after_shm_sha256,
+                    $statePreparationLocked.after_logical_snapshot_sha256
+                )) {
+                    if ([string]$lockedHash -notmatch '^[0-9a-f]{64}$') {
+                        throw "Locked state-preparation snapshot hash is invalid."
+                    }
+                }
+                $backupArguments += @(
+                    "--expected-db-sha256", [string]$statePreparationLocked.after_db_sha256,
+                    "--expected-wal-sha256", [string]$statePreparationLocked.after_wal_sha256,
+                    "--expected-shm-sha256", [string]$statePreparationLocked.after_shm_sha256,
+                    "--expected-logical-snapshot-sha256",
+                    [string]$statePreparationLocked.after_logical_snapshot_sha256
+                )
+            }
             $backup = Invoke-DawnstrikeActivationProcess `
                 -FilePath $pythonPath `
-                -ArgumentList @(
-                    (Join-Path $candidate "scripts\state_disaster_recovery.py"),
-                    "backup", "--source-db", $dbPath, "--backup-root", $backupRoot,
-                    "--state-root", $state, "--retention", [string]$BackupRetention,
-                    "--source-sha", $runtimeContract.head, "--backup-id", $backupId
-                ) `
+                -ArgumentList $backupArguments `
                 -WorkingDirectory $candidate `
                 -Label "SQLite-consistent pre-activation backup" `
                 -TimeoutSeconds $ProcessTimeoutSeconds
@@ -1765,6 +1996,77 @@ function Invoke-DawnstrikeRuntimeActivation {
                 [string]$backupResult.source_release_sha -ne $runtimeContract.head
             ) {
                 throw "SQLite backup contract validation failed."
+            }
+            $backupBundlePath = $null
+            $backupManifestSha256 = $null
+            $backupLogicalSnapshotSha256 = $null
+            $backupSourceLogicalSnapshotSha256 = $null
+            if ($stateDeclaration.required) {
+                if (
+                    [string]$backupResult.source_live_main_file_sha256 -ne
+                        [string]$statePreparationLocked.after_db_sha256 -or
+                    [string]$backupResult.backup_db_sha256 -ne
+                        [string]$statePreparationLocked.after_db_sha256 -or
+                    [string]$backupResult.source_logical_snapshot_sha256 -ne
+                        [string]$statePreparationLocked.after_logical_snapshot_sha256 -or
+                    [string]$backupResult.backup_logical_snapshot_sha256 -ne
+                        [string]$statePreparationLocked.after_logical_snapshot_sha256 -or
+                    [string]$backupResult.manifest_sha256 -notmatch '^[0-9a-f]{64}$' -or
+                    [string]$backupResult.bundle_path -eq ""
+                ) {
+                    throw "SQLite backup did not return the exact locked snapshot lineage."
+                }
+                $backupBundlePath = Resolve-DawnstrikeActivationRoot `
+                    ([string]$backupResult.bundle_path) `
+                    "Durable-state backup bundle"
+                $backupRootResolved = Resolve-DawnstrikeActivationRoot $backupRoot "BackupRoot"
+                if (
+                    -not $backupBundlePath.StartsWith(
+                        $backupRootResolved.TrimEnd('\') + '\',
+                        [System.StringComparison]::OrdinalIgnoreCase
+                    ) -or
+                    [System.IO.Path]::GetFileName($backupBundlePath) -ne $backupId
+                ) {
+                    throw "Durable-state backup bundle is outside the expected backup root."
+                }
+                foreach ($backupFileName in @("shadow_real.sqlite", "manifest.json", "receipt.json")) {
+                    $backupFile = Join-Path $backupBundlePath $backupFileName
+                    Assert-DawnstrikeNoReparseComponents $backupFile "Durable-state backup $backupFileName"
+                    if (-not (Test-Path -LiteralPath $backupFile -PathType Leaf)) {
+                        throw "Durable-state backup is missing $backupFileName."
+                    }
+                }
+                $backupVerification = Invoke-DawnstrikeActivationProcess `
+                    -FilePath $pythonPath `
+                    -ArgumentList @(
+                        $backupTool, "restore-verify", "--bundle", $backupBundlePath,
+                        "--target-db", $dbPath, "--backup-root", $backupRoot,
+                        "--state-root", $state
+                    ) `
+                    -WorkingDirectory $candidate `
+                    -Label "Pre-activation durable-state backup lineage verification" `
+                    -TimeoutSeconds $ProcessTimeoutSeconds
+                try { $backupVerificationResult = [string]$backupVerification.Stdout | ConvertFrom-Json }
+                catch { throw "Durable-state backup lineage verification did not return valid JSON." }
+                if (
+                    [string]$backupVerificationResult.status -ne "VERIFY" -or
+                    [string]$backupVerificationResult.backup_id -ne $backupId -or
+                    [string]$backupVerificationResult.bundle_path -ne $backupBundlePath -or
+                    [string]$backupVerificationResult.manifest_sha256 -ne [string]$backupResult.manifest_sha256 -or
+                    [string]$backupVerificationResult.backup_db_sha256 -ne [string]$backupResult.backup_db_sha256 -or
+                    [string]$backupVerificationResult.backup_logical_snapshot_sha256 -ne [string]$backupResult.backup_logical_snapshot_sha256 -or
+                    [string]$backupVerificationResult.source_logical_snapshot_sha256 -ne [string]$backupResult.source_logical_snapshot_sha256 -or
+                    [string]$backupVerificationResult.source_release_sha -ne [string]$runtimeContract.head -or
+                    [int]$backupVerificationResult.schema_version -ne [int]$stateInfo.schema_version -or
+                    [string]$backupVerificationResult.quick_check -ne "ok" -or
+                    $backupVerificationResult.write_performed -ne $false -or
+                    $backupVerificationResult.automatic_overwrite -ne $false
+                ) {
+                    throw "Durable-state backup manifest or receipt lineage does not match the locked proof."
+                }
+                $backupManifestSha256 = [string]$backupResult.manifest_sha256
+                $backupLogicalSnapshotSha256 = [string]$backupResult.backup_logical_snapshot_sha256
+                $backupSourceLogicalSnapshotSha256 = [string]$backupResult.source_logical_snapshot_sha256
             }
             $stateAfterBackup = Invoke-DawnstrikeContractCli $pythonPath $candidate @("inspect-state", "--db-path", $dbPath) "Post-backup state validation" $ProcessTimeoutSeconds
             if ($stateAfterBackup.main_file_sha256 -ne $stateLocked.main_file_sha256) {
@@ -1830,6 +2132,10 @@ function Invoke-DawnstrikeRuntimeActivation {
                 $receiptPayload.state_preparation_backup_db_sha256 = [string]$statePreparation.backup_db_sha256
                 $receiptPayload.state_preparation_backup_manifest_sha256 = [string]$statePreparation.backup_manifest_sha256
                 $receiptPayload.state_preparation_backup_manifest_file_sha256 = [string]$statePreparation.backup_manifest_file_sha256
+                $receiptPayload.state_backup_bundle_path = [string]$backupBundlePath
+                $receiptPayload.state_backup_manifest_sha256 = [string]$backupManifestSha256
+                $receiptPayload.state_backup_logical_snapshot_sha256 = [string]$backupLogicalSnapshotSha256
+                $receiptPayload.state_backup_source_logical_snapshot_sha256 = [string]$backupSourceLogicalSnapshotSha256
                 $receiptPayload.auxiliary_capture_present = [bool]$auxiliaryBefore.present
                 $receiptPayload.auxiliary_capture_state_before = if ($auxiliaryBefore.present) { [string]$auxiliaryBefore.state } else { "ABSENT" }
                 $receiptPayload.auxiliary_capture_state_after = if ($auxiliaryBefore.present) { "Disabled" } else { "ABSENT" }
