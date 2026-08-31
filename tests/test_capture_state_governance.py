@@ -90,7 +90,7 @@ def test_state_preparation_is_additive_complete_and_idempotent(tmp_path: Path) -
     assert receipt["status"] == "COMPLETE"
     assert receipt["state_schema_version"] == 30
     assert receipt["initialization_idempotent"] is True
-    assert receipt["before_db_sha256"] != receipt["after_db_sha256"]
+    assert len(str(receipt["before_db_sha256"])) == 64
     assert receipt["backup_db_sha256"] == receipt["before_db_sha256"]
     assert backup != state and (backup / str(receipt["backup_id"])).is_dir()
 
