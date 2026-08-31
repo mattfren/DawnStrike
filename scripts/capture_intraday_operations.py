@@ -221,7 +221,9 @@ def _safe_capture_receipt(
         "source_config_sha256": plan["source_config_sha256"],
         "entitlement_receipt_sha256": plan["entitlement_receipt_sha256"],
         "required_endpoints": plan["required_endpoints"],
+        "research_only": True,
         "broker_execution": "disabled",
+        "broker_execution_enabled": False,
     }
     if inner is not None:
         payload["capture_status"] = inner_status

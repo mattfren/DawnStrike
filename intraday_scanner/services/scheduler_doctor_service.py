@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shlex
 import subprocess  # nosec B404
 from datetime import date, datetime
@@ -30,7 +31,9 @@ AUXILIARY_REQUIRED_OPTIONS = frozenset(
         "--output-root",
         "--session-root",
         "--symbols-manifest",
+        "--symbols-manifest-sha256",
         "--entitlement-receipt",
+        "--entitlement-receipt-sha256",
         "--source-config",
         "--source-config-sha256",
         "--env-file",
@@ -38,6 +41,8 @@ AUXILIARY_REQUIRED_OPTIONS = frozenset(
         "--retries",
     }
 )
+GIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 PUBLICATION_CONTRACT = {
     "schema_version": "dawnstrike.publication_schedule.v1",
     "timezone": "America/Chicago",
@@ -155,6 +160,7 @@ def scheduler_doctor(
     queried = _query_scheduled_tasks()
     task_rows = _normalize_task_rows(queried)
     observation_date = datetime.now(SCHEDULE_TIMEZONE).date()
+    activation_completed_at = _load_exact_activation_completion(runtime, state)
     by_name: dict[str, dict[str, Any]] = {}
     for row in task_rows:
         name = str(row.get("name") or "")
@@ -174,14 +180,33 @@ def scheduler_doctor(
                 expected_repetition=EXPECTED_TASK_REPETITIONS.get(name),
                 expected_execution_limit=EXPECTED_EXECUTION_LIMITS[name],
                 observation_date=observation_date,
+                activation_completed_at=activation_completed_at,
             )
         )
     auxiliary_rows = [
         row for row in task_rows if str(row.get("name") or "") == AUXILIARY_TASK_NAME
     ]
-    auxiliary_check = _auxiliary_task_check(auxiliary_rows, runtime, state)
+    auxiliary_check = _auxiliary_task_check(
+        auxiliary_rows, runtime, state, observation_date=observation_date
+    )
     if auxiliary_check is not None:
         checks.append(auxiliary_check)
+    canonical_principal_ids = {
+        str(check.get("principal_user_id") or "")
+        for check in checks
+        if check.get("name") in EXPECTED_TASKS
+    }
+    principal_identity_matches = (
+        len(canonical_principal_ids) == 1 and "" not in canonical_principal_ids
+    )
+    if auxiliary_check is not None and auxiliary_check.get("enabled") is True:
+        auxiliary_principal = str(auxiliary_check.get("principal_user_id") or "")
+        principal_identity_matches = principal_identity_matches and (
+            auxiliary_principal.casefold()
+            == next(iter(canonical_principal_ids), "").casefold()
+        )
+    for check in checks:
+        check["principal_identity_matches"] = principal_identity_matches
     auxiliary_unexpected = _auxiliary_unexpected_rows(auxiliary_rows, auxiliary_check)
     unexpected_enabled = [
         row
@@ -209,8 +234,6 @@ def scheduler_doctor(
             deduped_unexpected.append(row)
     unexpected_enabled = deduped_unexpected
     expected_task_names = list(EXPECTED_TASKS)
-    if auxiliary_check is not None and auxiliary_check.get("governed") is True:
-        expected_task_names.append(AUXILIARY_TASK_NAME)
     failed_checks = [
         check
         for check in checks
@@ -228,7 +251,7 @@ def scheduler_doctor(
             "Run scheduler-doctor on the approved Windows runtime with "
             "Task Scheduler query access."
         )
-    elif failed_checks or unexpected_enabled:
+    elif failed_checks or unexpected_enabled or not principal_identity_matches:
         status = "BLOCKED_EXTERNAL"
         next_action = (
             "Register or repair every Dawnstrike V6 task against the exact runtime "
@@ -258,6 +281,7 @@ def scheduler_doctor(
         "expected_task_names": expected_task_names,
         "governed_auxiliary_task_name": AUXILIARY_TASK_NAME,
         "governed_auxiliary_task": auxiliary_check,
+        "principal_identity_matches": principal_identity_matches,
         "scheduled_tasks": checks,
         "scheduled_task": finalize,
         "expected_task_name": CANONICAL_TASK_NAME,
@@ -280,6 +304,7 @@ def _task_check(
     expected_repetition: str | None,
     expected_execution_limit: str,
     observation_date: date,
+    activation_completed_at: datetime | None,
 ) -> dict[str, Any]:
     task_name = str(task.get("name") or "")
     state = str(task.get("state") or "unknown")
@@ -317,12 +342,13 @@ def _task_check(
     healthy_state = state in {"Ready", "Running"}
     trigger_start_boundary = str(task.get("trigger_start_boundary") or "")
     trigger_start = _parse_aware_datetime(trigger_start_boundary)
-    history_superseded = _history_predates_trigger_definition(
+    history_superseded = _history_superseded_by_exact_runtime_activation(
         last_run_time=str(task.get("last_run_time") or ""),
         trigger_start=trigger_start,
+        activation_completed_at=activation_completed_at,
     )
     last_run_result_acceptable = (
-        last_result in ACCEPTABLE_LAST_RESULTS or history_superseded
+        _acceptable_last_result(last_result) or history_superseded
     )
     expected_hour, expected_minute = (int(value) for value in expected_start.split(":"))
     trigger_start_local = (
@@ -456,13 +482,13 @@ def _task_check(
         "battery_safe": battery_safe,
         "last_run_result_acceptable": last_run_result_acceptable,
         "last_run_status": (
-            "SUPERSEDED_BY_CURRENT_DEFINITION"
-            if history_superseded and last_result not in ACCEPTABLE_LAST_RESULTS
+            "SUPERSEDED_BY_EXACT_RUNTIME_ACTIVATION"
+            if history_superseded and not _acceptable_last_result(last_result)
             else "ACCEPTABLE"
             if last_run_result_acceptable
             else "STALE_OR_FAILED"
         ),
-        "history_superseded_by_current_definition": history_superseded,
+        "history_superseded_by_exact_runtime_activation": history_superseded,
         "expected_start_local": expected_start,
         "scheduled_time_matches": scheduled_time_matches,
         "trigger_active_on_observation_date": trigger_active,
@@ -498,7 +524,11 @@ def _task_check(
 
 
 def _auxiliary_task_check(
-    rows: list[dict[str, Any]], runtime: Path, state: Path
+    rows: list[dict[str, Any]],
+    runtime: Path,
+    state: Path,
+    *,
+    observation_date: date | None = None,
 ) -> dict[str, Any] | None:
     if not rows:
         return None
@@ -511,10 +541,26 @@ def _auxiliary_task_check(
             "duplicate_count": len(rows),
         }
     row = rows[0]
-    enabled = row.get("enabled") is True or str(row.get("state") or "") in {
-        "Queued",
-        "Running",
-    }
+    enabled_flag = row.get("enabled") is True
+    task_state = str(row.get("state") or "")
+    if (enabled_flag and task_state not in {"Ready", "Running", "Queued"}) or (
+        not enabled_flag and task_state != "Disabled"
+    ):
+        return {
+            **row,
+            "status": "FAILED",
+            "governed": False,
+            "definition_status": "INVALID_STATE",
+            "operational_ready": False,
+            "operational_status": "BLOCKED_NONOPERATIONAL",
+            "failure_reason": "auxiliary enabled/state pair is contradictory",
+            "last_task_result": row.get("last_task_result"),
+        }
+    enabled = enabled_flag
+    if not enabled and task_state == "Disabled":
+        enabled = False
+    elif task_state in {"Ready", "Running", "Queued"}:
+        enabled = True
     contract = _load_auxiliary_contract(runtime, state)
     if not enabled and not contract["declared"]:
         return {
@@ -534,11 +580,29 @@ def _auxiliary_task_check(
             "last_task_result": row.get("last_task_result"),
         }
     action = _validate_auxiliary_action(row, runtime, state, contract)
+    health = _validate_auxiliary_health(
+        row, enabled, contract, observation_date=observation_date
+    )
+    health_valid = health["valid"]
+    operational_ready = enabled and action["valid"] and health_valid
+    failure_reason = action["reason"] or health["reason"]
     return {
         **row,
-        "status": "LOCAL_VERIFIED" if action["valid"] else "FAILED",
+        "status": (
+            "LOCAL_VERIFIED"
+            if action["valid"] and (not enabled or health_valid)
+            else "FAILED"
+        ),
         "governed": action["valid"],
         "definition_status": "READY" if enabled and action["valid"] else "DISABLED",
+        "operational_ready": operational_ready,
+        "operational_status": (
+            "READY"
+            if operational_ready
+            else "BLOCKED_NONOPERATIONAL"
+            if enabled
+            else "DISABLED"
+        ),
         "sidecar_contract_matches": True,
         "action_contract_matches": action["action_contract_matches"],
         "runtime_root_matches": action["runtime_root_matches"],
@@ -548,7 +612,8 @@ def _auxiliary_task_check(
         "task_path_matches": action["task_path_matches"],
         "action_count_matches": action["action_count_matches"],
         "state_matches": action["state_matches"],
-        "failure_reason": action["reason"],
+        "failure_reason": failure_reason,
+        **health,
         "last_task_result": row.get("last_task_result"),
     }
 
@@ -591,7 +656,15 @@ def _load_auxiliary_contract(runtime: Path, state: Path) -> dict[str, Any]:
         return {"declared": True, "valid": False, "reason": "sidecar declaration is invalid"}
     runtime_sha = _runtime_git_sha(runtime)
     runtime_tree = _runtime_git_tree(runtime)
-    if runtime_sha is None or runtime_tree is None:
+    runtime_origin_sha = _runtime_git_origin_sha(runtime)
+    runtime_origin_main = _runtime_git_origin_main(runtime)
+    if (
+        runtime_sha is None
+        or runtime_tree is None
+        or runtime_origin_sha is None
+        or runtime_origin_main != runtime_sha
+        or not _runtime_git_clean(runtime)
+    ):
         return {"declared": True, "valid": False, "reason": "runtime SHA is unavailable"}
     receipt_root = state / "receipts" / "capture-task"
     receipt_paths = sorted(receipt_root.glob(f"capture-task-rebind-{runtime_sha}.json"))
@@ -607,6 +680,12 @@ def _load_auxiliary_contract(runtime: Path, state: Path) -> dict[str, Any]:
         receipt = load_receipt(
             receipt_paths[0], candidate_sha=runtime_sha, candidate_tree=runtime_tree
         )
+        if str(receipt.get("activation_id") or "") != str(
+            receipt.get("activation_receipt_name") or ""
+        ).removeprefix("runtime-activation-").removesuffix(".json"):
+            raise ValueError("capture activation id is not bound to its receipt name")
+        if receipt.get("action_after_sha256") == receipt.get("action_before_sha256"):
+            raise ValueError("capture action was not rebound")
         activation_name = str(receipt["activation_receipt_name"])
         activation_path = state / "receipts" / "runtime-activation" / activation_name
         if (
@@ -629,10 +708,32 @@ def _load_auxiliary_contract(runtime: Path, state: Path) -> dict[str, Any]:
         if (
             activation.get("schema_version") != "dawnstrike.runtime_activation_receipt.v1"
             or activation.get("status") != "COMPLETE"
+            or activation.get("activation_id") != receipt.get("activation_id")
             or activation.get("candidate_sha") != runtime_sha
             or activation.get("candidate_tree") != runtime_tree
+            or activation.get("runtime_origin_sha256") != runtime_origin_sha
+            or receipt.get("runtime_origin_sha256") != runtime_origin_sha
+            or activation.get("state_preparation_contract")
+            != AUXILIARY_SIDECAR_CONTRACT
+            or activation.get("auxiliary_capture_present") is not True
+            or activation.get("auxiliary_capture_state_after") != "Disabled"
+            or activation.get("auxiliary_capture_action")
+            != "DISABLED_UNTIL_EXACT_SHA_REBIND"
+            or activation.get("auxiliary_capture_action_contract_sha256")
+            != receipt.get("action_before_sha256")
+            or activation.get("auxiliary_capture_definition_contract_sha256")
+            != receipt.get("definition_before_sha256")
+            or activation.get("auxiliary_capture_xml_sha256")
+            != receipt.get("xml_before_sha256")
         ):
             raise ValueError("activation receipt is not bound to the runtime")
+        if (
+            _runtime_git_sha(runtime) != runtime_sha
+            or _runtime_git_tree(runtime) != runtime_tree
+            or _runtime_git_origin_sha(runtime) != runtime_origin_sha
+            or _runtime_git_origin_main(runtime) != runtime_origin_main
+        ):
+            raise ValueError("runtime identity changed during contract validation")
     except (ImportError, KeyError, OSError, TypeError, ValueError):
         return {
             "declared": True,
@@ -644,7 +745,16 @@ def _load_auxiliary_contract(runtime: Path, state: Path) -> dict[str, Any]:
         "valid": True,
         "candidate_sha": runtime_sha,
         "candidate_tree": runtime_tree,
+            "runtime_origin_sha256": runtime_origin_sha,
+        "activation_id": str(receipt["activation_id"]),
         "action_contract_sha256": str(receipt["action_after_sha256"]),
+        "definition_contract_sha256": str(receipt["definition_after_sha256"]),
+        "principal_sha256": str(receipt["principal_sha256"]),
+        "trigger_sha256": str(receipt["trigger_sha256"]),
+        "settings_sha256": str(receipt["settings_sha256"]),
+        "symbols_manifest_sha256": str(receipt["symbols_manifest_sha256"]),
+        "entitlement_receipt_sha256": str(receipt["entitlement_receipt_sha256"]),
+        "source_config_sha256": str(receipt["source_config_sha256"]),
     }
 
 
@@ -654,6 +764,75 @@ def _runtime_git_sha(runtime: Path) -> str | None:
 
 def _runtime_git_tree(runtime: Path) -> str | None:
     return _runtime_git_value(runtime, "HEAD^{tree}")
+
+
+def _runtime_git_origin_sha(runtime: Path) -> str | None:
+    try:
+        completed = subprocess.run(  # nosec B603, B607
+            ["git", "-C", str(runtime), "config", "--get", "remote.origin.url"],
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=SCHEDULER_QUERY_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    origin = completed.stdout.strip()
+    if not origin:
+        return None
+    return hashlib.sha256(origin.encode("utf-8")).hexdigest()
+
+
+def _runtime_git_origin_main(runtime: Path) -> str | None:
+    return _runtime_git_value(runtime, "refs/remotes/origin/main")
+
+
+def _runtime_git_clean(runtime: Path) -> bool:
+    """Match the release checkout cleanliness contract without exposing paths."""
+
+    try:
+        status = subprocess.run(  # nosec B603, B607
+            [
+                "git",
+                "-C",
+                str(runtime),
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+            ],
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=SCHEDULER_QUERY_TIMEOUT_SECONDS,
+        )
+        if status.stdout.strip():
+            return False
+        ignored = subprocess.run(  # nosec B603, B607
+            [
+                "git",
+                "-C",
+                str(runtime),
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "-z",
+            ],
+            capture_output=True,
+            check=True,
+            text=False,
+            timeout=SCHEDULER_QUERY_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    for name in ignored.stdout.decode("utf-8", errors="replace").split("\0"):
+        suffix = Path(name).suffix.lower()
+        if suffix in {
+            ".ps1", ".psm1", ".py", ".pyc", ".pyd", ".dll", ".exe",
+            ".com", ".bat", ".cmd", ".sh", ".pth",
+        } or Path(name).name.lower() in {"sitecustomize.py", "usercustomize.py"}:
+            return False
+    return True
 
 
 def _runtime_git_value(runtime: Path, revision: str) -> str | None:
@@ -683,6 +862,41 @@ def _action_option(tokens: list[str], option: str) -> str | None:
     return tokens[index + 1] if index + 1 < len(tokens) else None
 
 
+def _safe_regular_path(path: Path) -> bool:
+    try:
+        from scripts.capture_task_contract import _assert_no_reparse_components
+
+        supplied = _assert_no_reparse_components(path)
+        return supplied.is_file() and not supplied.is_symlink()
+    except (ImportError, OSError, TypeError, ValueError):
+        return False
+
+
+def _safe_file_sha256(path_text: str, expected: Any) -> bool:
+    if not isinstance(expected, str) or SHA256_PATTERN.fullmatch(expected) is None:
+        return False
+    path = Path(path_text)
+    if not _safe_regular_path(path):
+        return False
+    try:
+        from scripts.capture_task_contract import _assert_no_reparse_components
+
+        supplied = _assert_no_reparse_components(path)
+        before = supplied.stat()
+        digest = hashlib.sha256()
+        with supplied.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        _assert_no_reparse_components(supplied)
+        after = supplied.stat()
+        identity = ("st_dev", "st_ino", "st_size", "st_mtime_ns")
+        if any(getattr(before, field) != getattr(after, field) for field in identity):
+            return False
+        return digest.hexdigest() == expected
+    except (OSError, ValueError):
+        return False
+
+
 def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
@@ -690,6 +904,116 @@ def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, ob
             raise ValueError(f"duplicate JSON field: {key}")
         result[key] = value
     return result
+
+
+def _validate_auxiliary_health(
+    row: dict[str, Any],
+    enabled: bool,
+    contract: dict[str, Any],
+    *,
+    observation_date: date | None = None,
+) -> dict[str, Any]:
+    last_result = row.get("last_task_result")
+    trigger_start = _parse_aware_datetime(str(row.get("trigger_start_boundary") or ""))
+    next_run = _parse_aware_datetime(str(row.get("next_run_time") or ""))
+    trigger_start_local = (
+        trigger_start.astimezone(SCHEDULE_TIMEZONE) if trigger_start else None
+    )
+    next_run_local = next_run.astimezone(SCHEDULE_TIMEZONE) if next_run else None
+    observed_day = observation_date or datetime.now(SCHEDULE_TIMEZONE).date()
+    checks = {
+        "last_task_result_acceptable": _acceptable_last_result(last_result),
+        "trigger_count_matches": type(row.get("trigger_count")) is int
+        and row.get("trigger_count") == 1,
+        "trigger_type_matches": row.get("trigger_type") == "MSFT_TaskWeeklyTrigger",
+        "trigger_enabled_matches": row.get("trigger_enabled") is True,
+        "trigger_days_of_week_matches": row.get("trigger_days_of_week") == 62,
+        "trigger_weeks_interval_matches": row.get("trigger_weeks_interval") == 1,
+        "trigger_end_boundary_absent": not str(row.get("trigger_end_boundary") or ""),
+        "trigger_random_delay_absent": not str(row.get("trigger_random_delay") or ""),
+        "trigger_start_boundary_valid": trigger_start is not None,
+        "next_run_time_valid": next_run is not None,
+        "schedule_time_matches": (
+            trigger_start_local is not None
+            and trigger_start_local.hour == 15
+            and trigger_start_local.minute == 20
+            and trigger_start_local.second == 0
+            and trigger_start_local.microsecond == 0
+        ),
+        "schedule_weekday_matches": (
+            trigger_start_local is not None
+            and trigger_start_local.weekday() < 5
+            and next_run_local is not None
+            and next_run_local.weekday() < 5
+        ),
+        "trigger_active_on_observation_date": (
+            trigger_start_local is not None
+            and trigger_start_local.date() <= observed_day
+        ),
+        "next_run_schedule_time_matches": (
+            next_run_local is not None
+            and next_run_local.hour == 15
+            and next_run_local.minute == 20
+            and next_run_local.second == 0
+            and next_run_local.microsecond == 0
+        ),
+        "next_run_future": (
+            next_run_local is not None
+            and trigger_start_local is not None
+            and next_run_local > trigger_start_local
+            and next_run_local.date() >= observed_day
+        ),
+        "host_timezone_matches": row.get("host_timezone_id") == EXPECTED_WINDOWS_TIMEZONE_ID,
+        "multiple_instances_matches": row.get("multiple_instances")
+        == EXPECTED_MULTIPLE_INSTANCES,
+        "execution_time_limit_matches": row.get("execution_time_limit") == "PT3H",
+        "restart_count_matches": row.get("restart_count") == 3,
+        "restart_interval_matches": row.get("restart_interval") == "PT15M",
+        "noninteractive": str(row.get("logon_type") or "") in NONINTERACTIVE_LOGON_TYPES,
+        "run_level_matches": row.get("run_level") == EXPECTED_RUN_LEVEL,
+        "start_when_available": row.get("start_when_available") is True,
+        "wake_to_run": row.get("wake_to_run") is True,
+        "battery_safe": (
+            row.get("stop_if_going_on_batteries") is False
+            and row.get("disallow_start_if_on_batteries") is False
+        ),
+        "principal_contract_matches": row.get("principal_sha256")
+        == contract.get("principal_sha256"),
+        "trigger_contract_matches": row.get("trigger_sha256")
+        == contract.get("trigger_sha256"),
+        "settings_contract_matches": row.get("settings_sha256")
+        == contract.get("settings_sha256"),
+        "definition_contract_matches": row.get("definition_contract_sha256")
+        == contract.get("definition_contract_sha256"),
+    }
+    structural_checks = {
+        name: value
+        for name, value in checks.items()
+        if name.endswith("_contract_matches")
+    }
+    structural_valid = all(structural_checks.values())
+    checks["operational_health_valid"] = enabled and all(checks.values())
+    if not enabled:
+        return {
+            "valid": structural_valid,
+            "reason": "auxiliary task definition lineage is invalid"
+            if not structural_valid
+            else "",
+            **checks,
+        }
+    return {
+        "valid": checks["operational_health_valid"],
+        "reason": "auxiliary task is not operationally unattended-safe"
+        if not checks["operational_health_valid"]
+        else "",
+        **checks,
+    }
+
+
+def _acceptable_last_result(value: Any) -> bool:
+    return value is None or (
+        type(value) is int and value in ACCEPTABLE_LAST_RESULTS
+    )
 
 
 def _validate_auxiliary_action(
@@ -709,6 +1033,7 @@ def _validate_auxiliary_action(
     )
     option_values: dict[str, str] = {}
     duplicate_options: set[str] = set()
+    unknown_options: set[str] = set()
     unexpected_arguments = False
     option_index = 3 if prefix_matches else len(tokens)
     while option_index < len(tokens):
@@ -717,6 +1042,8 @@ def _validate_auxiliary_action(
             unexpected_arguments = True
             option_index += 1
             continue
+        if option not in AUXILIARY_REQUIRED_OPTIONS and option != "--execute":
+            unknown_options.add(option)
         if option in option_values:
             duplicate_options.add(option)
         if option == "--execute":
@@ -732,9 +1059,20 @@ def _validate_auxiliary_action(
     candidate = option_values.get("--candidate-sha")
     repo_root = option_values.get("--repo-root")
     env_file = option_values.get("--env-file")
+    hash_options_valid = all(
+        SHA256_PATTERN.fullmatch(option_values.get(name, "")) is not None
+        for name in (
+            "--symbols-manifest-sha256",
+            "--entitlement-receipt-sha256",
+            "--source-config-sha256",
+        )
+    )
+    candidate_format_valid = GIT_SHA_PATTERN.fullmatch(candidate or "") is not None
     required_options_present = (
         not duplicate_options
+        and not unknown_options
         and not unexpected_arguments
+        and set(option_values) == AUXILIARY_REQUIRED_OPTIONS | {"--execute"}
         and AUXILIARY_REQUIRED_OPTIONS.issubset(option_values)
         and option_values.get("--execute") == ""
         and all(
@@ -742,6 +1080,20 @@ def _validate_auxiliary_action(
             for name in AUXILIARY_REQUIRED_OPTIONS
             if name != "--execute"
         )
+        and hash_options_valid
+        and candidate_format_valid
+        and option_values.get("--max-pages") == "100"
+        and option_values.get("--retries") == "3"
+    )
+    external_path_options = (
+        "--db-path",
+        "--evidence-root",
+        "--run-root",
+        "--output-root",
+        "--session-root",
+        "--symbols-manifest",
+        "--entitlement-receipt",
+        "--source-config",
     )
     task_path_matches = str(row.get("task_path") or "\\") == "\\"
     action_count_matches = row.get("action_count") == 1
@@ -757,6 +1109,18 @@ def _validate_auxiliary_action(
             and repo_root is not None
             and Path(repo_root).resolve() == runtime
         )
+        external_values = [option_values.get(name, "") for name in external_path_options]
+        external_paths = [Path(value).resolve() for value in external_values]
+        external_paths_are_distinct = (
+            all(external_values)
+            and all(
+                left != right
+                and not left.is_relative_to(right)
+                and not right.is_relative_to(left)
+                for index, left in enumerate(external_paths)
+                for right in external_paths[index + 1 :]
+            )
+        )
         state_root_matches = (
             required_options_present
             and all(
@@ -767,9 +1131,19 @@ def _validate_auxiliary_action(
                     "--candidate-sha",
                     "--max-pages",
                     "--retries",
+                    "--symbols-manifest-sha256",
+                    "--entitlement-receipt-sha256",
                     "--source-config-sha256",
                 }
             )
+            and all(
+                not (
+                    Path(option_values[name]).resolve().is_relative_to(runtime)
+                    or Path(option_values[name]).resolve().is_relative_to(state)
+                )
+                for name in external_path_options
+            )
+            and external_paths_are_distinct
         )
         runner_matches = (
             runner is not None
@@ -778,6 +1152,7 @@ def _validate_auxiliary_action(
         env_file_matches = (
             env_file is not None
             and Path(env_file).resolve() == state / "secrets" / "runtime.env"
+            and _safe_regular_path(Path(env_file))
         )
     except (OSError, RuntimeError):
         runtime_root_matches = False
@@ -785,6 +1160,24 @@ def _validate_auxiliary_action(
         runner_matches = False
         env_file_matches = False
     candidate_sha_matches = candidate == contract["candidate_sha"]
+    input_hashes_match = all(
+        option_values.get(option) == contract.get(contract_key)
+        for option, contract_key in (
+            ("--symbols-manifest-sha256", "symbols_manifest_sha256"),
+            ("--entitlement-receipt-sha256", "entitlement_receipt_sha256"),
+            ("--source-config-sha256", "source_config_sha256"),
+        )
+    )
+    input_files_match = all(
+        _safe_file_sha256(
+            option_values.get(option, ""), contract.get(contract_key)
+        )
+        for option, contract_key in (
+            ("--symbols-manifest", "symbols_manifest_sha256"),
+            ("--entitlement-receipt", "entitlement_receipt_sha256"),
+            ("--source-config", "source_config_sha256"),
+        )
+    )
     action_text = "|".join((execute, arguments, working_directory))
     action_hash = hashlib.sha256(action_text.encode("utf-8")).hexdigest()
     action_contract_matches = action_hash == contract["action_contract_sha256"]
@@ -801,6 +1194,8 @@ def _validate_auxiliary_action(
             action_count_matches,
             state_matches,
             candidate_sha_matches,
+            input_hashes_match,
+            input_files_match,
             action_contract_matches,
         )
     )
@@ -812,6 +1207,8 @@ def _validate_auxiliary_action(
         "state_root_matches": state_root_matches,
         "env_file_matches": env_file_matches,
         "candidate_sha_matches": candidate_sha_matches,
+        "input_hashes_match": input_hashes_match,
+        "input_files_match": input_files_match,
         "runner_matches": runner_matches,
         "prefix_matches": prefix_matches,
         "task_path_matches": task_path_matches,
@@ -852,6 +1249,31 @@ def _scheduler_query_script() -> str:
         # exceed the bounded doctor timeout on otherwise healthy hosts.
         "$ErrorActionPreference = 'Stop'; "
         "$hostTimeZoneId = [TimeZoneInfo]::Local.Id; "
+        "function Get-DawnstrikeQuerySha256([string]$Text) { "
+        "$sha = [System.Security.Cryptography.SHA256]::Create(); "
+        "try { $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text); "
+        "return ([System.BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '')."
+        "ToLowerInvariant() } "
+        "finally { $sha.Dispose() } }; "
+        "function Get-DawnstrikeQuerySectionHash([string]$Xml, [string]$Name) { "
+        "if ([string]::IsNullOrWhiteSpace($Xml)) { return $null }; "
+        "try { $doc = [System.Xml.XmlDocument]::new(); $doc.PreserveWhitespace = $true; "
+        "$doc.LoadXml($Xml); $nodes = @($doc.SelectNodes(\"//*[local-name()='$Name']\")); "
+        "if ($nodes.Count -ne 1) { return $null }; "
+        "return Get-DawnstrikeQuerySha256 ([string]$nodes[0].OuterXml) } catch { return $null } }; "
+        "function Get-DawnstrikeQueryDefinitionHash([string]$Xml) { "
+        "if ([string]::IsNullOrWhiteSpace($Xml)) { return $null }; "
+        "try { $doc = [System.Xml.XmlDocument]::new(); "
+        "$doc.PreserveWhitespace = $false; $doc.LoadXml($Xml); "
+        "$namespace = [string]$doc.DocumentElement.NamespaceURI; "
+        "if ([string]::IsNullOrWhiteSpace($namespace)) { "
+        "$nodes = @($doc.SelectNodes('/Task/Settings/Enabled')) } "
+        "else { $manager = [System.Xml.XmlNamespaceManager]::new($doc.NameTable); "
+        "$manager.AddNamespace('task', $namespace); "
+        "$nodes = @($doc.SelectNodes('/task:Task/task:Settings/task:Enabled', $manager)) }; "
+        "if ($nodes.Count -gt 1) { return $null }; "
+        "if ($nodes.Count -eq 1) { $null = $nodes[0].ParentNode.RemoveChild($nodes[0]) }; "
+        "return Get-DawnstrikeQuerySha256 ([string]$doc.OuterXml) } catch { return $null } }; "
         "$tasks = @(Get-ScheduledTask -TaskPath '\\*' "
         "-TaskName 'Dawnstrike*' -ErrorAction Stop); "
         # Explicitly preserve missing canonical rows in the output; querying all
@@ -864,11 +1286,15 @@ def _scheduler_query_script() -> str:
         "-TaskPath $task.TaskPath -ErrorAction Stop; "
         "$actions = @($task.Actions); $action = $actions[0]; "
         "$triggers = @($task.Triggers); $trigger = $triggers[0]; "
+        "$taskXml = $null; if (Get-Command Export-ScheduledTask -ErrorAction SilentlyContinue) { "
+        "try { $taskXml = [string](Export-ScheduledTask -TaskName $task.TaskName "
+        "-TaskPath $task.TaskPath -ErrorAction Stop) } catch { $taskXml = $null } }; "
         "[pscustomobject]@{name=$task.TaskName; task_path=$task.TaskPath; "
         "state=$task.State.ToString(); enabled=[bool]$task.Settings.Enabled; "
         "action_count=$actions.Count; trigger_count=$triggers.Count; "
         "host_timezone_id=$hostTimeZoneId; "
         "logon_type=$task.Principal.LogonType.ToString(); "
+        "principal_user_id=[string]$task.Principal.UserId; "
         "run_level=$task.Principal.RunLevel.ToString(); "
         "start_when_available=[bool]$task.Settings.StartWhenAvailable; "
         "wake_to_run=[bool]$task.Settings.WakeToRun; "
@@ -878,6 +1304,10 @@ def _scheduler_query_script() -> str:
         "restart_count=[int]$task.Settings.RestartCount; "
         "restart_interval=[string]$task.Settings.RestartInterval; "
         "multiple_instances=[string]$task.Settings.MultipleInstances; "
+        "principal_sha256=Get-DawnstrikeQuerySectionHash $taskXml 'Principal'; "
+        "trigger_sha256=Get-DawnstrikeQuerySectionHash $taskXml 'Triggers'; "
+        "settings_sha256=Get-DawnstrikeQuerySectionHash $taskXml 'Settings'; "
+        "definition_contract_sha256=Get-DawnstrikeQueryDefinitionHash $taskXml; "
         "trigger_type=if ($trigger) {$trigger.CimClass.CimClassName} else {$null}; "
         "trigger_enabled=if ($null -ne $trigger.Enabled) "
         "{[bool]$trigger.Enabled} else {$null}; "
@@ -921,6 +1351,9 @@ def _scheduler_query_script() -> str:
         "trigger_random_delay=$null; repetition_interval=$null; "
         "repetition_stop_at_duration_end=$null; "
         "last_task_result=$null; last_run_time=$null; next_run_time=$null; "
+        "principal_user_id=$null; "
+        "principal_sha256=$null; trigger_sha256=$null; settings_sha256=$null; "
+        "definition_contract_sha256=$null; "
         "execute=$null; arguments=$null; working_directory=$null; "
         "execution_time_limit=$null; repetition_duration=$null} }; "
         "@(@($rows) + @($missing)) | ConvertTo-Json -Compress"
@@ -1014,6 +1447,7 @@ def _missing_task(name: str) -> dict[str, Any]:
         "repetition_interval": None,
         "repetition_stop_at_duration_end": None,
         "logon_type": None,
+        "principal_user_id": None,
         "start_when_available": None,
         "stop_if_going_on_batteries": None,
         "disallow_start_if_on_batteries": None,
@@ -1029,17 +1463,69 @@ def _missing_task(name: str) -> dict[str, Any]:
     }
 
 
-def _history_predates_trigger_definition(
+def _history_superseded_by_exact_runtime_activation(
     *,
     last_run_time: str,
     trigger_start: datetime | None,
+    activation_completed_at: datetime | None,
 ) -> bool:
-    """Return true only when failure history belongs to the replaced definition."""
+    """Return true only for failure history superseded by exact activation."""
 
     last_run = _parse_aware_datetime(last_run_time)
-    if last_run is None or trigger_start is None:
+    if last_run is None or activation_completed_at is None:
         return False
-    return last_run.astimezone(trigger_start.tzinfo).date() < trigger_start.date()
+    return activation_completed_at > last_run
+
+
+def _load_exact_activation_completion(
+    runtime: Path, state: Path
+) -> datetime | None:
+    """Load one strict COMPLETE receipt that supersedes prior task history.
+
+    A missing, malformed, stale, or ambiguous receipt is deliberately treated
+    as no supersession.  This keeps a preserved failed task result blocking
+    until the runtime activation itself provides a fresh, exact proof.
+    """
+
+    runtime_sha = _runtime_git_sha(runtime)
+    runtime_tree = _runtime_git_tree(runtime)
+    runtime_origin_sha = _runtime_git_origin_sha(runtime)
+    if runtime_sha is None or runtime_tree is None:
+        return None
+    try:
+        from scripts.runtime_activation_contract import (
+            _assert_no_reparse_components,
+            load_receipt,
+        )
+    except ImportError:
+        return None
+    matches: list[datetime] = []
+    receipt_root = state / "receipts" / "runtime-activation"
+    try:
+        paths = sorted(receipt_root.glob("runtime-activation-*.json"))
+    except OSError:
+        return None
+    for path in paths:
+        try:
+            _assert_no_reparse_components(path)
+            payload = load_receipt(path)
+            if (
+                payload.get("status") != "COMPLETE"
+                or payload.get("candidate_sha") != runtime_sha
+                or payload.get("candidate_tree") != runtime_tree
+            ):
+                continue
+            if (
+                runtime_origin_sha is not None
+                and payload.get("runtime_origin_sha256") != runtime_origin_sha
+            ):
+                continue
+            completed = _parse_aware_datetime(str(payload.get("completed_at_utc") or ""))
+            if completed is not None:
+                matches.append(completed)
+        except (OSError, TypeError, ValueError):
+            continue
+    return matches[0] if len(matches) == 1 else None
 
 
 def _parse_aware_datetime(value: str) -> datetime | None:

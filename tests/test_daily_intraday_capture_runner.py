@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sys
 from datetime import date
 from pathlib import Path
 
@@ -33,6 +34,56 @@ def test_daily_session_uses_regular_and_early_close_calendar() -> None:
 
 def test_daily_session_skips_closed_market_date() -> None:
     assert _module().build_expected_session(date(2026, 9, 7)) is None
+
+
+def test_runner_accepts_registered_execute_action_without_provider_call(
+    tmp_path: Path, monkeypatch
+) -> None:
+    module = _module()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_daily_intraday_capture.py",
+            "--candidate-sha",
+            "a" * 40,
+            "--repo-root",
+            str(tmp_path),
+            "--db-path",
+            r"C:\r\dawnstrike-forward-db\staging.sqlite",
+            "--evidence-root",
+            r"C:\r\dawnstrike-forward-evidence",
+            "--run-root",
+            r"C:\r\dawnstrike-forward-runs",
+            "--output-root",
+            r"C:\r\dawnstrike-forward-output",
+            "--session-root",
+            r"C:\r\dawnstrike-forward-sessions",
+            "--symbols-manifest",
+            r"C:\r\dawnstrike-capture-config-20260830\symbols.json",
+            "--symbols-manifest-sha256",
+            "b" * 64,
+            "--entitlement-receipt",
+            r"C:\r\dawnstrike-capture-config-20260830\entitlement.json",
+            "--entitlement-receipt-sha256",
+            "c" * 64,
+            "--source-config",
+            r"C:\r\dawnstrike-capture-config-20260830\web_sources.yaml",
+            "--source-config-sha256",
+            "d" * 64,
+            "--env-file",
+            str(tmp_path / "secrets" / "runtime.env"),
+            "--market-date",
+            "2026-09-07",
+            "--max-pages",
+            "100",
+            "--retries",
+            "3",
+            "--execute",
+        ],
+    )
+
+    assert module.main() == 0
 
 
 def test_daily_session_receipt_is_write_once(tmp_path: Path) -> None:

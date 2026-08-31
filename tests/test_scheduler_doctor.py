@@ -1,5 +1,6 @@
 import hashlib
 import json
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -271,6 +272,7 @@ def _healthy_tasks(runtime: Path, state: Path, *, last_result: int = 0):
             "trigger_end_boundary": None,
             "trigger_random_delay": None,
             "logon_type": "Password",
+            "principal_user_id": r"DAWNSTRIKE\capture-service",
             "start_when_available": True,
             "stop_if_going_on_batteries": False,
             "disallow_start_if_on_batteries": False,
@@ -313,6 +315,27 @@ def _healthy_tasks(runtime: Path, state: Path, *, last_result: int = 0):
 
 
 def _auxiliary_task(runtime: Path, state: Path, *, candidate_sha: str = "a" * 40):
+    external = runtime.parent / "aux-inputs"
+    (external / "db").mkdir(parents=True, exist_ok=True)
+    (external / "evidence").mkdir(parents=True, exist_ok=True)
+    (external / "runs").mkdir(parents=True, exist_ok=True)
+    (external / "output").mkdir(parents=True, exist_ok=True)
+    (external / "sessions").mkdir(parents=True, exist_ok=True)
+    (external / "config").mkdir(parents=True, exist_ok=True)
+    bound_files = {
+        external / "db" / "staging.sqlite": b"test-db",
+        external / "config" / "symbols.json": b"test-symbols",
+        external / "config" / "entitlement.json": b"test-entitlement",
+        external / "config" / "web_sources.yaml": b"test-source-config",
+    }
+    for path, content in bound_files.items():
+        path.write_bytes(content)
+    (state / "secrets").mkdir(parents=True, exist_ok=True)
+    (state / "secrets" / "runtime.env").write_text("TEST_ONLY=1\n", encoding="utf-8")
+    input_hashes = {
+        path.name: hashlib.sha256(content).hexdigest()
+        for path, content in bound_files.items()
+    }
     arguments = " ".join(
         f'"{token}"'
         for token in (
@@ -324,23 +347,27 @@ def _auxiliary_task(runtime: Path, state: Path, *, candidate_sha: str = "a" * 40
             "--repo-root",
             str(runtime),
             "--db-path",
-            r"C:\r\dawnstrike-forward-db\staging.sqlite",
+            str(external / "db" / "staging.sqlite"),
             "--evidence-root",
-            r"C:\r\dawnstrike-capture-evidence",
+            str(external / "evidence"),
             "--run-root",
-            r"C:\r\dawnstrike-capture-runs",
+            str(external / "runs"),
             "--output-root",
-            r"C:\r\dawnstrike-capture-output",
+            str(external / "output"),
             "--session-root",
-            r"C:\r\dawnstrike-capture-sessions",
+            str(external / "sessions"),
             "--symbols-manifest",
-            r"C:\r\dawnstrike-capture-config-20260830\symbols.json",
+            str(external / "config" / "symbols.json"),
+            "--symbols-manifest-sha256",
+            input_hashes["symbols.json"],
             "--entitlement-receipt",
-            r"C:\r\dawnstrike-capture-config-20260830\entitlement.json",
+            str(external / "config" / "entitlement.json"),
+            "--entitlement-receipt-sha256",
+            input_hashes["entitlement.json"],
             "--source-config",
-            r"C:\r\dawnstrike-capture-config-20260830\web_sources.yaml",
+            str(external / "config" / "web_sources.yaml"),
             "--source-config-sha256",
-            "b" * 64,
+            input_hashes["web_sources.yaml"],
             "--env-file",
             str(state / "secrets" / "runtime.env"),
             "--max-pages",
@@ -356,10 +383,38 @@ def _auxiliary_task(runtime: Path, state: Path, *, candidate_sha: str = "a" * 40
         "state": "Ready",
         "enabled": True,
         "action_count": 1,
+        "trigger_count": 1,
+        "host_timezone_id": scheduler_service.EXPECTED_WINDOWS_TIMEZONE_ID,
+        "multiple_instances": scheduler_service.EXPECTED_MULTIPLE_INSTANCES,
+        "run_level": scheduler_service.EXPECTED_RUN_LEVEL,
+        "wake_to_run": True,
+        "start_when_available": True,
+        "stop_if_going_on_batteries": False,
+        "disallow_start_if_on_batteries": False,
+        "execution_time_limit": "PT3H",
+        "restart_count": 3,
+        "restart_interval": "PT15M",
+        "logon_type": "Password",
+        "principal_user_id": r"DAWNSTRIKE\capture-service",
+        "trigger_type": "MSFT_TaskWeeklyTrigger",
+        "trigger_enabled": True,
+        "trigger_days_of_week": 62,
+        "trigger_weeks_interval": 1,
+        "trigger_end_boundary": None,
+        "trigger_random_delay": None,
+        "trigger_start_boundary": "2026-08-31T15:20:00-05:00",
+        "next_run_time": "2026-09-01T15:20:00-05:00",
+        "principal_sha256": "4" * 64,
+        "trigger_sha256": "5" * 64,
+        "settings_sha256": "6" * 64,
+        "definition_contract_sha256": "3" * 64,
+        "symbols_manifest_sha256": input_hashes["symbols.json"],
+        "entitlement_receipt_sha256": input_hashes["entitlement.json"],
+        "source_config_sha256": input_hashes["web_sources.yaml"],
         "execute": "py.exe",
         "arguments": arguments,
         "working_directory": str(runtime),
-        "last_task_result": 1,
+        "last_task_result": 0,
     }
 
 
@@ -373,6 +428,13 @@ def _auxiliary_contract(row: dict[str, object]) -> dict[str, object]:
         "valid": True,
         "candidate_sha": "a" * 40,
         "action_contract_sha256": hashlib.sha256(action_text.encode("utf-8")).hexdigest(),
+        "definition_contract_sha256": "3" * 64,
+        "principal_sha256": "4" * 64,
+        "trigger_sha256": "5" * 64,
+        "settings_sha256": "6" * 64,
+        "symbols_manifest_sha256": str(row.get("symbols_manifest_sha256") or ""),
+        "entitlement_receipt_sha256": str(row.get("entitlement_receipt_sha256") or ""),
+        "source_config_sha256": str(row.get("source_config_sha256") or ""),
     }
 
 
@@ -402,7 +464,18 @@ def _prepare_auxiliary_loader_inputs(
         "activation_id": activation_id,
         "activation_receipt_name": f"runtime-activation-{activation_id}.json",
         "activation_receipt_sha256": hashlib.sha256(activation_raw).hexdigest(),
+        "runtime_origin_sha256": "e" * 64,
+        "action_before_sha256": "f" * 64,
+        "definition_before_sha256": "1" * 64,
+        "xml_before_sha256": "2" * 64,
         "action_after_sha256": "c" * 64,
+        "definition_after_sha256": "3" * 64,
+        "principal_sha256": "4" * 64,
+        "trigger_sha256": "5" * 64,
+        "settings_sha256": "6" * 64,
+        "symbols_manifest_sha256": "7" * 64,
+        "entitlement_receipt_sha256": "8" * 64,
+        "source_config_sha256": "9" * 64,
     }
     capture_path = receipt_root / f"capture-task-rebind-{'a' * 40}.json"
     capture_path.write_text("{}", encoding="utf-8")
@@ -414,6 +487,14 @@ def _prepare_auxiliary_loader_inputs(
         "status": "COMPLETE",
         "candidate_sha": "a" * 40,
         "candidate_tree": "b" * 40,
+        "runtime_origin_sha256": "e" * 64,
+        "state_preparation_contract": scheduler_service.AUXILIARY_SIDECAR_CONTRACT,
+        "auxiliary_capture_present": True,
+        "auxiliary_capture_state_after": "Disabled",
+        "auxiliary_capture_action": "DISABLED_UNTIL_EXACT_SHA_REBIND",
+        "auxiliary_capture_action_contract_sha256": "f" * 64,
+        "auxiliary_capture_definition_contract_sha256": "1" * 64,
+        "auxiliary_capture_xml_sha256": "2" * 64,
     }
 
 
@@ -439,9 +520,51 @@ def test_scheduler_doctor_accepts_valid_ready_governed_auxiliary(
 
     assert result["status"] == "LOCAL_VERIFIED"
     assert result["unexpected_enabled_tasks"] == []
-    assert scheduler_service.AUXILIARY_TASK_NAME in result["expected_task_names"]
+    assert result["expected_task_names"] == list(scheduler_service.EXPECTED_TASKS)
     assert result["governed_auxiliary_task"]["status"] == "LOCAL_VERIFIED"
-    assert result["governed_auxiliary_task"]["last_task_result"] == 1
+    assert result["governed_auxiliary_task"]["last_task_result"] == 0
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("last_task_result", 1),
+        ("trigger_count", 2),
+        ("logon_type", "InteractiveToken"),
+        ("stop_if_going_on_batteries", True),
+        ("wake_to_run", False),
+    ],
+)
+def test_scheduler_doctor_blocks_nonoperational_ready_auxiliary(
+    tmp_path: Path, monkeypatch, field: str, value: object
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    _write_required_scripts(runtime)
+    rows = _healthy_tasks(runtime, state)
+    auxiliary = _auxiliary_task(runtime, state)
+    auxiliary[field] = value
+    rows.append(auxiliary)
+    monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
+    monkeypatch.setattr(
+        scheduler_service,
+        "_load_auxiliary_contract",
+        lambda _runtime, _state: _auxiliary_contract(auxiliary),
+    )
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+    check = result["governed_auxiliary_task"]
+
+    assert result["status"] == "BLOCKED_EXTERNAL"
+    assert result["unexpected_enabled_tasks"] == [auxiliary]
+    assert check["definition_status"] == "READY"
+    assert check["operational_ready"] is False
+    assert check["operational_status"] == "BLOCKED_NONOPERATIONAL"
+    assert check["failure_reason"] == (
+        "auxiliary task is not operationally unattended-safe"
+    )
 
 
 @pytest.mark.parametrize(
@@ -550,6 +673,9 @@ def test_auxiliary_loader_rejects_missing_activation_receipt(
 
     monkeypatch.setattr(scheduler_service, "_runtime_git_sha", lambda _root: "a" * 40)
     monkeypatch.setattr(scheduler_service, "_runtime_git_tree", lambda _root: "b" * 40)
+    monkeypatch.setattr(scheduler_service, "_runtime_git_origin_sha", lambda _root: "e" * 64)
+    monkeypatch.setattr(scheduler_service, "_runtime_git_origin_main", lambda _root: "a" * 40)
+    monkeypatch.setattr(scheduler_service, "_runtime_git_clean", lambda _root: True)
     monkeypatch.setattr(capture_contract, "load_receipt", lambda *_args, **_kwargs: capture)
     (state / "receipts" / "runtime-activation" / capture["activation_receipt_name"]).unlink()
 
@@ -571,6 +697,9 @@ def test_auxiliary_loader_rejects_tampered_activation_receipt(
 
     monkeypatch.setattr(scheduler_service, "_runtime_git_sha", lambda _root: "a" * 40)
     monkeypatch.setattr(scheduler_service, "_runtime_git_tree", lambda _root: "b" * 40)
+    monkeypatch.setattr(scheduler_service, "_runtime_git_origin_sha", lambda _root: "e" * 64)
+    monkeypatch.setattr(scheduler_service, "_runtime_git_origin_main", lambda _root: "a" * 40)
+    monkeypatch.setattr(scheduler_service, "_runtime_git_clean", lambda _root: True)
     monkeypatch.setattr(capture_contract, "load_receipt", lambda *_args, **_kwargs: capture)
     activation_path = (
         state
@@ -600,7 +729,11 @@ def test_auxiliary_loader_rejects_unbound_activation_receipt(
 
     monkeypatch.setattr(scheduler_service, "_runtime_git_sha", lambda _root: "a" * 40)
     monkeypatch.setattr(scheduler_service, "_runtime_git_tree", lambda _root: "b" * 40)
+    monkeypatch.setattr(scheduler_service, "_runtime_git_origin_sha", lambda _root: "e" * 64)
+    monkeypatch.setattr(scheduler_service, "_runtime_git_origin_main", lambda _root: "a" * 40)
+    monkeypatch.setattr(scheduler_service, "_runtime_git_clean", lambda _root: True)
     monkeypatch.setattr(capture_contract, "load_receipt", lambda *_args, **_kwargs: capture)
+    monkeypatch.setattr(activation_contract, "load_receipt", lambda *_args, **_kwargs: activation)
     invalid = dict(activation)
     invalid[field] = "PREPARED" if field == "status" else "d" * 40
     monkeypatch.setattr(activation_contract, "load_receipt", lambda *_args, **_kwargs: invalid)
@@ -918,6 +1051,11 @@ def test_scheduler_doctor_accepts_failure_from_replaced_task_definition(
     morning["last_run_time"] = "2026-07-30T08:10:00-05:00"
     morning["trigger_start_boundary"] = "2026-07-31T08:00:00-05:00"
     monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
+    monkeypatch.setattr(
+        scheduler_service,
+        "_load_exact_activation_completion",
+        lambda _runtime, _state: datetime.fromisoformat("2026-08-01T00:00:00+00:00"),
+    )
 
     result = scheduler_service.scheduler_doctor(runtime, state)
 
@@ -927,8 +1065,8 @@ def test_scheduler_doctor_accepts_failure_from_replaced_task_definition(
         for row in result["scheduled_tasks"]
         if row["name"] == "Dawnstrike AlphaOps Morning"
     )
-    assert checked["last_run_status"] == "SUPERSEDED_BY_CURRENT_DEFINITION"
-    assert checked["history_superseded_by_current_definition"] is True
+    assert checked["last_run_status"] == "SUPERSEDED_BY_EXACT_RUNTIME_ACTIVATION"
+    assert checked["history_superseded_by_exact_runtime_activation"] is True
 
 
 @pytest.mark.parametrize(
@@ -969,7 +1107,7 @@ def test_scheduler_doctor_keeps_same_day_failure_blocking(
         if row["name"] == "Dawnstrike AlphaOps Morning"
     )
     assert checked["last_run_status"] == "STALE_OR_FAILED"
-    assert checked["history_superseded_by_current_definition"] is False
+    assert checked["history_superseded_by_exact_runtime_activation"] is False
 
 
 def test_scheduler_doctor_uses_trigger_start_for_repeating_task(

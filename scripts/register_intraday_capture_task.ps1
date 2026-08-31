@@ -128,7 +128,15 @@ if (
 $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 if ($null -ne $existing) { throw "Scheduled task already exists; no existing Dawnstrike task was changed: $TaskName" }
 $action = New-ScheduledTaskAction -Execute $Python -Argument $actionArguments -WorkingDirectory $RuntimeRoot
-$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 3)
+$settings = New-ScheduledTaskSettingsSet `
+    -StartWhenAvailable `
+    -WakeToRun `
+    -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries `
+    -MultipleInstances IgnoreNew `
+    -ExecutionTimeLimit (New-TimeSpan -Hours 3) `
+    -RestartCount 3 `
+    -RestartInterval (New-TimeSpan -Minutes 15)
 if ($InteractiveCurrentUser) {
     $currentPrincipal = [string][System.Security.Principal.WindowsIdentity]::GetCurrent().Name
     if ([string]::IsNullOrWhiteSpace($currentPrincipal)) { throw "Current Windows principal is unavailable." }

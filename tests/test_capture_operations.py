@@ -227,6 +227,14 @@ def test_capture_script_is_plan_only_without_execute() -> None:
     assert "New-ScheduledTaskPrincipal" in registration
     assert "-LogonType Interactive -RunLevel Limited" in registration
     assert "Choose either InteractiveCurrentUser or RunAsCredential" in registration
+    assert "-StartWhenAvailable" in registration
+    assert "-WakeToRun" in registration
+    assert "-AllowStartIfOnBatteries" in registration
+    assert "-DontStopIfGoingOnBatteries" in registration
+    assert "-MultipleInstances IgnoreNew" in registration
+    assert "-ExecutionTimeLimit (New-TimeSpan -Hours 3)" in registration
+    assert "-RestartCount 3" in registration
+    assert "-RestartInterval (New-TimeSpan -Minutes 15)" in registration
     assert "-At $StartAt" in registration
     assert "$StartAt.TimeOfDay" not in registration
 
@@ -270,3 +278,6 @@ def test_outer_operation_retains_terminal_incomplete_receipt() -> None:
     assert result["capture_status"] == "PARTIAL"
     assert result["run_id"] == "run-1"
     assert result["coverage"] == inner["coverage"]
+    assert result["research_only"] is True
+    assert result["broker_execution"] == "disabled"
+    assert result["broker_execution_enabled"] is False

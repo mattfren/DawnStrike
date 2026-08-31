@@ -182,6 +182,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--market-date", default=None)
     parser.add_argument("--max-pages", type=int, default=100)
     parser.add_argument("--retries", type=int, default=3)
+    parser.add_argument("--execute", action="store_true", required=True)
     return parser
 
 

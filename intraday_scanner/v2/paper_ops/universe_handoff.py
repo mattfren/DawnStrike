@@ -700,19 +700,6 @@ def _validate_core_contract(
         "UNKNOWN",
     }:
         raise UniverseHandoffError("core universe contract freshness is invalid")
-    if (
-        str(core.get("status") or "").upper() == "READY"
-        and str(core.get("freshness_verdict") or "").upper() == "FRESH"
-    ):
-        if observed_date is None:
-            raise UniverseHandoffError("core universe contract observation is invalid")
-        observed_day = date.fromisoformat(observed_date)
-        requested_day = date.fromisoformat(market_date)
-        if (
-            observed_day > requested_day
-            or (requested_day - observed_day).days > DEFAULT_MAX_AGE_DAYS
-        ):
-            raise UniverseHandoffError("core universe observation is not fresh for market date")
     claimed = str(core.get("content_hash_sha256") or "").lower()
     if not _SHA_PATTERN.fullmatch(claimed):
         raise UniverseHandoffError("core universe contract hash is missing")
@@ -791,6 +778,29 @@ def _validate_core_contract(
     index_verdicts = core.get("index_verdicts")
     if not isinstance(index_verdicts, dict) or set(index_verdicts) != set(CORE_INDEXES):
         raise UniverseHandoffError("core universe index verdicts are incomplete")
+    has_ready_index = any(
+        isinstance(verdict, dict)
+        and str(verdict.get("status") or "").upper() == "READY"
+        for verdict in index_verdicts.values()
+    )
+    requires_fresh_observation = status == "READY" or bool(core_symbols) or has_ready_index
+    if requires_fresh_observation:
+        if (
+            observed_date is None
+            or str(core.get("freshness_verdict") or "").upper() != "FRESH"
+        ):
+            raise UniverseHandoffError(
+                "core universe with members or READY indexes requires a fresh observation"
+            )
+        observed_day = date.fromisoformat(observed_date)
+        requested_day = date.fromisoformat(market_date)
+        if (
+            observed_day > requested_day
+            or (requested_day - observed_day).days > DEFAULT_MAX_AGE_DAYS
+        ):
+            raise UniverseHandoffError(
+                "core universe observation is not fresh for market date"
+            )
     ready_indexes: set[str] = set()
     artifacts_by_index: dict[str, list[dict[str, Any]]] = {index: [] for index in CORE_INDEXES}
     for artifact in artifacts:

@@ -105,6 +105,46 @@ def test_missing_core_manifest_is_validated_as_lane_local_unavailable() -> None:
 
 
 @pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda core: core.update(status="DATA_UNAVAILABLE", observed_at=None),
+        lambda core: core.update(
+            status="DATA_UNAVAILABLE",
+            observed_at=None,
+            index_verdicts={
+                **dict(core["index_verdicts"]),
+                "S&P 500": {"status": "READY"},
+            },
+        ),
+    ],
+    ids=["members-without-observation", "ready-index-without-observation"],
+)
+def test_data_unavailable_mixed_core_rejects_null_observation(mutation) -> None:
+    core = _core_contract()
+    mutation(core)
+    _rehash_core(core)
+
+    with pytest.raises(UniverseHandoffError, match="requires a fresh observation"):
+        _validate_core_contract(core, MARKET_DATE)
+
+
+@pytest.mark.parametrize(
+    "observed_at",
+    ["2026-07-01T12:00:00+00:00", "2026-08-29T00:00:00+00:00"],
+    ids=["stale", "future"],
+)
+def test_data_unavailable_mixed_core_rejects_stale_or_future_observation(
+    observed_at: str,
+) -> None:
+    core = _core_contract()
+    core.update(status="DATA_UNAVAILABLE", observed_at=observed_at)
+    _rehash_core(core)
+
+    with pytest.raises(UniverseHandoffError, match="not fresh"):
+        _validate_core_contract(core, MARKET_DATE)
+
+
+@pytest.mark.parametrize(
     "value",
     [
         "2026-08-28",
