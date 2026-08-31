@@ -514,7 +514,11 @@ function Invoke-DawnstrikeRuntimeRollback {
     $taskBackup = $null
     $preserveLocks = $false
     try {
-        $activationLock = Enter-DawnstrikeRuntimeActivationLock $state
+        $lockOrigin = Convert-DawnstrikeCanonicalOriginIdentity $origin
+        $lockPythonSha = Get-DawnstrikeRuntimeLockHash $pythonPath
+        $activationLock = Enter-DawnstrikeGovernedRuntimeLock -StateRoot $state -Operation runtime_rollback `
+            -CandidateSha $candidateSha -CandidateTree ([string]$activation.candidate_tree) `
+            -OriginIdentity $lockOrigin -PythonPath $pythonPath -PythonSha256 $lockPythonSha
         Assert-DawnstrikeNoDailyLocks $state
         $dailyLock = Enter-DawnstrikeDailyRunLock -StateRoot $state -MarketDate $marketDate -Owner "runtime_rollback"
         if (-not $dailyLock.acquired) {
@@ -796,7 +800,7 @@ function Invoke-DawnstrikeRuntimeRollback {
     finally {
         if (-not $preserveLocks) {
             if ($null -ne $dailyLock) { Exit-DawnstrikeDailyRunLock -Lock $dailyLock }
-            Exit-DawnstrikeRuntimeActivationLock $activationLock
+            Exit-DawnstrikeGovernedRuntimeLock $activationLock
         }
     }
 }
@@ -814,7 +818,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         -RuntimeRoot $RuntimeRoot `
         -StateRoot $StateRoot `
         -BackupRoot $BackupRoot `
-        -ProcessTimeoutSeconds $ProcessTimeoutSeconds
+        -ProcessTimeoutSeconds $ProcessTimeoutSeconds `
         -RunAsCredential $RunAsCredential
     $result | ConvertTo-Json -Depth 12
 }

@@ -1742,6 +1742,9 @@ function Assert-DawnstrikeSameVolume {
     }
 }
 
+# Override the legacy per-script implementation before any operation runs.
+. (Join-Path $PSScriptRoot "runtime_activation_lock.ps1")
+
 function Invoke-DawnstrikeRuntimeActivation {
     [CmdletBinding()]
     param(
@@ -2091,7 +2094,11 @@ function Invoke-DawnstrikeRuntimeActivation {
         $auxiliaryDisabled = $false
         $preserveLocks = $false
         try {
-            $activationLock = Enter-DawnstrikeRuntimeActivationLock $state
+            $lockOrigin = Convert-DawnstrikeCanonicalOriginIdentity $origin
+            $lockPythonSha = Get-DawnstrikeRuntimeLockHash $pythonPath
+            $activationLock = Enter-DawnstrikeGovernedRuntimeLock -StateRoot $state -Operation runtime_activation `
+                -CandidateSha $ExpectedSha -CandidateTree ([string]$candidateContract.tree) `
+                -OriginIdentity $lockOrigin -PythonPath $pythonPath -PythonSha256 $lockPythonSha
             Assert-DawnstrikeNoDailyLocks $state
             $dailyLock = Enter-DawnstrikeDailyRunLock -StateRoot $state -MarketDate $MarketDate -Owner "runtime_activation"
             if (-not $dailyLock.acquired) {
@@ -2573,7 +2580,7 @@ function Invoke-DawnstrikeRuntimeActivation {
         finally {
             if (-not $preserveLocks) {
                 if ($null -ne $dailyLock) { Exit-DawnstrikeDailyRunLock -Lock $dailyLock }
-                Exit-DawnstrikeRuntimeActivationLock $activationLock
+                Exit-DawnstrikeGovernedRuntimeLock $activationLock
             }
         }
     }

@@ -850,6 +850,8 @@ def test_disposable_activation_and_rollback_preserve_exact_runtime_and_state(
     (candidate / "scripts").mkdir()
     for name in (
         "activate_dawnstrike_runtime.ps1",
+        "runtime_activation_lock.ps1",
+        "runtime_activation_lock_contract.py",
         "rollback_dawnstrike_runtime.ps1",
         "runtime_activation_contract.py",
         "dawnstrike_job_process.ps1",
