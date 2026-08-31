@@ -181,6 +181,17 @@ def test_hardening_script_is_explicit_and_preserves_capture_bindings() -> None:
     assert "InteractiveCurrentUser" in registration
 
 
+def test_standalone_entrypoints_forward_credential_without_serializing_it() -> None:
+    activation = Path("scripts/activate_dawnstrike_runtime.ps1").read_text(encoding="utf-8")
+    rollback = Path("scripts/rollback_dawnstrike_runtime.ps1").read_text(encoding="utf-8")
+    for script in (activation, rollback):
+        assert "[pscredential]$RunAsCredential" in script
+        assert "-RunAsCredential $RunAsCredential" in script
+        assert "ConvertTo-Json $RunAsCredential" not in script
+        assert "Write-Output $RunAsCredential" not in script
+    assert "$rollbackRunAsCredential = $RunAsCredential" in rollback
+
+
 @pytest.mark.skipif(
     subprocess.run(["where", "powershell"], capture_output=True).returncode != 0,
     reason="Windows PowerShell unavailable",
