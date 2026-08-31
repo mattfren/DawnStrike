@@ -19,6 +19,25 @@ AUXILIARY_TASK_NAME = "Dawnstrike Delayed SIP Capture"
 AUXILIARY_SIDECAR_CONTRACT = "dawnstrike.account_capture_trial_sidecar.v1"
 AUXILIARY_DECLARATION_FILE = Path("config") / "state_preparation_contract.json"
 AUXILIARY_CAPTURE_RUNNER = Path("scripts") / "run_daily_intraday_capture.py"
+AUXILIARY_PYTHON_PREFIX = ("-3.13", "-u")
+AUXILIARY_REQUIRED_OPTIONS = frozenset(
+    {
+        "--candidate-sha",
+        "--repo-root",
+        "--db-path",
+        "--evidence-root",
+        "--run-root",
+        "--output-root",
+        "--session-root",
+        "--symbols-manifest",
+        "--entitlement-receipt",
+        "--source-config",
+        "--source-config-sha256",
+        "--env-file",
+        "--max-pages",
+        "--retries",
+    }
+)
 PUBLICATION_CONTRACT = {
     "schema_version": "dawnstrike.publication_schedule.v1",
     "timezone": "America/Chicago",
@@ -553,8 +572,11 @@ def _load_auxiliary_contract(runtime: Path, state: Path) -> dict[str, Any]:
     if not declaration_path.is_file():
         return {"declared": False, "valid": False, "reason": "sidecar declaration is missing"}
     try:
-        declaration = json.loads(declaration_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        declaration = json.loads(
+            declaration_path.read_text(encoding="utf-8"),
+            object_pairs_hook=_reject_duplicate_json_keys,
+        )
+    except (OSError, UnicodeDecodeError, ValueError):
         return {"declared": True, "valid": False, "reason": "sidecar declaration is invalid"}
     expected = {
         "schema_version": "dawnstrike.state_preparation_contract.v1",
@@ -568,7 +590,8 @@ def _load_auxiliary_contract(runtime: Path, state: Path) -> dict[str, Any]:
     if declaration != expected:
         return {"declared": True, "valid": False, "reason": "sidecar declaration is invalid"}
     runtime_sha = _runtime_git_sha(runtime)
-    if runtime_sha is None:
+    runtime_tree = _runtime_git_tree(runtime)
+    if runtime_sha is None or runtime_tree is None:
         return {"declared": True, "valid": False, "reason": "runtime SHA is unavailable"}
     receipt_root = state / "receipts" / "capture-task"
     receipt_paths = sorted(receipt_root.glob(f"capture-task-rebind-{runtime_sha}.json"))
@@ -581,7 +604,35 @@ def _load_auxiliary_contract(runtime: Path, state: Path) -> dict[str, Any]:
     try:
         from scripts.capture_task_contract import load_receipt
 
-        receipt = load_receipt(receipt_paths[0], candidate_sha=runtime_sha)
+        receipt = load_receipt(
+            receipt_paths[0], candidate_sha=runtime_sha, candidate_tree=runtime_tree
+        )
+        activation_name = str(receipt["activation_receipt_name"])
+        activation_path = state / "receipts" / "runtime-activation" / activation_name
+        if (
+            activation_name
+            != "runtime-activation-" + str(receipt["activation_id"]) + ".json"
+            or not activation_path.is_file()
+        ):
+            raise ValueError("activation receipt is missing")
+        from scripts.runtime_activation_contract import _assert_no_reparse_components
+        from scripts.runtime_activation_contract import (
+            load_receipt as load_activation_receipt,
+        )
+
+        _assert_no_reparse_components(activation_path)
+        activation_raw = activation_path.read_bytes()
+        if hashlib.sha256(activation_raw).hexdigest() != receipt["activation_receipt_sha256"]:
+            raise ValueError("activation receipt hash mismatch")
+
+        activation = load_activation_receipt(activation_path)
+        if (
+            activation.get("schema_version") != "dawnstrike.runtime_activation_receipt.v1"
+            or activation.get("status") != "COMPLETE"
+            or activation.get("candidate_sha") != runtime_sha
+            or activation.get("candidate_tree") != runtime_tree
+        ):
+            raise ValueError("activation receipt is not bound to the runtime")
     except (ImportError, KeyError, OSError, TypeError, ValueError):
         return {
             "declared": True,
@@ -592,14 +643,23 @@ def _load_auxiliary_contract(runtime: Path, state: Path) -> dict[str, Any]:
         "declared": True,
         "valid": True,
         "candidate_sha": runtime_sha,
+        "candidate_tree": runtime_tree,
         "action_contract_sha256": str(receipt["action_after_sha256"]),
     }
 
 
 def _runtime_git_sha(runtime: Path) -> str | None:
+    return _runtime_git_value(runtime, "HEAD")
+
+
+def _runtime_git_tree(runtime: Path) -> str | None:
+    return _runtime_git_value(runtime, "HEAD^{tree}")
+
+
+def _runtime_git_value(runtime: Path, revision: str) -> str | None:
     try:
         completed = subprocess.run(  # nosec B603, B607
-            ["git", "-C", str(runtime), "rev-parse", "HEAD"],
+            ["git", "-C", str(runtime), "rev-parse", revision],
             capture_output=True,
             check=True,
             text=True,
@@ -623,6 +683,15 @@ def _action_option(tokens: list[str], option: str) -> str | None:
     return tokens[index + 1] if index + 1 < len(tokens) else None
 
 
+def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON field: {key}")
+        result[key] = value
+    return result
+
+
 def _validate_auxiliary_action(
     row: dict[str, Any], runtime: Path, state: Path, contract: dict[str, Any]
 ) -> dict[str, Any]:
@@ -633,14 +702,55 @@ def _validate_auxiliary_action(
         tokens = [token.strip('"') for token in shlex.split(arguments, posix=False)]
     except ValueError:
         tokens = []
-    candidate = _action_option(tokens, "--candidate-sha")
-    repo_root = _action_option(tokens, "--repo-root")
-    db_path = _action_option(tokens, "--db-path")
-    source_config = _action_option(tokens, "--source-config")
-    runner = tokens[0] if tokens else None
+    prefix_matches = len(tokens) >= 3 and tuple(tokens[:2]) == AUXILIARY_PYTHON_PREFIX
+    runner = tokens[2] if prefix_matches else None
+    prefix_matches = prefix_matches and not any(
+        token in AUXILIARY_PYTHON_PREFIX for token in tokens[3:]
+    )
+    option_values: dict[str, str] = {}
+    duplicate_options: set[str] = set()
+    unexpected_arguments = False
+    option_index = 3 if prefix_matches else len(tokens)
+    while option_index < len(tokens):
+        option = tokens[option_index]
+        if not option.startswith("--"):
+            unexpected_arguments = True
+            option_index += 1
+            continue
+        if option in option_values:
+            duplicate_options.add(option)
+        if option == "--execute":
+            option_values[option] = ""
+            option_index += 1
+            continue
+        if option_index + 1 >= len(tokens) or tokens[option_index + 1].startswith("--"):
+            option_values[option] = ""
+            option_index += 1
+            continue
+        option_values[option] = tokens[option_index + 1]
+        option_index += 2
+    candidate = option_values.get("--candidate-sha")
+    repo_root = option_values.get("--repo-root")
+    env_file = option_values.get("--env-file")
+    required_options_present = (
+        not duplicate_options
+        and not unexpected_arguments
+        and AUXILIARY_REQUIRED_OPTIONS.issubset(option_values)
+        and option_values.get("--execute") == ""
+        and all(
+            option_values.get(name)
+            for name in AUXILIARY_REQUIRED_OPTIONS
+            if name != "--execute"
+        )
+    )
     task_path_matches = str(row.get("task_path") or "\\") == "\\"
     action_count_matches = row.get("action_count") == 1
-    state_matches = str(row.get("state") or "") in {"Ready", "Running", "Queued"}
+    state_matches = str(row.get("state") or "") in {
+        "Ready",
+        "Running",
+        "Queued",
+        "Disabled",
+    }
     try:
         runtime_root_matches = (
             Path(working_directory).resolve() == runtime
@@ -648,19 +758,32 @@ def _validate_auxiliary_action(
             and Path(repo_root).resolve() == runtime
         )
         state_root_matches = (
-            db_path is not None
-            and Path(db_path).resolve() == state / "shadow_real.sqlite"
-            and source_config is not None
-            and Path(source_config).resolve() == state / "config" / "web_sources.yaml"
+            required_options_present
+            and all(
+                Path(option_values[name]).is_absolute()
+                for name in AUXILIARY_REQUIRED_OPTIONS
+                if name
+                not in {
+                    "--candidate-sha",
+                    "--max-pages",
+                    "--retries",
+                    "--source-config-sha256",
+                }
+            )
         )
         runner_matches = (
             runner is not None
             and Path(runner).resolve() == runtime / AUXILIARY_CAPTURE_RUNNER
         )
+        env_file_matches = (
+            env_file is not None
+            and Path(env_file).resolve() == state / "secrets" / "runtime.env"
+        )
     except (OSError, RuntimeError):
         runtime_root_matches = False
         state_root_matches = False
         runner_matches = False
+        env_file_matches = False
     candidate_sha_matches = candidate == contract["candidate_sha"]
     action_text = "|".join((execute, arguments, working_directory))
     action_hash = hashlib.sha256(action_text.encode("utf-8")).hexdigest()
@@ -669,9 +792,11 @@ def _validate_auxiliary_action(
         (
             execute.casefold() == "py.exe",
             runner_matches,
-            "--execute" in tokens,
+            prefix_matches,
+            required_options_present,
             runtime_root_matches,
             state_root_matches,
+            env_file_matches,
             task_path_matches,
             action_count_matches,
             state_matches,
@@ -685,8 +810,10 @@ def _validate_auxiliary_action(
         "action_contract_matches": action_contract_matches,
         "runtime_root_matches": runtime_root_matches,
         "state_root_matches": state_root_matches,
+        "env_file_matches": env_file_matches,
         "candidate_sha_matches": candidate_sha_matches,
         "runner_matches": runner_matches,
+        "prefix_matches": prefix_matches,
         "task_path_matches": task_path_matches,
         "action_count_matches": action_count_matches,
         "state_matches": state_matches,

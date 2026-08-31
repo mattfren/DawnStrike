@@ -316,15 +316,37 @@ def _auxiliary_task(runtime: Path, state: Path, *, candidate_sha: str = "a" * 40
     arguments = " ".join(
         f'"{token}"'
         for token in (
+            "-3.13",
+            "-u",
             str(runtime / "scripts" / "run_daily_intraday_capture.py"),
             "--candidate-sha",
             candidate_sha,
             "--repo-root",
             str(runtime),
             "--db-path",
-            str(state / "shadow_real.sqlite"),
+            r"C:\r\dawnstrike-forward-db\staging.sqlite",
+            "--evidence-root",
+            r"C:\r\dawnstrike-capture-evidence",
+            "--run-root",
+            r"C:\r\dawnstrike-capture-runs",
+            "--output-root",
+            r"C:\r\dawnstrike-capture-output",
+            "--session-root",
+            r"C:\r\dawnstrike-capture-sessions",
+            "--symbols-manifest",
+            r"C:\r\dawnstrike-capture-config-20260830\symbols.json",
+            "--entitlement-receipt",
+            r"C:\r\dawnstrike-capture-config-20260830\entitlement.json",
             "--source-config",
-            str(state / "config" / "web_sources.yaml"),
+            r"C:\r\dawnstrike-capture-config-20260830\web_sources.yaml",
+            "--source-config-sha256",
+            "b" * 64,
+            "--env-file",
+            str(state / "secrets" / "runtime.env"),
+            "--max-pages",
+            "100",
+            "--retries",
+            "3",
             "--execute",
         )
     )
@@ -354,6 +376,47 @@ def _auxiliary_contract(row: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _auxiliary_declaration() -> dict[str, object]:
+    return {
+        "schema_version": "dawnstrike.state_preparation_contract.v1",
+        "sidecar_contract": "dawnstrike.account_capture_trial_sidecar.v1",
+        "sidecar_version": 1,
+        "legacy_schema_marker": 30,
+        "required_before_activation": True,
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+
+
+def _prepare_auxiliary_loader_inputs(
+    runtime: Path, state: Path, *, activation_raw: bytes = b"activation"
+) -> tuple[dict[str, object], dict[str, object]]:
+    (runtime / "config").mkdir(parents=True)
+    (runtime / "config" / "state_preparation_contract.json").write_text(
+        json.dumps(_auxiliary_declaration()), encoding="utf-8"
+    )
+    receipt_root = state / "receipts" / "capture-task"
+    receipt_root.mkdir(parents=True)
+    activation_id = "1" * 24
+    capture = {
+        "activation_id": activation_id,
+        "activation_receipt_name": f"runtime-activation-{activation_id}.json",
+        "activation_receipt_sha256": hashlib.sha256(activation_raw).hexdigest(),
+        "action_after_sha256": "c" * 64,
+    }
+    capture_path = receipt_root / f"capture-task-rebind-{'a' * 40}.json"
+    capture_path.write_text("{}", encoding="utf-8")
+    activation_root = state / "receipts" / "runtime-activation"
+    activation_root.mkdir(parents=True)
+    (activation_root / capture["activation_receipt_name"]).write_bytes(activation_raw)
+    return capture, {
+        "schema_version": "dawnstrike.runtime_activation_receipt.v1",
+        "status": "COMPLETE",
+        "candidate_sha": "a" * 40,
+        "candidate_tree": "b" * 40,
+    }
+
+
 def test_scheduler_doctor_accepts_valid_ready_governed_auxiliary(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -379,6 +442,173 @@ def test_scheduler_doctor_accepts_valid_ready_governed_auxiliary(
     assert scheduler_service.AUXILIARY_TASK_NAME in result["expected_task_names"]
     assert result["governed_auxiliary_task"]["status"] == "LOCAL_VERIFIED"
     assert result["governed_auxiliary_task"]["last_task_result"] == 1
+
+
+@pytest.mark.parametrize(
+    "arguments_mutator",
+    [
+        lambda args: args.replace('"-3.13" "-u"', '"-u" "-3.13"', 1),
+        lambda args: args.replace('"-3.13" "-u"', '"-3.13"', 1),
+        lambda args: args.replace('"-3.13" "-u"', '"-3.13" "-u" "-u"', 1),
+        lambda args: args.replace(
+            '"-3.13" "-u"', '"-3.13" "-u" "python.exe"', 1
+        ),
+    ],
+    ids=["reordered", "missing", "duplicate", "interpreter-shadow"],
+)
+def test_scheduler_doctor_rejects_auxiliary_prefix_variants(
+    tmp_path: Path, monkeypatch, arguments_mutator
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    _write_required_scripts(runtime)
+    rows = _healthy_tasks(runtime, state)
+    auxiliary = _auxiliary_task(runtime, state)
+    auxiliary["arguments"] = arguments_mutator(auxiliary["arguments"])
+    rows.append(auxiliary)
+    monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
+    monkeypatch.setattr(
+        scheduler_service,
+        "_load_auxiliary_contract",
+        lambda _runtime, _state: _auxiliary_contract(auxiliary),
+    )
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    assert result["status"] == "BLOCKED_EXTERNAL"
+    assert result["unexpected_enabled_tasks"] == [auxiliary]
+    assert result["governed_auxiliary_task"]["status"] == "FAILED"
+
+
+@pytest.mark.parametrize("duplicate_option", ["--candidate-sha", "--db-path"])
+def test_scheduler_doctor_rejects_duplicate_auxiliary_options(
+    tmp_path: Path, monkeypatch, duplicate_option: str
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    _write_required_scripts(runtime)
+    rows = _healthy_tasks(runtime, state)
+    auxiliary = _auxiliary_task(runtime, state)
+    auxiliary["arguments"] = auxiliary["arguments"].replace(
+        '"--execute"', f'"{duplicate_option}" "duplicate" "--execute"', 1
+    )
+    rows.append(auxiliary)
+    monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
+    monkeypatch.setattr(
+        scheduler_service,
+        "_load_auxiliary_contract",
+        lambda _runtime, _state: _auxiliary_contract(auxiliary),
+    )
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    assert result["status"] == "BLOCKED_EXTERNAL"
+    assert result["unexpected_enabled_tasks"] == [auxiliary]
+    assert result["governed_auxiliary_task"]["status"] == "FAILED"
+
+
+@pytest.mark.parametrize("duplicate_order", ["expected-first", "hostile-first"])
+def test_auxiliary_loader_rejects_duplicate_sidecar_keys(
+    tmp_path: Path, monkeypatch, duplicate_order: str
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    declaration = json.dumps(_auxiliary_declaration(), separators=(",", ":"))
+    if duplicate_order == "expected-first":
+        declaration = declaration[:-1] + ',"schema_version":"hostile"}'
+    else:
+        declaration = '{"schema_version":"hostile",' + declaration[1:]
+    (runtime / "config").mkdir()
+    (runtime / "config" / "state_preparation_contract.json").write_text(
+        declaration, encoding="utf-8"
+    )
+
+    result = scheduler_service._load_auxiliary_contract(runtime, state)
+
+    assert result == {
+        "declared": True,
+        "valid": False,
+        "reason": "sidecar declaration is invalid",
+    }
+
+
+def test_auxiliary_loader_rejects_missing_activation_receipt(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    capture, _activation = _prepare_auxiliary_loader_inputs(runtime, state)
+    import scripts.capture_task_contract as capture_contract
+
+    monkeypatch.setattr(scheduler_service, "_runtime_git_sha", lambda _root: "a" * 40)
+    monkeypatch.setattr(scheduler_service, "_runtime_git_tree", lambda _root: "b" * 40)
+    monkeypatch.setattr(capture_contract, "load_receipt", lambda *_args, **_kwargs: capture)
+    (state / "receipts" / "runtime-activation" / capture["activation_receipt_name"]).unlink()
+
+    result = scheduler_service._load_auxiliary_contract(runtime, state)
+
+    assert result["valid"] is False
+    assert result["reason"] == "capture sidecar receipt is invalid"
+
+
+def test_auxiliary_loader_rejects_tampered_activation_receipt(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    capture, _activation = _prepare_auxiliary_loader_inputs(runtime, state)
+    import scripts.capture_task_contract as capture_contract
+
+    monkeypatch.setattr(scheduler_service, "_runtime_git_sha", lambda _root: "a" * 40)
+    monkeypatch.setattr(scheduler_service, "_runtime_git_tree", lambda _root: "b" * 40)
+    monkeypatch.setattr(capture_contract, "load_receipt", lambda *_args, **_kwargs: capture)
+    activation_path = (
+        state
+        / "receipts"
+        / "runtime-activation"
+        / capture["activation_receipt_name"]
+    )
+    activation_path.write_bytes(b"tampered")
+
+    result = scheduler_service._load_auxiliary_contract(runtime, state)
+
+    assert result["valid"] is False
+    assert result["reason"] == "capture sidecar receipt is invalid"
+
+
+@pytest.mark.parametrize("field", ["status", "candidate_sha", "candidate_tree"])
+def test_auxiliary_loader_rejects_unbound_activation_receipt(
+    tmp_path: Path, monkeypatch, field: str
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    capture, activation = _prepare_auxiliary_loader_inputs(runtime, state)
+    import scripts.capture_task_contract as capture_contract
+    import scripts.runtime_activation_contract as activation_contract
+
+    monkeypatch.setattr(scheduler_service, "_runtime_git_sha", lambda _root: "a" * 40)
+    monkeypatch.setattr(scheduler_service, "_runtime_git_tree", lambda _root: "b" * 40)
+    monkeypatch.setattr(capture_contract, "load_receipt", lambda *_args, **_kwargs: capture)
+    invalid = dict(activation)
+    invalid[field] = "PREPARED" if field == "status" else "d" * 40
+    monkeypatch.setattr(activation_contract, "load_receipt", lambda *_args, **_kwargs: invalid)
+
+    result = scheduler_service._load_auxiliary_contract(runtime, state)
+
+    assert result["valid"] is False
+    assert result["reason"] == "capture sidecar receipt is invalid"
 
 
 def test_scheduler_doctor_rejects_undeclared_enabled_auxiliary(
@@ -525,6 +755,32 @@ def test_scheduler_doctor_allows_disabled_undeclared_auxiliary(
     assert result["governed_auxiliary_task"]["definition_status"] == (
         "DISABLED_UNDECLARED"
     )
+
+
+def test_scheduler_doctor_accepts_disabled_governed_auxiliary(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    _write_required_scripts(runtime)
+    rows = _healthy_tasks(runtime, state)
+    auxiliary = _auxiliary_task(runtime, state)
+    auxiliary.update(state="Disabled", enabled=False)
+    rows.append(auxiliary)
+    monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
+    monkeypatch.setattr(
+        scheduler_service,
+        "_load_auxiliary_contract",
+        lambda _runtime, _state: _auxiliary_contract(auxiliary),
+    )
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    assert result["status"] == "LOCAL_VERIFIED"
+    assert result["unexpected_enabled_tasks"] == []
+    assert result["governed_auxiliary_task"]["definition_status"] == "DISABLED"
 
 
 def test_scheduler_doctor_blocks_when_any_v5_task_is_missing(
