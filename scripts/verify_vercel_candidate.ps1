@@ -56,10 +56,14 @@ $scanRoots = @(
     (Join-Path $stage "api")
 )
 $prebuiltRoots = @(
-    Get-ChildItem -LiteralPath $stage -Directory -Force |
+    Get-ChildItem -LiteralPath (Join-Path $stage ".vercel\output") -Directory -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -eq "functions" -or $_.Name -eq "static" }
+)
+$legacyPrebuiltRoots = @(
+    Get-ChildItem -LiteralPath $stage -Directory -Force -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -like ".vercel-output*" }
 )
-$scanRoots += @($prebuiltRoots | ForEach-Object { $_.FullName })
+$scanRoots += @($prebuiltRoots + $legacyPrebuiltRoots | ForEach-Object { $_.FullName })
 $forbidden = foreach ($root in $scanRoots) {
     if (Test-Path -LiteralPath $root) {
         Get-ChildItem -LiteralPath $root -Recurse -File -Force |

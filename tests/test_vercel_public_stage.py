@@ -72,6 +72,12 @@ def test_stage_builder_declares_dependency_free_python_stage() -> None:
     assert 'Destination (Join-Path $stagePublic "vercel-source-manifest.json")' in script
     assert 'Destination (Join-Path $functionPublic "vercel-source-manifest.json")' in script
     assert "Assert-VercelGitSourceStable" in script
+    assert "Assert-VercelBuiltPackage" in Path(
+        "scripts/vercel_source_contract.ps1"
+    ).read_text(encoding="utf-8")
+    assert "vercel\\output" in Path(
+        "scripts/vercel_source_contract.ps1"
+    ).read_text(encoding="utf-8")
 
 
 def test_candidate_verifier_reads_optional_config_fields_under_strict_mode() -> None:
@@ -147,3 +153,17 @@ def test_daily_vercel_publisher_builds_once_verifies_and_can_roll_back() -> None
         "scripts/vercel_source_contract.ps1"
     ).read_text(encoding="utf-8")
     assert script.count("Assert-VercelStagedSourceManifest") >= 2
+    assert "Assert-RemoteVercelSourceManifest" in script
+    build_position = script.index('-Arguments @("build", "--yes", "--project", $ProjectId)')
+    deploy_position = script.index(
+        '-Arguments @("deploy", "--prebuilt", "--project", $ProjectId, "--yes", "--json")'
+    )
+    built_positions = [
+        index for index in range(len(script))
+        if script.startswith("Assert-VercelBuiltPackage", index)
+    ]
+    assert len(built_positions) >= 3
+    # The package is checked once as soon as `vercel build` completes, again
+    # immediately before prebuilt deploy, and once more before promotion.
+    assert build_position < built_positions[0] < built_positions[1] < deploy_position
+    assert built_positions[2] > deploy_position
