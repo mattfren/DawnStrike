@@ -5,7 +5,8 @@ param(
     [string]$RuntimeRoot = "C:\r\dawnstrike-runtime",
     [string]$StateRoot = "C:\r\dawnstrike-state",
     [string]$BackupRoot = "C:\r\dawnstrike-state-backups",
-    [ValidateRange(30, 1800)][int]$ProcessTimeoutSeconds = 300
+    [ValidateRange(30, 1800)][int]$ProcessTimeoutSeconds = 300,
+    [pscredential]$RunAsCredential
 )
 
 $ErrorActionPreference = "Stop"
@@ -19,10 +20,12 @@ $rollbackRuntimeRoot = $RuntimeRoot
 $rollbackStateRoot = $StateRoot
 $rollbackBackupRoot = $BackupRoot
 $rollbackTimeout = $ProcessTimeoutSeconds
+$rollbackRunAsCredential = $RunAsCredential
 . (Join-Path $PSScriptRoot "activate_dawnstrike_runtime.ps1")
 $RuntimeRoot = $rollbackRuntimeRoot
 $StateRoot = $rollbackStateRoot
 $BackupRoot = $rollbackBackupRoot
+$RunAsCredential = $rollbackRunAsCredential
 $ProcessTimeoutSeconds = $rollbackTimeout
 
 function Get-DawnstrikeActivationAuxiliaryRecoveryContract {
@@ -812,5 +815,6 @@ if ($MyInvocation.InvocationName -ne '.') {
         -StateRoot $StateRoot `
         -BackupRoot $BackupRoot `
         -ProcessTimeoutSeconds $ProcessTimeoutSeconds
+        -RunAsCredential $RunAsCredential
     $result | ConvertTo-Json -Depth 12
 }

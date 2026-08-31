@@ -10,6 +10,7 @@ param(
     [string]$BackupRoot = "C:\r\dawnstrike-state-backups",
     [ValidateRange(1, 120)][int]$BackupRetention = 30,
     [ValidateRange(30, 1800)][int]$ProcessTimeoutSeconds = 300,
+    [pscredential]$RunAsCredential,
     [switch]$PreflightOnly
 )
 
@@ -2606,6 +2607,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         -BackupRoot $BackupRoot `
         -BackupRetention $BackupRetention `
         -ProcessTimeoutSeconds $ProcessTimeoutSeconds `
+        -RunAsCredential $RunAsCredential `
         -PreflightOnly:$PreflightOnly
     $result | ConvertTo-Json -Depth 12
 }
