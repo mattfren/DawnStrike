@@ -32,6 +32,7 @@ if ($expectedSourceTree -notmatch '^[0-9a-f]{40}$') {
 }
 $stage = Join-Path $resolvedRoot $StageRoot
 $resultPath = Join-Path $resolvedRoot "build\daily-deployment-result.json"
+$rollbackResultPath = Join-Path $resolvedRoot "build\daily-deployment-rollback-result.json"
 $vercel = @("--yes", "vercel@58.4.0")
 $vercelAuth = @()
 if (-not [string]::IsNullOrWhiteSpace($env:VERCEL_TOKEN)) {
@@ -50,6 +51,7 @@ if (-not (Test-Path -LiteralPath $npxCliPath -PathType Leaf)) {
 }
 $promoted = $false
 $priorProduction = $null
+$priorProductionAliases = @{}
 $promotedDeployment = $null
 $allProductionAliases = @($ProductionAlias) + @($AdditionalProductionAliases) |
     Select-Object -Unique
@@ -179,6 +181,60 @@ function Set-VercelAlias {
         -Arguments @("alias", "set", $deploymentHost, $aliasHost) `
         -Label $Label `
         -TimeoutSeconds $VercelCommandTimeoutSeconds
+}
+
+function Normalize-VercelDeploymentUrl {
+    param([AllowNull()][object]$Value)
+    return ([string]$Value -replace "^https?://", "").TrimEnd("/").ToLowerInvariant()
+}
+
+function Assert-VercelAliasRestored {
+    param(
+        [Parameter(Mandatory = $true)][string]$AliasUrl,
+        [Parameter(Mandatory = $true)][object]$PriorAlias,
+        [Parameter(Mandatory = $true)][int64]$CacheBuster
+    )
+    $restored = Invoke-VercelJson `
+        -Arguments @("inspect", [string]$AliasUrl, "--json") `
+        -Label "Rollback verification inspect for $AliasUrl"
+    $restoredId = [string](Get-OptionalJsonProperty -InputObject $restored -Name "id")
+    $restoredUrl = [string](Get-OptionalJsonProperty -InputObject $restored -Name "url")
+    if (-not $restoredId -or $restoredId -ne [string]$PriorAlias.id) {
+        throw "Rollback verification for $AliasUrl resolved the wrong deployment ID."
+    }
+    if (
+        -not $restoredUrl -or
+        (Normalize-VercelDeploymentUrl $restoredUrl) -ne
+        (Normalize-VercelDeploymentUrl $PriorAlias.url)
+    ) {
+        throw "Rollback verification for $AliasUrl resolved the wrong deployment URL."
+    }
+
+    # Identity is authoritative; these cache-busted endpoint reads provide a
+    # safe application-level receipt when the prior deployment exposes them.
+    $health = Invoke-VercelJson `
+        -Arguments @("curl", "$AliasUrl/api/health?rollback_verify=$CacheBuster") `
+        -Label "Rollback verification health for $AliasUrl"
+    $readiness = Invoke-VercelJson `
+        -Arguments @("curl", "$AliasUrl/api/readiness?rollback_verify=$CacheBuster") `
+        -Label "Rollback verification readiness for $AliasUrl"
+    $manifestProcess = Invoke-VercelProcess `
+        -Arguments @("curl", "$AliasUrl/vercel-source-manifest.json?rollback_verify=$CacheBuster") `
+        -Label "Rollback verification source manifest for $AliasUrl" `
+        -TimeoutSeconds $VercelCommandTimeoutSeconds
+    $manifestCanonical = Convert-VercelSourceManifestToCanonicalJson `
+        -RawJson ([string]$manifestProcess.Stdout).Trim()
+    $manifest = $manifestCanonical | ConvertFrom-Json
+    return [ordered]@{
+        alias = $AliasUrl
+        deployment_id = $restoredId
+        deployment_url = $restoredUrl
+        health_status = Get-OptionalJsonProperty -InputObject $health -Name "status"
+        readiness_status = Get-OptionalJsonProperty -InputObject $readiness -Name "status"
+        source_sha = [string]$manifest.source_sha
+        source_tree = [string]$manifest.source_tree
+        source_manifest_sha256 = Get-Sha256Hex $manifestCanonical
+    }
 }
 
 function Get-Sha256Hex {
@@ -391,9 +447,29 @@ Assert-PublicationState `
     -Label "Preview"
 
 if ($Promote) {
-    $priorProduction = Invoke-VercelJson `
-        -Arguments @("inspect", $ProductionAlias, "--json") `
-        -Label "Prior production inspect"
+    # Every alias is independent external state.  Snapshot each target before
+    # promotion so an uncertain promotion can restore the exact deployment
+    # that was serving that alias, rather than copying the primary alias to
+    # every hostname.
+    foreach ($alias in $allProductionAliases) {
+        $snapshot = Invoke-VercelJson `
+            -Arguments @("inspect", [string]$alias, "--json") `
+            -Label "Prior production inspect for $alias"
+        $snapshotId = Get-OptionalJsonProperty -InputObject $snapshot -Name "id"
+        $snapshotUrl = [string](
+            Get-OptionalJsonProperty -InputObject $snapshot -Name "url"
+        )
+        if (-not $snapshotId -or -not $snapshotUrl) {
+            throw "Prior production inspect did not return a deployment ID and URL for $alias."
+        }
+        $priorProductionAliases[[string]$alias] = [pscustomobject]@{
+            id = [string]$snapshotId
+            url = $snapshotUrl
+        }
+        if ([string]$alias -eq [string]$ProductionAlias) {
+            $priorProduction = $snapshot
+        }
+    }
 }
 
 try {
@@ -602,20 +678,24 @@ try {
 }
 catch {
     $publicationError = $_.Exception.Message
-    $priorProductionId = Get-OptionalJsonProperty `
-        -InputObject $priorProduction `
-        -Name "id"
-    $priorProductionUrl = [string](
-        Get-OptionalJsonProperty -InputObject $priorProduction -Name "url"
-    )
-    if ($promoted -and $priorProductionId -and $priorProductionUrl) {
+    if ($promoted -and $priorProductionAliases.Count -eq $allProductionAliases.Count) {
         $rollbackErrors = @()
+        $rollbackProofs = @()
+        $rollbackCacheBuster = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
         foreach ($alias in $allProductionAliases) {
             try {
+                $priorAlias = $priorProductionAliases[[string]$alias]
+                if ($null -eq $priorAlias -or -not $priorAlias.url) {
+                    throw "No complete prior deployment snapshot exists for $alias."
+                }
                 Set-VercelAlias `
-                    -DeploymentUrl $priorProductionUrl `
+                    -DeploymentUrl ([string]$priorAlias.url) `
                     -AliasUrl ([string]$alias) `
                     -Label "Production rollback for $alias"
+                $rollbackProofs += Assert-VercelAliasRestored `
+                    -AliasUrl ([string]$alias) `
+                    -PriorAlias $priorAlias `
+                    -CacheBuster $rollbackCacheBuster
             }
             catch {
                 $rollbackErrors += $_.Exception.Message
@@ -624,6 +704,30 @@ catch {
         if ($rollbackErrors.Count) {
             throw "$publicationError Rollback errors: $($rollbackErrors -join '; ')"
         }
+        $rollbackReceipt = [ordered]@{
+            schema_version = "dawnstrike.daily_deployment_rollback.v1"
+            generated_at = [DateTimeOffset]::UtcNow.ToString("o")
+            project_id = $ProjectId
+            candidate_preview_deployment_id = Get-OptionalJsonProperty `
+                -InputObject $deployment -Name "id"
+            candidate_promoted_deployment_id = Get-OptionalJsonProperty `
+                -InputObject $promotedDeployment -Name "id"
+            aliases = @($rollbackProofs)
+            candidate_no_longer_live = $true
+            status = "ROLLED_BACK"
+            publication_error = $publicationError
+        }
+        try {
+            $rollbackJson = $rollbackReceipt | ConvertTo-Json -Depth 20
+            $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+            [System.IO.File]::WriteAllText($rollbackResultPath, $rollbackJson, $utf8NoBom)
+        }
+        catch {
+            throw "$publicationError Rollback receipt write failed: $($_.Exception.Message)"
+        }
+    }
+    elseif ($promoted) {
+        throw "$publicationError Rollback blocked: a complete per-alias production snapshot was not captured."
     }
     throw $publicationError
 }
