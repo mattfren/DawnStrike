@@ -891,6 +891,8 @@ def test_disposable_activation_and_rollback_preserve_exact_runtime_and_state(
     _git(runtime, "add", "previous.txt")
     _git(runtime, "commit", "-m", "previous")
     _git(runtime, "remote", "add", "origin", str(remote))
+    _git(candidate, "remote", "set-url", "origin", "https://github.com/mattfren/DawnStrike.git")
+    _git(runtime, "remote", "set-url", "origin", "https://github.com/mattfren/DawnStrike.git")
     previous_sha = _git(runtime, "rev-parse", "HEAD")
 
     db = state / "shadow_real.sqlite"

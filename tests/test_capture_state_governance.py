@@ -1174,7 +1174,9 @@ function Disable-ScheduledTask {{
   $global:MockAuxState=if ($Xml -match '<Enabled>true</Enabled>') {{ 'Ready' }} else {{ 'Disabled' }}
   [pscustomobject]@{{ TaskName=$TaskName }}
 }}
-& '{prep_q}' -CandidateRoot '{candidate_q}' -RuntimeRoot '{runtime_q}' -StateRoot '{state_q}' -BackupRoot '{backup_q}' -CandidateSha '{candidate_sha}' -ProcessTimeoutSeconds 120 | Out-Null
+    & '{prep_q}' -CandidateRoot '{candidate_q}' -RuntimeRoot '{runtime_q}' -StateRoot '{state_q}' -BackupRoot '{backup_q}' -CandidateSha '{candidate_sha}' -ProcessTimeoutSeconds 120 | Out-Null
+            & git -C '{candidate_q}' remote set-url origin 'https://github.com/mattfren/DawnStrike.git'
+            & git -C '{runtime_q}' remote set-url origin 'https://github.com/mattfren/DawnStrike.git'
         $activated = Invoke-DawnstrikeRuntimeActivation -ExpectedSha '{candidate_sha}' -MarketDate '2026-08-31' -CiEvidencePath '{ci_q}' -SolEvidencePath '{sol_q}' -CandidateRoot '{candidate_q}' -RuntimeRoot '{runtime_q}' -StateRoot '{state_q}' -BackupRoot '{backup_q}' -BackupRetention 5 -ProcessTimeoutSeconds 120 -RunAsCredential $global:TestCredential
         $activationAuxState = $global:MockAuxState
         $hardeningRoot = Join-Path '{state_q}' 'receipts\capture-task'
