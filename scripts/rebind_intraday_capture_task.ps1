@@ -27,6 +27,7 @@ if (
 $captureRebindRuntimeRoot = $RuntimeRoot
 $captureRebindStateRoot = $StateRoot
 $captureRebindTimeout = $ProcessTimeoutSeconds
+$captureRebindRunAsCredential = $RunAsCredential
 . (Join-Path $PSScriptRoot "resolve_dawnstrike_task_principal.ps1")
 . (Join-Path $PSScriptRoot "activate_dawnstrike_runtime.ps1")
 . (Join-Path $PSScriptRoot "dawnstrike_job_process.ps1")
@@ -34,6 +35,7 @@ $captureRebindTimeout = $ProcessTimeoutSeconds
 $RuntimeRoot = $captureRebindRuntimeRoot
 $StateRoot = $captureRebindStateRoot
 $ProcessTimeoutSeconds = $captureRebindTimeout
+$RunAsCredential = $captureRebindRunAsCredential
 if ($null -eq $RunAsCredential -or [string]::IsNullOrWhiteSpace($RunAsCredential.UserName)) {
     throw "Rebind requires the locally prompted RunAsCredential for the Password auxiliary task."
 }

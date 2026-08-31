@@ -814,7 +814,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         -RuntimeRoot $RuntimeRoot `
         -StateRoot $StateRoot `
         -BackupRoot $BackupRoot `
-        -ProcessTimeoutSeconds $ProcessTimeoutSeconds
+        -ProcessTimeoutSeconds $ProcessTimeoutSeconds `
         -RunAsCredential $RunAsCredential
     $result | ConvertTo-Json -Depth 12
 }

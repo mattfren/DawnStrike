@@ -8,10 +8,12 @@ param(
     [string]$ReceiptPath = "",
     [string]$BackupXmlPath = "",
     [pscredential]$RunAsCredential,
-    [switch]$Rollback
+    [switch]$Rollback,
+    [switch]$InjectCrashAfterUnregister
 )
 
 $ErrorActionPreference = "Stop"
+$script:PreserveHardeningLock = $false
 $script:HardeningTaskName = "Dawnstrike Delayed SIP Capture"
 
 function Get-HardeningSha256Text {
@@ -85,16 +87,16 @@ function Enter-HardeningActivationLock {
     }
     $dailyLocks = @(Get-ChildItem -LiteralPath $lockRoot -Filter "dawnstrike-daily-*.lock" -File -Force -ErrorAction SilentlyContinue)
     if ($dailyLocks.Count -gt 0) { throw "A daily run lock exists; task hardening is not permitted." }
-    $token = [Guid]::NewGuid().ToString("N")
+    $token = (Get-HardeningSha256Text ([Guid]::NewGuid().ToString("N"))).Substring(0, 40)
     $payload = [ordered]@{
         schema_version = "dawnstrike.runtime_activation_lock.v1"
         operation = "capture-task-hardening"
         lock_token = $token
         candidate_sha = $CandidateSha
         candidate_tree = $CandidateTree
-        origin_main_refreshed_at_utc = $script:HardeningOriginRefreshUtc
         origin_url = $script:HardeningOriginUrl
         origin_url_sha256 = $script:HardeningOriginUrlSha256
+        origin_main_refreshed_at_utc = $script:HardeningOriginRefreshUtc
         created_at_utc = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ")
     }
     $encoding = [System.Text.UTF8Encoding]::new($false)
@@ -130,6 +132,52 @@ function Exit-HardeningActivationLock {
         Remove-Item -LiteralPath $Lock.path -Force -ErrorAction Stop
         if (Test-Path -LiteralPath $Lock.path -PathType Leaf) { throw "Hardening activation lock could not be removed." }
     } catch { throw "Hardening activation lock could not be released; operator recovery is required." }
+}
+
+function Invoke-HardeningPreparedRecovery {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$PreparedPath)
+    if ($null -eq $RunAsCredential -or [string]::IsNullOrWhiteSpace($RunAsCredential.UserName)) {
+        throw "Prepared recovery requires the locally prompted RunAsCredential."
+    }
+    Assert-HardeningNoReparseComponents $PreparedPath "Hardening PREPARED record"
+    $prepared = Get-Content -LiteralPath $PreparedPath -Raw -ErrorAction Stop | ConvertFrom-Json
+    $python = @(Get-Command py.exe -CommandType Application -ErrorAction Stop)[0].Source
+    & $python -3.13 -u (Join-Path $PSScriptRoot "capture_task_hardening_contract.py") verify-prepared --prepared $PreparedPath --candidate-sha $CandidateSha --candidate-tree $CandidateTree | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Hardening PREPARED record strict validation failed." }
+    if ($prepared.schema_version -ne "dawnstrike.capture_task_hardening_prepared.v1" -or
+        $prepared.status -ne "PREPARED" -or $prepared.task_name -ne $script:HardeningTaskName -or
+        $prepared.task_path -ne "\" -or $prepared.candidate_sha -ne $CandidateSha -or
+        $prepared.candidate_tree -ne $CandidateTree -or $prepared.final_state -ne $null) {
+        throw "Hardening PREPARED record identity is invalid."
+    }
+    $statePrefix = ([System.IO.Path]::GetFullPath($StateRoot)).TrimEnd('\') + '\'
+    $backupFull = [System.IO.Path]::GetFullPath((Join-Path $StateRoot ($prepared.backup_relative_path -replace '/', '\')))
+    if (-not $backupFull.StartsWith($statePrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
+        -not (Test-Path -LiteralPath $backupFull -PathType Leaf)) { throw "Hardening recovery backup is invalid." }
+    if ((Get-HardeningSha256File $backupFull) -ne $prepared.backup_xml_file_sha256) { throw "Hardening recovery backup hash mismatch." }
+    $xml = [System.IO.File]::ReadAllText($backupFull, [System.Text.UTF8Encoding]::new($false))
+    if ((Get-HardeningSha256Text $xml) -ne $prepared.backup_xml_sha256) { throw "Hardening recovery backup content mismatch." }
+    $password = $RunAsCredential.GetNetworkCredential().Password
+    if ([string]::IsNullOrWhiteSpace($password)) { throw "Hardening recovery credential is incomplete." }
+    Register-ScheduledTask -TaskName $script:HardeningTaskName -TaskPath '\' -Xml $xml -User $RunAsCredential.UserName -Password $password -Force -ErrorAction Stop | Out-Null
+    $recovered = Get-HardeningTaskRecord -AllowDisabled
+    if ($recovered.state -ne "Disabled" -or $recovered.xml_sha256 -ne $prepared.xml_before_sha256) { throw "Hardening recovery did not prove the exact Disabled task." }
+    $evidence = Join-Path (Split-Path -Parent $PreparedPath) "capture-task-hardening-recovered.json"
+    Write-HardeningExactTextFile -Path $evidence -Text (ConvertTo-Json ([ordered]@{
+        schema_version = "dawnstrike.capture_task_hardening_recovery.v1"
+        status = "RECOVERED_DISABLED"
+        candidate_sha = $CandidateSha
+        candidate_tree = $CandidateTree
+        prepared_record_sha256 = Get-HardeningSha256File $PreparedPath
+        backup_xml_sha256 = $prepared.backup_xml_sha256
+        old_last_task_result = $prepared.old_last_task_result
+        old_last_run_time = $prepared.old_last_run_time
+        scheduler_history_restored = $false
+        research_only = $true
+        broker_execution_enabled = $false
+    }) -Compress)
+    return $recovered
 }
 
 function Assert-HardeningCandidateIdentity {
@@ -224,6 +272,8 @@ function Write-HardeningPreparedRecord {
         original_state = $Before.state
         backup_xml_sha256 = $BackupSha256
         backup_xml_file_sha256 = $BackupFileSha256
+        backup_relative_path = $backupRelativePath
+        activation_lock_token = $hardeningLock.token
         xml_before_sha256 = $Before.xml_sha256
         xml_after_sha256 = $AfterSha256
         action_sha256 = $Before.action_contract_sha256
@@ -580,6 +630,22 @@ if ([string]::IsNullOrWhiteSpace($taskPassword)) { throw "RunAsCredential must c
 $contractScript = Join-Path $PSScriptRoot "capture_task_hardening_contract.py"
 if (-not (Test-Path -LiteralPath $contractScript -PathType Leaf)) { throw "Hardening receipt contract is missing." }
 
+# A prior process may have exited after unregister and before registration.  Do
+# not attempt a second lock or silently leave the auxiliary task absent.
+$preparedCandidates = @(Get-ChildItem -LiteralPath (Join-Path $StateRoot "scheduler-backups") -Filter "capture-task-hardening-prepared.json" -File -Recurse -ErrorAction SilentlyContinue)
+if ($preparedCandidates.Count -gt 0) {
+    if ($preparedCandidates.Count -ne 1) { throw "Ambiguous hardening PREPARED recovery records require operator review." }
+    $recoveryLockPath = Join-Path $StateRoot "locks\dawnstrike-runtime-activation.lock"
+    if (-not (Test-Path -LiteralPath $recoveryLockPath -PathType Leaf)) { throw "Hardening PREPARED record exists without its activation lock." }
+    $prepared = Get-Content -LiteralPath $preparedCandidates[0].FullName -Raw | ConvertFrom-Json
+    $recoveryLock = Get-Content -LiteralPath $recoveryLockPath -Raw | ConvertFrom-Json
+    if ($recoveryLock.candidate_sha -ne $CandidateSha -or $recoveryLock.candidate_tree -ne $CandidateTree -or $recoveryLock.origin_url_sha256 -ne $prepared.origin_url_sha256) { throw "Hardening recovery lock does not match the candidate." }
+    $recovered = Invoke-HardeningPreparedRecovery -PreparedPath $preparedCandidates[0].FullName
+    Remove-Item -LiteralPath $recoveryLockPath -Force -ErrorAction Stop
+    Write-Output (ConvertTo-Json ([ordered]@{ status = "RECOVERED_DISABLED"; task_name = $script:HardeningTaskName; scheduler_history_restored = $false; research_only = $true; broker_execution_enabled = $false }) -Compress)
+    return
+}
+
 $hardeningLock = Enter-HardeningActivationLock -StateRoot $StateRoot
 try {
     # The task and its scheduler history are re-read only after the shared
@@ -622,6 +688,18 @@ if (-not [System.IO.Path]::GetFullPath($ReceiptPath).StartsWith($receiptRoot, [S
     throw "Hardening receipt must be inside the governed capture-task receipt root."
 }
 $preparedPath = Join-Path $BackupRoot "capture-task-hardening-prepared.json"
+$stateRootFull = ([System.IO.Path]::GetFullPath($StateRoot)).TrimEnd('\\')
+$statePrefix = $stateRootFull + '\\'
+$backupFull = [System.IO.Path]::GetFullPath($backupXmlPath)
+$preparedFull = [System.IO.Path]::GetFullPath($preparedPath)
+foreach ($durablePath in @($backupFull, $preparedFull)) {
+    if (-not $durablePath.StartsWith($statePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Hardening durable record escaped StateRoot."
+    }
+    Assert-HardeningNoReparseComponents $durablePath "Hardening durable record"
+}
+$backupRelativePath = (($backupFull.Substring($statePrefix.Length)) -replace '\\\\','/')
+$preparedRelativePath = (($preparedFull.Substring($statePrefix.Length)) -replace '\\\\','/')
     $preparedRecordSha = Write-HardeningPreparedRecord `
     -Path $preparedPath `
     -Before $before `
@@ -647,6 +725,7 @@ $preparedPath = Join-Path $BackupRoot "capture-task-hardening-prepared.json"
         -TaskPath $before.task_path `
         -Confirm:$false `
         -ErrorAction Stop
+    if ($InjectCrashAfterUnregister) { [Environment]::Exit(137) }
     Register-ScheduledTask `
         -TaskName $script:HardeningTaskName `
         -TaskPath $before.task_path `
@@ -745,10 +824,11 @@ catch {
             -Password $rollbackPassword
     }
     catch {
+        $script:PreserveHardeningLock = $true
         throw "Delayed SIP task hardening failed and exact rollback could not be proven; operator recovery is required."
     }
     throw "Delayed SIP task hardening failed; exact original XML and enablement were restored."
 }
 finally {
-    Exit-HardeningActivationLock -Lock $hardeningLock
+    if (-not $script:PreserveHardeningLock) { Exit-HardeningActivationLock -Lock $hardeningLock }
 }

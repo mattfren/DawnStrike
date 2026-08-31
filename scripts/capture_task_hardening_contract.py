@@ -27,6 +27,35 @@ class CaptureTaskHardeningContractError(ValueError):
     """The hardening receipt is unsafe or ambiguous."""
 
 
+PREPARED_FIELDS = {
+    "schema_version", "status", "task_name", "task_path", "candidate_sha", "candidate_tree",
+    "origin_main_refreshed_at_utc", "origin_url", "origin_url_sha256", "backup_xml_sha256",
+    "backup_xml_file_sha256", "backup_relative_path", "activation_lock_token", "xml_before_sha256",
+    "xml_after_sha256", "action_sha256", "trigger_sha256", "principal_sha256", "settings_sha256",
+    "old_last_task_result", "old_last_run_time", "intended_receipt_path", "rollback_contract",
+    "research_only", "broker_execution_enabled", "prepared_at_utc", "prepared_record_sha256",
+}
+
+
+def validate_prepared(payload: Mapping[str, Any], *, candidate_sha: str, candidate_tree: str) -> dict[str, Any]:
+    _reject_sensitive_keys(payload)
+    if set(payload) != PREPARED_FIELDS or payload.get("schema_version") != "dawnstrike.capture_task_hardening_prepared.v1" or payload.get("status") != "PREPARED":
+        raise CaptureTaskHardeningContractError("prepared record fields or identity are invalid")
+    if payload.get("task_name") != CAPTURE_TASK_NAME or payload.get("task_path") != "\\":
+        raise CaptureTaskHardeningContractError("prepared task identity is invalid")
+    if payload.get("candidate_sha") != candidate_sha or payload.get("candidate_tree") != candidate_tree:
+        raise CaptureTaskHardeningContractError("prepared candidate identity mismatch")
+    for field in ("candidate_sha", "candidate_tree", "activation_lock_token"):
+        if not isinstance(payload.get(field), str) or not re.fullmatch(r"^[0-9a-f]{40}$", payload[field], re.I):
+            raise CaptureTaskHardeningContractError(f"prepared {field} is invalid")
+    for field in ("backup_xml_sha256", "backup_xml_file_sha256", "xml_before_sha256", "xml_after_sha256", "action_sha256", "trigger_sha256", "principal_sha256", "settings_sha256", "origin_url_sha256", "prepared_record_sha256"):
+        if not _SHA256.fullmatch(str(payload.get(field) or "")):
+            raise CaptureTaskHardeningContractError(f"prepared {field} is invalid")
+    if payload.get("research_only") is not True or payload.get("broker_execution_enabled") is not False:
+        raise CaptureTaskHardeningContractError("prepared safety flags are invalid")
+    return dict(payload)
+
+
 def canonical_json(value: object) -> bytes:
     return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode(
         "utf-8"
@@ -362,6 +391,10 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("--receipt", required=True)
     verify.add_argument("--candidate-sha")
     verify.add_argument("--candidate-tree")
+    prepared = sub.add_parser("verify-prepared")
+    prepared.add_argument("--prepared", required=True)
+    prepared.add_argument("--candidate-sha", required=True)
+    prepared.add_argument("--candidate-tree", required=True)
     return parser
 
 
@@ -370,9 +403,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "seal-hardening":
             result = seal_receipt(_load_json_object(args.input), args.output)
-        else:
+        elif args.command == "verify-hardening":
             result = load_receipt(
                 args.receipt,
+                candidate_sha=args.candidate_sha,
+                candidate_tree=args.candidate_tree,
+            )
+        else:
+            result = validate_prepared(
+                _load_json_object(args.prepared),
                 candidate_sha=args.candidate_sha,
                 candidate_tree=args.candidate_tree,
             )
