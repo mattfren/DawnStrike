@@ -853,6 +853,240 @@ def test_receipt_bound_recovery_rejects_descendant_junction_escape(
 
 
 @pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
+def test_normal_activation_json_writer_rejects_receipt_root_junction_escape(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "state"
+    receipt_root = state / "receipts" / "runtime-activation"
+    held_root = state / "receipts" / "runtime-activation-held"
+    external = tmp_path / "external"
+    state.mkdir()
+    receipt_root.mkdir(parents=True)
+    external.mkdir()
+    receipt_root.rename(held_root)
+
+    activation_script = str(Path("scripts/activate_dawnstrike_runtime.ps1").resolve()).replace(
+        "'", "''"
+    )
+    receipt_root_text = str(receipt_root).replace("'", "''")
+    held_root_text = str(held_root).replace("'", "''")
+    external_text = str(external).replace("'", "''")
+    command = rf"""
+    . '{activation_script}'
+    New-Item -ItemType Junction -Path '{receipt_root_text}' -Target '{external_text}' | Out-Null
+    $ok = $true
+    try {{
+        Write-DawnstrikeActivationJson `
+            -Payload ([ordered]@{{ probe = 'normal-activation' }}) `
+            -Path (Join-Path '{receipt_root_text}' '.probe.input.json') `
+            -ExpectedRoot '{receipt_root_text}'
+    }} catch {{ $ok = $false }}
+    [pscustomobject]@{{
+        ok = $ok
+        external_probe = Test-Path -LiteralPath (
+            Join-Path '{external_text}' '.probe.input.json'
+        ) -PathType Leaf
+        held_probe = Test-Path -LiteralPath (
+            Join-Path '{held_root_text}' '.probe.input.json'
+        ) -PathType Leaf
+    }} | ConvertTo-Json -Compress
+    """
+    completed = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=Path.cwd(),
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert completed.returncode == 0, (completed.stdout, completed.stderr)
+    result = json.loads(completed.stdout.strip().splitlines()[-1])
+    assert result == {"ok": False, "external_probe": False, "held_probe": False}
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
+def test_normal_activation_entrypoint_rejects_receipt_root_junction_before_write(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "state"
+    runtime = tmp_path / "runtime"
+    backup = tmp_path / "backup"
+    receipt_root = state / "receipts" / "runtime-activation"
+    held_root = state / "receipts" / "runtime-activation-held"
+    external = tmp_path / "external"
+    state.mkdir()
+    runtime.mkdir()
+    receipt_root.mkdir(parents=True)
+    external.mkdir()
+    receipt_root.rename(held_root)
+
+    activation_script = str(Path("scripts/activate_dawnstrike_runtime.ps1").resolve()).replace(
+        "'", "''"
+    )
+    state_text = str(state).replace("'", "''")
+    runtime_text = str(runtime).replace("'", "''")
+    backup_text = str(backup).replace("'", "''")
+    receipt_root_text = str(receipt_root).replace("'", "''")
+    held_root_text = str(held_root).replace("'", "''")
+    external_text = str(external).replace("'", "''")
+    candidate_text = str(Path.cwd().resolve()).replace("'", "''")
+    command = rf"""
+    . '{activation_script}'
+    function Resolve-DawnstrikeActivationRoot {{
+        param([string]$Path,[string]$Label)
+        [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+    }}
+    function Invoke-DawnstrikeActivationProcess {{
+        param(
+            [string]$FilePath,[object[]]$ArgumentList,[string]$WorkingDirectory,
+            [string]$Label,[int]$TimeoutSeconds
+        )
+        [pscustomobject]@{{ Stdout = ''; Stderr = '' }}
+    }}
+    function Get-DawnstrikeGitContract {{
+        param([string]$GitPath,[string]$Root,[int]$TimeoutSeconds,[string]$ExpectedCommit='')
+        if (
+            [System.IO.Path]::GetFullPath($Root).TrimEnd('\') -eq
+            [System.IO.Path]::GetFullPath('{candidate_text}').TrimEnd('\')
+        ) {{
+            return [pscustomobject]@{{ head = ('a' * 40); tree = ('b' * 40) }}
+        }}
+        return [pscustomobject]@{{ head = ('c' * 40); tree = ('d' * 40) }}
+    }}
+    function Get-DawnstrikeGitValue {{
+        param(
+            [string]$GitPath,[string]$Root,[string[]]$Arguments,
+            [string]$Label,[int]$TimeoutSeconds
+        )
+        'https://github.com/example/dawnstrike.git'
+    }}
+    function Invoke-DawnstrikeContractCli {{
+        param([string]$PythonPath,[string]$CandidateRoot,[string[]]$Arguments,[string]$Label,[int]$TimeoutSeconds)
+        if ($Arguments[0] -eq 'validate-evidence') {{
+            return [pscustomobject]@{{
+                ci_evidence_sha256 = ('1' * 64); sol_evidence_sha256 = ('2' * 64)
+            }}
+        }}
+        return [pscustomobject]@{{
+            schema_version = 1; quick_check = 'ok'; main_file_sha256 = ('3' * 64)
+        }}
+    }}
+    New-Item -ItemType Junction -Path '{receipt_root_text}' -Target '{external_text}' | Out-Null
+    $ok = $true
+    try {{
+        Invoke-DawnstrikeRuntimeActivation `
+            -ExpectedSha ('a' * 40) -MarketDate '2026-08-31' `
+            -CiEvidencePath (Join-Path '{state_text}' 'ci.json') `
+            -SolEvidencePath (Join-Path '{state_text}' 'sol.json') `
+            -CandidateRoot '{candidate_text}' -RuntimeRoot '{runtime_text}' `
+            -StateRoot '{state_text}' -BackupRoot '{backup_text}' `
+            -BackupRetention 5 -ProcessTimeoutSeconds 30
+    }} catch {{ $ok = $false }}
+    [pscustomobject]@{{
+        ok = $ok
+        external_probe = Test-Path -LiteralPath (
+            Join-Path '{external_text}' '.a.input.json'
+        ) -PathType Leaf
+        held_probe = Test-Path -LiteralPath (
+            Join-Path '{held_root_text}' '.a.input.json'
+        ) -PathType Leaf
+    }} | ConvertTo-Json -Compress
+    """
+    completed = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=Path.cwd(),
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert completed.returncode == 0, (completed.stdout, completed.stderr)
+    result = json.loads(completed.stdout.strip().splitlines()[-1])
+    assert result == {"ok": False, "external_probe": False, "held_probe": False}
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
+def test_strict_lock_json_parser_rejects_semantic_duplicate_properties() -> None:
+    stage_script = str(Path("scripts/invoke_dawnstrike_stage.ps1").resolve()).replace(
+        "'", "''"
+    )
+    command = rf"""
+    . '{stage_script}'
+    $samples = @(
+        '{{"a":1,"nested":{{"a":2,"a":3}}}}',
+        '{{"process_started_at_utc":1,"process\u005fstarted_at_utc":2}}',
+        '{{"process_started_at_utc":1,"PROCESS_STARTED_AT_UTC":2}}',
+        '{{"caf\u00e9":1,"cafe\u0301":2}}'
+    )
+    $accepted = 0
+    foreach ($sample in $samples) {{
+        try {{ Assert-DawnstrikeJsonUniqueProperties $sample; $accepted++ }} catch {{ }}
+    }}
+    [pscustomobject]@{{ accepted = $accepted }} | ConvertTo-Json -Compress
+    """
+    completed = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=Path.cwd(),
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert completed.returncode == 0, (completed.stdout, completed.stderr)
+    assert json.loads(completed.stdout.strip().splitlines()[-1]) == {"accepted": 0}
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
+def test_runtime_rollback_artifact_root_rejects_junction_before_create(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "state"
+    rollback_root = state / "runtime-rollbacks"
+    held_root = state / "runtime-rollbacks-held"
+    external = tmp_path / "external"
+    state.mkdir()
+    rollback_root.mkdir()
+    external.mkdir()
+    rollback_root.rename(held_root)
+
+    activation_script = str(Path("scripts/activate_dawnstrike_runtime.ps1").resolve()).replace(
+        "'", "''"
+    )
+    rollback_root_text = str(rollback_root).replace("'", "''")
+    external_text = str(external).replace("'", "''")
+    command = rf"""
+    . '{activation_script}'
+    New-Item -ItemType Junction -Path '{rollback_root_text}' -Target '{external_text}' | Out-Null
+    $ok = $true
+    try {{
+        Ensure-DawnstrikeActivationArtifactRoot `
+            -Path (Join-Path '{rollback_root_text}' ('e' * 24)) `
+            -Label 'Runtime rollback root'
+    }} catch {{ $ok = $false }}
+    [pscustomobject]@{{
+        ok = $ok
+        external_created = Test-Path -LiteralPath (
+            Join-Path '{external_text}' ('e' * 24)
+        ) -PathType Container
+        held_created = Test-Path -LiteralPath (
+            Join-Path '{str(held_root).replace("'", "''")}' ('e' * 24)
+        ) -PathType Container
+    }} | ConvertTo-Json -Compress
+    """
+    completed = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=Path.cwd(),
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert completed.returncode == 0, (completed.stdout, completed.stderr)
+    result = json.loads(completed.stdout.strip().splitlines()[-1])
+    assert result == {"ok": False, "external_created": False, "held_created": False}
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
 @pytest.mark.parametrize(
     ("activation_binding", "daily_binding"),
     [("UNBOUND", "UNBOUND"), ("BOUND", "UNBOUND"), ("UNBOUND", "BOUND")],

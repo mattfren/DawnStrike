@@ -32,18 +32,245 @@ function Assert-DawnstrikeNoReparsePath {
     }
 }
 
+function Ensure-DawnstrikeStageDirectory {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $missing = New-Object System.Collections.Generic.List[string]
+    $cursor = $fullPath
+    while (-not (Test-Path -LiteralPath $cursor -PathType Container)) {
+        if (Test-Path -LiteralPath $cursor) {
+            $item = Get-Item -LiteralPath $cursor -Force -ErrorAction Stop
+            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "$Label contains a reparse-point component."
+            }
+            throw "$Label must be a directory."
+        }
+        $missing.Add($cursor)
+        $parent = Split-Path -Parent $cursor
+        if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $cursor) {
+            throw "$Label parent directory does not exist."
+        }
+        $cursor = $parent.TrimEnd('\')
+    }
+    Assert-DawnstrikeNoReparsePath $cursor "$Label existing parent"
+    for ($index = $missing.Count - 1; $index -ge 0; $index--) {
+        $target = $missing[$index]
+        $parent = Split-Path -Parent $target
+        Assert-DawnstrikeNoReparsePath $parent "$Label parent"
+        Assert-DawnstrikeNoReparsePath $target $Label -AllowMissingLeaf
+        New-Item -ItemType Directory -Path $target -ErrorAction Stop | Out-Null
+        Assert-DawnstrikeNoReparsePath $target $Label
+    }
+    return $fullPath
+}
+
+function Skip-DawnstrikeJsonWhitespace {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Raw,
+        [Parameter(Mandatory = $true)][ref]$Index
+    )
+
+    while ($Index.Value -lt $Raw.Length -and $Raw[$Index.Value] -in @(' ', "`t", "`r", "`n")) {
+        $Index.Value++
+    }
+}
+
+function Read-DawnstrikeJsonStringToken {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Raw,
+        [Parameter(Mandatory = $true)][ref]$Index
+    )
+
+    if ($Index.Value -ge $Raw.Length -or $Raw[$Index.Value] -ne '"') {
+        throw "JSON string token is missing."
+    }
+    $Index.Value++
+    $builder = [System.Text.StringBuilder]::new()
+    while ($Index.Value -lt $Raw.Length) {
+        $character = $Raw[$Index.Value]
+        $Index.Value++
+        if ($character -eq '"') {
+            return $builder.ToString()
+        }
+        if ([int][char]$character -lt 0x20) {
+            throw "JSON string contains an unescaped control character."
+        }
+        if ($character -ne '\') {
+            [void]$builder.Append($character)
+            continue
+        }
+        if ($Index.Value -ge $Raw.Length) {
+            throw "JSON string escape is incomplete."
+        }
+        $escape = $Raw[$Index.Value]
+        $Index.Value++
+        if ($escape -eq 'u') {
+            if ($Index.Value + 4 -gt $Raw.Length) {
+                throw "JSON unicode escape is incomplete."
+            }
+            $hex = $Raw.Substring($Index.Value, 4)
+            if ($hex -notmatch '^[0-9A-Fa-f]{4}$') {
+                throw "JSON unicode escape is invalid."
+            }
+            [void]$builder.Append([char][Convert]::ToInt32($hex, 16))
+            $Index.Value += 4
+            continue
+        }
+        switch ($escape) {
+            '"' { [void]$builder.Append('"'); continue }
+            '\' { [void]$builder.Append('\'); continue }
+            '/' { [void]$builder.Append('/'); continue }
+            'b' { [void]$builder.Append("`b"); continue }
+            'f' { [void]$builder.Append("`f"); continue }
+            'n' { [void]$builder.Append("`n"); continue }
+            'r' { [void]$builder.Append("`r"); continue }
+            't' { [void]$builder.Append("`t"); continue }
+            default { throw "JSON string escape is invalid." }
+        }
+    }
+    throw "JSON string is unterminated."
+}
+
+function Read-DawnstrikeJsonValue {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Raw,
+        [Parameter(Mandatory = $true)][ref]$Index
+    )
+
+    Skip-DawnstrikeJsonWhitespace $Raw $Index
+    if ($Index.Value -ge $Raw.Length) {
+        throw "JSON value is missing."
+    }
+    $character = $Raw[$Index.Value]
+    if ($character -eq '{') {
+        $Index.Value++
+        $names = [System.Collections.Generic.HashSet[string]]::new(
+            [System.StringComparer]::OrdinalIgnoreCase
+        )
+        Skip-DawnstrikeJsonWhitespace $Raw $Index
+        if ($Index.Value -lt $Raw.Length -and $Raw[$Index.Value] -eq '}') {
+            $Index.Value++
+            return
+        }
+        while ($true) {
+            Skip-DawnstrikeJsonWhitespace $Raw $Index
+            $name = Read-DawnstrikeJsonStringToken $Raw $Index
+            try {
+                $canonicalName = $name.Normalize([System.Text.NormalizationForm]::FormC).ToUpperInvariant()
+            }
+            catch {
+                throw "JSON property name cannot be normalized."
+            }
+            if (-not $names.Add($canonicalName)) {
+                throw "JSON contains duplicate properties."
+            }
+            Skip-DawnstrikeJsonWhitespace $Raw $Index
+            if ($Index.Value -ge $Raw.Length -or $Raw[$Index.Value] -ne ':') {
+                throw "JSON object property separator is missing."
+            }
+            $Index.Value++
+            $null = Read-DawnstrikeJsonValue $Raw $Index
+            Skip-DawnstrikeJsonWhitespace $Raw $Index
+            if ($Index.Value -ge $Raw.Length) {
+                throw "JSON object is unterminated."
+            }
+            if ($Raw[$Index.Value] -eq '}') {
+                $Index.Value++
+                return
+            }
+            if ($Raw[$Index.Value] -ne ',') {
+                throw "JSON object separator is invalid."
+            }
+            $Index.Value++
+        }
+    }
+    if ($character -eq '[') {
+        $Index.Value++
+        Skip-DawnstrikeJsonWhitespace $Raw $Index
+        if ($Index.Value -lt $Raw.Length -and $Raw[$Index.Value] -eq ']') {
+            $Index.Value++
+            return
+        }
+        while ($true) {
+            $null = Read-DawnstrikeJsonValue $Raw $Index
+            Skip-DawnstrikeJsonWhitespace $Raw $Index
+            if ($Index.Value -ge $Raw.Length) {
+                throw "JSON array is unterminated."
+            }
+            if ($Raw[$Index.Value] -eq ']') {
+                $Index.Value++
+                return
+            }
+            if ($Raw[$Index.Value] -ne ',') {
+                throw "JSON array separator is invalid."
+            }
+            $Index.Value++
+        }
+    }
+    if ($character -eq '"') {
+        $null = Read-DawnstrikeJsonStringToken $Raw $Index
+        return
+    }
+    foreach ($literal in @('true', 'false', 'null')) {
+        if ($Index.Value + $literal.Length -le $Raw.Length -and
+            $Raw.Substring($Index.Value, $literal.Length) -ceq $literal) {
+            $Index.Value += $literal.Length
+            return
+        }
+    }
+    $number = [regex]::Match(
+        $Raw.Substring($Index.Value),
+        '^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?'
+    )
+    if ($number.Success) {
+        $Index.Value += $number.Length
+        return
+    }
+    throw "JSON value is invalid."
+}
+
 function Assert-DawnstrikeJsonUniqueProperties {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string]$Raw)
 
-    $names = [System.Collections.Generic.HashSet[string]]::new(
-        [System.StringComparer]::Ordinal
-    )
-    $propertyPattern = '(?m)"(?<name>(?:\\.|[^"\\])*)"\s*:'
-    foreach ($match in [regex]::Matches($Raw, $propertyPattern)) {
-        if (-not $names.Add($match.Groups['name'].Value)) {
-            throw "JSON contains duplicate properties."
+    $index = 0
+    $null = Read-DawnstrikeJsonValue $Raw ([ref]$index)
+    Skip-DawnstrikeJsonWhitespace $Raw ([ref]$index)
+    if ($index -ne $Raw.Length) {
+        throw "JSON contains trailing data."
+    }
+}
+
+function Get-DawnstrikeLockOwnerStateFromPayload {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][object]$Payload)
+
+    try {
+        $processId = 0
+        if (-not [int]::TryParse([string]$Payload.process_id, [ref]$processId) -or $processId -le 0) {
+            return "UNKNOWN"
         }
+        $startedValue = [string]$Payload.process_started_at_utc
+        if ([string]::IsNullOrWhiteSpace($startedValue)) { return "UNKNOWN" }
+        $recordedStart = [DateTimeOffset]::Parse($startedValue).ToUniversalTime()
+        $ownerProcess = Get-Process -Id $processId -ErrorAction SilentlyContinue
+        if ($null -eq $ownerProcess) { return "DEAD" }
+        $processStarted = [DateTimeOffset]$ownerProcess.StartTime.ToUniversalTime()
+        if ($processStarted.UtcDateTime.Ticks -eq $recordedStart.UtcDateTime.Ticks) {
+            return "ACTIVE"
+        }
+        return "DEAD"
+    }
+    catch {
+        return "UNKNOWN"
     }
 }
 
@@ -86,9 +313,7 @@ function Enter-DawnstrikeDailyRunLock {
     }
     $lockRoot = Join-Path $StateRoot "locks"
     Assert-DawnstrikeNoReparsePath $StateRoot "StateRoot"
-    Assert-DawnstrikeNoReparsePath $lockRoot "Daily lock directory" -AllowMissingLeaf
-    New-Item -ItemType Directory -Path $lockRoot -Force | Out-Null
-    Assert-DawnstrikeNoReparsePath $lockRoot "Daily lock directory"
+    $lockRoot = Ensure-DawnstrikeStageDirectory $lockRoot "Daily lock directory"
     $lockPath = Join-Path $lockRoot ("dawnstrike-daily-" + $MarketDate + ".lock")
     Assert-DawnstrikeNoReparsePath $lockPath "Daily lock" -AllowMissingLeaf
     if (Test-Path -LiteralPath $lockPath -PathType Leaf) {
@@ -122,7 +347,7 @@ function Enter-DawnstrikeDailyRunLock {
                 age_minutes = [math]::Round($age, 2)
             }
         }
-        $ownerState = Get-DawnstrikeLockOwnerState -LockPath $lockPath
+        $ownerState = Get-DawnstrikeLockOwnerStateFromPayload $existingPayload
         # Wall-clock age is diagnostic only.  A long-running owner must never
         # be evicted merely because it crossed StaleAfterMinutes; doing so
         # permits two daily runs to mutate the same research ledger.  Recovery
@@ -236,20 +461,7 @@ function Get-DawnstrikeLockOwnerState {
         $raw = Get-Content -LiteralPath $LockPath -Raw -ErrorAction Stop
         Assert-DawnstrikeJsonUniqueProperties $raw
         $payload = $raw | ConvertFrom-Json
-        $processId = 0
-        if (-not [int]::TryParse([string]$payload.process_id, [ref]$processId) -or $processId -le 0) { return "UNKNOWN" }
-        $startedValue = [string]$payload.process_started_at_utc
-        if ([string]::IsNullOrWhiteSpace($startedValue)) { return "UNKNOWN" }
-        $recordedStart = [DateTimeOffset]::Parse($startedValue).ToUniversalTime()
-        $ownerProcess = Get-Process -Id $processId -ErrorAction SilentlyContinue
-        if ($null -eq $ownerProcess) { return "DEAD" }
-        $processStarted = [DateTimeOffset]$ownerProcess.StartTime.ToUniversalTime()
-        if ($processStarted.UtcDateTime.Ticks -eq $recordedStart.UtcDateTime.Ticks) {
-            return "ACTIVE"
-        }
-        # A live PID with a different start identity is a reused PID and the
-        # recorded owner is therefore dead.  Wall-clock age is never proof.
-        return "DEAD"
+        return Get-DawnstrikeLockOwnerStateFromPayload $payload
     }
     catch {
         return "UNKNOWN"
@@ -263,11 +475,11 @@ function Exit-DawnstrikeDailyRunLock {
     if ($Lock.acquired -and (Test-Path -LiteralPath $Lock.lock_path -PathType Leaf)) {
         try {
             Assert-DawnstrikeNoReparsePath $Lock.lock_path "Daily lock"
-            $payload = Get-Content -LiteralPath $Lock.lock_path -Raw | ConvertFrom-Json
-            Assert-DawnstrikeJsonUniqueProperties (
-                Get-Content -LiteralPath $Lock.lock_path -Raw -ErrorAction Stop
-            )
+            $raw = Get-Content -LiteralPath $Lock.lock_path -Raw -ErrorAction Stop
+            Assert-DawnstrikeJsonUniqueProperties $raw
+            $payload = $raw | ConvertFrom-Json
             if ([string]$payload.lock_token -eq [string]$Lock.lock_token) {
+                Assert-DawnstrikeNoReparsePath $Lock.lock_path "Daily lock"
                 Remove-Item -LiteralPath $Lock.lock_path -Force
             }
         }
@@ -289,9 +501,7 @@ function Write-DawnstrikeLockDenialReceipt {
     try {
         $receiptRoot = Join-Path $StateRoot "receipts\lock-denials"
         Assert-DawnstrikeNoReparsePath $StateRoot "StateRoot"
-        Assert-DawnstrikeNoReparsePath $receiptRoot "Lock denial receipt directory" -AllowMissingLeaf
-        New-Item -ItemType Directory -Path $receiptRoot -Force | Out-Null
-        Assert-DawnstrikeNoReparsePath $receiptRoot "Lock denial receipt directory"
+        $receiptRoot = Ensure-DawnstrikeStageDirectory $receiptRoot "Lock denial receipt directory"
         $recordedAt = [DateTimeOffset]::UtcNow
         $payload = [ordered]@{
             schema_version = "dawnstrike.lock_denial.v1"
@@ -308,9 +518,12 @@ function Write-DawnstrikeLockDenialReceipt {
         $path = Join-Path $receiptRoot $name
         $temporary = "$path.$([guid]::NewGuid().ToString('N')).tmp"
         Assert-DawnstrikeNoReparsePath $path "Lock denial receipt" -AllowMissingLeaf
+        Assert-DawnstrikeNoReparsePath $temporary "Lock denial receipt temporary file" -AllowMissingLeaf
         [System.IO.File]::WriteAllText($temporary, $payload, [System.Text.UTF8Encoding]::new($false))
         Assert-DawnstrikeNoReparsePath $temporary "Lock denial receipt temporary file"
+        Assert-DawnstrikeNoReparsePath $path "Lock denial receipt" -AllowMissingLeaf
         Move-Item -LiteralPath $temporary -Destination $path
+        Assert-DawnstrikeNoReparsePath $path "Lock denial receipt"
         return $true
     }
     catch {

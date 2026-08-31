@@ -115,10 +115,7 @@ function Ensure-DawnstrikeActivationRoot {
     )
 
     $fullPath = Get-DawnstrikeFutureActivationRoot $Path $Label
-    if (-not (Test-Path -LiteralPath $fullPath -PathType Container)) {
-        New-Item -ItemType Directory -Path $fullPath -ErrorAction Stop | Out-Null
-    }
-    return Resolve-DawnstrikeActivationRoot $fullPath $Label
+    return Ensure-DawnstrikeActivationArtifactRoot $fullPath $Label
 }
 
 function Assert-DawnstrikeRootIsolation {
@@ -357,7 +354,8 @@ function Write-DawnstrikeTaskXmlFile {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$Xml,
-        [Parameter(Mandatory = $true)][string]$Path
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$ExpectedRoot
     )
 
     try {
@@ -388,7 +386,9 @@ function Write-DawnstrikeTaskXmlFile {
         else {
             throw "Task XML declares an unsupported encoding."
         }
+        Assert-DawnstrikeActivationJsonPath $Path $ExpectedRoot "Scheduler backup task XML" -AllowMissingLeaf
         [System.IO.File]::WriteAllText($Path, $Xml, $encoding)
+        Assert-DawnstrikeActivationJsonPath $Path $ExpectedRoot "Scheduler backup task XML"
         return $encodingLabel
     }
     catch {
@@ -409,24 +409,16 @@ function New-DawnstrikeTaskXmlBackup {
         throw "Scheduler backup name is invalid."
     }
     $root = Join-Path $StateRoot "scheduler-backups"
-    if (Test-Path -LiteralPath $root) {
-        $rootItem = Get-Item -LiteralPath $root -Force -ErrorAction Stop
-        if (
-            -not $rootItem.PSIsContainer -or
-            ($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
-        ) {
-            throw "Scheduler backup root is not a safe directory."
-        }
-    }
-    else {
-        New-Item -ItemType Directory -Path $root -ErrorAction Stop | Out-Null
-    }
+    $root = Ensure-DawnstrikeActivationArtifactRoot $root "Scheduler backup root"
     $final = Join-Path $root $BackupName
     if (Test-Path -LiteralPath $final) {
         throw "Scheduler XML backup already exists and requires review."
     }
     $temporary = Join-Path $root (".incomplete-$BackupName-" + [guid]::NewGuid().ToString("N"))
+    Assert-DawnstrikeNoReparsePath $root "Scheduler backup root"
+    Assert-DawnstrikeNoReparsePath $temporary "Scheduler backup temporary directory" -AllowMissingLeaf
     New-Item -ItemType Directory -Path $temporary -ErrorAction Stop | Out-Null
+    Assert-DawnstrikeNoReparsePath $temporary "Scheduler backup temporary directory"
     try {
         $entries = @()
         foreach ($taskName in $script:DawnstrikeCanonicalTaskNames) {
@@ -439,7 +431,7 @@ function New-DawnstrikeTaskXmlBackup {
             $xml = [string](Export-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction Stop)
             $safeName = ($taskName -replace '[^A-Za-z0-9_.-]', '_') + ".xml"
             $xmlPath = Join-Path $temporary $safeName
-            $xmlEncoding = Write-DawnstrikeTaskXmlFile $xml $xmlPath
+            $xmlEncoding = Write-DawnstrikeTaskXmlFile $xml $xmlPath $temporary
             $entries += [ordered]@{
                 task_name = $taskName
                 task_path = $taskPath
@@ -463,9 +455,18 @@ function New-DawnstrikeTaskXmlBackup {
             broker_execution_enabled = $false
         }
         $manifestPath = Join-Path $temporary "manifest.json"
-        Write-DawnstrikeActivationJson $manifest $manifestPath
+        Assert-DawnstrikeNoReparsePath $temporary "Scheduler backup temporary directory"
+        Assert-DawnstrikeNoReparsePath $manifestPath "Scheduler backup manifest" -AllowMissingLeaf
+        Write-DawnstrikeActivationJson `
+            -Payload $manifest `
+            -Path $manifestPath `
+            -ExpectedRoot $temporary
+        Assert-DawnstrikeNoReparsePath $temporary "Scheduler backup temporary directory"
+        Assert-DawnstrikeNoReparsePath $final "Scheduler backup destination" -AllowMissingLeaf
         [System.IO.Directory]::Move($temporary, $final)
         $finalManifest = Join-Path $final "manifest.json"
+        Assert-DawnstrikeNoReparsePath $final "Scheduler backup destination"
+        Assert-DawnstrikeNoReparsePath $finalManifest "Scheduler backup manifest"
         $result = [pscustomobject]@{
             backup_name = $BackupName
             backup_path = $final
@@ -482,7 +483,11 @@ function New-DawnstrikeTaskXmlBackup {
     }
     finally {
         if (Test-Path -LiteralPath $temporary -PathType Container) {
-            Remove-Item -LiteralPath $temporary -Recurse -Force
+            try {
+                Assert-DawnstrikeNoReparsePath $temporary "Scheduler backup temporary directory"
+                Remove-Item -LiteralPath $temporary -Recurse -Force
+            }
+            catch { }
         }
     }
 }
@@ -529,7 +534,9 @@ function Assert-DawnstrikeTaskXmlBackup {
         throw "Scheduler XML backup manifest does not match its receipt-bound hash."
     }
     try {
-        $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $manifestRaw = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8
+        Assert-DawnstrikeJsonUniqueProperties $manifestRaw
+        $manifest = $manifestRaw | ConvertFrom-Json
     }
     catch {
         throw "Scheduler XML backup manifest is invalid JSON."
@@ -778,23 +785,65 @@ function Write-DawnstrikeActivationJson {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][object]$Payload,
-        [Parameter(Mandatory = $true)][string]$Path
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$ExpectedRoot
     )
 
-    $parent = Split-Path -Parent $Path
-    New-Item -ItemType Directory -Path $parent -Force | Out-Null
-    $temporary = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
+    $pathFull = [System.IO.Path]::GetFullPath($Path)
+    Assert-DawnstrikeActivationJsonPath `
+        -Path $Path `
+        -ExpectedRoot $ExpectedRoot `
+        -Label "Activation JSON path" `
+        -AllowMissingLeaf
+    $rootFull = [System.IO.Path]::GetFullPath($ExpectedRoot)
+    $parent = Split-Path -Parent $pathFull
+    if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
+        throw "Activation JSON parent directory is missing."
+    }
+    $temporary = "$pathFull.$([guid]::NewGuid().ToString('N')).tmp"
+    Assert-DawnstrikeActivationJsonPath `
+        -Path $temporary `
+        -ExpectedRoot $rootFull `
+        -Label "Activation JSON temporary path" `
+        -AllowMissingLeaf
     try {
         $json = $Payload | ConvertTo-Json -Depth 12
+        Assert-DawnstrikeActivationJsonPath `
+            -Path $pathFull `
+            -ExpectedRoot $rootFull `
+            -Label "Activation JSON destination" `
+            -AllowMissingLeaf
+        Assert-DawnstrikeActivationJsonPath `
+            -Path $temporary `
+            -ExpectedRoot $rootFull `
+            -Label "Activation JSON temporary path" `
+            -AllowMissingLeaf
         [System.IO.File]::WriteAllText(
             $temporary,
             $json,
             [System.Text.UTF8Encoding]::new($false)
         )
-        [System.IO.File]::Move($temporary, $Path)
+        Assert-DawnstrikeActivationJsonPath `
+            -Path $temporary `
+            -ExpectedRoot $rootFull `
+            -Label "Activation JSON temporary path"
+        Assert-DawnstrikeActivationJsonPath `
+            -Path $pathFull `
+            -ExpectedRoot $rootFull `
+            -Label "Activation JSON destination" `
+            -AllowMissingLeaf
+        [System.IO.File]::Move($temporary, $pathFull)
+        Assert-DawnstrikeActivationJsonPath `
+            -Path $pathFull `
+            -ExpectedRoot $rootFull `
+            -Label "Activation JSON destination"
     }
     finally {
         if (Test-Path -LiteralPath $temporary -PathType Leaf) {
+            Assert-DawnstrikeActivationJsonPath `
+                -Path $temporary `
+                -ExpectedRoot $rootFull `
+                -Label "Activation JSON temporary path"
             Remove-Item -LiteralPath $temporary -Force
         }
     }
@@ -839,9 +888,7 @@ function Enter-DawnstrikeRuntimeActivationLock {
 
     $lockRoot = Join-Path $StateRoot "locks"
     Assert-DawnstrikeNoReparsePath $StateRoot "StateRoot"
-    Assert-DawnstrikeNoReparsePath $lockRoot "Activation lock directory" -AllowMissingLeaf
-    New-Item -ItemType Directory -Path $lockRoot -Force | Out-Null
-    Assert-DawnstrikeNoReparsePath $lockRoot "Activation lock directory"
+    $lockRoot = Ensure-DawnstrikeActivationArtifactRoot $lockRoot "Activation lock directory"
     $path = Join-Path $lockRoot "dawnstrike-runtime-activation.lock"
     Assert-DawnstrikeNoReparsePath $path "Activation lock" -AllowMissingLeaf
     if (Test-Path -LiteralPath $path) {
@@ -883,6 +930,7 @@ function Enter-DawnstrikeRuntimeActivationLock {
     $payload = $payloadObject | ConvertTo-Json -Depth 5
     $handle = $null
     try {
+        Assert-DawnstrikeNoReparsePath $path "Activation lock" -AllowMissingLeaf
         $handle = [System.IO.File]::Open(
             $path,
             [System.IO.FileMode]::CreateNew,
@@ -914,6 +962,7 @@ function Exit-DawnstrikeRuntimeActivationLock {
         Assert-DawnstrikeJsonUniqueProperties $raw
         $payload = $raw | ConvertFrom-Json
         if ([string]$payload.lock_token -eq [string]$Lock.token) {
+            Assert-DawnstrikeNoReparsePath $Lock.path "Activation lock"
             Remove-Item -LiteralPath $Lock.path -Force
         }
     }
@@ -953,18 +1002,311 @@ function Assert-DawnstrikeNoReparsePath {
     }
 }
 
+function Assert-DawnstrikeActivationJsonPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$ExpectedRoot,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [switch]$AllowMissingLeaf
+    )
+
+    $rootFull = [System.IO.Path]::GetFullPath($ExpectedRoot).TrimEnd('\')
+    $pathFull = [System.IO.Path]::GetFullPath($Path)
+    $rootPrefix = $rootFull + '\'
+    if (
+        [string]::Equals($rootFull, $pathFull, [System.StringComparison]::OrdinalIgnoreCase) -or
+        -not $pathFull.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)
+    ) {
+        throw "$Label is outside the expected activation artifact root."
+    }
+
+    Assert-DawnstrikeNoReparsePath $rootFull "$Label root"
+    if ($AllowMissingLeaf) {
+        Assert-DawnstrikeNoReparsePath $pathFull $Label -AllowMissingLeaf
+    }
+    else {
+        Assert-DawnstrikeNoReparsePath $pathFull $Label
+    }
+}
+
+function Ensure-DawnstrikeActivationArtifactRoot {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $missing = New-Object System.Collections.Generic.List[string]
+    $cursor = $fullPath
+    while (-not (Test-Path -LiteralPath $cursor -PathType Container)) {
+        if (Test-Path -LiteralPath $cursor) {
+            $item = Get-Item -LiteralPath $cursor -Force -ErrorAction Stop
+            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "$Label contains a reparse-point component."
+            }
+            throw "$Label must be a directory."
+        }
+        $missing.Add($cursor)
+        $parent = Split-Path -Parent $cursor
+        if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $cursor) {
+            throw "$Label parent directory does not exist."
+        }
+        $cursor = $parent.TrimEnd('\')
+    }
+    Assert-DawnstrikeNoReparsePath $cursor "$Label existing parent"
+    for ($index = $missing.Count - 1; $index -ge 0; $index--) {
+        $target = $missing[$index]
+        $parent = Split-Path -Parent $target
+        Assert-DawnstrikeNoReparsePath $parent "$Label parent"
+        Assert-DawnstrikeNoReparsePath $target $Label -AllowMissingLeaf
+        New-Item -ItemType Directory -Path $target -ErrorAction Stop | Out-Null
+        Assert-DawnstrikeNoReparsePath $target $Label
+    }
+    return $fullPath
+}
+
+function Skip-DawnstrikeJsonWhitespace {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Raw,
+        [Parameter(Mandatory = $true)][ref]$Index
+    )
+
+    while ($Index.Value -lt $Raw.Length -and $Raw[$Index.Value] -in @(' ', "`t", "`r", "`n")) {
+        $Index.Value++
+    }
+}
+
+function Read-DawnstrikeJsonStringToken {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Raw,
+        [Parameter(Mandatory = $true)][ref]$Index
+    )
+
+    if ($Index.Value -ge $Raw.Length -or $Raw[$Index.Value] -ne '"') {
+        throw "JSON string token is missing."
+    }
+    $Index.Value++
+    $builder = [System.Text.StringBuilder]::new()
+    while ($Index.Value -lt $Raw.Length) {
+        $character = $Raw[$Index.Value]
+        $Index.Value++
+        if ($character -eq '"') {
+            return $builder.ToString()
+        }
+        if ([int][char]$character -lt 0x20) {
+            throw "JSON string contains an unescaped control character."
+        }
+        if ($character -ne '\') {
+            [void]$builder.Append($character)
+            continue
+        }
+        if ($Index.Value -ge $Raw.Length) {
+            throw "JSON string escape is incomplete."
+        }
+        $escape = $Raw[$Index.Value]
+        $Index.Value++
+        if ($escape -eq 'u') {
+            if ($Index.Value + 4 -gt $Raw.Length) {
+                throw "JSON unicode escape is incomplete."
+            }
+            $hex = $Raw.Substring($Index.Value, 4)
+            if ($hex -notmatch '^[0-9A-Fa-f]{4}$') {
+                throw "JSON unicode escape is invalid."
+            }
+            [void]$builder.Append([char][Convert]::ToInt32($hex, 16))
+            $Index.Value += 4
+            continue
+        }
+        switch ($escape) {
+            '"' { [void]$builder.Append('"'); continue }
+            '\' { [void]$builder.Append('\'); continue }
+            '/' { [void]$builder.Append('/'); continue }
+            'b' { [void]$builder.Append("`b"); continue }
+            'f' { [void]$builder.Append("`f"); continue }
+            'n' { [void]$builder.Append("`n"); continue }
+            'r' { [void]$builder.Append("`r"); continue }
+            't' { [void]$builder.Append("`t"); continue }
+            default { throw "JSON string escape is invalid." }
+        }
+    }
+    throw "JSON string is unterminated."
+}
+
+function Read-DawnstrikeJsonValue {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Raw,
+        [Parameter(Mandatory = $true)][ref]$Index
+    )
+
+    Skip-DawnstrikeJsonWhitespace $Raw $Index
+    if ($Index.Value -ge $Raw.Length) {
+        throw "JSON value is missing."
+    }
+    $character = $Raw[$Index.Value]
+    if ($character -eq '{') {
+        $Index.Value++
+        $names = [System.Collections.Generic.HashSet[string]]::new(
+            [System.StringComparer]::OrdinalIgnoreCase
+        )
+        Skip-DawnstrikeJsonWhitespace $Raw $Index
+        if ($Index.Value -lt $Raw.Length -and $Raw[$Index.Value] -eq '}') {
+            $Index.Value++
+            return
+        }
+        while ($true) {
+            Skip-DawnstrikeJsonWhitespace $Raw $Index
+            $name = Read-DawnstrikeJsonStringToken $Raw $Index
+            try {
+                $canonicalName = $name.Normalize([System.Text.NormalizationForm]::FormC).ToUpperInvariant()
+            }
+            catch {
+                throw "JSON property name cannot be normalized."
+            }
+            if (-not $names.Add($canonicalName)) {
+                throw "JSON contains duplicate properties."
+            }
+            Skip-DawnstrikeJsonWhitespace $Raw $Index
+            if ($Index.Value -ge $Raw.Length -or $Raw[$Index.Value] -ne ':') {
+                throw "JSON object property separator is missing."
+            }
+            $Index.Value++
+            $null = Read-DawnstrikeJsonValue $Raw $Index
+            Skip-DawnstrikeJsonWhitespace $Raw $Index
+            if ($Index.Value -ge $Raw.Length) {
+                throw "JSON object is unterminated."
+            }
+            if ($Raw[$Index.Value] -eq '}') {
+                $Index.Value++
+                return
+            }
+            if ($Raw[$Index.Value] -ne ',') {
+                throw "JSON object separator is invalid."
+            }
+            $Index.Value++
+        }
+    }
+    if ($character -eq '[') {
+        $Index.Value++
+        Skip-DawnstrikeJsonWhitespace $Raw $Index
+        if ($Index.Value -lt $Raw.Length -and $Raw[$Index.Value] -eq ']') {
+            $Index.Value++
+            return
+        }
+        while ($true) {
+            $null = Read-DawnstrikeJsonValue $Raw $Index
+            Skip-DawnstrikeJsonWhitespace $Raw $Index
+            if ($Index.Value -ge $Raw.Length) {
+                throw "JSON array is unterminated."
+            }
+            if ($Raw[$Index.Value] -eq ']') {
+                $Index.Value++
+                return
+            }
+            if ($Raw[$Index.Value] -ne ',') {
+                throw "JSON array separator is invalid."
+            }
+            $Index.Value++
+        }
+    }
+    if ($character -eq '"') {
+        $null = Read-DawnstrikeJsonStringToken $Raw $Index
+        return
+    }
+    foreach ($literal in @('true', 'false', 'null')) {
+        if ($Index.Value + $literal.Length -le $Raw.Length -and
+            $Raw.Substring($Index.Value, $literal.Length) -ceq $literal) {
+            $Index.Value += $literal.Length
+            return
+        }
+    }
+    $number = [regex]::Match(
+        $Raw.Substring($Index.Value),
+        '^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?'
+    )
+    if ($number.Success) {
+        $Index.Value += $number.Length
+        return
+    }
+    throw "JSON value is invalid."
+}
+
 function Assert-DawnstrikeJsonUniqueProperties {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string]$Raw)
 
-    $names = [System.Collections.Generic.HashSet[string]]::new(
-        [System.StringComparer]::Ordinal
+    $index = 0
+    $null = Read-DawnstrikeJsonValue $Raw ([ref]$index)
+    Skip-DawnstrikeJsonWhitespace $Raw ([ref]$index)
+    if ($index -ne $Raw.Length) {
+        throw "JSON contains trailing data."
+    }
+}
+
+function Get-DawnstrikeFileSnapshotBytes {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Label
     )
-    $propertyPattern = '(?m)"(?<name>(?:\\.|[^"\\])*)"\s*:'
-    foreach ($match in [regex]::Matches($Raw, $propertyPattern)) {
-        if (-not $names.Add($match.Groups['name'].Value)) {
-            throw "JSON contains duplicate properties."
+
+    Assert-DawnstrikeNoReparsePath $Path $Label
+    $stream = $null
+    $bytes = $null
+    try {
+        $stream = [System.IO.File]::Open(
+            $Path,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::Read
+        )
+        $bytes = [byte[]]::new($stream.Length)
+        $offset = 0
+        while ($offset -lt $bytes.Length) {
+            $read = $stream.Read($bytes, $offset, $bytes.Length - $offset)
+            if ($read -le 0) { throw "$Label could not be read completely." }
+            $offset += $read
         }
+    }
+    finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $fileSha256 = ([System.BitConverter]::ToString($sha.ComputeHash($bytes))).Replace("-", "").ToLowerInvariant()
+    }
+    finally {
+        $sha.Dispose()
+    }
+    return [pscustomobject]@{ bytes = $bytes; file_sha256 = $fileSha256 }
+}
+
+function Get-DawnstrikeLockOwnerStateFromPayload {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][object]$Payload)
+
+    try {
+        $processId = 0
+        if (-not [int]::TryParse([string]$Payload.process_id, [ref]$processId) -or $processId -le 0) {
+            return "UNKNOWN"
+        }
+        $startedValue = [string]$Payload.process_started_at_utc
+        if ([string]::IsNullOrWhiteSpace($startedValue)) { return "UNKNOWN" }
+        $recordedStart = [DateTimeOffset]::Parse($startedValue).ToUniversalTime()
+        $ownerProcess = Get-Process -Id $processId -ErrorAction SilentlyContinue
+        if ($null -eq $ownerProcess) { return "DEAD" }
+        $processStarted = [DateTimeOffset]$ownerProcess.StartTime.ToUniversalTime()
+        if ($processStarted.UtcDateTime.Ticks -eq $recordedStart.UtcDateTime.Ticks) {
+            return "ACTIVE"
+        }
+        return "DEAD"
+    }
+    catch {
+        return "UNKNOWN"
     }
 }
 
@@ -1068,7 +1410,8 @@ function Set-DawnstrikeReceiptBoundLock {
     $receiptFileSha = [string]$receiptSnapshot.file_sha256
     $payload = $null
     try {
-        $lockRaw = Get-Content -LiteralPath $LockPath -Raw -Encoding UTF8
+        $lockFileSnapshot = Get-DawnstrikeFileSnapshotBytes $LockPath "Receipt-bound lock"
+        $lockRaw = [System.Text.Encoding]::UTF8.GetString($lockFileSnapshot.bytes)
         Assert-DawnstrikeJsonUniqueProperties $lockRaw
         $payload = $lockRaw | ConvertFrom-Json
     }
@@ -1093,10 +1436,23 @@ function Set-DawnstrikeReceiptBoundLock {
         Assert-DawnstrikeNoReparsePath $temporary "Receipt-bound lock temporary" -AllowMissingLeaf
         Assert-DawnstrikeNoReparsePath $replacementBackup "Receipt-bound lock backup" -AllowMissingLeaf
         $json = $payload | ConvertTo-Json -Depth 8
+        Assert-DawnstrikeNoReparsePath $temporary "Receipt-bound lock temporary" -AllowMissingLeaf
         [System.IO.File]::WriteAllText($temporary, $json, [System.Text.UTF8Encoding]::new($false))
         Assert-DawnstrikeNoReparsePath $LockPath "Receipt-bound lock"
         Assert-DawnstrikeNoReparsePath $temporary "Receipt-bound lock temporary"
         Assert-DawnstrikeNoReparsePath $replacementBackup "Receipt-bound lock backup" -AllowMissingLeaf
+        $currentLockSnapshot = Get-DawnstrikeFileSnapshotBytes $LockPath "Receipt-bound lock"
+        if (
+            $currentLockSnapshot.file_sha256 -ne $lockFileSnapshot.file_sha256 -or
+            $currentLockSnapshot.bytes.Length -ne $lockFileSnapshot.bytes.Length
+        ) {
+            throw "Receipt-bound lock changed during binding."
+        }
+        for ($byteIndex = 0; $byteIndex -lt $currentLockSnapshot.bytes.Length; $byteIndex++) {
+            if ($currentLockSnapshot.bytes[$byteIndex] -ne $lockFileSnapshot.bytes[$byteIndex]) {
+                throw "Receipt-bound lock changed during binding."
+            }
+        }
         $null = Get-DawnstrikePreparedReceiptSnapshot `
             -PreparedReceiptPath $PreparedReceiptPath `
             -ExpectedReceipt $Receipt `
@@ -1105,10 +1461,18 @@ function Set-DawnstrikeReceiptBoundLock {
     }
     finally {
         if (Test-Path -LiteralPath $temporary -PathType Leaf) {
-            Remove-Item -LiteralPath $temporary -Force
+            try {
+                Assert-DawnstrikeNoReparsePath $temporary "Receipt-bound lock temporary"
+                Remove-Item -LiteralPath $temporary -Force
+            }
+            catch { }
         }
         if (Test-Path -LiteralPath $replacementBackup -PathType Leaf) {
-            Remove-Item -LiteralPath $replacementBackup -Force
+            try {
+                Assert-DawnstrikeNoReparsePath $replacementBackup "Receipt-bound lock backup"
+                Remove-Item -LiteralPath $replacementBackup -Force
+            }
+            catch { }
         }
     }
 }
@@ -1117,14 +1481,16 @@ function Get-DawnstrikeLockSnapshot {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string]$Path)
 
-    Assert-DawnstrikeNoReparsePath $Path "Lock"
-    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    Assert-DawnstrikeNoReparsePath $fullPath "Lock"
+    $item = Get-Item -LiteralPath $fullPath -Force -ErrorAction Stop
     if ($item.PSIsContainer -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw "Lock path is missing or unsafe."
     }
+    $fileSnapshot = Get-DawnstrikeFileSnapshotBytes $fullPath "Lock"
     $payload = $null
     try {
-        $raw = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
+        $raw = [System.Text.Encoding]::UTF8.GetString($fileSnapshot.bytes)
         Assert-DawnstrikeJsonUniqueProperties $raw
         $payload = $raw | ConvertFrom-Json
     }
@@ -1135,11 +1501,12 @@ function Get-DawnstrikeLockSnapshot {
     if ($token -notmatch '^[0-9a-f]{32}$') {
         throw "Lock token is invalid."
     }
-    $ownerState = Get-DawnstrikeLockOwnerState -LockPath $Path
+    $ownerState = Get-DawnstrikeLockOwnerStateFromPayload $payload
     [pscustomobject]@{
-        path = $Path
+        path = $fullPath
         payload = $payload
-        file_sha256 = Get-DawnstrikeSha256File $Path
+        raw_bytes = $fileSnapshot.bytes
+        file_sha256 = $fileSnapshot.file_sha256
         owner_state = $ownerState
     }
 }
@@ -1159,7 +1526,7 @@ function Assert-DawnstrikeReceiptBoundLock {
     if ($Snapshot.owner_state -ne "DEAD") {
         throw "Receipt-bound $Kind lock owner is not proven dead."
     }
-    $null = Get-DawnstrikePreparedReceiptSnapshot `
+    $preparedSnapshot = Get-DawnstrikePreparedReceiptSnapshot `
         -PreparedReceiptPath $PreparedReceiptPath `
         -ExpectedReceipt $Receipt `
         -ExpectedFileSha256 $PreparedReceiptFileSha256
@@ -1179,7 +1546,7 @@ function Assert-DawnstrikeReceiptBoundLock {
         if ([string]$payload.prepared_receipt_sha256 -ne [string]$Receipt.receipt_sha256) {
             throw "Receipt-bound $Kind lock receipt self-hash mismatch."
         }
-        $receiptFileSha = Get-DawnstrikeSha256File $PreparedReceiptPath
+        $receiptFileSha = [string]$preparedSnapshot.file_sha256
         if ([string]$payload.prepared_receipt_file_sha256 -ne $receiptFileSha) {
             throw "Receipt-bound $Kind lock receipt file hash mismatch."
         }
@@ -1461,14 +1828,33 @@ function Archive-DawnstrikeReceiptBoundStaleLocks {
             -ExpectedFileSha256 $PreparedReceiptFileSha256
         Assert-DawnstrikeNoReparsePath $entry.snapshot.path "$($entry.kind) lock"
         Assert-DawnstrikeNoReparsePath $entry.destination "$($entry.kind) lock archive" -AllowMissingLeaf
-        $currentHash = Get-DawnstrikeSha256File $entry.snapshot.path
-        if ($currentHash -ne [string]$entry.snapshot.file_sha256) {
+        $currentFileSnapshot = Get-DawnstrikeFileSnapshotBytes $entry.snapshot.path "$($entry.kind) lock"
+        if (
+            $currentFileSnapshot.file_sha256 -ne [string]$entry.snapshot.file_sha256 -or
+            $currentFileSnapshot.bytes.Length -ne $entry.snapshot.raw_bytes.Length
+        ) {
             throw "Receipt-bound $($entry.kind) lock changed during recovery preflight."
         }
+        for ($byteIndex = 0; $byteIndex -lt $currentFileSnapshot.bytes.Length; $byteIndex++) {
+            if ($currentFileSnapshot.bytes[$byteIndex] -ne $entry.snapshot.raw_bytes[$byteIndex]) {
+                throw "Receipt-bound $($entry.kind) lock changed during recovery preflight."
+            }
+        }
+        Assert-DawnstrikeNoReparsePath $entry.snapshot.path "$($entry.kind) lock"
+        Assert-DawnstrikeNoReparsePath $entry.destination "$($entry.kind) lock archive" -AllowMissingLeaf
         [System.IO.File]::Move($entry.snapshot.path, $entry.destination)
         Assert-DawnstrikeNoReparsePath $entry.destination "$($entry.kind) lock archive"
-        if ((Get-DawnstrikeSha256File $entry.destination) -ne [string]$entry.snapshot.file_sha256) {
+        $archivedFileSnapshot = Get-DawnstrikeFileSnapshotBytes $entry.destination "$($entry.kind) lock archive"
+        if (
+            $archivedFileSnapshot.file_sha256 -ne [string]$entry.snapshot.file_sha256 -or
+            $archivedFileSnapshot.bytes.Length -ne $entry.snapshot.raw_bytes.Length
+        ) {
             throw "Archived $($entry.kind) lock failed integrity verification."
+        }
+        for ($byteIndex = 0; $byteIndex -lt $archivedFileSnapshot.bytes.Length; $byteIndex++) {
+            if ($archivedFileSnapshot.bytes[$byteIndex] -ne $entry.snapshot.raw_bytes[$byteIndex]) {
+                throw "Archived $($entry.kind) lock failed integrity verification."
+            }
         }
     }
     return [pscustomobject]@{
@@ -1668,6 +2054,9 @@ function Invoke-DawnstrikeRuntimeActivation {
     $schedulerBackupPath = Join-Path $state "scheduler-backups\$schedulerBackupName"
     $preparedReceipt = Join-Path $receiptRoot "runtime-activation-$activationId.prepared.json"
     $completeReceipt = Join-Path $receiptRoot "runtime-activation-$activationId.json"
+    $receiptRoot = Ensure-DawnstrikeActivationArtifactRoot $receiptRoot "Activation receipt directory"
+    Assert-DawnstrikeActivationJsonPath $preparedReceipt $receiptRoot "Prepared activation receipt" -AllowMissingLeaf
+    Assert-DawnstrikeActivationJsonPath $completeReceipt $receiptRoot "Complete activation receipt" -AllowMissingLeaf
     Assert-DawnstrikeSameVolume @($runtime, $stage, $rollbackCheckout)
 
     if (Test-Path -LiteralPath $completeReceipt -PathType Leaf) {
@@ -1729,6 +2118,10 @@ function Invoke-DawnstrikeRuntimeActivation {
     ) {
         throw "A partial activation exists. Run the governed rollback tool before retrying."
     }
+    Assert-DawnstrikeNoReparsePath (Split-Path -Parent $stage) "Runtime staging parent"
+    Assert-DawnstrikeNoReparsePath $stage "Runtime staging path" -AllowMissingLeaf
+    Assert-DawnstrikeNoReparsePath (Split-Path -Parent $rollbackRoot) "Runtime rollback parent" -AllowMissingLeaf
+    Assert-DawnstrikeNoReparsePath (Split-Path -Parent $schedulerBackupPath) "Scheduler backup parent" -AllowMissingLeaf
 
     $null = Invoke-DawnstrikeActivationProcess `
         -FilePath $gitPath `
@@ -1736,6 +2129,7 @@ function Invoke-DawnstrikeRuntimeActivation {
         -WorkingDirectory (Split-Path -Parent $runtime) `
         -Label "Candidate runtime staging" `
         -TimeoutSeconds $ProcessTimeoutSeconds
+    Assert-DawnstrikeNoReparsePath $stage "Runtime staging path"
     try {
         $null = Invoke-DawnstrikeActivationProcess $gitPath @("-C", $stage, "checkout", "--detach", "--quiet", $ExpectedSha) $stage "Candidate checkout staging" $ProcessTimeoutSeconds
         $null = Invoke-DawnstrikeActivationProcess $gitPath @("-C", $stage, "remote", "set-url", "origin", $origin) $stage "Candidate origin binding" $ProcessTimeoutSeconds
@@ -1828,11 +2222,21 @@ function Invoke-DawnstrikeRuntimeActivation {
                 throw "Durable state changed while creating the activation backup."
             }
 
-            New-Item -ItemType Directory -Path $rollbackRoot -Force | Out-Null
+            $rollbackParent = Ensure-DawnstrikeActivationArtifactRoot `
+                (Join-Path $state "runtime-rollbacks") `
+                "Runtime rollback directory"
+            $rollbackRoot = Ensure-DawnstrikeActivationArtifactRoot $rollbackRoot "Runtime rollback root"
+            Assert-DawnstrikeNoReparsePath $rollbackRoot "Runtime rollback root"
+            Assert-DawnstrikeNoReparsePath $rollbackBundle "Rollback bundle" -AllowMissingLeaf
             $bundleTemporary = "$rollbackBundle.$([guid]::NewGuid().ToString('N')).tmp"
+            Assert-DawnstrikeNoReparsePath $bundleTemporary "Rollback bundle temporary" -AllowMissingLeaf
             $null = Invoke-DawnstrikeActivationProcess $gitPath @("-C", $runtime, "bundle", "create", $bundleTemporary, "HEAD") $runtime "Rollback bundle creation" $ProcessTimeoutSeconds
+            Assert-DawnstrikeNoReparsePath $bundleTemporary "Rollback bundle temporary"
             $null = Invoke-DawnstrikeActivationProcess $gitPath @("bundle", "verify", $bundleTemporary) $runtime "Rollback bundle verification" $ProcessTimeoutSeconds
+            Assert-DawnstrikeNoReparsePath $bundleTemporary "Rollback bundle temporary"
+            Assert-DawnstrikeNoReparsePath $rollbackBundle "Rollback bundle" -AllowMissingLeaf
             [System.IO.File]::Move($bundleTemporary, $rollbackBundle)
+            Assert-DawnstrikeNoReparsePath $rollbackBundle "Rollback bundle"
             $bundleHash = Get-DawnstrikeSha256File $rollbackBundle
 
             $preparedAt = [DateTime]::UtcNow.ToString("o")
@@ -1871,12 +2275,21 @@ function Invoke-DawnstrikeRuntimeActivation {
                 broker_execution_enabled = $false
             }
             $inputReceipt = Join-Path $receiptRoot ".$activationId.input.json"
-            Write-DawnstrikeActivationJson $receiptPayload $inputReceipt
+            Write-DawnstrikeActivationJson `
+                -Payload $receiptPayload `
+                -Path $inputReceipt `
+                -ExpectedRoot $receiptRoot
             try {
+                Assert-DawnstrikeActivationJsonPath $inputReceipt $receiptRoot "Activation input receipt"
+                Assert-DawnstrikeActivationJsonPath $preparedReceipt $receiptRoot "Prepared activation receipt" -AllowMissingLeaf
                 $prepared = Invoke-DawnstrikeContractCli $pythonPath $candidate @("seal-receipt", "--input", $inputReceipt, "--output", $preparedReceipt) "Prepared activation receipt sealing" $ProcessTimeoutSeconds
+                Assert-DawnstrikeActivationJsonPath $preparedReceipt $receiptRoot "Prepared activation receipt"
             }
             finally {
-                if (Test-Path -LiteralPath $inputReceipt -PathType Leaf) { Remove-Item -LiteralPath $inputReceipt -Force }
+                if (Test-Path -LiteralPath $inputReceipt -PathType Leaf) {
+                    Assert-DawnstrikeActivationJsonPath $inputReceipt $receiptRoot "Activation input receipt"
+                    Remove-Item -LiteralPath $inputReceipt -Force
+                }
             }
             $preparedReceiptFileSha256 = Get-DawnstrikeSha256File $preparedReceipt
             Set-DawnstrikeReceiptBoundLock `
@@ -1918,8 +2331,15 @@ function Invoke-DawnstrikeRuntimeActivation {
                 -ExpectedTaskActionContractSha256 ([string]$taskLocked.task_action_contract_sha256)
 
             $swapStarted = $true
+            Assert-DawnstrikeNoReparsePath $runtime "Runtime root"
+            Assert-DawnstrikeNoReparsePath $rollbackCheckout "Rollback checkout" -AllowMissingLeaf
+            Assert-DawnstrikeNoReparsePath $stage "Runtime staging path"
             [System.IO.Directory]::Move($runtime, $rollbackCheckout)
+            Assert-DawnstrikeNoReparsePath $rollbackCheckout "Rollback checkout"
+            Assert-DawnstrikeNoReparsePath $runtime "Runtime root" -AllowMissingLeaf
+            Assert-DawnstrikeNoReparsePath $stage "Runtime staging path"
             [System.IO.Directory]::Move($stage, $runtime)
+            Assert-DawnstrikeNoReparsePath $runtime "Runtime root"
             $candidateInstalled = $true
 
             $installed = Get-DawnstrikeGitContract $gitPath $runtime $ProcessTimeoutSeconds $ExpectedSha
@@ -1959,12 +2379,21 @@ function Invoke-DawnstrikeRuntimeActivation {
             $receiptPayload.status = "COMPLETE"
             $receiptPayload.task_enablement_restored = $true
             $receiptPayload.completed_at_utc = [DateTime]::UtcNow.ToString("o")
-            Write-DawnstrikeActivationJson $receiptPayload $inputReceipt
+            Write-DawnstrikeActivationJson `
+                -Payload $receiptPayload `
+                -Path $inputReceipt `
+                -ExpectedRoot $receiptRoot
             try {
+                Assert-DawnstrikeActivationJsonPath $inputReceipt $receiptRoot "Activation input receipt"
+                Assert-DawnstrikeActivationJsonPath $completeReceipt $receiptRoot "Complete activation receipt" -AllowMissingLeaf
                 $complete = Invoke-DawnstrikeContractCli $pythonPath $runtime @("seal-receipt", "--input", $inputReceipt, "--output", $completeReceipt) "Complete activation receipt sealing" $ProcessTimeoutSeconds
+                Assert-DawnstrikeActivationJsonPath $completeReceipt $receiptRoot "Complete activation receipt"
             }
             finally {
-                if (Test-Path -LiteralPath $inputReceipt -PathType Leaf) { Remove-Item -LiteralPath $inputReceipt -Force }
+                if (Test-Path -LiteralPath $inputReceipt -PathType Leaf) {
+                    Assert-DawnstrikeActivationJsonPath $inputReceipt $receiptRoot "Activation input receipt"
+                    Remove-Item -LiteralPath $inputReceipt -Force
+                }
             }
             return $complete
         }
@@ -1984,16 +2413,22 @@ function Invoke-DawnstrikeRuntimeActivation {
                 try {
                     if ($candidateInstalled -and (Test-Path -LiteralPath $runtime -PathType Container)) {
                         $failedCandidate = Join-Path $rollbackRoot "failed-candidate-runtime"
+                        Assert-DawnstrikeNoReparsePath $runtime "Runtime root"
+                        Assert-DawnstrikeNoReparsePath $failedCandidate "Failed candidate preservation path" -AllowMissingLeaf
                         if (Test-Path -LiteralPath $failedCandidate) {
                             throw "Failed-candidate preservation path already exists."
                         }
                         [System.IO.Directory]::Move($runtime, $failedCandidate)
+                        Assert-DawnstrikeNoReparsePath $failedCandidate "Failed candidate preservation path"
                     }
                     if (
                         -not (Test-Path -LiteralPath $runtime) -and
                         (Test-Path -LiteralPath $rollbackCheckout -PathType Container)
                     ) {
+                        Assert-DawnstrikeNoReparsePath $rollbackCheckout "Rollback checkout"
+                        Assert-DawnstrikeNoReparsePath $runtime "Runtime root" -AllowMissingLeaf
                         [System.IO.Directory]::Move($rollbackCheckout, $runtime)
+                        Assert-DawnstrikeNoReparsePath $runtime "Runtime root"
                     }
                     $restoredRuntime = Get-DawnstrikeGitContract $gitPath $runtime $ProcessTimeoutSeconds $runtimeContract.head
                     if ($restoredRuntime.tree -ne $runtimeContract.tree) {

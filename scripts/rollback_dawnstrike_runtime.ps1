@@ -122,8 +122,7 @@ function Invoke-DawnstrikeRuntimeRollback {
     $schedulerBackupRoot = Join-Path $state "scheduler-backups"
     Assert-DawnstrikeNoReparsePath $schedulerBackupRoot "Scheduler backup directory"
     Assert-DawnstrikeNoReparsePath $rollbackSchedulerBackupPath "Rollback scheduler backup" -AllowMissingLeaf
-    New-Item -ItemType Directory -Path $rollbackReceiptRoot -Force | Out-Null
-    Assert-DawnstrikeNoReparsePath $rollbackReceiptRoot "Rollback receipt directory"
+    $rollbackReceiptRoot = Ensure-DawnstrikeActivationArtifactRoot $rollbackReceiptRoot "Rollback receipt directory"
     Assert-DawnstrikeNoReparsePath $rollbackReceipt "Rollback receipt" -AllowMissingLeaf
     $preparedReceiptPath = if ([string]$activation.status -eq "PREPARED") {
         $receiptPath
@@ -316,7 +315,10 @@ function Invoke-DawnstrikeRuntimeRollback {
         if (Test-Path -LiteralPath $rollbackStage) {
             throw "Rollback stage already exists and requires review."
         }
+        Assert-DawnstrikeNoReparsePath (Split-Path -Parent $rollbackStage) "Rollback staging parent"
+        Assert-DawnstrikeNoReparsePath $rollbackStage "Rollback staging path" -AllowMissingLeaf
         $null = Invoke-DawnstrikeActivationProcess $gitPath @("clone", "--no-checkout", "--quiet", $rollbackBundle, $rollbackStage) (Split-Path -Parent $runtime) "Previous runtime staging" $ProcessTimeoutSeconds
+        Assert-DawnstrikeNoReparsePath $rollbackStage "Rollback staging path"
         $null = Invoke-DawnstrikeActivationProcess $gitPath @("-C", $rollbackStage, "checkout", "--detach", "--quiet", $previousSha) $rollbackStage "Previous runtime checkout" $ProcessTimeoutSeconds
         $null = Invoke-DawnstrikeActivationProcess $gitPath @("-C", $rollbackStage, "remote", "set-url", "origin", $origin) $rollbackStage "Previous origin binding" $ProcessTimeoutSeconds
         $staged = Get-DawnstrikeGitContract $gitPath $rollbackStage $ProcessTimeoutSeconds $previousSha
@@ -396,6 +398,7 @@ function Invoke-DawnstrikeRuntimeRollback {
             Assert-DawnstrikeNoReparsePath $rollbackCheckout "Rollback checkout"
             Assert-DawnstrikeNoReparsePath $runtime "Runtime root" -AllowMissingLeaf
             [System.IO.Directory]::Move($rollbackCheckout, $runtime)
+            Assert-DawnstrikeNoReparsePath $runtime "Runtime root"
             $previousInstalled = $true
         }
         elseif ($currentContract.head -eq $candidateSha) {
@@ -405,11 +408,16 @@ function Invoke-DawnstrikeRuntimeRollback {
             if (Test-Path -LiteralPath $deactivatedCandidate) {
                 throw "Deactivated candidate preservation path already exists."
             }
+            Assert-DawnstrikeNoReparsePath $runtime "Runtime root"
+            Assert-DawnstrikeNoReparsePath $deactivatedCandidate "Deactivated candidate" -AllowMissingLeaf
             [System.IO.Directory]::Move($runtime, $deactivatedCandidate)
             $candidateMoved = $true
             Assert-DawnstrikeNoReparsePath $deactivatedCandidate "Deactivated candidate"
             Assert-DawnstrikeNoReparsePath $runtime "Runtime root" -AllowMissingLeaf
+            Assert-DawnstrikeNoReparsePath $rollbackStage "Rollback stage"
+            Assert-DawnstrikeNoReparsePath $runtime "Runtime root" -AllowMissingLeaf
             [System.IO.Directory]::Move($rollbackStage, $runtime)
+            Assert-DawnstrikeNoReparsePath $runtime "Runtime root"
             $previousInstalled = $true
         }
 
@@ -480,12 +488,22 @@ function Invoke-DawnstrikeRuntimeRollback {
             broker_execution_enabled = $false
         }
         $input = Join-Path $rollbackReceiptRoot ".$activationId.input.json"
-        Write-DawnstrikeActivationJson $payload $input
+        Write-DawnstrikeActivationJson `
+            -Payload $payload `
+            -Path $input `
+            -ExpectedRoot $rollbackReceiptRoot
         try {
-            return Invoke-DawnstrikeContractCli $pythonPath $contract @("seal-receipt", "--input", $input, "--output", $rollbackReceipt) "Rollback receipt sealing" $ProcessTimeoutSeconds
+            Assert-DawnstrikeActivationJsonPath $input $rollbackReceiptRoot "Rollback input receipt"
+            Assert-DawnstrikeActivationJsonPath $rollbackReceipt $rollbackReceiptRoot "Rollback receipt" -AllowMissingLeaf
+            $result = Invoke-DawnstrikeContractCli $pythonPath $contract @("seal-receipt", "--input", $input, "--output", $rollbackReceipt) "Rollback receipt sealing" $ProcessTimeoutSeconds
+            Assert-DawnstrikeActivationJsonPath $rollbackReceipt $rollbackReceiptRoot "Rollback receipt"
+            return $result
         }
         finally {
-            if (Test-Path -LiteralPath $input -PathType Leaf) { Remove-Item -LiteralPath $input -Force }
+            if (Test-Path -LiteralPath $input -PathType Leaf) {
+                Assert-DawnstrikeActivationJsonPath $input $rollbackReceiptRoot "Rollback input receipt"
+                Remove-Item -LiteralPath $input -Force
+            }
         }
     }
     catch {
@@ -508,7 +526,10 @@ function Invoke-DawnstrikeRuntimeRollback {
                 if (Test-Path -LiteralPath $failedPrevious) {
                     throw "Failed previous-runtime preservation path already exists."
                 }
+                Assert-DawnstrikeNoReparsePath $runtime "Runtime root"
+                Assert-DawnstrikeNoReparsePath $failedPrevious "Failed previous runtime" -AllowMissingLeaf
                 [System.IO.Directory]::Move($runtime, $failedPrevious)
+                Assert-DawnstrikeNoReparsePath $failedPrevious "Failed previous runtime"
             }
             if (
                 $candidateMoved -and
@@ -518,6 +539,7 @@ function Invoke-DawnstrikeRuntimeRollback {
                 Assert-DawnstrikeNoReparsePath $deactivatedCandidate "Deactivated candidate"
                 Assert-DawnstrikeNoReparsePath $runtime "Runtime root" -AllowMissingLeaf
                 [System.IO.Directory]::Move($deactivatedCandidate, $runtime)
+                Assert-DawnstrikeNoReparsePath $runtime "Runtime root"
             }
             if ($tasksDisabled) {
                 if ($null -eq $currentContract) {
