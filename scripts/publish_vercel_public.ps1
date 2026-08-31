@@ -53,6 +53,7 @@ $promoted = $false
 $priorProduction = $null
 $priorProductionAliases = @{}
 $promotedDeployment = $null
+$packageManifestSha256 = $null
 $allProductionAliases = @($ProductionAlias) + @($AdditionalProductionAliases) |
     Select-Object -Unique
 
@@ -131,7 +132,7 @@ function Invoke-VercelProcess {
         -OutputDrainTimeoutSeconds 5 `
         -EnvironmentOverrides $environment
     if ($result.ExitCode -ne 0) {
-        $detail = if ($result.Stderr) { " stderr: $($result.Stderr)" } else { "" }
+        $detail = if ($result.Stderr) { " provider diagnostics suppressed" } else { "" }
         throw "$Label failed with exit code $($result.ExitCode).$detail"
     }
     return $result
@@ -210,31 +211,115 @@ function Assert-VercelAliasRestored {
         throw "Rollback verification for $AliasUrl resolved the wrong deployment URL."
     }
 
-    # Identity is authoritative; these cache-busted endpoint reads provide a
-    # safe application-level receipt when the prior deployment exposes them.
-    $health = Invoke-VercelJson `
-        -Arguments @("curl", "$AliasUrl/api/health?rollback_verify=$CacheBuster") `
-        -Label "Rollback verification health for $AliasUrl"
-    $readiness = Invoke-VercelJson `
-        -Arguments @("curl", "$AliasUrl/api/readiness?rollback_verify=$CacheBuster") `
-        -Label "Rollback verification readiness for $AliasUrl"
-    $manifestProcess = Invoke-VercelProcess `
-        -Arguments @("curl", "$AliasUrl/vercel-source-manifest.json?rollback_verify=$CacheBuster") `
-        -Label "Rollback verification source manifest for $AliasUrl" `
-        -TimeoutSeconds $VercelCommandTimeoutSeconds
-    $manifestCanonical = Convert-VercelSourceManifestToCanonicalJson `
-        -RawJson ([string]$manifestProcess.Stdout).Trim()
-    $manifest = $manifestCanonical | ConvertFrom-Json
+    $proof = Get-VercelAliasEndpointProof -AliasUrl $AliasUrl -CacheBuster $CacheBuster
+    if ($PriorAlias.health_available -and -not $proof.health_available) {
+        throw "Rollback verification health is unavailable for $AliasUrl."
+    }
+    if ($PriorAlias.health_status -and $proof.health_status -ne $PriorAlias.health_status) {
+        throw "Rollback verification health status changed for $AliasUrl."
+    }
+    if ($PriorAlias.readiness_available -and -not $proof.readiness_available) {
+        throw "Rollback verification readiness is unavailable for $AliasUrl."
+    }
+    if ($PriorAlias.readiness_status -and $proof.readiness_status -ne $PriorAlias.readiness_status) {
+        throw "Rollback verification readiness status changed for $AliasUrl."
+    }
+    if ($null -ne $PriorAlias.readiness_http_status -and
+        $proof.readiness_http_status -ne $PriorAlias.readiness_http_status) {
+        throw "Rollback verification readiness HTTP status changed for $AliasUrl."
+    }
+    if ($PriorAlias.source_manifest_available) {
+        if (-not $proof.source_manifest_available) {
+            throw "Rollback verification source manifest is unavailable for $AliasUrl."
+        }
+        if ($proof.source_manifest_sha256 -ne $PriorAlias.source_manifest_sha256) {
+            throw "Rollback verification source manifest changed for $AliasUrl."
+        }
+    }
     return [ordered]@{
         alias = $AliasUrl
         deployment_id = $restoredId
         deployment_url = $restoredUrl
-        health_status = Get-OptionalJsonProperty -InputObject $health -Name "status"
-        readiness_status = Get-OptionalJsonProperty -InputObject $readiness -Name "status"
-        source_sha = [string]$manifest.source_sha
-        source_tree = [string]$manifest.source_tree
-        source_manifest_sha256 = Get-Sha256Hex $manifestCanonical
+        health_available = [bool]$proof.health_available
+        health_status = $proof.health_status
+        readiness_available = [bool]$proof.readiness_available
+        readiness_status = $proof.readiness_status
+        readiness_http_status = $proof.readiness_http_status
+        source_manifest_available = [bool]$proof.source_manifest_available
+        source_sha = [string]$proof.source_sha
+        source_tree = [string]$proof.source_tree
+        source_manifest_sha256 = [string]$proof.source_manifest_sha256
     }
+}
+
+function Get-VercelAliasEndpointProof {
+    param(
+        [Parameter(Mandatory = $true)][string]$AliasUrl,
+        [Parameter(Mandatory = $true)][int64]$CacheBuster,
+        [switch]$RequireHealthReadiness
+    )
+    $proof = [ordered]@{
+        health_available = $false
+        health_status = $null
+        readiness_available = $false
+        readiness_status = $null
+        readiness_http_status = $null
+        source_manifest_available = $false
+        source_sha = $null
+        source_tree = $null
+        source_manifest_sha256 = $null
+    }
+    try {
+        $health = Invoke-VercelJson `
+            -Arguments @("curl", "$AliasUrl/api/health?rollback_verify=$CacheBuster") `
+            -Label "Alias health proof for $AliasUrl"
+        if ($null -ne $health) {
+            $proof.health_available = $true
+            $proof.health_status = Get-OptionalJsonProperty -InputObject $health -Name "status"
+        }
+    }
+    catch { }
+    try {
+        $readiness = Invoke-VercelJson `
+            -Arguments @("curl", "$AliasUrl/api/readiness?rollback_verify=$CacheBuster") `
+            -Label "Alias readiness proof for $AliasUrl"
+        if ($null -ne $readiness) {
+            $proof.readiness_available = $true
+            $proof.readiness_status = Get-OptionalJsonProperty -InputObject $readiness -Name "status"
+            $proof.readiness_http_status = Get-OptionalJsonProperty -InputObject $readiness -Name "http_status"
+        }
+    }
+    catch { }
+    try {
+        $manifestProcess = Invoke-VercelProcess `
+            -Arguments @("curl", "$AliasUrl/vercel-source-manifest.json?rollback_verify=$CacheBuster") `
+            -Label "Alias source manifest proof for $AliasUrl" `
+            -TimeoutSeconds $VercelCommandTimeoutSeconds
+        $manifestCanonical = Convert-VercelSourceManifestToCanonicalJson `
+            -RawJson ([string]$manifestProcess.Stdout).Trim()
+        $manifest = $manifestCanonical | ConvertFrom-Json
+        $proof.source_manifest_available = $true
+        $proof.source_sha = [string]$manifest.source_sha
+        $proof.source_tree = [string]$manifest.source_tree
+        $proof.source_manifest_sha256 = Get-Sha256Hex $manifestCanonical
+    }
+    catch { }
+    if ($RequireHealthReadiness -and -not $proof.health_available) {
+        throw "Prior production health proof is unavailable for $AliasUrl."
+    }
+    if ($RequireHealthReadiness -and $proof.health_status -ne "alive") {
+        throw "Prior production health status is not alive for $AliasUrl."
+    }
+    if ($RequireHealthReadiness -and -not $proof.readiness_available) {
+        throw "Prior production readiness proof is unavailable for $AliasUrl."
+    }
+    if ($RequireHealthReadiness -and $proof.readiness_status -ne "ready") {
+        throw "Prior production readiness status is not ready for $AliasUrl."
+    }
+    if ($RequireHealthReadiness -and $proof.readiness_http_status -ne 200) {
+        throw "Prior production readiness HTTP status is not 200 for $AliasUrl."
+    }
+    return $proof
 }
 
 function Get-Sha256Hex {
@@ -373,16 +458,20 @@ try {
         -Arguments @("build", "--yes", "--project", $ProjectId) `
         -Label "Vercel prebuild" `
         -TimeoutSeconds $VercelBuildTimeoutSeconds
-    if ($buildResult.Stdout) {
-        [Console]::Out.WriteLine($buildResult.Stdout)
+    # Provider build output can contain environment values; never echo it.
+    $previewEnvironmentFile = Join-Path $stage ".vercel\.env.preview.local"
+    if (Test-Path -LiteralPath $previewEnvironmentFile -PathType Leaf) {
+        Remove-Item -LiteralPath $previewEnvironmentFile -Force
     }
-    if ($buildResult.Stderr) {
-        [Console]::Error.WriteLine($buildResult.Stderr)
-    }
-    Assert-VercelBuiltPackage `
+    Assert-VercelNoEnvironmentArtifacts -StageRoot $stage
+    Add-VercelFunctionPublicBindings -StageRoot $stage
+    $packageManifestSha256 = Assert-VercelBuiltPackage `
         -StageRoot $stage `
         -ExpectedSourceSha $expectedSourceSha `
         -ExpectedSourceTree $expectedSourceTree
+    # Seal the complete post-build output inventory before any deploy command;
+    # later checks must compare against this in-memory hash, never authorize a
+    # rewritten manifest from the mutable stage directory.
     Assert-VercelGitSourceStable `
         -Root $resolvedRoot `
         -ExpectedSourceSha $expectedSourceSha `
@@ -392,10 +481,13 @@ try {
         -StageRoot $stage `
         -ExpectedSourceSha $expectedSourceSha `
         -ExpectedSourceTree $expectedSourceTree
-    Assert-VercelBuiltPackage `
+    Add-VercelFunctionPublicBindings -StageRoot $stage
+    Assert-VercelNoEnvironmentArtifacts -StageRoot $stage
+    $null = Assert-VercelBuiltPackage `
         -StageRoot $stage `
         -ExpectedSourceSha $expectedSourceSha `
-        -ExpectedSourceTree $expectedSourceTree
+        -ExpectedSourceTree $expectedSourceTree `
+        -ExpectedPackageManifestSha256 $packageManifestSha256
     $deploymentResponse = Invoke-VercelJson `
         -Arguments @("deploy", "--prebuilt", "--project", $ProjectId, "--yes", "--json") `
         -Label "Vercel prebuilt deploy"
@@ -462,9 +554,22 @@ if ($Promote) {
         if (-not $snapshotId -or -not $snapshotUrl) {
             throw "Prior production inspect did not return a deployment ID and URL for $alias."
         }
+        $endpointProof = Get-VercelAliasEndpointProof `
+            -AliasUrl ([string]$alias) `
+            -CacheBuster ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) `
+            -RequireHealthReadiness
         $priorProductionAliases[[string]$alias] = [pscustomobject]@{
             id = [string]$snapshotId
             url = $snapshotUrl
+            health_available = [bool]$endpointProof.health_available
+            health_status = [string]$endpointProof.health_status
+            readiness_available = [bool]$endpointProof.readiness_available
+            readiness_status = [string]$endpointProof.readiness_status
+            readiness_http_status = $endpointProof.readiness_http_status
+            source_manifest_available = [bool]$endpointProof.source_manifest_available
+            source_sha = [string]$endpointProof.source_sha
+            source_tree = [string]$endpointProof.source_tree
+            source_manifest_sha256 = [string]$endpointProof.source_manifest_sha256
         }
         if ([string]$alias -eq [string]$ProductionAlias) {
             $priorProduction = $snapshot
@@ -483,10 +588,13 @@ try {
             -StageRoot $stage `
             -ExpectedSourceSha $expectedSourceSha `
             -ExpectedSourceTree $expectedSourceTree
-        Assert-VercelBuiltPackage `
+        Add-VercelFunctionPublicBindings -StageRoot $stage
+        Assert-VercelNoEnvironmentArtifacts -StageRoot $stage
+        $null = Assert-VercelBuiltPackage `
             -StageRoot $stage `
             -ExpectedSourceSha $expectedSourceSha `
-            -ExpectedSourceTree $expectedSourceTree
+            -ExpectedSourceTree $expectedSourceTree `
+            -ExpectedPackageManifestSha256 $packageManifestSha256
         # Mark the external state as potentially mutated before starting the
         # command. A timeout can occur after Vercel accepted the promotion, so
         # every promotion failure must enter the existing rollback boundary.
@@ -681,7 +789,35 @@ catch {
     if ($promoted -and $priorProductionAliases.Count -eq $allProductionAliases.Count) {
         $rollbackErrors = @()
         $rollbackProofs = @()
+        $primaryRollbackProof = $null
         $rollbackCacheBuster = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+        try {
+            $priorPrimary = $priorProductionAliases[[string]$ProductionAlias]
+            if ($null -eq $priorPrimary -or -not $priorPrimary.id) {
+                throw "No complete prior primary deployment snapshot exists."
+            }
+            $null = Invoke-VercelProcess `
+                -Arguments @("rollback", [string]$priorPrimary.id, "--yes") `
+                -Label "Primary production rollback" `
+                -TimeoutSeconds $VercelCommandTimeoutSeconds
+            $primaryAfterRollback = Invoke-VercelJson `
+                -Arguments @("inspect", $ProductionAlias, "--json") `
+                -Label "Primary production rollback inspect"
+            $primaryAfterId = [string](Get-OptionalJsonProperty `
+                -InputObject $primaryAfterRollback -Name "id")
+            if ($primaryAfterId -ne [string]$priorPrimary.id) {
+                throw "Primary production rollback resolved to an unexpected deployment."
+            }
+            $primaryRollbackProof = [ordered]@{
+                alias = [string]$ProductionAlias
+                expected_deployment_id = [string]$priorPrimary.id
+                observed_deployment_id = $primaryAfterId
+                restored = $true
+            }
+        }
+        catch {
+            $rollbackErrors += "Primary production rollback: $($_.Exception.Message)"
+        }
         foreach ($alias in $allProductionAliases) {
             try {
                 $priorAlias = $priorProductionAliases[[string]$alias]
@@ -701,9 +837,7 @@ catch {
                 $rollbackErrors += $_.Exception.Message
             }
         }
-        if ($rollbackErrors.Count) {
-            throw "$publicationError Rollback errors: $($rollbackErrors -join '; ')"
-        }
+        $rollbackSucceeded = $rollbackErrors.Count -eq 0
         $rollbackReceipt = [ordered]@{
             schema_version = "dawnstrike.daily_deployment_rollback.v1"
             generated_at = [DateTimeOffset]::UtcNow.ToString("o")
@@ -712,18 +846,36 @@ catch {
                 -InputObject $deployment -Name "id"
             candidate_promoted_deployment_id = Get-OptionalJsonProperty `
                 -InputObject $promotedDeployment -Name "id"
+            candidate_source_sha = $expectedSourceSha
+            candidate_source_tree = $expectedSourceTree
+            candidate_vercel_source_manifest_sha256 = if (Test-Path -LiteralPath (Join-Path $stage "vercel-source-manifest.json") -PathType Leaf) {
+                Get-VercelFileSha256 -Path (Join-Path $stage "vercel-source-manifest.json")
+            }
+            else { $null }
+            candidate_vercel_package_manifest_sha256 = $packageManifestSha256
+            primary_rollback_proof = $primaryRollbackProof
             aliases = @($rollbackProofs)
-            candidate_no_longer_live = $true
-            status = "ROLLED_BACK"
+            alias_errors = @($rollbackErrors)
+            candidate_no_longer_live = [bool]$rollbackSucceeded
+            status = if ($rollbackSucceeded) { "ROLLED_BACK" } else { "ROLLBACK_FAILED" }
             publication_error = $publicationError
         }
         try {
             $rollbackJson = $rollbackReceipt | ConvertTo-Json -Depth 20
             $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-            [System.IO.File]::WriteAllText($rollbackResultPath, $rollbackJson, $utf8NoBom)
+            $receiptPath = $rollbackResultPath
+            if (Test-Path -LiteralPath $receiptPath -PathType Leaf) {
+                $receiptPath = Join-Path `
+                    (Split-Path -Parent $rollbackResultPath) `
+                    "daily-deployment-rollback-result-$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()).json"
+            }
+            [System.IO.File]::WriteAllText($receiptPath, $rollbackJson, $utf8NoBom)
         }
         catch {
             throw "$publicationError Rollback receipt write failed: $($_.Exception.Message)"
+        }
+        if (-not $rollbackSucceeded) {
+            throw "$publicationError Rollback errors: $($rollbackErrors -join '; ')"
         }
     }
     elseif ($promoted) {
@@ -740,6 +892,10 @@ $result = [ordered]@{
     preview_deployment_id = $deploymentId
     preview_ready_state = Get-OptionalJsonProperty -InputObject $deployment -Name "readyState"
     source_sha = $previewManifest.source_sha
+    source_tree = $expectedSourceTree
+    vercel_source_manifest_sha256 = Get-VercelFileSha256 `
+        -Path (Join-Path $stage "vercel-source-manifest.json")
+    vercel_package_manifest_sha256 = $packageManifestSha256
     build_id = $previewManifest.build_id
     build_sha = $previewManifest.build_sha
     data_hash_sha256 = $previewManifest.data_hash_sha256
