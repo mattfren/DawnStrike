@@ -633,6 +633,8 @@ def _validate_core_contract(
         str(core.get("status") or "").upper() == "READY"
         and str(core.get("freshness_verdict") or "").upper() == "FRESH"
     ):
+        if observed_date is None:
+            raise UniverseHandoffError("core universe contract observation is invalid")
         observed_day = date.fromisoformat(observed_date)
         requested_day = date.fromisoformat(market_date)
         if (
