@@ -193,6 +193,22 @@ _EXTENDED_RECEIPT_KEYS = frozenset(
 )
 _ACTIVATION_RECEIPT_KEYS_EXTENDED = _ACTIVATION_RECEIPT_KEYS | _EXTENDED_RECEIPT_KEYS
 _ROLLBACK_RECEIPT_KEYS_EXTENDED = _ROLLBACK_RECEIPT_KEYS | _EXTENDED_RECEIPT_KEYS
+_CAPTURE_INTERPRETER_DECLARATION = {
+    "capture_interpreter_path": (
+        r"C:\Users\MattFields\AppData\Local\Programs\Python\Python313\python.exe"
+    ),
+    "capture_interpreter_version": "3.13.14",
+    "capture_interpreter_sha256": (
+        "ef8f51028ac5329641985112f8efb1c2d4c47c86b8011ddf7e6fae21e2b4e5a1"
+    ),
+    "capture_interpreter_signer_subject": (
+        "CN=Python Software Foundation, O=Python Software Foundation, "
+        "L=Beaverton, S=Oregon, C=US"
+    ),
+    "capture_interpreter_signer_thumbprint": (
+        "9BA3C2E210C7E8296C5056515BFC0B0BBA78AC48"
+    ),
+}
 _STATE_PREPARATION_DECLARATION_KEYS = frozenset(
     {
         "schema_version",
@@ -203,6 +219,7 @@ _STATE_PREPARATION_DECLARATION_KEYS = frozenset(
         "research_only",
         "broker_execution_enabled",
     }
+    | _CAPTURE_INTERPRETER_DECLARATION.keys()
 )
 
 
@@ -697,6 +714,10 @@ def validate_state_preparation_declaration(
         or payload.get("legacy_schema_marker") != 30
         or type(payload.get("required_before_activation")) is not bool
         or payload.get("required_before_activation") is not True
+        or any(
+            payload.get(field) != expected
+            for field, expected in _CAPTURE_INTERPRETER_DECLARATION.items()
+        )
         or type(payload.get("research_only")) is not bool
         or payload.get("research_only") is not True
         or type(payload.get("broker_execution_enabled")) is not bool

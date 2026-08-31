@@ -84,6 +84,23 @@ def _git(root: Path, *arguments: str) -> str:
     return completed.stdout.strip()
 
 
+def _install_local_origin_fixture_seam(lock_script: Path) -> None:
+    """Let a disposable candidate use its local bare remote in integration tests."""
+
+    text = lock_script.read_text(encoding="utf-8")
+    start_marker = "function Convert-DawnstrikeCanonicalOriginIdentity([string]$Origin) {"
+    end_marker = "\nfunction New-DawnstrikeRuntimeLockPayload"
+    start = text.index(start_marker)
+    end = text.index(end_marker, start)
+    fixture = (
+        f"{start_marker}\n"
+        "    if ([string]::IsNullOrWhiteSpace($Origin)) { throw 'Fixture origin is empty.' }\n"
+        "    return 'github.com/mattfren/dawnstrike'\n"
+        "}\n"
+    )
+    lock_script.write_text(text[:start] + fixture + text[end:], encoding="utf-8")
+
+
 def _self_seal_unsafe(payload: dict[str, object]) -> dict[str, object]:
     value = dict(payload)
     value["evidence_sha256"] = self_hash(value, "evidence_sha256")
@@ -97,6 +114,20 @@ def _state_preparation_declaration() -> dict[str, object]:
         "sidecar_version": 1,
         "legacy_schema_marker": 30,
         "required_before_activation": True,
+        "capture_interpreter_path": (
+            r"C:\Users\MattFields\AppData\Local\Programs\Python\Python313\python.exe"
+        ),
+        "capture_interpreter_version": "3.13.14",
+        "capture_interpreter_sha256": (
+            "ef8f51028ac5329641985112f8efb1c2d4c47c86b8011ddf7e6fae21e2b4e5a1"
+        ),
+        "capture_interpreter_signer_subject": (
+            "CN=Python Software Foundation, O=Python Software Foundation, "
+            "L=Beaverton, S=Oregon, C=US"
+        ),
+        "capture_interpreter_signer_thumbprint": (
+            "9BA3C2E210C7E8296C5056515BFC0B0BBA78AC48"
+        ),
         "research_only": True,
         "broker_execution_enabled": False,
     }
@@ -112,6 +143,10 @@ def test_state_preparation_declaration_requires_exact_schema_and_values() -> Non
         validate_state_preparation_declaration({**declaration, "sidecar_version": True})
     with pytest.raises(ActivationContractError, match="violates"):
         validate_state_preparation_declaration({**declaration, "research_only": False})
+    with pytest.raises(ActivationContractError, match="violates"):
+        validate_state_preparation_declaration(
+            {**declaration, "capture_interpreter_sha256": "0" * 64}
+        )
 
 
 def test_state_preparation_declaration_loader_rejects_duplicate_json_keys(
@@ -859,6 +894,7 @@ def test_disposable_activation_and_rollback_preserve_exact_runtime_and_state(
         "state_disaster_recovery.py",
     ):
         shutil.copy2(source / "scripts" / name, candidate / "scripts" / name)
+    _install_local_origin_fixture_seam(candidate / "scripts" / "runtime_activation_lock.ps1")
     shutil.copytree(
         source / "intraday_scanner",
         candidate / "intraday_scanner",
@@ -926,7 +962,6 @@ def test_disposable_activation_and_rollback_preserve_exact_runtime_and_state(
     }
     command = rf"""
 . '{activation_script}'
-function Convert-DawnstrikeCanonicalOriginIdentity {{ param([string]$Origin) 'github.com/mattfren/dawnstrike' }}
 $global:MockRuntime = '{values["runtime"]}'
 $global:MockState = '{values["state"]}'
 $global:MockTaskStates = @{{}}
