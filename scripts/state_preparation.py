@@ -177,6 +177,141 @@ SIDECAR_COLUMNS = {
         "broker_execution_enabled",
     ),
 }
+# PRAGMA table_info is part of the wire contract.  Names alone are not enough:
+# a hostile partial migration can retain every name while weakening a type,
+# NOT NULL boundary, primary key, or default.
+SIDECAR_COLUMN_CONTRACT = {
+    "expected_market_sessions": (
+        ("session_id", "TEXT", 0, None, 1),
+        ("market_date", "TEXT", 1, None, 0),
+        ("exchange", "TEXT", 1, None, 0),
+        ("session_open_utc", "TEXT", 1, None, 0),
+        ("session_close_utc", "TEXT", 1, None, 0),
+        ("status", "TEXT", 1, None, 0),
+        ("calendar_source", "TEXT", 1, None, 0),
+        ("calendar_source_hash_sha256", "TEXT", 1, None, 0),
+        ("created_at", "TEXT", 1, None, 0),
+        ("research_only", "INTEGER", 1, None, 0),
+        ("broker_execution_enabled", "INTEGER", 1, None, 0),
+        ("payload_json", "TEXT", 1, None, 0),
+    ),
+    "intraday_capture_runs": (
+        ("capture_run_id", "TEXT", 0, None, 1),
+        ("session_id", "TEXT", 1, None, 0),
+        ("market_date", "TEXT", 1, None, 0),
+        ("evidence_mode", "TEXT", 1, None, 0),
+        ("provider", "TEXT", 1, None, 0),
+        ("feed", "TEXT", 1, None, 0),
+        ("source_identity", "TEXT", 1, None, 0),
+        ("requested_start_utc", "TEXT", 1, None, 0),
+        ("requested_end_utc", "TEXT", 1, None, 0),
+        ("started_at", "TEXT", 1, None, 0),
+        ("completed_at", "TEXT", 0, None, 0),
+        ("status", "TEXT", 1, None, 0),
+        ("coverage_status", "TEXT", 1, None, 0),
+        ("code_sha", "TEXT", 1, None, 0),
+        ("source_config_hash_sha256", "TEXT", 1, None, 0),
+        ("raw_artifact_hash_sha256", "TEXT", 0, None, 0),
+        ("normalized_artifact_hash_sha256", "TEXT", 0, None, 0),
+        ("receipt_hash_sha256", "TEXT", 1, None, 0),
+        ("payload_json", "TEXT", 1, None, 0),
+        ("created_at", "TEXT", 1, None, 0),
+        ("research_only", "INTEGER", 1, None, 0),
+        ("broker_execution_enabled", "INTEGER", 1, None, 0),
+    ),
+    "committed_fill_truth_receipts": (
+        ("receipt_id", "TEXT", 0, None, 1),
+        ("receipt_hash_sha256", "TEXT", 1, None, 0),
+        ("account_id", "TEXT", 1, None, 0),
+        ("strategy_id", "TEXT", 1, None, 0),
+        ("strategy_version", "TEXT", 1, None, 0),
+        ("experiment_id", "TEXT", 0, None, 0),
+        ("arm_id", "TEXT", 0, None, 0),
+        ("decision_id", "TEXT", 0, None, 0),
+        ("selection_id", "TEXT", 0, None, 0),
+        ("intent_id", "TEXT", 0, None, 0),
+        ("position_id", "TEXT", 0, None, 0),
+        ("order_id", "TEXT", 0, None, 0),
+        ("side", "TEXT", 0, None, 0),
+        ("market_date", "TEXT", 1, None, 0),
+        ("execution_status", "TEXT", 1, None, 0),
+        ("entry_at", "TEXT", 0, None, 0),
+        ("exit_at", "TEXT", 0, None, 0),
+        ("quantity", "REAL", 0, None, 0),
+        ("entry_price", "REAL", 0, None, 0),
+        ("exit_price", "REAL", 0, None, 0),
+        ("spread_cost_cents", "INTEGER", 0, None, 0),
+        ("slippage_cost_cents", "INTEGER", 0, None, 0),
+        ("fees_cents", "INTEGER", 0, None, 0),
+        ("regulatory_cost_cents", "INTEGER", 0, None, 0),
+        ("borrow_cost_cents", "INTEGER", 0, None, 0),
+        ("source_artifact_hash_sha256", "TEXT", 1, None, 0),
+        ("code_sha", "TEXT", 1, None, 0),
+        ("frozen_window", "TEXT", 1, None, 0),
+        ("payload_json", "TEXT", 1, None, 0),
+        ("created_at", "TEXT", 1, None, 0),
+        ("research_only", "INTEGER", 1, None, 0),
+        ("broker_execution_enabled", "INTEGER", 1, None, 0),
+    ),
+    "no_trade_session_receipts": (
+        ("receipt_id", "TEXT", 0, None, 1),
+        ("receipt_hash_sha256", "TEXT", 1, None, 0),
+        ("account_id", "TEXT", 1, None, 0),
+        ("strategy_id", "TEXT", 1, None, 0),
+        ("strategy_version", "TEXT", 1, None, 0),
+        ("experiment_id", "TEXT", 0, None, 0),
+        ("arm_id", "TEXT", 0, None, 0),
+        ("market_date", "TEXT", 1, None, 0),
+        ("session_id", "TEXT", 1, None, 0),
+        ("run_id", "TEXT", 1, None, 0),
+        ("status", "TEXT", 1, None, 0),
+        ("decision", "TEXT", 1, None, 0),
+        ("no_entry", "INTEGER", 1, None, 0),
+        ("source_artifact_hash_sha256", "TEXT", 1, None, 0),
+        ("source_config_hash_sha256", "TEXT", 1, None, 0),
+        ("calendar_source_hash_sha256", "TEXT", 1, None, 0),
+        ("code_sha", "TEXT", 1, None, 0),
+        ("payload_json", "TEXT", 1, None, 0),
+        ("created_at", "TEXT", 1, None, 0),
+        ("research_only", "INTEGER", 1, None, 0),
+        ("broker_execution_enabled", "INTEGER", 1, None, 0),
+    ),
+    "experiment_trial_ledger": (
+        ("trial_id", "TEXT", 0, None, 1),
+        ("trial_number", "INTEGER", 1, None, 0),
+        ("experiment_id", "TEXT", 1, None, 0),
+        ("arm_id", "TEXT", 1, None, 0),
+        ("strategy_id", "TEXT", 1, None, 0),
+        ("strategy_version", "TEXT", 1, None, 0),
+        ("configuration_hash_sha256", "TEXT", 1, None, 0),
+        ("feature_set_hash_sha256", "TEXT", 1, None, 0),
+        ("cost_model_version", "TEXT", 1, None, 0),
+        ("validation_window", "TEXT", 1, None, 0),
+        ("status", "TEXT", 1, None, 0),
+        ("code_sha", "TEXT", 1, None, 0),
+        ("source_hash_sha256", "TEXT", 1, None, 0),
+        ("attempted_at", "TEXT", 1, None, 0),
+        ("payload_json", "TEXT", 1, None, 0),
+        ("research_only", "INTEGER", 1, None, 0),
+        ("broker_execution_enabled", "INTEGER", 1, None, 0),
+    ),
+}
+PAPER_LEDGER_COLUMN_CONTRACT = (
+    ("target_return_pct", "REAL", 1, "1.0", 0),
+    ("target_status", "TEXT", 1, "'PENDING'", 0),
+    ("expected_session_id", "TEXT", 0, None, 0),
+    ("experiment_id", "TEXT", 0, None, 0),
+    ("arm_id", "TEXT", 0, None, 0),
+    ("evidence_mode", "TEXT", 1, "'forward_observed'", 0),
+    ("lineage_sha256", "TEXT", 0, None, 0),
+    ("target_shortfall_pct", "REAL", 0, None, 0),
+    ("target_excess_pct", "REAL", 0, None, 0),
+    ("spread_cost_cents", "INTEGER", 0, None, 0),
+    ("slippage_cost_cents", "INTEGER", 0, None, 0),
+    ("fees_cents", "INTEGER", 0, None, 0),
+    ("regulatory_cost_cents", "INTEGER", 0, None, 0),
+    ("borrow_cost_cents", "INTEGER", 0, None, 0),
+)
 # The migration is intentionally immutable after publication.  These
 # fragments are checked against sqlite_master, while PRAGMA checks below
 # prove the actual primary-key, uniqueness, NOT NULL, CHECK, and FK shape.
@@ -295,6 +430,24 @@ def canonical_json(value: object) -> bytes:
     return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
 
 
+def _strict_object_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """Reject duplicate JSON names after JSON escape/case normalization."""
+
+    result: dict[str, object] = {}
+    seen: set[str] = set()
+    for key, value in pairs:
+        normalized = key.casefold()
+        if normalized in seen:
+            raise StatePreparationError("JSON contains duplicate or case-colliding keys")
+        seen.add(normalized)
+        result[key] = value
+    return result
+
+
+def _strict_json(text: str) -> object:
+    return json.loads(text, object_pairs_hook=_strict_object_pairs)
+
+
 def self_hash(payload: Mapping[str, Any], field: str) -> str:
     return hashlib.sha256(
         canonical_json({key: value for key, value in payload.items() if key != field})
@@ -360,7 +513,7 @@ def _validate_preparation_lock(path: str | Path, state_root: Path) -> Path:
     if lock != expected or not lock.is_file() or _is_reparse_point(lock):
         raise StatePreparationError("state preparation lock is missing or unsafe")
     try:
-        payload = json.loads(lock.read_text(encoding="utf-8"))
+        payload = _strict_json(lock.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise StatePreparationError("state preparation lock is invalid") from exc
     if (
@@ -389,18 +542,14 @@ def _connect_rw(db: Path) -> sqlite3.Connection:
 
 
 def _online_snapshot_sha256(connection: sqlite3.Connection) -> str:
-    """Hash an SQLite online-backup snapshot without touching StateRoot."""
+    """Hash a canonical SQLite snapshot without touching StateRoot.
 
-    descriptor, temporary_name = tempfile.mkstemp(prefix="dawnstrike-state-snapshot-", suffix=".sqlite")
-    os.close(descriptor)
-    temporary = Path(temporary_name)
-    try:
-        with closing(sqlite3.connect(temporary)) as destination:
-            connection.backup(destination)
-            destination.commit()
-        return _sha256_file(temporary)
-    finally:
-        temporary.unlink(missing_ok=True)
+    Physical online-backup page images are allowed to differ when SQLite
+    rebuilds a database.  The SQL dump binds the committed logical view,
+    including pages visible from WAL, while never creating a sidecar.
+    """
+
+    return hashlib.sha256("\n".join(connection.iterdump()).encode("utf-8")).hexdigest()
 
 
 def _logical_snapshot_for_path(db: Path) -> str:
@@ -419,6 +568,102 @@ def _normalize_sql(value: str | None) -> str:
 
 def _compact_sql(value: str | None) -> str:
     return re.sub(r"\s+", "", _normalize_sql(value))
+
+
+def _safety_probe_value(table: str, column: str, declared_type: str) -> object:
+    """Produce a valid value for every required field of a safety probe."""
+
+    if column == "status":
+        return {
+            "expected_market_sessions": "expected",
+            "intraday_capture_runs": "pending",
+            "committed_fill_truth_receipts": "pending",
+            "no_trade_session_receipts": "finalized",
+            "experiment_trial_ledger": "attempted",
+        }[table]
+    if column == "evidence_mode":
+        return "forward_observed"
+    if column == "execution_status":
+        return "pending"
+    if column == "decision":
+        return "no_trade"
+    if column == "no_entry":
+        return 1
+    if column == "trial_number":
+        return 999999
+    if column == "payload_json":
+        return "{}"
+    if column.endswith("_at") or column.endswith("_utc") or column in {
+        "market_date",
+        "created_at",
+        "attempted_at",
+    }:
+        return "2026-01-01T00:00:00Z" if column != "market_date" else "2026-01-01"
+    upper_type = declared_type.upper()
+    if "INT" in upper_type:
+        return 1
+    if "REAL" in upper_type or "FLOA" in upper_type or "DOUB" in upper_type:
+        return 1.0
+    return f"state-preparation-safety-probe-{table}-{column}"
+
+
+def _probe_sidecar_safety(connection: sqlite3.Connection, table: str) -> None:
+    """Prove both safety CHECKs reject unsafe inserts without persistence."""
+
+    columns = [
+        (str(row[1]), str(row[2] or ""), int(row[3]), int(row[5]))
+        for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+        if int(row[3]) == 1 or int(row[5]) > 0
+    ]
+    if not columns:
+        raise StatePreparationError(f"sidecar safety probe has no required columns: {table}")
+    for probe_index, (research_only, broker_enabled) in enumerate(((0, 0), (1, 1))):
+        savepoint = f"sidecar_safety_probe_{probe_index}"
+        connection.execute(f"SAVEPOINT {savepoint}")
+        try:
+            if table == "intraday_capture_runs":
+                parent = {
+                    "session_id": "state-preparation-safety-probe-session",
+                    "market_date": "2099-01-01",
+                    "exchange": "XNYS",
+                    "session_open_utc": "2099-01-01T14:30:00Z",
+                    "session_close_utc": "2099-01-01T21:00:00Z",
+                    "status": "expected",
+                    "calendar_source": "safety-probe",
+                    "calendar_source_hash_sha256": "a" * 64,
+                    "created_at": "2099-01-01T00:00:00Z",
+                    "research_only": 1,
+                    "broker_execution_enabled": 0,
+                    "payload_json": "{}",
+                }
+                names = tuple(parent)
+                connection.execute(
+                    f"INSERT INTO expected_market_sessions ({', '.join(names)}) "
+                    f"VALUES ({', '.join('?' for _ in names)})",
+                    tuple(parent.values()),
+                )
+            values: dict[str, object] = {
+                name: _safety_probe_value(table, name, declared_type)
+                for name, declared_type, _not_null, _primary_key in columns
+            }
+            values["research_only"] = research_only
+            values["broker_execution_enabled"] = broker_enabled
+            names = tuple(values)
+            connection.execute(
+                f"INSERT INTO {table} ({', '.join(names)}) "
+                f"VALUES ({', '.join('?' for _ in names)})",
+                tuple(values.values()),
+            )
+        except sqlite3.IntegrityError:
+            # The expected CHECK/constraint rejection is the proof.
+            pass
+        else:
+            raise StatePreparationError(
+                f"sidecar safety constraint accepted an unsafe row: {table}"
+            )
+        finally:
+            connection.execute(f"ROLLBACK TO {savepoint}")
+            connection.execute(f"RELEASE {savepoint}")
 
 
 def inventory(connection: sqlite3.Connection) -> dict[str, Any]:
@@ -447,6 +692,69 @@ def inventory(connection: sqlite3.Connection) -> dict[str, Any]:
         raise StatePreparationError(
             "sidecar columns are missing: " + json.dumps(missing_columns, sort_keys=True)
         )
+
+    for table, expected_contract in SIDECAR_COLUMN_CONTRACT.items():
+        actual_contract = tuple(
+            (
+                str(row[1]),
+                str(row[2] or "").upper(),
+                int(row[3]),
+                row[4],
+                int(row[5]),
+            )
+            for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+        )
+        if actual_contract != expected_contract:
+            raise StatePreparationError(
+                f"sidecar PRAGMA table_info contract is invalid: {table}"
+            )
+    paper_info = {
+        str(row[1]): (
+            str(row[2] or "").upper(),
+            int(row[3]),
+            row[4],
+            int(row[5]),
+        )
+        for row in connection.execute(
+            "PRAGMA table_info(paper_account_daily_ledger)"
+        ).fetchall()
+    }
+    for name, expected_type, expected_notnull, expected_default, expected_pk in (
+        PAPER_LEDGER_COLUMN_CONTRACT
+    ):
+        actual = paper_info.get(name)
+        if actual != (
+            expected_type,
+            expected_notnull,
+            expected_default,
+            expected_pk,
+        ):
+            raise StatePreparationError(
+                "sidecar PRAGMA table_info contract is invalid: "
+                "paper_account_daily_ledger"
+            )
+    # ``inspect_live`` and activation intentionally hold a read-only handle.
+    # Clone that exact logical view once into memory before running all write
+    # probes; never weaken validation or repeatedly copy the live DB.
+    probe_connection = connection
+    shadow: sqlite3.Connection | None = None
+    if int(connection.execute("PRAGMA query_only").fetchone()[0]) == 1:
+        shadow = sqlite3.connect(":memory:")
+        connection.backup(shadow)
+        probe_connection = shadow
+    try:
+        for table in SIDECAR_TABLES:
+            unsafe_rows = connection.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE research_only IS NULL "
+                "OR broker_execution_enabled IS NULL "
+                "OR research_only <> 1 OR broker_execution_enabled <> 0"
+            ).fetchone()[0]
+            if int(unsafe_rows) != 0:
+                raise StatePreparationError(f"sidecar contains unsafe existing rows: {table}")
+            _probe_sidecar_safety(probe_connection, table)
+    finally:
+        if shadow is not None:
+            shadow.close()
 
     structural_errors: list[str] = []
     for table, fragments in SIDECAR_TABLE_SQL_FRAGMENTS.items():
@@ -589,7 +897,7 @@ def inspect_task_proof(
     if _is_reparse_point(source) or not source.is_file():
         raise StatePreparationError("task proof is missing or unsafe")
     try:
-        value = json.loads(source.read_text(encoding="utf-8"))
+        value = _strict_json(source.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise StatePreparationError("task proof is invalid JSON") from exc
     if not isinstance(value, dict):
@@ -680,7 +988,7 @@ def inspect_live(db_path: str | Path) -> dict[str, Any]:
 def _load_receipt(path: Path) -> dict[str, Any]:
     path = _assert_no_reparse_components(path)
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = _strict_json(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise StatePreparationError("state-preparation receipt is invalid JSON") from exc
     if not isinstance(value, dict):
@@ -713,6 +1021,7 @@ def validate_receipt(
         "backup_id",
         "backup_bundle_path",
         "backup_db_sha256",
+        "backup_logical_snapshot_sha256",
         "backup_manifest_sha256",
         "backup_manifest_file_sha256",
         "inventory_before_sha256",
@@ -758,6 +1067,7 @@ def validate_receipt(
         "after_shm_sha256",
         "after_logical_snapshot_sha256",
         "backup_db_sha256",
+        "backup_logical_snapshot_sha256",
         "backup_manifest_sha256",
         "backup_manifest_file_sha256",
         "inventory_before_sha256",
@@ -972,6 +1282,12 @@ def prepare_state(
         backup_bundle = _assert_no_reparse_components(backup / backup_result["backup_id"])
         for backup_file in (DB_NAME, "manifest.json", "receipt.json"):
             _assert_no_reparse_components(backup_bundle / backup_file)
+        if backup_result["backup_logical_snapshot_sha256"] != before[
+            "logical_snapshot_sha256"
+        ]:
+            raise StatePreparationError(
+                "online backup is not bound to the proven pre-preparation snapshot"
+            )
         after_backup = _hashes(db)
         after_backup["logical_snapshot_sha256"] = _logical_snapshot_for_path(db)
         if after_backup != before:
@@ -1018,6 +1334,10 @@ def prepare_state(
         )
         if verified_backup["backup_db_sha256"] != backup_result["backup_db_sha256"]:
             raise StatePreparationError("online backup hash changed during preparation")
+        if verified_backup["backup_logical_snapshot_sha256"] != backup_result[
+            "backup_logical_snapshot_sha256"
+        ]:
+            raise StatePreparationError("online backup logical snapshot changed during preparation")
         payload: dict[str, Any] = {
             "schema_version": STATE_PREPARATION_SCHEMA,
             "status": "COMPLETE",
@@ -1036,6 +1356,9 @@ def prepare_state(
             "backup_id": str(backup_result["backup_id"]),
             "backup_bundle_path": str(backup_bundle.resolve()),
             "backup_db_sha256": str(backup_result["backup_db_sha256"]),
+            "backup_logical_snapshot_sha256": str(
+                backup_result["backup_logical_snapshot_sha256"]
+            ),
             "backup_manifest_sha256": str(backup_result["manifest_sha256"]),
             "backup_manifest_file_sha256": _sha256_file(backup_bundle / "manifest.json"),
             "inventory_before_sha256": first_hash,

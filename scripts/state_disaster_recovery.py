@@ -121,9 +121,10 @@ def _validate_roots(
         raise RecoveryValidationError("backup root cannot be the source database")
 
 
-def _db_metadata(path: Path, *, read_only: bool) -> dict[str, Any]:
+def _db_metadata(path: Path, *, read_only: bool, immutable: bool = False) -> dict[str, Any]:
     if read_only:
-        uri = f"file:{quote(path.as_posix(), safe='/:')}?mode=ro"
+        query = "mode=ro&immutable=1" if immutable else "mode=ro"
+        uri = f"file:{quote(path.as_posix(), safe='/:')}?{query}"
         connection = sqlite3.connect(uri, uri=True, timeout=30)
     else:
         connection = sqlite3.connect(path, timeout=30)
@@ -154,6 +155,26 @@ def _db_metadata(path: Path, *, read_only: bool) -> dict[str, Any]:
         raise RecoveryValidationError(f"SQLite validation failed: {exc}") from exc
     finally:
         connection.close()
+
+
+def _logical_snapshot_sha256(path: Path, *, immutable: bool) -> str:
+    """Hash SQLite's logical online snapshot without writing beside ``path``.
+
+    ``immutable=1`` is intentional for sealed backup validation: even a
+    metadata read must not make SQLite create a WAL or SHM sidecar in the
+    three-file bundle.  A canonical SQL dump is stable across physical page
+    layouts and reflects committed WAL pages observed by the connection.
+    """
+
+    query = "mode=ro&immutable=1" if immutable else "mode=ro"
+    uri = f"file:{quote(path.as_posix(), safe='/:')}?{query}"
+    try:
+        with closing(sqlite3.connect(uri, uri=True, timeout=30)) as connection:
+            connection.execute("PRAGMA query_only = ON")
+            image = "\n".join(connection.iterdump()).encode("utf-8")
+    except (AttributeError, sqlite3.Error) as exc:
+        raise RecoveryValidationError("SQLite logical snapshot failed") from exc
+    return hashlib.sha256(image).hexdigest()
 
 
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
@@ -246,15 +267,32 @@ def create_backup(
     try:
         target = temporary_dir / DB_NAME
         source_uri = f"file:{quote(source.as_posix(), safe='/:')}?mode=ro"
+        source_logical_snapshot = _logical_snapshot_sha256(source, immutable=False)
         with closing(sqlite3.connect(source_uri, uri=True, timeout=30)) as source_connection:
             source_connection.execute("PRAGMA query_only = ON")
             with closing(sqlite3.connect(target, timeout=30)) as target_connection:
                 source_connection.backup(target_connection, pages=128, sleep=0.05)
                 target_connection.commit()
+        source_logical_snapshot_after = _logical_snapshot_sha256(source, immutable=False)
+        if source_logical_snapshot_after != source_logical_snapshot:
+            raise RecoveryValidationError(
+                "source SQLite logical snapshot changed during online backup"
+            )
         backup_size, backup_hash = _sha256(target)
-        backup_metadata = _db_metadata(target, read_only=True)
+        # An immutable read avoids SQLite creating -wal/-shm sidecars next to
+        # the sealed backup while still proving the online-backup result.
+        backup_metadata = _db_metadata(target, read_only=True, immutable=True)
         if backup_metadata != metadata:
             raise RecoveryValidationError("source and backup SQLite metadata differ")
+        backup_logical_snapshot = _logical_snapshot_sha256(target, immutable=True)
+        if backup_logical_snapshot != source_logical_snapshot:
+            raise RecoveryValidationError(
+                "online backup logical snapshot does not match its source"
+            )
+        if {item.name for item in temporary_dir.iterdir()} != {DB_NAME}:
+            raise RecoveryValidationError(
+                "online backup database staging directory contains unexpected files"
+            )
         manifest: dict[str, Any] = {
             "artifact": "dawnstrike-durable-state-backup",
             "schema_version": SCHEMA_VERSION,
@@ -270,12 +308,14 @@ def create_backup(
                 "observational_main_database_only_wal_may_be_pending"
             ),
             "source_release_sha": normalized_source_sha,
+            "source_logical_snapshot_sha256": source_logical_snapshot,
             "source_quick_check": metadata["quick_check"],
             "source_schema_version": metadata["schema_version"],
             "source_sqlite_user_version": metadata["sqlite_user_version"],
             "backup_db_name": DB_NAME,
             "backup_db_bytes": backup_size,
             "backup_db_sha256": backup_hash,
+            "backup_logical_snapshot_sha256": backup_logical_snapshot,
             "backup_quick_check": backup_metadata["quick_check"],
             "backup_schema_version": backup_metadata["schema_version"],
             "backup_sqlite_user_version": backup_metadata["sqlite_user_version"],
@@ -292,9 +332,11 @@ def create_backup(
             "manifest_sha256": manifest["manifest_sha256"],
             "source_release_sha": normalized_source_sha,
             "source_live_main_file_sha256": source_hash,
+            "source_logical_snapshot_sha256": source_logical_snapshot,
             "source_schema_version": metadata["schema_version"],
             "backup_schema_version": backup_metadata["schema_version"],
             "backup_db_sha256": backup_hash,
+            "backup_logical_snapshot_sha256": backup_logical_snapshot,
             "status": "PASS",
             "write_mode": "sqlite_online_backup_atomic_bundle",
             "automatic_restore": False,
@@ -312,6 +354,10 @@ def create_backup(
             existing = validate_backup(final_dir, backup_root=root)
             if (
                 existing["backup_db_sha256"] != backup_hash
+                or existing.get("backup_logical_snapshot_sha256")
+                != backup_logical_snapshot
+                or existing.get("source_logical_snapshot_sha256")
+                != source_logical_snapshot
                 or existing.get("source_release_sha") != normalized_source_sha
                 or existing["schema_version"] != backup_metadata["schema_version"]
             ):
@@ -344,10 +390,26 @@ def create_backup(
     }
 
 
+def _strict_object_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """Reject duplicate JSON names after unescaping and case folding."""
+
+    result: dict[str, object] = {}
+    seen: set[str] = set()
+    for key, value in pairs:
+        normalized = key.casefold()
+        if normalized in seen:
+            raise RecoveryValidationError("recovery JSON contains duplicate keys")
+        seen.add(normalized)
+        result[key] = value
+    return result
+
+
 def _load_json(path: Path) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        value = json.loads(
+            path.read_text(encoding="utf-8"), object_pairs_hook=_strict_object_pairs
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecoveryValidationError) as exc:
         raise RecoveryValidationError(f"invalid recovery JSON: {path}") from exc
     if not isinstance(value, dict):
         raise RecoveryValidationError(f"recovery JSON must be an object: {path}")
@@ -379,8 +441,10 @@ def validate_backup(
         "created_at",
         "source_quick_check",
         "source_schema_version",
+        "source_logical_snapshot_sha256",
         "backup_db_bytes",
         "backup_db_sha256",
+        "backup_logical_snapshot_sha256",
         "backup_quick_check",
         "backup_schema_version",
         "manifest_sha256",
@@ -406,6 +470,13 @@ def validate_backup(
         if not isinstance(manifest.get(hash_field), str) or not _SHA256.fullmatch(
             manifest[hash_field]
         ):
+            raise RecoveryValidationError(f"manifest {hash_field} is invalid")
+    for hash_field in (
+        "source_logical_snapshot_sha256",
+        "backup_logical_snapshot_sha256",
+    ):
+        value = manifest.get(hash_field)
+        if not isinstance(value, str) or not _SHA256.fullmatch(value):
             raise RecoveryValidationError(f"manifest {hash_field} is invalid")
     for size_field in ("source_live_main_file_bytes", "backup_db_bytes"):
         if not isinstance(manifest.get(size_field), int) or manifest[size_field] < 0:
@@ -442,6 +513,10 @@ def validate_backup(
         or receipt.get("source_release_sha") != manifest.get("source_release_sha")
         or receipt.get("source_live_main_file_sha256")
         != manifest["source_live_main_file_sha256"]
+        or receipt.get("source_logical_snapshot_sha256")
+        != manifest.get("source_logical_snapshot_sha256")
+        or receipt.get("backup_logical_snapshot_sha256")
+        != manifest.get("backup_logical_snapshot_sha256")
         or receipt.get("source_schema_version") != manifest["source_schema_version"]
         or receipt.get("backup_schema_version") != manifest["backup_schema_version"]
         or receipt.get("created_at") != manifest["created_at"]
@@ -454,11 +529,16 @@ def validate_backup(
     size, digest = _sha256(db)
     if size != manifest["backup_db_bytes"] or digest != manifest["backup_db_sha256"]:
         raise RecoveryValidationError("backup database hash or size mismatch")
-    metadata = _db_metadata(db, read_only=True)
+    # Validation must be observational: never create sidecars inside a sealed
+    # three-file bundle merely by opening its database.
+    metadata = _db_metadata(db, read_only=True, immutable=True)
     if metadata["quick_check"] != manifest["backup_quick_check"]:
         raise RecoveryValidationError("backup quick_check mismatch")
     if metadata["schema_version"] != manifest["backup_schema_version"]:
         raise RecoveryValidationError("backup schema mismatch")
+    logical_snapshot = _logical_snapshot_sha256(db, immutable=True)
+    if logical_snapshot != manifest["backup_logical_snapshot_sha256"]:
+        raise RecoveryValidationError("backup logical snapshot hash mismatch")
     if manifest["source_quick_check"] != "ok" or manifest["backup_quick_check"] != "ok":
         raise RecoveryValidationError("recovery artifact is not known-good")
     if (
@@ -472,6 +552,12 @@ def validate_backup(
         "bundle_path": str(path),
         "manifest_sha256": manifest["manifest_sha256"],
         "backup_db_sha256": digest,
+        "backup_logical_snapshot_sha256": manifest.get(
+            "backup_logical_snapshot_sha256"
+        ),
+        "source_logical_snapshot_sha256": manifest.get(
+            "source_logical_snapshot_sha256"
+        ),
         "source_live_main_file_sha256": manifest["source_live_main_file_sha256"],
         "source_release_sha": manifest.get("source_release_sha"),
         "created_at": manifest["created_at"],

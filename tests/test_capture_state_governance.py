@@ -27,13 +27,23 @@ from scripts.capture_task_contract import (
     validate_receipt as validate_capture_receipt,
 )
 from scripts.runtime_activation_contract import CI_SCHEMA, SOL_SCHEMA, seal_evidence
-from scripts.state_disaster_recovery import RecoveryValidationError, validate_backup
+from scripts.state_disaster_recovery import (
+    RecoveryValidationError,
+    create_backup,
+    validate_backup,
+)
+from scripts.state_disaster_recovery import (
+    _load_json as load_recovery_json,
+)
 from scripts.state_preparation import (
     StatePreparationError,
     inspect_live,
     inspect_task_proof,
     inventory,
     prepare_state,
+)
+from scripts.state_preparation import (
+    _load_receipt as load_state_receipt,
 )
 from scripts.state_preparation import (
     self_hash as state_self_hash,
@@ -165,6 +175,120 @@ def test_state_preparation_is_additive_complete_and_idempotent(tmp_path: Path) -
     with sqlite3.connect(db) as connection:
         current = inventory(connection)
     assert current["inventory_contract_sha256"] == receipt["inventory_sha256"]
+
+
+def test_online_backup_is_exactly_three_files_and_hashes_logical_wal_view(
+    tmp_path: Path,
+) -> None:
+    db, state, _proof, backup = _state_fixture(tmp_path)
+    with sqlite3.connect(db) as connection:
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("CREATE TABLE wal_fixture (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO wal_fixture(value) VALUES ('committed')")
+        connection.commit()
+
+    result = create_backup(
+        db,
+        backup,
+        state_root=state,
+        source_sha=CANDIDATE_SHA,
+        backup_id="wal-three-file-fixture",
+    )
+    bundle = backup / result["backup_id"]
+    assert {item.name for item in bundle.iterdir()} == {
+        "shadow_real.sqlite",
+        "manifest.json",
+        "receipt.json",
+    }
+    assert result["backup_logical_snapshot_sha256"] == result[
+        "source_logical_snapshot_sha256"
+    ]
+    assert validate_backup(bundle, backup_root=backup)[
+        "backup_logical_snapshot_sha256"
+    ] == result["backup_logical_snapshot_sha256"]
+    assert {item.name for item in bundle.iterdir()} == {
+        "shadow_real.sqlite",
+        "manifest.json",
+        "receipt.json",
+    }
+
+
+def test_online_backup_rejects_a_wal_commit_during_the_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db, state, _proof, backup = _state_fixture(tmp_path)
+    import scripts.state_disaster_recovery as recovery
+
+    original = recovery._logical_snapshot_sha256
+    calls = 0
+
+    def inject_commit(path: Path, *, immutable: bool) -> str:
+        nonlocal calls
+        if path == db and not immutable:
+            calls += 1
+            if calls == 2:
+                with sqlite3.connect(db) as connection:
+                    connection.execute("PRAGMA journal_mode=WAL")
+                    connection.execute("CREATE TABLE hostile_wal_commit (value TEXT)")
+                    connection.execute("INSERT INTO hostile_wal_commit(value) VALUES ('late')")
+                    connection.commit()
+        return original(path, immutable=immutable)
+
+    monkeypatch.setattr(recovery, "_logical_snapshot_sha256", inject_commit)
+    with pytest.raises(RecoveryValidationError, match="logical snapshot changed"):
+        create_backup(
+            db,
+            backup,
+            state_root=state,
+            source_sha=CANDIDATE_SHA,
+            backup_id="wal-drift-fixture",
+        )
+
+
+def test_inventory_rejects_weakened_pragma_column_contract(tmp_path: Path) -> None:
+    _receipt, db, _state, _proof, _backup = _prepare(tmp_path)
+    with sqlite3.connect(db) as connection:
+        sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+            ("expected_market_sessions",),
+        ).fetchone()[0]
+        weakened = str(sql).replace("exchange TEXT NOT NULL", "exchange TEXT")
+        assert weakened != sql
+        connection.execute("PRAGMA writable_schema=ON")
+        connection.execute(
+            "UPDATE sqlite_master SET sql=? WHERE type='table' AND name=?",
+            (weakened, "expected_market_sessions"),
+        )
+        connection.execute("PRAGMA writable_schema=OFF")
+        connection.commit()
+    with sqlite3.connect(db) as connection:
+        with pytest.raises(StatePreparationError, match="PRAGMA table_info contract"):
+            inventory(connection)
+
+
+@pytest.mark.parametrize("loader", [load_recovery_json, load_state_receipt])
+def test_json_loaders_reject_unescaped_and_case_colliding_duplicate_keys(
+    tmp_path: Path, loader: object
+) -> None:
+    path = tmp_path / "duplicate.json"
+    path.write_text(
+        '{"capture_running":false,"capture_\\u0072unning":false}\n',
+        encoding="utf-8",
+    )
+    expected = (
+        RecoveryValidationError
+        if loader is load_recovery_json
+        else StatePreparationError
+    )
+    with pytest.raises(expected, match="duplicate"):
+        loader(path)  # type: ignore[operator]
+
+
+def test_task_proof_loader_rejects_case_colliding_duplicate_keys(tmp_path: Path) -> None:
+    path = tmp_path / "duplicate-proof.json"
+    path.write_text('{"task_count":5,"Task_Count":5}\n', encoding="utf-8")
+    with pytest.raises(StatePreparationError, match="duplicate"):
+        inspect_task_proof(path)
 
 
 def test_state_preparation_fails_closed_on_wal_drift(tmp_path: Path) -> None:
