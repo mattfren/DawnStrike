@@ -102,6 +102,9 @@ function Assert-DawnstrikeCaptureTaskSafety {
         [string]$ExpectedOutputRoot = "C:\r\dawnstrike-forward-output",
         [string]$ExpectedSessionRoot = "C:\r\dawnstrike-forward-sessions",
         [string]$ExpectedConfigRoot = "C:\r\dawnstrike-capture-config-20260830",
+        [string]$ExpectedInterpreterPath = "",
+        [string]$ExpectedInterpreterSha256 = "",
+        [switch]$AllowLegacyLauncher,
         [switch]$RequirePasswordPrincipal,
         [switch]$RequireRunner
     )
@@ -204,8 +207,21 @@ function Assert-DawnstrikeCaptureTaskSafety {
         if ($nodes.Count -ne 1) { throw "Capture task Exec must contain exactly one $name." }
         $record[$name] = [string]$nodes[0].InnerText
     }
-    if (-not [string]::Equals($record.Command, "py.exe", [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw "Capture task command must be the governed py.exe launcher."
+    $legacyLauncher = [string]::Equals($record.Command, "py.exe", [System.StringComparison]::OrdinalIgnoreCase)
+    if ($legacyLauncher -and -not $AllowLegacyLauncher) { throw "Legacy py.exe is forbidden after hardening." }
+    if (-not $legacyLauncher) {
+        if ([string]::IsNullOrWhiteSpace($ExpectedInterpreterPath) -or [string]::IsNullOrWhiteSpace($ExpectedInterpreterSha256)) {
+            throw "Direct capture interpreter validation requires an exact approved path and SHA-256."
+        }
+        if (-not [System.IO.Path]::IsPathRooted($record.Command)) { throw "Capture interpreter path must be absolute." }
+        $interpreter = Assert-DawnstrikeCaptureRegularPath $record.Command "Capture interpreter"
+        if (-not [string]::Equals($interpreter, [System.IO.Path]::GetFullPath($ExpectedInterpreterPath), [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Capture interpreter path is not the exact approved executable."
+        }
+        $interpreterSha = Get-DawnstrikeCaptureFileSha256 $interpreter
+        if ($interpreterSha -ne $ExpectedInterpreterSha256) { throw "Capture interpreter hash changed." }
+        $versionOutput = @(& $interpreter -I -c "import sys; print('.'.join(map(str, sys.version_info[:3])))" 2>$null)
+        if ($LASTEXITCODE -ne 0 -or $versionOutput.Count -ne 1 -or [string]$versionOutput[0] -notmatch '^3\.13\.') { throw "Capture interpreter is not Python 3.13." }
     }
     $runtime = [System.IO.Path]::GetFullPath($RuntimeRoot).TrimEnd('\')
     $state = [System.IO.Path]::GetFullPath($StateRoot).TrimEnd('\')
@@ -220,7 +236,10 @@ function Assert-DawnstrikeCaptureTaskSafety {
         "--source-config-sha256", "--env-file", "--max-pages", "--retries"
     )
     if ($tokens.Count -ne (3 + ($optionOrder.Count * 2) + 1)) { throw "Capture action token count is not exact." }
-    if ($tokens[0] -ne "-3.13" -or $tokens[1] -ne "-u") { throw "Capture action Python prefix is invalid." }
+    if ($legacyLauncher) {
+        if ($tokens[0] -ne "-3.13" -or $tokens[1] -ne "-u") { throw "Legacy capture launcher prefix is invalid." }
+    }
+    elseif ($tokens[0] -ne "-I" -or $tokens[1] -ne "-u") { throw "Capture action Python isolation prefix is invalid." }
     $runner = [System.IO.Path]::GetFullPath($tokens[2])
     $expectedRunner = [System.IO.Path]::GetFullPath((Join-Path $runtime "scripts\run_daily_intraday_capture.py"))
     if (-not [string]::Equals($runner, $expectedRunner, [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -323,8 +342,8 @@ function Assert-DawnstrikeCaptureTaskSafety {
         run_level = "LeastPrivilege"
         group_id_absent = $true
         required_privileges_absent = $true
-        execute = "py.exe"
-        python_prefix = "-3.13 -u"
+        execute = [string]$record.Command
+        python_prefix = if ($legacyLauncher) { "-3.13 -u" } else { "-I -u" }
         runner_path = $runner
         working_directory = $runtime
         candidate_sha = [string]$values["--candidate-sha"]

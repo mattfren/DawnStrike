@@ -97,7 +97,7 @@ def _run(xml: Path, values: dict[str, str]) -> subprocess.CompletedProcess[str]:
         f'-ExpectedOutputRoot "{values["external"]}\\output" '
         f'-ExpectedSessionRoot "{values["external"]}\\sessions" '
         f'-ExpectedConfigRoot "{values["external"]}\\config" '
-        '-RequirePasswordPrincipal -RequireRunner | ConvertTo-Json -Compress'
+        '-RequirePasswordPrincipal -RequireRunner -AllowLegacyLauncher | ConvertTo-Json -Compress'
     )
     return subprocess.run(
         ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],

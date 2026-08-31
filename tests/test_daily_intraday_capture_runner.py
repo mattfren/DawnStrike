@@ -5,6 +5,7 @@ import json
 import sys
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -96,3 +97,35 @@ def test_daily_session_receipt_is_write_once(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="identity conflicts"):
         module._write_once_json(path, {**payload, "market_date": "2026-09-01"})
+
+
+def test_runner_child_uses_isolated_exact_interpreter(tmp_path: Path, monkeypatch) -> None:
+    module = _module()
+    captured: dict[str, object] = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    argv = [
+        "run_daily_intraday_capture.py", "--candidate-sha", "a" * 40,
+        "--repo-root", str(tmp_path), "--db-path", str(tmp_path / "capture.sqlite"),
+        "--evidence-root", str(tmp_path / "evidence"), "--run-root", str(tmp_path / "runs"),
+        "--output-root", str(tmp_path / "output"), "--session-root", str(tmp_path / "sessions"),
+        "--symbols-manifest", str(tmp_path / "symbols.json"),
+        "--symbols-manifest-sha256", "b" * 64,
+        "--entitlement-receipt", str(tmp_path / "entitlement.json"),
+        "--entitlement-receipt-sha256", "c" * 64,
+        "--source-config", str(tmp_path / "sources.yaml"),
+        "--source-config-sha256", "d" * 64, "--env-file", str(tmp_path / "runtime.env"),
+        "--market-date", "2026-08-31", "--max-pages", "100", "--retries", "3", "--execute",
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+
+    assert module.main() == 0
+    command = captured["command"]
+    assert command[:3] == [sys.executable, "-I", "-u"]
+    assert Path(command[3]).resolve() == Path("scripts/capture_intraday_operations.py").resolve()
+    assert captured["kwargs"]["cwd"] == tmp_path

@@ -20,6 +20,7 @@ param(
     [string]$StateRoot = "C:\r\dawnstrike-state",
     [string]$EnvFile = "",
     [string]$Python = "",
+    [ValidatePattern('^[0-9a-f]{64}$')][string]$PythonSha256 = "",
     [datetime]$StartAt = (Get-Date).Date.AddDays(1).AddHours(15).AddMinutes(20),
     [switch]$Create,
     [switch]$ReplaceExisting,
@@ -94,13 +95,29 @@ $EntitlementReceipt = Assert-DawnstrikeCaptureInputBindingFile `
 $SourceConfig = Assert-DawnstrikeCaptureInputBindingFile `
     -Path $SourceConfig -ExpectedSha256 $SourceConfigSha256 -Label "Source config"
 if ([string]::IsNullOrWhiteSpace($Python)) {
-    # The active runtime may intentionally have no project-local venv.  Use
-    # the governed launcher and pin the interpreter family explicitly.
-    $Python = "py.exe"
-    $pythonPrefix = @("-3.13", "-u")
-} else {
-    $pythonPrefix = @("-u")
+    $Python = "C:\Users\MattFields\AppData\Local\Programs\Python\Python313\python.exe"
+    $PythonSha256 = "ef8f51028ac5329641985112f8efb1c2d4c47c86b8011ddf7e6fae21e2b4e5a1"
 }
+$Python = [System.IO.Path]::GetFullPath($Python)
+$pythonItem = Get-Item -LiteralPath $Python -Force -ErrorAction Stop
+if ($pythonItem.PSIsContainer -or ($pythonItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "Capture interpreter must be a regular non-reparse file."
+}
+$pythonVersion = @(& $Python -I -c "import sys; print('.'.join(map(str, sys.version_info[:3])))" 2>$null)
+if ($LASTEXITCODE -ne 0 -or $pythonVersion.Count -ne 1 -or [string]$pythonVersion[0] -notmatch '^3\.13\.') {
+    throw "Capture interpreter must be exact Python 3.13."
+}
+$pythonSha256 = (Get-FileHash -LiteralPath $Python -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+if ([string]::IsNullOrWhiteSpace($PythonSha256) -or $pythonSha256 -ne $PythonSha256.ToLowerInvariant()) {
+    throw "Capture interpreter hash is not the exact approved identity."
+}
+$pythonSignature = Get-AuthenticodeSignature -LiteralPath $Python -ErrorAction Stop
+if (
+    [string]$pythonSignature.Status -ne "Valid" -or
+    $null -eq $pythonSignature.SignerCertificate -or
+    [string]$pythonSignature.SignerCertificate.Subject -ne "CN=Python Software Foundation, O=Python Software Foundation, L=Beaverton, S=Oregon, C=US"
+) { throw "Capture interpreter Authenticode identity is not approved." }
+$pythonPrefix = @("-I", "-u")
 if ([string]::IsNullOrWhiteSpace($EnvFile)) {
     $EnvFile = Join-Path $StateRoot "secrets\runtime.env"
 }
@@ -127,7 +144,14 @@ $preview = [ordered]@{
     task_name = $TaskName
     schedule_local = $StartAt.ToString("HH:mm")
     days = @("Monday", "Tuesday", "Wednesday", "Thursday", "Friday")
-    action = @{ execute = $Python; arguments = $actionArguments; working_directory = $RuntimeRoot }
+    action = @{
+        execute = $Python
+        execute_version = [string]$pythonVersion[0]
+        execute_sha256 = $pythonSha256
+        execute_signer_thumbprint = [string]$pythonSignature.SignerCertificate.Thumbprint
+        arguments = $actionArguments
+        working_directory = $RuntimeRoot
+    }
     mode = $Mode
     feed = "sip"
     candidate_sha = $CandidateSha

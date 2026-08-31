@@ -48,6 +48,8 @@ def main() -> int:
     _write_once_json(session_path, session)
     command = [
         sys.executable,
+        "-I",
+        "-u",
         str(Path(__file__).with_name("capture_intraday_operations.py")),
         "--mode",
         "forward_observed",
