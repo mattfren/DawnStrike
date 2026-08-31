@@ -28,14 +28,18 @@ function Invoke-DawnstrikeRuntimeRollback {
     $runtime = Get-DawnstrikeFutureActivationRoot $RuntimeRoot "RuntimeRoot"
     Assert-DawnstrikeRootIsolation $safeBackupRoot @($contract, $runtime, $state) "BackupRoot"
     $receiptPath = (Resolve-Path -LiteralPath $ActivationReceipt -ErrorAction Stop).Path
+    Assert-DawnstrikeNoReparsePath $state "StateRoot"
+    $activationReceiptRoot = Join-Path $state "receipts\runtime-activation"
+    Assert-DawnstrikeNoReparsePath $activationReceiptRoot "Activation receipt directory"
     $approvedReceiptRoot = [System.IO.Path]::GetFullPath(
         (Join-Path $state "receipts\runtime-activation")
     ).TrimEnd('\') + '\'
     if (-not $receiptPath.StartsWith($approvedReceiptRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "Activation receipt must be inside the durable activation receipt root."
     }
+    Assert-DawnstrikeNoReparsePath $receiptPath "Activation receipt"
     $receiptItem = Get-Item -LiteralPath $receiptPath -Force
-    if (($receiptItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+    if ($receiptItem.PSIsContainer -or ($receiptItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw "Activation receipt cannot be a reparse point."
     }
 
@@ -54,7 +58,9 @@ function Invoke-DawnstrikeRuntimeRollback {
     . (Join-Path $PSScriptRoot "dawnstrike_job_process.ps1")
 
     try {
-        $receiptHint = Get-Content -LiteralPath $receiptPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $receiptRaw = Get-Content -LiteralPath $receiptPath -Raw -Encoding UTF8
+        Assert-DawnstrikeJsonUniqueProperties $receiptRaw
+        $receiptHint = $receiptRaw | ConvertFrom-Json
     }
     catch {
         throw "Activation receipt is not valid JSON."
@@ -85,6 +91,9 @@ function Invoke-DawnstrikeRuntimeRollback {
     if ($activation.schema_version -ne "dawnstrike.runtime_activation_receipt.v1") {
         throw "Rollback requires an activation receipt."
     }
+    if ([string]$activation.status -notin @("PREPARED", "COMPLETE")) {
+        throw "Rollback requires a sealed PREPARED or COMPLETE activation receipt."
+    }
     if (
         $contractGit.head -ne [string]$activation.candidate_sha -or
         $contractGit.tree -ne [string]$activation.candidate_tree
@@ -105,6 +114,40 @@ function Invoke-DawnstrikeRuntimeRollback {
     $rollbackReceipt = Join-Path $rollbackReceiptRoot "runtime-rollback-$activationId.json"
     $rollbackSchedulerBackupName = "runtime-rollback-$activationId"
     $rollbackSchedulerBackupPath = Join-Path $state "scheduler-backups\$rollbackSchedulerBackupName"
+    Assert-DawnstrikeNoReparsePath $rollbackRoot "Rollback root"
+    Assert-DawnstrikeNoReparsePath $rollbackCheckout "Rollback checkout" -AllowMissingLeaf
+    Assert-DawnstrikeNoReparsePath $rollbackBundle "Rollback bundle" -AllowMissingLeaf
+    Assert-DawnstrikeNoReparsePath $rollbackStage "Rollback stage" -AllowMissingLeaf
+    Assert-DawnstrikeNoReparsePath $deactivatedCandidate "Deactivated candidate" -AllowMissingLeaf
+    $schedulerBackupRoot = Join-Path $state "scheduler-backups"
+    Assert-DawnstrikeNoReparsePath $schedulerBackupRoot "Scheduler backup directory"
+    Assert-DawnstrikeNoReparsePath $rollbackSchedulerBackupPath "Rollback scheduler backup" -AllowMissingLeaf
+    New-Item -ItemType Directory -Path $rollbackReceiptRoot -Force | Out-Null
+    Assert-DawnstrikeNoReparsePath $rollbackReceiptRoot "Rollback receipt directory"
+    Assert-DawnstrikeNoReparsePath $rollbackReceipt "Rollback receipt" -AllowMissingLeaf
+    $preparedReceiptPath = if ([string]$activation.status -eq "PREPARED") {
+        $receiptPath
+    } else {
+        Join-Path $state "receipts\runtime-activation\runtime-activation-$activationId.prepared.json"
+    }
+    Assert-DawnstrikeNoReparsePath $preparedReceiptPath "Prepared activation receipt"
+    $preparedReceipt = if ([string]$activation.status -eq "PREPARED") {
+        $activation
+    } else {
+        Invoke-DawnstrikeContractCli `
+            -PythonPath $pythonPath `
+            -CandidateRoot $contract `
+            -Arguments @("verify-receipt", "--receipt", $preparedReceiptPath, "--expected-status", "PREPARED") `
+            -Label "Prepared activation receipt verification" `
+            -TimeoutSeconds $ProcessTimeoutSeconds
+    }
+    if (
+        [string]$preparedReceipt.activation_id -ne $activationId -or
+        [string]$preparedReceipt.market_date -ne $marketDate
+    ) {
+        throw "Prepared activation receipt does not match the sealed activation receipt."
+    }
+    $preparedReceiptFileSha256 = Get-DawnstrikeSha256File $preparedReceiptPath
     Assert-DawnstrikeSameVolume @($runtime, $rollbackStage, $rollbackRoot)
 
     if (Test-Path -LiteralPath $rollbackReceipt -PathType Leaf) {
@@ -154,7 +197,9 @@ function Invoke-DawnstrikeRuntimeRollback {
         $null = Archive-DawnstrikeReceiptBoundStaleLocks `
             -StateRoot $state `
             -ActivationReceiptPath $receiptPath `
-            -Receipt $activation
+            -Receipt $activation `
+            -PreparedReceipt $preparedReceipt `
+            -PreparedReceiptFileSha256 $preparedReceiptFileSha256
         return $existing
     }
     if (-not (Test-Path -LiteralPath $rollbackBundle -PathType Leaf)) {
@@ -263,7 +308,9 @@ function Invoke-DawnstrikeRuntimeRollback {
     $null = Archive-DawnstrikeReceiptBoundStaleLocks `
         -StateRoot $state `
         -ActivationReceiptPath $receiptPath `
-        -Receipt $activation
+        -Receipt $activation `
+        -PreparedReceipt $preparedReceipt `
+        -PreparedReceiptFileSha256 $preparedReceiptFileSha256
 
     if ($null -ne $currentContract -and $currentContract.head -eq $candidateSha) {
         if (Test-Path -LiteralPath $rollbackStage) {
@@ -287,15 +334,14 @@ function Invoke-DawnstrikeRuntimeRollback {
     $preserveLocks = $false
     try {
         $lockBinding = @{}
-        if ($activation.status -eq "PREPARED") {
-            $lockBinding = @{
-                ActivationId = $activationId
-                PreparedReceiptName = Split-Path -Leaf $receiptPath
-                PreparedReceiptSha256 = [string]$activation.receipt_sha256
-                PreparedReceiptFileSha256 = Get-DawnstrikeSha256File $receiptPath
-            }
+        $lockBinding = @{
+            ActivationId = $activationId
+            PreparedReceiptName = Split-Path -Leaf $preparedReceiptPath
+            PreparedReceiptSha256 = [string]$preparedReceipt.receipt_sha256
+            PreparedReceiptFileSha256 = $preparedReceiptFileSha256
         }
-        $activationLock = Enter-DawnstrikeRuntimeActivationLock -StateRoot $state @lockBinding
+        $activationLock = Enter-DawnstrikeRuntimeActivationLock `
+            -StateRoot $state -Owner "runtime_rollback" @lockBinding
         Assert-DawnstrikeNoDailyLocks $state
         $dailyLock = Enter-DawnstrikeDailyRunLock `
             -StateRoot $state `
@@ -347,15 +393,22 @@ function Invoke-DawnstrikeRuntimeRollback {
             -ExpectedTaskActionContractSha256 ([string]$activation.task_action_contract_sha256)
 
         if ($null -eq $currentContract) {
+            Assert-DawnstrikeNoReparsePath $rollbackCheckout "Rollback checkout"
+            Assert-DawnstrikeNoReparsePath $runtime "Runtime root" -AllowMissingLeaf
             [System.IO.Directory]::Move($rollbackCheckout, $runtime)
             $previousInstalled = $true
         }
         elseif ($currentContract.head -eq $candidateSha) {
+            Assert-DawnstrikeNoReparsePath $runtime "Runtime root"
+            Assert-DawnstrikeNoReparsePath $deactivatedCandidate "Deactivated candidate" -AllowMissingLeaf
+            Assert-DawnstrikeNoReparsePath $rollbackStage "Rollback stage"
             if (Test-Path -LiteralPath $deactivatedCandidate) {
                 throw "Deactivated candidate preservation path already exists."
             }
             [System.IO.Directory]::Move($runtime, $deactivatedCandidate)
             $candidateMoved = $true
+            Assert-DawnstrikeNoReparsePath $deactivatedCandidate "Deactivated candidate"
+            Assert-DawnstrikeNoReparsePath $runtime "Runtime root" -AllowMissingLeaf
             [System.IO.Directory]::Move($rollbackStage, $runtime)
             $previousInstalled = $true
         }
@@ -450,6 +503,8 @@ function Invoke-DawnstrikeRuntimeRollback {
         try {
             if ($previousInstalled -and $candidateMoved -and (Test-Path -LiteralPath $runtime -PathType Container)) {
                 $failedPrevious = Join-Path $rollbackRoot "failed-previous-runtime"
+                Assert-DawnstrikeNoReparsePath $runtime "Runtime root"
+                Assert-DawnstrikeNoReparsePath $failedPrevious "Failed previous runtime" -AllowMissingLeaf
                 if (Test-Path -LiteralPath $failedPrevious) {
                     throw "Failed previous-runtime preservation path already exists."
                 }
@@ -460,6 +515,8 @@ function Invoke-DawnstrikeRuntimeRollback {
                 -not (Test-Path -LiteralPath $runtime) -and
                 (Test-Path -LiteralPath $deactivatedCandidate -PathType Container)
             ) {
+                Assert-DawnstrikeNoReparsePath $deactivatedCandidate "Deactivated candidate"
+                Assert-DawnstrikeNoReparsePath $runtime "Runtime root" -AllowMissingLeaf
                 [System.IO.Directory]::Move($deactivatedCandidate, $runtime)
             }
             if ($tasksDisabled) {

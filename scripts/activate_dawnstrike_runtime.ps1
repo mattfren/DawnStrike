@@ -829,6 +829,8 @@ function Enter-DawnstrikeRuntimeActivationLock {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$StateRoot,
+        [ValidateSet("runtime_activation", "runtime_rollback")]
+        [string]$Owner = "runtime_activation",
         [string]$ActivationId = "",
         [string]$PreparedReceiptName = "",
         [string]$PreparedReceiptSha256 = "",
@@ -836,8 +838,12 @@ function Enter-DawnstrikeRuntimeActivationLock {
     )
 
     $lockRoot = Join-Path $StateRoot "locks"
+    Assert-DawnstrikeNoReparsePath $StateRoot "StateRoot"
+    Assert-DawnstrikeNoReparsePath $lockRoot "Activation lock directory" -AllowMissingLeaf
     New-Item -ItemType Directory -Path $lockRoot -Force | Out-Null
+    Assert-DawnstrikeNoReparsePath $lockRoot "Activation lock directory"
     $path = Join-Path $lockRoot "dawnstrike-runtime-activation.lock"
+    Assert-DawnstrikeNoReparsePath $path "Activation lock" -AllowMissingLeaf
     if (Test-Path -LiteralPath $path) {
         throw "A runtime activation lock already exists and requires review."
     }
@@ -867,7 +873,7 @@ function Enter-DawnstrikeRuntimeActivationLock {
         broker_execution_enabled = $false
     }
     if (-not [string]::IsNullOrWhiteSpace($ActivationId)) {
-        $payloadObject.owner = "runtime_activation"
+        $payloadObject.owner = $Owner
         $payloadObject.activation_id = $ActivationId
         $payloadObject.prepared_receipt_name = $PreparedReceiptName
         $payloadObject.prepared_receipt_sha256 = if ([string]::IsNullOrWhiteSpace($PreparedReceiptSha256)) { $null } else { $PreparedReceiptSha256 }
@@ -897,11 +903,16 @@ function Exit-DawnstrikeRuntimeActivationLock {
     [CmdletBinding()]
     param([AllowNull()][object]$Lock)
 
-    if ($null -eq $Lock -or -not (Test-Path -LiteralPath $Lock.path -PathType Leaf)) {
+    if ($null -eq $Lock) {
         return
     }
+    try { Assert-DawnstrikeNoReparsePath $Lock.path "Activation lock" }
+    catch { return }
+    if (-not (Test-Path -LiteralPath $Lock.path -PathType Leaf)) { return }
     try {
-        $payload = Get-Content -LiteralPath $Lock.path -Raw | ConvertFrom-Json
+        $raw = Get-Content -LiteralPath $Lock.path -Raw -ErrorAction Stop
+        Assert-DawnstrikeJsonUniqueProperties $raw
+        $payload = $raw | ConvertFrom-Json
         if ([string]$payload.lock_token -eq [string]$Lock.token) {
             Remove-Item -LiteralPath $Lock.path -Force
         }
@@ -911,6 +922,115 @@ function Exit-DawnstrikeRuntimeActivationLock {
     }
 }
 
+function Assert-DawnstrikeNoReparsePath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [switch]$AllowMissingLeaf
+    )
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $driveRoot = [System.IO.Path]::GetPathRoot($fullPath)
+    if ([string]::IsNullOrWhiteSpace($driveRoot)) {
+        throw "$Label does not have a valid filesystem root."
+    }
+    $relative = $fullPath.Substring($driveRoot.Length).Trim('\')
+    $current = $driveRoot.TrimEnd('\')
+    $parts = if ($relative) { $relative -split '\\' } else { @() }
+    for ($index = 0; $index -lt $parts.Count; $index++) {
+        $current = Join-Path $current $parts[$index]
+        if (-not (Test-Path -LiteralPath $current)) {
+            if ($AllowMissingLeaf -and $index -eq ($parts.Count - 1)) {
+                return
+            }
+            throw "$Label is missing or has a missing parent component."
+        }
+        $item = Get-Item -LiteralPath $current -Force -ErrorAction Stop
+        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "$Label contains a reparse-point component."
+        }
+    }
+}
+
+function Assert-DawnstrikeJsonUniqueProperties {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Raw)
+
+    $names = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    $propertyPattern = '(?m)"(?<name>(?:\\.|[^"\\])*)"\s*:'
+    foreach ($match in [regex]::Matches($Raw, $propertyPattern)) {
+        if (-not $names.Add($match.Groups['name'].Value)) {
+            throw "JSON contains duplicate properties."
+        }
+    }
+}
+
+function Get-DawnstrikePreparedReceiptSnapshot {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$PreparedReceiptPath,
+        [Parameter(Mandatory = $true)][object]$ExpectedReceipt,
+        [Parameter(Mandatory = $true)][string]$ExpectedFileSha256
+    )
+
+    if ($ExpectedFileSha256 -notmatch '^[0-9a-f]{64}$') {
+        throw "Prepared receipt file hash is invalid."
+    }
+    Assert-DawnstrikeNoReparsePath $PreparedReceiptPath "Prepared receipt"
+    $stream = $null
+    $bytes = $null
+    try {
+        $stream = [System.IO.File]::Open(
+            $PreparedReceiptPath,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::Read
+        )
+        $bytes = [byte[]]::new($stream.Length)
+        $offset = 0
+        while ($offset -lt $bytes.Length) {
+            $read = $stream.Read($bytes, $offset, $bytes.Length - $offset)
+            if ($read -le 0) { throw "Prepared receipt could not be read completely." }
+            $offset += $read
+        }
+    }
+    finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $fileSha256 = ([System.BitConverter]::ToString($sha.ComputeHash($bytes))).Replace("-", "").ToLowerInvariant()
+    }
+    finally {
+        $sha.Dispose()
+    }
+    if ($fileSha256 -ne $ExpectedFileSha256) {
+        throw "Prepared receipt file changed after validation."
+    }
+    $raw = [System.Text.Encoding]::UTF8.GetString($bytes)
+    Assert-DawnstrikeJsonUniqueProperties $raw
+    try { $fresh = $raw | ConvertFrom-Json } catch { throw "Prepared receipt is not valid JSON." }
+    if ([string]$fresh.status -ne "PREPARED") {
+        throw "Prepared receipt is not in the PREPARED state."
+    }
+    if (
+        [string]$fresh.activation_id -ne [string]$ExpectedReceipt.activation_id -or
+        [string]$fresh.market_date -ne [string]$ExpectedReceipt.market_date -or
+        [string]$fresh.receipt_sha256 -ne [string]$ExpectedReceipt.receipt_sha256
+    ) {
+        throw "Prepared receipt identity changed after validation."
+    }
+    $expectedJson = $ExpectedReceipt | ConvertTo-Json -Depth 30 -Compress
+    $freshJson = $fresh | ConvertTo-Json -Depth 30 -Compress
+    if ($freshJson -ne $expectedJson) {
+        throw "Prepared receipt content changed after validation."
+    }
+    return [pscustomobject]@{ payload = $fresh; file_sha256 = $fileSha256 }
+}
+
 function Set-DawnstrikeReceiptBoundLock {
     [CmdletBinding()]
     param(
@@ -918,9 +1038,16 @@ function Set-DawnstrikeReceiptBoundLock {
         [Parameter(Mandatory = $true)][string]$LockToken,
         [Parameter(Mandatory = $true)][string]$ActivationId,
         [Parameter(Mandatory = $true)][string]$PreparedReceiptPath,
+        [Parameter(Mandatory = $true)][string]$PreparedReceiptFileSha256,
         [Parameter(Mandatory = $true)][object]$Receipt
     )
 
+    Assert-DawnstrikeNoReparsePath $PreparedReceiptPath "Prepared receipt"
+    Assert-DawnstrikeNoReparsePath $LockPath "Receipt-bound lock"
+    $receiptSnapshot = Get-DawnstrikePreparedReceiptSnapshot `
+        -PreparedReceiptPath $PreparedReceiptPath `
+        -ExpectedReceipt $Receipt `
+        -ExpectedFileSha256 $PreparedReceiptFileSha256
     $receiptItem = Get-Item -LiteralPath $PreparedReceiptPath -Force -ErrorAction Stop
     if (
         -not $receiptItem.PSIsContainer -and
@@ -934,14 +1061,16 @@ function Set-DawnstrikeReceiptBoundLock {
     if ($receiptName -ne "runtime-activation-$ActivationId.prepared.json") {
         throw "Prepared receipt name does not match the activation."
     }
-    $receiptSha = [string]$Receipt.receipt_sha256
+    $receiptSha = [string]$receiptSnapshot.payload.receipt_sha256
     if ($receiptSha -notmatch '^[0-9a-f]{64}$') {
         throw "Prepared receipt self-hash is invalid."
     }
-    $receiptFileSha = Get-DawnstrikeSha256File $PreparedReceiptPath
+    $receiptFileSha = [string]$receiptSnapshot.file_sha256
     $payload = $null
     try {
-        $payload = Get-Content -LiteralPath $LockPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $lockRaw = Get-Content -LiteralPath $LockPath -Raw -Encoding UTF8
+        Assert-DawnstrikeJsonUniqueProperties $lockRaw
+        $payload = $lockRaw | ConvertFrom-Json
     }
     catch {
         throw "Receipt binding cannot read the lock."
@@ -961,8 +1090,17 @@ function Set-DawnstrikeReceiptBoundLock {
     $temporary = "$LockPath.$([guid]::NewGuid().ToString('N')).tmp"
     $replacementBackup = "$LockPath.$([guid]::NewGuid().ToString('N')).bak"
     try {
+        Assert-DawnstrikeNoReparsePath $temporary "Receipt-bound lock temporary" -AllowMissingLeaf
+        Assert-DawnstrikeNoReparsePath $replacementBackup "Receipt-bound lock backup" -AllowMissingLeaf
         $json = $payload | ConvertTo-Json -Depth 8
         [System.IO.File]::WriteAllText($temporary, $json, [System.Text.UTF8Encoding]::new($false))
+        Assert-DawnstrikeNoReparsePath $LockPath "Receipt-bound lock"
+        Assert-DawnstrikeNoReparsePath $temporary "Receipt-bound lock temporary"
+        Assert-DawnstrikeNoReparsePath $replacementBackup "Receipt-bound lock backup" -AllowMissingLeaf
+        $null = Get-DawnstrikePreparedReceiptSnapshot `
+            -PreparedReceiptPath $PreparedReceiptPath `
+            -ExpectedReceipt $Receipt `
+            -ExpectedFileSha256 $PreparedReceiptFileSha256
         [System.IO.File]::Replace($temporary, $LockPath, $replacementBackup)
     }
     finally {
@@ -979,13 +1117,16 @@ function Get-DawnstrikeLockSnapshot {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string]$Path)
 
+    Assert-DawnstrikeNoReparsePath $Path "Lock"
     $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
     if ($item.PSIsContainer -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw "Lock path is missing or unsafe."
     }
     $payload = $null
     try {
-        $payload = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+        $raw = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
+        Assert-DawnstrikeJsonUniqueProperties $raw
+        $payload = $raw | ConvertFrom-Json
     }
     catch {
         throw "Lock payload is not valid JSON."
@@ -1009,6 +1150,7 @@ function Assert-DawnstrikeReceiptBoundLock {
         [Parameter(Mandatory = $true)][object]$Snapshot,
         [Parameter(Mandatory = $true)][object]$Receipt,
         [Parameter(Mandatory = $true)][string]$PreparedReceiptPath,
+        [Parameter(Mandatory = $true)][string]$PreparedReceiptFileSha256,
         [Parameter(Mandatory = $true)][string]$ActivationId,
         [Parameter(Mandatory = $true)][string]$Kind,
         [switch]$AllowUnbound
@@ -1017,6 +1159,10 @@ function Assert-DawnstrikeReceiptBoundLock {
     if ($Snapshot.owner_state -ne "DEAD") {
         throw "Receipt-bound $Kind lock owner is not proven dead."
     }
+    $null = Get-DawnstrikePreparedReceiptSnapshot `
+        -PreparedReceiptPath $PreparedReceiptPath `
+        -ExpectedReceipt $Receipt `
+        -ExpectedFileSha256 $PreparedReceiptFileSha256
     $payload = $Snapshot.payload
     $schema = if ($Kind -eq "activation") { "dawnstrike.runtime_activation_lock.v2" } else { "dawnstrike.daily_run_lock.v4" }
     if ([string]$payload.schema_version -ne $schema) {
@@ -1057,8 +1203,8 @@ function Assert-DawnstrikeReceiptBoundLock {
     if ([string]$payload.research_only -ne "True" -or [string]$payload.broker_execution_enabled -ne "False") {
         throw "Receipt-bound $Kind lock violates research-only safety."
     }
-    if ([string]$payload.owner -ne "runtime_activation") {
-        throw "Receipt-bound $Kind lock owner is not runtime_activation."
+    if ([string]$payload.owner -notin @("runtime_activation", "runtime_rollback")) {
+        throw "Receipt-bound $Kind lock owner is not allowlisted."
     }
     if ($Kind -eq "daily" -and [string]$payload.market_date -ne [string]$Receipt.market_date) {
         throw "Receipt-bound daily lock market date mismatch."
@@ -1071,6 +1217,7 @@ function Complete-DawnstrikeReceiptBindingTransition {
         [Parameter(Mandatory = $true)][object]$Snapshot,
         [Parameter(Mandatory = $true)][object]$Receipt,
         [Parameter(Mandatory = $true)][string]$PreparedReceiptPath,
+        [Parameter(Mandatory = $true)][string]$PreparedReceiptFileSha256,
         [Parameter(Mandatory = $true)][string]$ActivationId,
         [Parameter(Mandatory = $true)][string]$Kind
     )
@@ -1079,6 +1226,7 @@ function Complete-DawnstrikeReceiptBindingTransition {
         -Snapshot $Snapshot `
         -Receipt $Receipt `
         -PreparedReceiptPath $PreparedReceiptPath `
+        -PreparedReceiptFileSha256 $PreparedReceiptFileSha256 `
         -ActivationId $ActivationId `
         -Kind $Kind `
         -AllowUnbound
@@ -1088,6 +1236,7 @@ function Complete-DawnstrikeReceiptBindingTransition {
             -LockToken ([string]$Snapshot.payload.lock_token) `
             -ActivationId $ActivationId `
             -PreparedReceiptPath $PreparedReceiptPath `
+            -PreparedReceiptFileSha256 $PreparedReceiptFileSha256 `
             -Receipt $Receipt
         $Snapshot = Get-DawnstrikeLockSnapshot $Snapshot.path
     }
@@ -1095,6 +1244,7 @@ function Complete-DawnstrikeReceiptBindingTransition {
         -Snapshot $Snapshot `
         -Receipt $Receipt `
         -PreparedReceiptPath $PreparedReceiptPath `
+        -PreparedReceiptFileSha256 $PreparedReceiptFileSha256 `
         -ActivationId $ActivationId `
         -Kind $Kind
     return $Snapshot
@@ -1106,6 +1256,7 @@ function Find-DawnstrikeArchivedLock {
         [Parameter(Mandatory = $true)][string]$LockPath,
         [Parameter(Mandatory = $true)][object]$Receipt,
         [Parameter(Mandatory = $true)][string]$PreparedReceiptPath,
+        [Parameter(Mandatory = $true)][string]$PreparedReceiptFileSha256,
         [Parameter(Mandatory = $true)][string]$ActivationId,
         [Parameter(Mandatory = $true)][string]$Kind
     )
@@ -1117,7 +1268,9 @@ function Find-DawnstrikeArchivedLock {
         try {
             $snapshot = Get-DawnstrikeLockSnapshot $candidate.FullName
             if ([string]$snapshot.payload.activation_id -eq $ActivationId) {
-                Assert-DawnstrikeReceiptBoundLock $snapshot $Receipt $PreparedReceiptPath $ActivationId $Kind -AllowUnbound
+                Assert-DawnstrikeReceiptBoundLock `
+                    $snapshot $Receipt $PreparedReceiptPath $PreparedReceiptFileSha256 `
+                    $ActivationId $Kind -AllowUnbound
                 $matches += $snapshot
             }
         }
@@ -1139,42 +1292,104 @@ function Archive-DawnstrikeReceiptBoundStaleLocks {
     param(
         [Parameter(Mandatory = $true)][string]$StateRoot,
         [Parameter(Mandatory = $true)][string]$ActivationReceiptPath,
-        [Parameter(Mandatory = $true)][object]$Receipt
+        [Parameter(Mandatory = $true)][object]$Receipt,
+        [Parameter(Mandatory = $true)][string]$PreparedReceiptFileSha256,
+        [object]$PreparedReceipt = $null
     )
 
-    if ([string]$Receipt.status -ne "PREPARED") {
-        $activationLockPath = Join-Path $StateRoot "locks\dawnstrike-runtime-activation.lock"
-        $dailyLockPath = Join-Path $StateRoot ("locks\dawnstrike-daily-" + [string]$Receipt.market_date + ".lock")
+    Assert-DawnstrikeNoReparsePath $StateRoot "StateRoot"
+    $lockRoot = Join-Path $StateRoot "locks"
+    $receiptRoot = Join-Path $StateRoot "receipts\runtime-activation"
+    Assert-DawnstrikeNoReparsePath $lockRoot "Lock directory"
+    Assert-DawnstrikeNoReparsePath $receiptRoot "Activation receipt directory"
+    $activationId = [string]$Receipt.activation_id
+    $marketDate = [string]$Receipt.market_date
+    if ($activationId -notmatch '^[0-9a-f]{24}$' -or $marketDate -notmatch '^\d{4}-\d{2}-\d{2}$') {
+        throw "Stale lock recovery receipt identity is invalid."
+    }
+    $activationLockPath = Join-Path $lockRoot "dawnstrike-runtime-activation.lock"
+    $dailyLockPath = Join-Path $lockRoot ("dawnstrike-daily-" + $marketDate + ".lock")
+    Assert-DawnstrikeNoReparsePath $activationLockPath "Activation lock" -AllowMissingLeaf
+    Assert-DawnstrikeNoReparsePath $dailyLockPath "Daily lock" -AllowMissingLeaf
+
+    $receiptStatus = [string]$Receipt.status
+    if ($receiptStatus -notin @("PREPARED", "COMPLETE")) {
         if ((Test-Path -LiteralPath $activationLockPath -PathType Leaf) -or (Test-Path -LiteralPath $dailyLockPath -PathType Leaf)) {
-            throw "Stale lock recovery requires the exact PREPARED activation receipt."
+            throw "Stale lock recovery requires the exact sealed PREPARED or COMPLETE activation receipt."
         }
         return [pscustomobject]@{ status = "NO_LOCKS"; activation_archived = $false; daily_archived = $false }
     }
-    $preparedItem = Get-Item -LiteralPath $ActivationReceiptPath -Force -ErrorAction Stop
+
     $approvedReceiptRoot = [System.IO.Path]::GetFullPath(
-        (Join-Path $StateRoot "receipts\runtime-activation")
+        $receiptRoot
     ).TrimEnd('\') + '\'
-    $preparedFullPath = [System.IO.Path]::GetFullPath($preparedItem.FullName)
-    if (-not $preparedFullPath.StartsWith($approvedReceiptRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+    Assert-DawnstrikeNoReparsePath $ActivationReceiptPath "Activation receipt"
+    $receiptItem = Get-Item -LiteralPath $ActivationReceiptPath -Force -ErrorAction Stop
+    $receiptFullPath = [System.IO.Path]::GetFullPath($receiptItem.FullName)
+    if (-not $receiptFullPath.StartsWith($approvedReceiptRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "Stale lock recovery receipt is outside the durable activation receipt root."
     }
-    if (
-        $preparedItem.PSIsContainer -or
-        ($preparedItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
-        $preparedItem.Name -ne "runtime-activation-$($Receipt.activation_id).prepared.json"
-    ) {
-        throw "Stale lock recovery requires the exact activation PREPARED receipt path."
+    $expectedReceiptName = if ($receiptStatus -eq "PREPARED") {
+        "runtime-activation-$activationId.prepared.json"
+    } else {
+        "runtime-activation-$activationId.json"
     }
-    $lockRoot = Join-Path $StateRoot "locks"
-    $activationPath = Join-Path $lockRoot "dawnstrike-runtime-activation.lock"
-    $dailyPath = Join-Path $lockRoot ("dawnstrike-daily-" + [string]$Receipt.market_date + ".lock")
-    $activationCurrent = if (Test-Path -LiteralPath $activationPath -PathType Leaf) { Get-DawnstrikeLockSnapshot $activationPath } else { $null }
-    $dailyCurrent = if (Test-Path -LiteralPath $dailyPath -PathType Leaf) { Get-DawnstrikeLockSnapshot $dailyPath } else { $null }
+    if (
+        $receiptItem.PSIsContainer -or
+        ($receiptItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $receiptItem.Name -ne $expectedReceiptName
+    ) {
+        throw "Stale lock recovery requires the exact sealed activation receipt path."
+    }
+    $preparedReceiptPath = if ($receiptStatus -eq "PREPARED") {
+        $ActivationReceiptPath
+    } else {
+        Join-Path $receiptRoot "runtime-activation-$activationId.prepared.json"
+    }
+    if ($receiptStatus -eq "COMPLETE") {
+        try {
+            $completeRaw = Get-Content -LiteralPath $ActivationReceiptPath -Raw -Encoding UTF8
+            Assert-DawnstrikeJsonUniqueProperties $completeRaw
+            $completePayload = $completeRaw | ConvertFrom-Json
+        }
+        catch {
+            throw "Complete activation receipt is not valid JSON."
+        }
+        if (
+            [string]$completePayload.status -ne "COMPLETE" -or
+            [string]$completePayload.activation_id -ne $activationId -or
+            [string]$completePayload.market_date -ne $marketDate -or
+            [string]$completePayload.receipt_sha256 -notmatch '^[0-9a-f]{64}$'
+        ) {
+            throw "Complete activation receipt is not an exact sealed receipt."
+        }
+        if (($completePayload | ConvertTo-Json -Depth 30 -Compress) -ne ($Receipt | ConvertTo-Json -Depth 30 -Compress)) {
+            throw "Complete activation receipt changed after validation."
+        }
+    }
+    if ($null -eq $PreparedReceipt) { $PreparedReceipt = $Receipt }
+    Assert-DawnstrikeNoReparsePath $preparedReceiptPath "Prepared activation receipt"
+    $preparedSnapshot = Get-DawnstrikePreparedReceiptSnapshot `
+        -PreparedReceiptPath $preparedReceiptPath `
+        -ExpectedReceipt $PreparedReceipt `
+        -ExpectedFileSha256 $PreparedReceiptFileSha256
+    $PreparedReceipt = $preparedSnapshot.payload
+
+    $activationCurrent = if (Test-Path -LiteralPath $activationLockPath -PathType Leaf) { Get-DawnstrikeLockSnapshot $activationLockPath } else { $null }
+    $dailyCurrent = if (Test-Path -LiteralPath $dailyLockPath -PathType Leaf) { Get-DawnstrikeLockSnapshot $dailyLockPath } else { $null }
     $activationArchived = if ($null -eq $activationCurrent) {
-        Find-DawnstrikeArchivedLock $activationPath $Receipt $ActivationReceiptPath ([string]$Receipt.activation_id) "activation"
+        Find-DawnstrikeArchivedLock `
+            -LockPath $activationLockPath -Receipt $PreparedReceipt `
+            -PreparedReceiptPath $preparedReceiptPath `
+            -PreparedReceiptFileSha256 $PreparedReceiptFileSha256 `
+            -ActivationId $activationId -Kind "activation"
     } else { $null }
     $dailyArchived = if ($null -eq $dailyCurrent) {
-        Find-DawnstrikeArchivedLock $dailyPath $Receipt $ActivationReceiptPath ([string]$Receipt.activation_id) "daily"
+        Find-DawnstrikeArchivedLock `
+            -LockPath $dailyLockPath -Receipt $PreparedReceipt `
+            -PreparedReceiptPath $preparedReceiptPath `
+            -PreparedReceiptFileSha256 $PreparedReceiptFileSha256 `
+            -ActivationId $activationId -Kind "daily"
     } else { $null }
     if ($null -eq $activationCurrent -and $null -eq $activationArchived -and $null -eq $dailyCurrent -and $null -eq $dailyArchived) {
         return [pscustomobject]@{ status = "NO_LOCKS"; activation_archived = $false; daily_archived = $false }
@@ -1187,17 +1402,35 @@ function Archive-DawnstrikeReceiptBoundStaleLocks {
     }
     $activationSnapshot = if ($null -ne $activationCurrent) { $activationCurrent } else { $activationArchived }
     $dailySnapshot = if ($null -ne $dailyCurrent) { $dailyCurrent } else { $dailyArchived }
+    Assert-DawnstrikeReceiptBoundLock `
+        -Snapshot $activationSnapshot -Receipt $PreparedReceipt `
+        -PreparedReceiptPath $preparedReceiptPath `
+        -PreparedReceiptFileSha256 $PreparedReceiptFileSha256 `
+        -ActivationId $activationId -Kind "activation" -AllowUnbound
+    Assert-DawnstrikeReceiptBoundLock `
+        -Snapshot $dailySnapshot -Receipt $PreparedReceipt `
+        -PreparedReceiptPath $preparedReceiptPath `
+        -PreparedReceiptFileSha256 $PreparedReceiptFileSha256 `
+        -ActivationId $activationId -Kind "daily" -AllowUnbound
+    $allowedOwners = @("runtime_activation", "runtime_rollback")
+    $activationOwner = [string]$activationSnapshot.payload.owner
+    $dailyOwner = [string]$dailySnapshot.payload.owner
+    if ($activationOwner -notin $allowedOwners -or $dailyOwner -notin $allowedOwners -or $activationOwner -ne $dailyOwner) {
+        throw "Receipt-bound activation locks do not share one allowlisted operation owner."
+    }
     $activationSnapshot = Complete-DawnstrikeReceiptBindingTransition `
         -Snapshot $activationSnapshot `
-        -Receipt $Receipt `
-        -PreparedReceiptPath $ActivationReceiptPath `
-        -ActivationId ([string]$Receipt.activation_id) `
+        -Receipt $PreparedReceipt `
+        -PreparedReceiptPath $preparedReceiptPath `
+        -PreparedReceiptFileSha256 $PreparedReceiptFileSha256 `
+        -ActivationId $activationId `
         -Kind "activation"
     $dailySnapshot = Complete-DawnstrikeReceiptBindingTransition `
         -Snapshot $dailySnapshot `
-        -Receipt $Receipt `
-        -PreparedReceiptPath $ActivationReceiptPath `
-        -ActivationId ([string]$Receipt.activation_id) `
+        -Receipt $PreparedReceipt `
+        -PreparedReceiptPath $preparedReceiptPath `
+        -PreparedReceiptFileSha256 $PreparedReceiptFileSha256 `
+        -ActivationId $activationId `
         -Kind "daily"
     if (
         [int]$activationSnapshot.payload.process_id -ne [int]$dailySnapshot.payload.process_id -or
@@ -1211,22 +1444,29 @@ function Archive-DawnstrikeReceiptBoundStaleLocks {
         $entries += [pscustomobject]@{
             kind = "activation"
             snapshot = $activationSnapshot
-            destination = "$activationPath.archived.$timestamp.$([guid]::NewGuid().ToString('N'))"
+            destination = "$activationLockPath.archived.$timestamp.$([guid]::NewGuid().ToString('N'))"
         }
     }
     if ($null -ne $dailyCurrent) {
         $entries += [pscustomobject]@{
             kind = "daily"
             snapshot = $dailySnapshot
-            destination = "$dailyPath.archived.$timestamp.$([guid]::NewGuid().ToString('N'))"
+            destination = "$dailyLockPath.archived.$timestamp.$([guid]::NewGuid().ToString('N'))"
         }
     }
     foreach ($entry in $entries) {
+        $null = Get-DawnstrikePreparedReceiptSnapshot `
+            -PreparedReceiptPath $preparedReceiptPath `
+            -ExpectedReceipt $PreparedReceipt `
+            -ExpectedFileSha256 $PreparedReceiptFileSha256
+        Assert-DawnstrikeNoReparsePath $entry.snapshot.path "$($entry.kind) lock"
+        Assert-DawnstrikeNoReparsePath $entry.destination "$($entry.kind) lock archive" -AllowMissingLeaf
         $currentHash = Get-DawnstrikeSha256File $entry.snapshot.path
         if ($currentHash -ne [string]$entry.snapshot.file_sha256) {
             throw "Receipt-bound $($entry.kind) lock changed during recovery preflight."
         }
         [System.IO.File]::Move($entry.snapshot.path, $entry.destination)
+        Assert-DawnstrikeNoReparsePath $entry.destination "$($entry.kind) lock archive"
         if ((Get-DawnstrikeSha256File $entry.destination) -ne [string]$entry.snapshot.file_sha256) {
             throw "Archived $($entry.kind) lock failed integrity verification."
         }
@@ -1341,6 +1581,8 @@ function Invoke-DawnstrikeRuntimeActivation {
     $runtimeContract = Get-DawnstrikeGitContract $gitPath $runtime $ProcessTimeoutSeconds
     if ($runtimeContract.head -eq $ExpectedSha) {
         $receiptRoot = Join-Path $state "receipts\runtime-activation"
+        Assert-DawnstrikeNoReparsePath $state "StateRoot"
+        Assert-DawnstrikeNoReparsePath $receiptRoot "Activation receipt directory"
         $existing = @(Get-ChildItem -LiteralPath $receiptRoot -Filter "runtime-activation-*.json" -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTimeUtc -Descending)
         foreach ($item in $existing) {
             try {
@@ -1463,6 +1705,20 @@ function Invoke-DawnstrikeRuntimeActivation {
             -PythonPath $pythonPath `
             -TimeoutSeconds $ProcessTimeoutSeconds `
             -RequireRollbackCheckout
+        $existingPreparedPath = Join-Path $receiptRoot "runtime-activation-$([string]$existing.activation_id).prepared.json"
+        Assert-DawnstrikeNoReparsePath $existingPreparedPath "Prepared activation receipt"
+        $existingPrepared = Invoke-DawnstrikeContractCli `
+            -PythonPath $pythonPath `
+            -CandidateRoot $candidate `
+            -Arguments @("verify-receipt", "--receipt", $existingPreparedPath, "--expected-status", "PREPARED") `
+            -Label "Existing prepared activation receipt verification" `
+            -TimeoutSeconds $ProcessTimeoutSeconds
+        $null = Archive-DawnstrikeReceiptBoundStaleLocks `
+            -StateRoot $state `
+            -ActivationReceiptPath $item.FullName `
+            -Receipt $existing `
+            -PreparedReceipt $existingPrepared `
+            -PreparedReceiptFileSha256 (Get-DawnstrikeSha256File $existingPreparedPath)
         return $existing
     }
     if (
@@ -1622,17 +1878,20 @@ function Invoke-DawnstrikeRuntimeActivation {
             finally {
                 if (Test-Path -LiteralPath $inputReceipt -PathType Leaf) { Remove-Item -LiteralPath $inputReceipt -Force }
             }
+            $preparedReceiptFileSha256 = Get-DawnstrikeSha256File $preparedReceipt
             Set-DawnstrikeReceiptBoundLock `
                 -LockPath $activationLock.path `
                 -LockToken $activationLock.token `
                 -ActivationId $activationId `
                 -PreparedReceiptPath $preparedReceipt `
+                -PreparedReceiptFileSha256 $preparedReceiptFileSha256 `
                 -Receipt $prepared
             Set-DawnstrikeReceiptBoundLock `
                 -LockPath $dailyLock.lock_path `
                 -LockToken $dailyLock.lock_token `
                 -ActivationId $activationId `
                 -PreparedReceiptPath $preparedReceipt `
+                -PreparedReceiptFileSha256 $preparedReceiptFileSha256 `
                 -Receipt $prepared
 
             $runtimeFinalCheck = Get-DawnstrikeGitContract $gitPath $runtime $ProcessTimeoutSeconds $runtimeContract.head

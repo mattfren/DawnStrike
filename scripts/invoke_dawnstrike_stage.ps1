@@ -1,6 +1,52 @@
 [CmdletBinding()]
 param()
 
+function Assert-DawnstrikeNoReparsePath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [switch]$AllowMissingLeaf
+    )
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $driveRoot = [System.IO.Path]::GetPathRoot($fullPath)
+    if ([string]::IsNullOrWhiteSpace($driveRoot)) {
+        throw "$Label does not have a valid filesystem root."
+    }
+    $relative = $fullPath.Substring($driveRoot.Length).Trim('\')
+    $current = $driveRoot.TrimEnd('\')
+    $parts = if ($relative) { $relative -split '\\' } else { @() }
+    for ($index = 0; $index -lt $parts.Count; $index++) {
+        $current = Join-Path $current $parts[$index]
+        if (-not (Test-Path -LiteralPath $current)) {
+            if ($AllowMissingLeaf -and $index -eq ($parts.Count - 1)) {
+                return
+            }
+            throw "$Label is missing or has a missing parent component."
+        }
+        $item = Get-Item -LiteralPath $current -Force -ErrorAction Stop
+        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "$Label contains a reparse-point component."
+        }
+    }
+}
+
+function Assert-DawnstrikeJsonUniqueProperties {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Raw)
+
+    $names = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    $propertyPattern = '(?m)"(?<name>(?:\\.|[^"\\])*)"\s*:'
+    foreach ($match in [regex]::Matches($Raw, $propertyPattern)) {
+        if (-not $names.Add($match.Groups['name'].Value)) {
+            throw "JSON contains duplicate properties."
+        }
+    }
+}
+
 function Enter-DawnstrikeDailyRunLock {
     [CmdletBinding()]
     param(
@@ -26,6 +72,12 @@ function Enter-DawnstrikeDailyRunLock {
     if (-not [string]::IsNullOrWhiteSpace($ActivationId) -and [string]::IsNullOrWhiteSpace($PreparedReceiptName)) {
         throw "PreparedReceiptName is required when ActivationId is provided."
     }
+    if (
+        -not [string]::IsNullOrWhiteSpace($ActivationId) -and
+        $Owner -notin @("runtime_activation", "runtime_rollback")
+    ) {
+        throw "Receipt-bound daily locks require an allowlisted operation owner."
+    }
     if (-not [string]::IsNullOrWhiteSpace($PreparedReceiptSha256) -and $PreparedReceiptSha256 -notmatch '^[0-9a-f]{64}$') {
         throw "PreparedReceiptSha256 is invalid."
     }
@@ -33,13 +85,19 @@ function Enter-DawnstrikeDailyRunLock {
         throw "PreparedReceiptFileSha256 is invalid."
     }
     $lockRoot = Join-Path $StateRoot "locks"
+    Assert-DawnstrikeNoReparsePath $StateRoot "StateRoot"
+    Assert-DawnstrikeNoReparsePath $lockRoot "Daily lock directory" -AllowMissingLeaf
     New-Item -ItemType Directory -Path $lockRoot -Force | Out-Null
+    Assert-DawnstrikeNoReparsePath $lockRoot "Daily lock directory"
     $lockPath = Join-Path $lockRoot ("dawnstrike-daily-" + $MarketDate + ".lock")
+    Assert-DawnstrikeNoReparsePath $lockPath "Daily lock" -AllowMissingLeaf
     if (Test-Path -LiteralPath $lockPath -PathType Leaf) {
         $age = ((Get-Date).ToUniversalTime() - (Get-Item -LiteralPath $lockPath).LastWriteTimeUtc).TotalMinutes
         $existingPayload = $null
         try {
-            $existingPayload = Get-Content -LiteralPath $lockPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $existingRaw = Get-Content -LiteralPath $lockPath -Raw -Encoding UTF8
+            Assert-DawnstrikeJsonUniqueProperties $existingRaw
+            $existingPayload = $existingRaw | ConvertFrom-Json
         }
         catch {
             # Owner-state validation below remains the fail-closed result for
@@ -72,7 +130,10 @@ function Enter-DawnstrikeDailyRunLock {
         # the payload cannot prove any owner exists).
         if ($ownerState -eq "DEAD") {
             $stalePath = "$lockPath.archived.$([DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')).$([guid]::NewGuid().ToString('N'))"
+            Assert-DawnstrikeNoReparsePath $lockPath "Daily lock"
+            Assert-DawnstrikeNoReparsePath $stalePath "Daily lock archive" -AllowMissingLeaf
             Move-Item -LiteralPath $lockPath -Destination $stalePath -ErrorAction Stop
+            Assert-DawnstrikeNoReparsePath $stalePath "Daily lock archive"
         } else {
             return [pscustomobject]@{
                 acquired = $false
@@ -140,6 +201,7 @@ function Test-DawnstrikeLockOwnerActive {
     # receipt-bound stale recovery requires the v4 process-start contract.
     try {
         $raw = Get-Content -LiteralPath $LockPath -Raw -ErrorAction Stop
+        Assert-DawnstrikeJsonUniqueProperties $raw
         $payload = $raw | ConvertFrom-Json
         $processId = 0
         if (-not [int]::TryParse([string]$payload.process_id, [ref]$processId) -or $processId -le 0) {
@@ -148,18 +210,13 @@ function Test-DawnstrikeLockOwnerActive {
         $ownerProcess = Get-Process -Id $processId -ErrorAction SilentlyContinue
         if ($null -eq $ownerProcess) { return $false }
         $processStarted = [DateTimeOffset]$ownerProcess.StartTime.ToUniversalTime()
-        $startedMatch = [regex]::Match($raw, '"process_started_at_utc"\s*:\s*"([^"]+)"')
-        if ($startedMatch.Success -and -not [string]::IsNullOrWhiteSpace($startedMatch.Groups[1].Value)) {
-            $recordedStart = [DateTimeOffset]::Parse($startedMatch.Groups[1].Value).ToUniversalTime()
+        $startedValue = [string]$payload.process_started_at_utc
+        if (-not [string]::IsNullOrWhiteSpace($startedValue)) {
+            $recordedStart = [DateTimeOffset]::Parse($startedValue).ToUniversalTime()
             return $processStarted.UtcDateTime.Ticks -eq $recordedStart.UtcDateTime.Ticks
         }
-        try {
-            $acquiredAt = [DateTimeOffset]::Parse([string]$payload.acquired_at).ToUniversalTime()
-            return $processStarted.UtcDateTime.Ticks -le $acquiredAt.UtcDateTime.AddTicks([TimeSpan]::TicksPerSecond * 5).Ticks
-        }
-        catch {
-            return $true
-        }
+        $acquiredAt = [DateTimeOffset]::Parse([string]$payload.acquired_at).ToUniversalTime()
+        return $processStarted.UtcDateTime.Ticks -le $acquiredAt.UtcDateTime.AddTicks([TimeSpan]::TicksPerSecond * 5).Ticks
     }
     catch {
         return $false
@@ -172,23 +229,18 @@ function Get-DawnstrikeLockOwnerState {
 
     try {
         $lockItem = Get-Item -LiteralPath $LockPath -Force -ErrorAction Stop
+        Assert-DawnstrikeNoReparsePath $LockPath "Daily lock"
         if (($lockItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
             return "UNKNOWN"
         }
         $raw = Get-Content -LiteralPath $LockPath -Raw -ErrorAction Stop
+        Assert-DawnstrikeJsonUniqueProperties $raw
         $payload = $raw | ConvertFrom-Json
         $processId = 0
-        if (-not [int]::TryParse([string]$payload.process_id, [ref]$processId) -or $processId -le 0) {
-            return "UNKNOWN"
-        }
-        # ConvertFrom-Json materializes RFC3339 values as local DateTime on
-        # some PowerShell versions. Read the original JSON string so the
-        # process-start identity keeps its UTC offset and full precision.
-        $startedMatch = [regex]::Match($raw, '"process_started_at_utc"\s*:\s*"([^"]+)"')
-        if (-not $startedMatch.Success -or [string]::IsNullOrWhiteSpace($startedMatch.Groups[1].Value)) {
-            return "UNKNOWN"
-        }
-        $recordedStart = [DateTimeOffset]::Parse($startedMatch.Groups[1].Value).ToUniversalTime()
+        if (-not [int]::TryParse([string]$payload.process_id, [ref]$processId) -or $processId -le 0) { return "UNKNOWN" }
+        $startedValue = [string]$payload.process_started_at_utc
+        if ([string]::IsNullOrWhiteSpace($startedValue)) { return "UNKNOWN" }
+        $recordedStart = [DateTimeOffset]::Parse($startedValue).ToUniversalTime()
         $ownerProcess = Get-Process -Id $processId -ErrorAction SilentlyContinue
         if ($null -eq $ownerProcess) { return "DEAD" }
         $processStarted = [DateTimeOffset]$ownerProcess.StartTime.ToUniversalTime()
@@ -210,7 +262,11 @@ function Exit-DawnstrikeDailyRunLock {
 
     if ($Lock.acquired -and (Test-Path -LiteralPath $Lock.lock_path -PathType Leaf)) {
         try {
+            Assert-DawnstrikeNoReparsePath $Lock.lock_path "Daily lock"
             $payload = Get-Content -LiteralPath $Lock.lock_path -Raw | ConvertFrom-Json
+            Assert-DawnstrikeJsonUniqueProperties (
+                Get-Content -LiteralPath $Lock.lock_path -Raw -ErrorAction Stop
+            )
             if ([string]$payload.lock_token -eq [string]$Lock.lock_token) {
                 Remove-Item -LiteralPath $Lock.lock_path -Force
             }
@@ -232,7 +288,10 @@ function Write-DawnstrikeLockDenialReceipt {
 
     try {
         $receiptRoot = Join-Path $StateRoot "receipts\lock-denials"
+        Assert-DawnstrikeNoReparsePath $StateRoot "StateRoot"
+        Assert-DawnstrikeNoReparsePath $receiptRoot "Lock denial receipt directory" -AllowMissingLeaf
         New-Item -ItemType Directory -Path $receiptRoot -Force | Out-Null
+        Assert-DawnstrikeNoReparsePath $receiptRoot "Lock denial receipt directory"
         $recordedAt = [DateTimeOffset]::UtcNow
         $payload = [ordered]@{
             schema_version = "dawnstrike.lock_denial.v1"
@@ -248,7 +307,9 @@ function Write-DawnstrikeLockDenialReceipt {
         $name = "$MarketDate-$Owner-$($recordedAt.ToString('yyyyMMddTHHmmssfffZ')).json"
         $path = Join-Path $receiptRoot $name
         $temporary = "$path.$([guid]::NewGuid().ToString('N')).tmp"
+        Assert-DawnstrikeNoReparsePath $path "Lock denial receipt" -AllowMissingLeaf
         [System.IO.File]::WriteAllText($temporary, $payload, [System.Text.UTF8Encoding]::new($false))
+        Assert-DawnstrikeNoReparsePath $temporary "Lock denial receipt temporary file"
         Move-Item -LiteralPath $temporary -Destination $path
         return $true
     }

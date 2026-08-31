@@ -41,7 +41,9 @@ The tool fails closed unless all of the following are true:
   activation id and PREPARED receipt name; governed rollback completes its
   hash binding before archiving the pair. Ordinary daily stages never archive
   or supersede a v4 activation-owned lock and must direct the operator to
-  rollback.
+  rollback. The pair owner must be the same allowlisted operation
+  (`runtime_activation` or `runtime_rollback`); duplicate JSON properties,
+  PID reuse, and any descendant reparse point are hard stops.
 - `shadow_real.sqlite` passes read-only `PRAGMA quick_check`, and its schema is
   exactly the candidate application's current schema. Activation never runs a
   migration.
@@ -191,10 +193,15 @@ Rollback is permitted from a valid `PREPARED` or `COMPLETE` activation receipt:
 ```
 
 For a crash before the complete receipt, pass the matching `.prepared.json`.
+If a crash occurs after the exact `COMPLETE` receipt is sealed but before the
+operation's `finally` block removes its pair, rollback (or an exact activation
+retry) proves the matching PREPARED receipt and archives that dead pair
+idempotently before proceeding.
 The tool verifies the bundle hash, exact previous commit/tree/origin, current
 schema compatibility, all task definitions, persisted scheduler XML evidence,
 and both locks. If both locks are present, it verifies their exact activation
-and PREPARED-receipt identity plus PID/start identity. A finite `UNBOUND`
+and PREPARED-receipt identity plus matching allowlisted owner and PID/start
+identity. A finite `UNBOUND`
 binding transition is completed against that exact sealed receipt before the
 pair is moved into the durable `locks` archive; it never blindly deletes or
 age-evicts them. It then
