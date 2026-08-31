@@ -102,8 +102,11 @@ def _state_fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     state = tmp_path / "state"
     state.mkdir()
     db = state / "shadow_real.sqlite"
-    with sqlite3.connect(db) as connection:
+    connection = sqlite3.connect(db)
+    try:
         run_migrations(connection)
+    finally:
+        connection.close()
     proof = _task_proof(tmp_path / "task-proof.json")
     backup = tmp_path / "backups"
     return db, state, proof, backup
@@ -278,6 +281,7 @@ def test_inventory_rejects_weakened_pragma_column_contract(tmp_path: Path) -> No
         )
         connection.execute("PRAGMA writable_schema=OFF")
         connection.commit()
+    connection.close()
     with sqlite3.connect(db) as connection:
         with pytest.raises(StatePreparationError, match="PRAGMA table_info contract"):
             inventory(connection)
@@ -286,18 +290,71 @@ def test_inventory_rejects_weakened_pragma_column_contract(tmp_path: Path) -> No
 def test_inventory_rejects_null_text_primary_key_identity(tmp_path: Path) -> None:
     _receipt, db, _state, _proof, _backup = _prepare(tmp_path)
     with sqlite3.connect(db) as connection:
+        with pytest.raises(sqlite3.IntegrityError, match="NOT NULL"):
+            connection.execute(
+                "INSERT INTO expected_market_sessions "
+                "(session_id, market_date, exchange, session_open_utc, session_close_utc, "
+                "status, calendar_source, calendar_source_hash_sha256, created_at, "
+                "research_only, broker_execution_enabled, payload_json) "
+                "VALUES (NULL, '2099-02-02', 'XNYS', '2099-02-02T14:30:00Z', "
+                "'2099-02-02T21:00:00Z', 'EXPECTED', 'test', ?, '2099-02-02T00:00:00Z', 1, 0, '{}')",
+                ("a" * 64,),
+            )
+    connection.close()
+
+
+def test_migration_repairs_legacy_nullable_identity_without_data_loss(
+    tmp_path: Path,
+) -> None:
+    _receipt, db, _state, _proof, _backup = _prepare(tmp_path)
+    with sqlite3.connect(db) as connection:
         connection.execute(
             "INSERT INTO expected_market_sessions "
             "(session_id, market_date, exchange, session_open_utc, session_close_utc, "
             "status, calendar_source, calendar_source_hash_sha256, created_at, "
             "research_only, broker_execution_enabled, payload_json) "
-            "VALUES (NULL, '2099-02-02', 'XNYS', '2099-02-02T14:30:00Z', "
-            "'2099-02-02T21:00:00Z', 'EXPECTED', 'test', ?, '2099-02-02T00:00:00Z', 1, 0, '{}')",
-            ("a" * 64,),
+            "VALUES ('legacy-session', '2099-02-03', 'XNYS', '2099-02-03T14:30:00Z', "
+            "'2099-02-03T21:00:00Z', 'EXPECTED', 'test', ?, '2099-02-03T00:00:00Z', 1, 0, '{}')",
+            ("b" * 64,),
         )
+        sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+            ("expected_market_sessions",),
+        ).fetchone()[0]
+        weakened = str(sql).replace(
+            "session_id TEXT PRIMARY KEY NOT NULL", "session_id TEXT PRIMARY KEY"
+        )
+        assert weakened != sql
+        connection.execute("PRAGMA writable_schema=ON")
+        connection.execute(
+            "UPDATE sqlite_master SET sql=? WHERE type='table' AND name=?",
+            (weakened, "expected_market_sessions"),
+        )
+        connection.execute("PRAGMA writable_schema=OFF")
         connection.commit()
-        with pytest.raises(StatePreparationError, match="NULL identity"):
-            inventory(connection)
+    connection.close()
+    with sqlite3.connect(db) as connection:
+        run_migrations(connection)
+        identity = connection.execute(
+            "PRAGMA table_info(expected_market_sessions)"
+        ).fetchall()[0]
+        assert (identity[1], identity[3], identity[5]) == ("session_id", 1, 1)
+        assert connection.execute(
+            "SELECT session_id FROM expected_market_sessions"
+        ).fetchone()[0] == "legacy-session"
+        with pytest.raises(sqlite3.IntegrityError, match="NOT NULL"):
+            connection.execute(
+                "INSERT INTO expected_market_sessions "
+                "(session_id, market_date, exchange, session_open_utc, session_close_utc, "
+                "status, calendar_source, calendar_source_hash_sha256, created_at, "
+                "research_only, broker_execution_enabled, payload_json) "
+                "VALUES (NULL, '2099-02-04', 'XNYS', '2099-02-04T14:30:00Z', "
+                "'2099-02-04T21:00:00Z', 'EXPECTED', 'test', ?, '2099-02-04T00:00:00Z', 1, 0, '{}')",
+                ("c" * 64,),
+            )
+        connection.commit()
+        assert inventory(connection)["schema_marker"] == 30
+    connection.close()
 
 
 def test_inventory_rejects_comment_hidden_weakened_safety_check(tmp_path: Path) -> None:
@@ -309,7 +366,7 @@ def test_inventory_rejects_comment_hidden_weakened_safety_check(tmp_path: Path) 
         ).fetchone()[0]
         weakened = str(sql).replace(
             "CHECK (research_only = 1)",
-            "CHECK (research_only = 0) /* research_only INTEGER NOT NULL CHECK (research_only = 1) */",
+            "CHECK (research_only <> 0) /* research_only INTEGER NOT NULL CHECK (research_only = 1) */",
         )
         assert weakened != sql
         connection.execute("PRAGMA writable_schema=ON")
