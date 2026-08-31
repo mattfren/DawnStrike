@@ -77,6 +77,23 @@ def _git(root: Path, *arguments: str) -> str:
     return completed.stdout.strip()
 
 
+def _install_local_origin_fixture_seam(lock_script: Path) -> None:
+    """Let a disposable candidate use its local bare remote in integration tests."""
+
+    text = lock_script.read_text(encoding="utf-8")
+    start_marker = "function Convert-DawnstrikeCanonicalOriginIdentity([string]$Origin) {"
+    end_marker = "\nfunction New-DawnstrikeRuntimeLockPayload"
+    start = text.index(start_marker)
+    end = text.index(end_marker, start)
+    fixture = (
+        f"{start_marker}\n"
+        "    if ([string]::IsNullOrWhiteSpace($Origin)) { throw 'Fixture origin is empty.' }\n"
+        "    return 'github.com/mattfren/dawnstrike'\n"
+        "}\n"
+    )
+    lock_script.write_text(text[:start] + fixture + text[end:], encoding="utf-8")
+
+
 def _sha(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -985,6 +1002,7 @@ def test_powershell_sidecar_activation_and_rollback_keep_auxiliary_disabled(
         "state_disaster_recovery.py",
     ):
         shutil.copy2(source / "scripts" / name, candidate / "scripts" / name)
+    _install_local_origin_fixture_seam(candidate / "scripts" / "runtime_activation_lock.ps1")
     shutil.copytree(
         source / "intraday_scanner",
         candidate / "intraday_scanner",
@@ -1108,7 +1126,6 @@ def test_powershell_sidecar_activation_and_rollback_keep_auxiliary_disabled(
     prep_q = quote(candidate / "scripts" / "prepare_dawnstrike_state.ps1")
     command = rf"""
     . '{activation_q}'
-    function Convert-DawnstrikeCanonicalOriginIdentity {{ param([string]$Origin) 'github.com/mattfren/dawnstrike' }}
     $global:MockRuntime = '{runtime_q}'
 $global:MockState = '{state_q}'
     $global:MockAuxState = '{initial_aux_state}'
