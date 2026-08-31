@@ -27,6 +27,7 @@ if (
 $captureRebindRuntimeRoot = $RuntimeRoot
 $captureRebindStateRoot = $StateRoot
 $captureRebindTimeout = $ProcessTimeoutSeconds
+$captureRebindRunAsCredential = $RunAsCredential
 . (Join-Path $PSScriptRoot "resolve_dawnstrike_task_principal.ps1")
 . (Join-Path $PSScriptRoot "activate_dawnstrike_runtime.ps1")
 . (Join-Path $PSScriptRoot "dawnstrike_job_process.ps1")
@@ -34,6 +35,7 @@ $captureRebindTimeout = $ProcessTimeoutSeconds
 $RuntimeRoot = $captureRebindRuntimeRoot
 $StateRoot = $captureRebindStateRoot
 $ProcessTimeoutSeconds = $captureRebindTimeout
+$RunAsCredential = $captureRebindRunAsCredential
 if ($null -eq $RunAsCredential -or [string]::IsNullOrWhiteSpace($RunAsCredential.UserName)) {
     throw "Rebind requires the locally prompted RunAsCredential for the Password auxiliary task."
 }
@@ -856,7 +858,11 @@ if (Test-Path -LiteralPath $receiptFull -PathType Leaf) {
     throw "Existing capture-task receipt does not match the current task, activation, or supplied input bindings; rebind is ambiguous."
 }
 
-$rebindLock = Enter-DawnstrikeRuntimeActivationLock $state
+$lockOrigin = Convert-DawnstrikeCanonicalOriginIdentity $origin
+$lockPythonSha = Get-DawnstrikeRuntimeLockHash $python
+$rebindLock = Enter-DawnstrikeGovernedRuntimeLock -StateRoot $state -Operation capture_task_rebind `
+    -CandidateSha $CandidateSha -CandidateTree ([string]$runtimeContract.tree) `
+    -OriginIdentity $lockOrigin -PythonPath $python -PythonSha256 $lockPythonSha
 try {
     $lockedAuxiliary = Get-DawnstrikeAuxiliaryCaptureTask $runtime $state
     if (
@@ -1179,7 +1185,7 @@ try {
     }
 }
 finally {
-    Exit-DawnstrikeRuntimeActivationLock $rebindLock
+    Exit-DawnstrikeGovernedRuntimeLock $rebindLock
     if (Test-Path -LiteralPath $rebindLock.path -PathType Leaf) {
         throw "Capture-task rebind lock could not be released; operator recovery is required."
     }

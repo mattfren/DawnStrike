@@ -969,6 +969,8 @@ def test_powershell_sidecar_activation_and_rollback_keep_auxiliary_disabled(
     (candidate / "scripts").mkdir()
     for name in (
         "activate_dawnstrike_runtime.ps1",
+        "runtime_activation_lock.ps1",
+        "runtime_activation_lock_contract.py",
         "rollback_dawnstrike_runtime.ps1",
         "rebind_intraday_capture_task.ps1",
         "runtime_activation_contract.py",
