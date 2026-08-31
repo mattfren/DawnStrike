@@ -195,6 +195,32 @@ function Invoke-DawnstrikeRuntimeRollback {
 
     Assert-DawnstrikeNoDailyLocks $state
     $taskBefore = Get-DawnstrikeTaskContract $runtime $state -AllowDisabled
+    $stateDeclaration = Get-DawnstrikeStatePreparationDeclaration $contract
+    $auxiliaryBefore = if ($stateDeclaration.required) {
+        Get-DawnstrikeAuxiliaryCaptureTask $runtime $state
+    }
+    else {
+        [pscustomobject]@{
+            present = $false; task_name = $script:DawnstrikeAuxiliaryCaptureTaskName;
+            state = "ABSENT"; enabled = $false; xml = "";
+            xml_sha256 = Get-DawnstrikeSha256Text "";
+            xml_file_sha256 = Get-DawnstrikeSha256Text "";
+            definition_contract_sha256 = Get-DawnstrikeSha256Text "";
+            action_contract_sha256 = Get-DawnstrikeSha256Text ""; task_path = "NONE"
+        }
+    }
+    if ($stateDeclaration.required -and $activation.PSObject.Properties.Name -contains "auxiliary_capture_present") {
+        if ([bool]$activation.auxiliary_capture_present -ne [bool]$auxiliaryBefore.present) {
+            throw "Rollback auxiliary capture presence does not match the activation receipt."
+        }
+        if ($auxiliaryBefore.present -and (
+            $auxiliaryBefore.state -ne "Disabled" -or
+            $auxiliaryBefore.definition_contract_sha256 -ne [string]$activation.auxiliary_capture_definition_contract_sha256 -or
+            $auxiliaryBefore.action_contract_sha256 -ne [string]$activation.auxiliary_capture_action_contract_sha256
+        )) {
+            throw "Rollback auxiliary capture task is not the exact disabled activation task."
+        }
+    }
     if ($taskBefore.task_action_contract_sha256 -ne [string]$activation.task_action_contract_sha256) {
         throw "Task actions do not match the activation receipt."
     }
@@ -259,6 +285,7 @@ function Invoke-DawnstrikeRuntimeRollback {
     $candidateMoved = $false
     $previousInstalled = $false
     $tasksDisabled = $tasksInitiallyDisabled
+    $auxiliaryDisabled = $false
     $taskBackup = $null
     $preserveLocks = $false
     try {
@@ -280,7 +307,8 @@ function Invoke-DawnstrikeRuntimeRollback {
                 -StateRoot $state `
                 -BackupName $rollbackSchedulerBackupName `
                 -ActivationId $activationId `
-                -TaskContract $taskLocked
+                -TaskContract $taskLocked `
+                -AuxiliaryCapture $auxiliaryBefore
             $tasksDisabled = $true
             Disable-DawnstrikeCanonicalTasks
         }
@@ -300,6 +328,10 @@ function Invoke-DawnstrikeRuntimeRollback {
                 [string]$activation.task_action_contract_sha256
         ) {
             throw "Canonical tasks did not enter the exact disabled rollback boundary."
+        }
+        if ($auxiliaryBefore.present) {
+            $auxiliaryDisabled = $true
+            $null = Disable-DawnstrikeAuxiliaryCaptureTask $runtime $state
         }
         $null = Assert-DawnstrikeTaskXmlBackup `
             -StateRoot $state `
@@ -342,6 +374,11 @@ function Invoke-DawnstrikeRuntimeRollback {
         ) {
             throw "Task definitions changed across the rollback swap."
         }
+        $auxiliaryAfterDisabled = Get-DawnstrikeAuxiliaryCaptureTask $runtime $state
+        if ($auxiliaryBefore.present -and (
+            $auxiliaryAfterDisabled.state -ne "Disabled" -or
+            $auxiliaryAfterDisabled.definition_contract_sha256 -ne $auxiliaryBefore.definition_contract_sha256
+        )) { throw "Auxiliary capture task changed across the rollback swap." }
         $null = Assert-DawnstrikeReceiptRecoveryArtifacts `
             -Receipt $activation `
             -StateRoot $state `
@@ -350,6 +387,22 @@ function Invoke-DawnstrikeRuntimeRollback {
             -GitPath $gitPath `
             -PythonPath $pythonPath `
             -TimeoutSeconds $ProcessTimeoutSeconds
+        if ($stateDeclaration.required -and $activation.PSObject.Properties.Name -contains "auxiliary_capture_present") {
+            $expectedAuxiliary = [pscustomobject]@{
+                present = [bool]$activation.auxiliary_capture_present
+                task_path = [string]$auxiliaryBefore.task_path
+                xml = [string]$auxiliaryBefore.xml
+                xml_sha256 = [string]$activation.auxiliary_capture_xml_sha256
+                enabled = ([string]$activation.auxiliary_capture_state_before -eq "Ready")
+            }
+            if ($expectedAuxiliary.present) {
+                $null = Restore-DawnstrikeAuxiliaryCaptureTask `
+                    -Expected $expectedAuxiliary `
+                    -RuntimeRoot $runtime `
+                    -StateRoot $state
+            }
+            $auxiliaryDisabled = $false
+        }
         Enable-DawnstrikeCanonicalTasks
         $taskAfter = Get-DawnstrikeTaskContract $runtime $state
         if ($taskAfter.task_contract_sha256 -ne [string]$activation.task_contract_sha256) {
@@ -389,6 +442,25 @@ function Invoke-DawnstrikeRuntimeRollback {
             research_only = $true
             broker_execution_enabled = $false
         }
+        if ($stateDeclaration.required -and $activation.PSObject.Properties.Name -contains "auxiliary_capture_present") {
+            $payload.state_preparation_required = $true
+            $payload.state_preparation_contract = [string]$activation.state_preparation_contract
+            $payload.state_preparation_receipt_sha256 = [string]$activation.state_preparation_receipt_sha256
+            $payload.state_preparation_after_db_sha256 = [string]$activation.state_preparation_after_db_sha256
+            $payload.state_preparation_after_wal_sha256 = [string]$activation.state_preparation_after_wal_sha256
+            $payload.state_preparation_after_shm_sha256 = [string]$activation.state_preparation_after_shm_sha256
+            $payload.state_preparation_inventory_sha256 = [string]$activation.state_preparation_inventory_sha256
+            $payload.auxiliary_capture_present = [bool]$activation.auxiliary_capture_present
+            $payload.auxiliary_capture_state_before = "Disabled"
+            $payload.auxiliary_capture_state_after = [string]$activation.auxiliary_capture_state_before
+            $payload.auxiliary_capture_action = "RESTORED_EXACT"
+            $payload.auxiliary_capture_xml_sha256 = [string]$activation.auxiliary_capture_xml_sha256
+            $payload.auxiliary_capture_xml_file_sha256 = [string]$activation.auxiliary_capture_xml_file_sha256
+            $payload.auxiliary_capture_definition_contract_sha256 = [string]$activation.auxiliary_capture_definition_contract_sha256
+            $payload.auxiliary_capture_action_contract_sha256 = [string]$activation.auxiliary_capture_action_contract_sha256
+            $payload.auxiliary_capture_backup_name = [string]$activation.auxiliary_capture_backup_name
+            $payload.auxiliary_capture_backup_manifest_sha256 = [string]$activation.auxiliary_capture_backup_manifest_sha256
+        }
         $input = Join-Path $rollbackReceiptRoot ".$activationId.input.json"
         Write-DawnstrikeActivationJson $payload $input
         try {
@@ -404,6 +476,10 @@ function Invoke-DawnstrikeRuntimeRollback {
             try {
                 $null = Set-DawnstrikeTasksFailClosedDisabled $runtime $state
                 $tasksDisabled = $true
+                if ($auxiliaryBefore.present) {
+                    $null = Disable-DawnstrikeAuxiliaryCaptureTask $runtime $state
+                    $auxiliaryDisabled = $true
+                }
             }
             catch {
                 $preserveLocks = $true
@@ -454,6 +530,13 @@ function Invoke-DawnstrikeRuntimeRollback {
                         [string]$activation.task_definition_contract_sha256
                 ) {
                     throw "Automatic rollback recovery did not recover exact disabled task definitions."
+                }
+                if ($auxiliaryBefore.present) {
+                    $null = Restore-DawnstrikeAuxiliaryCaptureTask `
+                        -Expected $auxiliaryBefore `
+                        -RuntimeRoot $runtime `
+                        -StateRoot $state
+                    $auxiliaryDisabled = $false
                 }
                 Enable-DawnstrikeCanonicalTasks
                 $recoveredTasks = Get-DawnstrikeTaskContract $runtime $state

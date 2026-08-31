@@ -22,6 +22,8 @@ $script:DawnstrikeCanonicalTaskNames = @(
     "Dawnstrike AlphaOps V6 Weekly Training",
     "Dawnstrike 10of10 Daily Finalize"
 )
+$script:DawnstrikeAuxiliaryCaptureTaskName = "Dawnstrike Delayed SIP Capture"
+$script:DawnstrikeStatePreparationContractFile = "config\state_preparation_contract.json"
 
 function Get-DawnstrikeSha256Text {
     [CmdletBinding()]
@@ -289,6 +291,165 @@ function Get-DawnstrikeTaskDefinitionText {
     }
 }
 
+function Get-DawnstrikeStatePreparationDeclaration {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$CandidateRoot)
+
+    $path = Join-Path $CandidateRoot $script:DawnstrikeStatePreparationContractFile
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        # Older runtimes predate the account/capture/trial sidecar.  Their
+        # five-task activation contract remains explicitly backward compatible.
+        return [pscustomobject]@{ required = $false; path = $path }
+    }
+    try {
+        $declaration = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
+    }
+    catch {
+        throw "State-preparation declaration is invalid JSON."
+    }
+    if (
+        [string]$declaration.schema_version -ne "dawnstrike.state_preparation_contract.v1" -or
+        [string]$declaration.sidecar_contract -ne "dawnstrike.account_capture_trial_sidecar.v1" -or
+        [int]$declaration.sidecar_version -ne 1 -or
+        [int]$declaration.legacy_schema_marker -ne 30 -or
+        $declaration.required_before_activation -ne $true -or
+        $declaration.research_only -ne $true -or
+        $declaration.broker_execution_enabled -ne $false
+    ) {
+        throw "State-preparation declaration violates the sidecar contract."
+    }
+    return [pscustomobject]@{
+        required = $true
+        path = $path
+        sidecar_contract = [string]$declaration.sidecar_contract
+    }
+}
+
+function Get-DawnstrikeAuxiliaryCaptureTask {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot,
+        [Parameter(Mandatory = $true)][string]$StateRoot,
+        [switch]$AllowDisabled
+    )
+
+    $matches = @(Get-ScheduledTask -TaskName $script:DawnstrikeAuxiliaryCaptureTaskName -ErrorAction SilentlyContinue)
+    if ($matches.Count -eq 0) {
+        return [pscustomobject]@{
+            present = $false
+            task_name = $script:DawnstrikeAuxiliaryCaptureTaskName
+            state = "ABSENT"
+            enabled = $false
+            xml = ""
+            xml_sha256 = Get-DawnstrikeSha256Text ""
+            xml_file_sha256 = Get-DawnstrikeSha256Text ""
+            definition_contract_sha256 = Get-DawnstrikeSha256Text ""
+            action_contract_sha256 = Get-DawnstrikeSha256Text ""
+            task_path = "NONE"
+        }
+    }
+    if ($matches.Count -ne 1) {
+        throw "Auxiliary capture task name is not unique."
+    }
+    $task = $matches[0]
+    $state = [string]$task.State
+    if ($state -notin @("Ready", "Disabled")) {
+        throw "Auxiliary capture task is not quiesceable: state=$state"
+    }
+    $actions = @($task.Actions)
+    if ($actions.Count -lt 1) {
+        throw "Auxiliary capture task has no action."
+    }
+    $actionText = ($actions | ForEach-Object {
+        "{0}|{1}|{2}" -f $_.Execute, $_.Arguments, $_.WorkingDirectory
+    }) -join "`n"
+    if (
+        -not $actionText.ToLowerInvariant().Contains($RuntimeRoot.ToLowerInvariant()) -or
+        -not $actionText.ToLowerInvariant().Contains($StateRoot.ToLowerInvariant())
+    ) {
+        throw "Auxiliary capture task does not retain the fixed runtime/state roots."
+    }
+    $taskPath = [string]$task.TaskPath
+    if ([string]::IsNullOrWhiteSpace($taskPath)) { $taskPath = "\" }
+    $xml = [string](Export-ScheduledTask -TaskName $script:DawnstrikeAuxiliaryCaptureTaskName -TaskPath $taskPath -ErrorAction Stop)
+    if ([string]::IsNullOrWhiteSpace($xml)) {
+        throw "Auxiliary capture task export is empty."
+    }
+    return [pscustomobject]@{
+        present = $true
+        task_name = $script:DawnstrikeAuxiliaryCaptureTaskName
+        state = $state
+        enabled = ($state -eq "Ready")
+        task_path = $taskPath
+        xml = $xml
+        xml_sha256 = Get-DawnstrikeSha256Text $xml
+        xml_file_sha256 = Get-DawnstrikeSha256Text $xml
+        definition_contract_sha256 = Get-DawnstrikeSha256Text (Get-DawnstrikeTaskDefinitionText $xml)
+        action_contract_sha256 = Get-DawnstrikeSha256Text $actionText
+    }
+}
+
+function Disable-DawnstrikeAuxiliaryCaptureTask {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot,
+        [Parameter(Mandatory = $true)][string]$StateRoot
+    )
+    $task = Get-DawnstrikeAuxiliaryCaptureTask $RuntimeRoot $StateRoot -AllowDisabled
+    if (-not $task.present) { return $task }
+    if ($task.state -eq "Ready") {
+        Disable-ScheduledTask -TaskName $script:DawnstrikeAuxiliaryCaptureTaskName -TaskPath $task.task_path -ErrorAction Stop | Out-Null
+    }
+    $after = Get-DawnstrikeAuxiliaryCaptureTask $RuntimeRoot $StateRoot -AllowDisabled
+    if (
+        $after.state -ne "Disabled" -or
+        $after.definition_contract_sha256 -ne $task.definition_contract_sha256 -or
+        $after.action_contract_sha256 -ne $task.action_contract_sha256
+    ) {
+        throw "Auxiliary capture task did not enter the exact Disabled boundary."
+    }
+    return $after
+}
+
+function Restore-DawnstrikeAuxiliaryCaptureTask {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][object]$Expected,
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot,
+        [Parameter(Mandatory = $true)][string]$StateRoot
+    )
+    $current = Get-DawnstrikeAuxiliaryCaptureTask $RuntimeRoot $StateRoot -AllowDisabled
+    if (-not $Expected.present) {
+        if ($current.present) { throw "An auxiliary capture task appeared despite the absent-task policy." }
+        return $current
+    }
+    if (-not $current.present) { throw "The receipt-bound auxiliary capture task is missing." }
+    # Re-registering from the exact exported XML restores principal, triggers,
+    # settings, and action atomically as one task definition.  Never construct
+    # those fields from guessed defaults during recovery.
+    Register-ScheduledTask -TaskName $script:DawnstrikeAuxiliaryCaptureTaskName `
+        -TaskPath ([string]$Expected.task_path) -Xml ([string]$Expected.xml) -Force -ErrorAction Stop | Out-Null
+    $restored = Get-DawnstrikeAuxiliaryCaptureTask $RuntimeRoot $StateRoot -AllowDisabled
+    if ($restored.xml_sha256 -ne [string]$Expected.xml_sha256) {
+        throw "Auxiliary capture XML was not restored exactly."
+    }
+    if ($Expected.enabled) {
+        if ($restored.state -eq "Disabled") {
+            Enable-ScheduledTask -TaskName $script:DawnstrikeAuxiliaryCaptureTaskName -TaskPath $restored.task_path -ErrorAction Stop | Out-Null
+        }
+    }
+    else {
+        if ($restored.state -eq "Ready") {
+            Disable-ScheduledTask -TaskName $script:DawnstrikeAuxiliaryCaptureTaskName -TaskPath $restored.task_path -ErrorAction Stop | Out-Null
+        }
+    }
+    $final = Get-DawnstrikeAuxiliaryCaptureTask $RuntimeRoot $StateRoot -AllowDisabled
+    if ($final.xml_sha256 -ne [string]$Expected.xml_sha256 -or $final.enabled -ne [bool]$Expected.enabled) {
+        throw "Auxiliary capture task XML or enablement did not restore exactly."
+    }
+    return $final
+}
+
 function Get-DawnstrikeTaskContract {
     [CmdletBinding()]
     param(
@@ -402,7 +563,8 @@ function New-DawnstrikeTaskXmlBackup {
         [Parameter(Mandatory = $true)][string]$StateRoot,
         [Parameter(Mandatory = $true)][string]$BackupName,
         [Parameter(Mandatory = $true)][string]$ActivationId,
-        [Parameter(Mandatory = $true)][object]$TaskContract
+        [Parameter(Mandatory = $true)][object]$TaskContract,
+        [AllowNull()][object]$AuxiliaryCapture
     )
 
     if ($BackupName -notmatch '^runtime-(activation|rollback)-[0-9a-f]{24}$') {
@@ -450,6 +612,32 @@ function New-DawnstrikeTaskXmlBackup {
                 xml_file_sha256 = Get-DawnstrikeSha256File $xmlPath
             }
         }
+        if ($null -eq $AuxiliaryCapture) {
+            $AuxiliaryCapture = Get-DawnstrikeAuxiliaryCaptureTask `
+                -RuntimeRoot (Get-Location).Path -StateRoot $StateRoot
+        }
+        $auxiliaryEntry = [ordered]@{
+            present = [bool]$AuxiliaryCapture.present
+            task_name = $script:DawnstrikeAuxiliaryCaptureTaskName
+            state_before = if ($AuxiliaryCapture.present) { [string]$AuxiliaryCapture.state } else { "ABSENT" }
+            enabled_before = if ($AuxiliaryCapture.present) { [bool]$AuxiliaryCapture.enabled } else { $false }
+            action = if ($AuxiliaryCapture.present) { "DISABLED_UNTIL_EXACT_SHA_REBIND" } else { "ABSENT_ALLOWED" }
+        }
+        if ($AuxiliaryCapture.present) {
+            $auxiliaryFileName = "Dawnstrike_Delayed_SIP_Capture.xml"
+            $auxiliaryPath = Join-Path $temporary $auxiliaryFileName
+            [System.IO.File]::WriteAllText(
+                $auxiliaryPath,
+                [string]$AuxiliaryCapture.xml,
+                [System.Text.UTF8Encoding]::new($false)
+            )
+            $auxiliaryEntry.file_name = $auxiliaryFileName
+            $auxiliaryEntry.xml_sha256 = [string]$AuxiliaryCapture.xml_sha256
+            $auxiliaryEntry.xml_file_sha256 = Get-DawnstrikeSha256File $auxiliaryPath
+            $auxiliaryEntry.definition_contract_sha256 = [string]$AuxiliaryCapture.definition_contract_sha256
+            $auxiliaryEntry.action_contract_sha256 = [string]$AuxiliaryCapture.action_contract_sha256
+            $auxiliaryEntry.task_path = [string]$AuxiliaryCapture.task_path
+        }
         $manifest = [ordered]@{
             schema_version = "dawnstrike.scheduler_xml_backup.v1"
             activation_id = $ActivationId
@@ -459,6 +647,7 @@ function New-DawnstrikeTaskXmlBackup {
             task_definition_contract_sha256 = [string]$TaskContract.task_definition_contract_sha256
             task_action_contract_sha256 = [string]$TaskContract.task_action_contract_sha256
             tasks = $entries
+            auxiliary_capture = $auxiliaryEntry
             research_only = $true
             broker_execution_enabled = $false
         }
@@ -551,7 +740,45 @@ function Assert-DawnstrikeTaskXmlBackup {
     if ($entries.Count -ne $script:DawnstrikeCanonicalTaskNames.Count) {
         throw "Scheduler XML backup does not contain exactly five tasks."
     }
+    $auxiliary = $manifest.auxiliary_capture
+    if ($null -eq $auxiliary) {
+        throw "Scheduler XML backup does not attest auxiliary capture task policy."
+    }
     $expectedChildren = @("manifest.json") + @($entries | ForEach-Object { [string]$_.file_name })
+    if ($auxiliary.present -eq $true) {
+        if ([string]$auxiliary.task_name -ne $script:DawnstrikeAuxiliaryCaptureTaskName) {
+            throw "Scheduler XML backup auxiliary task name is invalid."
+        }
+        $expectedChildren += [string]$auxiliary.file_name
+        if (
+            [string]$auxiliary.state_before -notin @("Ready", "Disabled") -or
+            [string]$auxiliary.action -ne "DISABLED_UNTIL_EXACT_SHA_REBIND" -or
+            [string]$auxiliary.xml_sha256 -notmatch '^[0-9a-f]{64}$' -or
+            [string]$auxiliary.xml_file_sha256 -notmatch '^[0-9a-f]{64}$' -or
+            [string]$auxiliary.definition_contract_sha256 -notmatch '^[0-9a-f]{64}$' -or
+            [string]$auxiliary.action_contract_sha256 -notmatch '^[0-9a-f]{64}$'
+        ) {
+            throw "Scheduler XML backup auxiliary task entry violates the exact contract."
+        }
+        $auxiliaryXmlPath = Join-Path $backupPath ([string]$auxiliary.file_name)
+        $auxiliaryXmlItem = Get-Item -LiteralPath $auxiliaryXmlPath -Force -ErrorAction Stop
+        if (
+            $auxiliaryXmlItem.PSIsContainer -or
+            ($auxiliaryXmlItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            (Get-DawnstrikeSha256File $auxiliaryXmlPath) -ne [string]$auxiliary.xml_file_sha256 -or
+            (Get-DawnstrikeSha256Text ([System.IO.File]::ReadAllText($auxiliaryXmlPath))) -ne [string]$auxiliary.xml_sha256
+        ) {
+            throw "Scheduler XML backup auxiliary task file does not match its manifest."
+        }
+    }
+    elseif (
+        $auxiliary.present -ne $false -or
+        [string]$auxiliary.task_name -ne $script:DawnstrikeAuxiliaryCaptureTaskName -or
+        [string]$auxiliary.state_before -ne "ABSENT" -or
+        [string]$auxiliary.action -ne "ABSENT_ALLOWED"
+    ) {
+        throw "Scheduler XML backup absent auxiliary policy is invalid."
+    }
     $actualChildren = @(Get-ChildItem -LiteralPath $backupPath -Force)
     if (
         $actualChildren.Count -ne $expectedChildren.Count -or
@@ -825,6 +1052,68 @@ function Invoke-DawnstrikeContractCli {
     }
 }
 
+function Get-DawnstrikeStatePreparationProof {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$CandidateRoot,
+        [Parameter(Mandatory = $true)][string]$StateRoot,
+        [Parameter(Mandatory = $true)][string]$CandidateSha,
+        [Parameter(Mandatory = $true)][string]$CandidateTree,
+        [Parameter(Mandatory = $true)][string]$PythonPath,
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds
+    )
+
+    $tool = Join-Path $CandidateRoot "scripts\state_preparation.py"
+    if (-not (Test-Path -LiteralPath $tool -PathType Leaf)) {
+        throw "Candidate declares the sidecar contract but state-preparation tool is missing."
+    }
+    $receiptPath = Join-Path $StateRoot ("receipts\state-preparation\state-preparation-" + $CandidateSha + ".json")
+    if (-not (Test-Path -LiteralPath $receiptPath -PathType Leaf)) {
+        throw "Matching COMPLETE state-preparation receipt is required before activation."
+    }
+    $receipt = Invoke-DawnstrikeActivationProcess `
+        -FilePath $PythonPath `
+        -ArgumentList @(
+            $tool, "--db-path", (Join-Path $StateRoot "shadow_real.sqlite"),
+            "--state-root", $StateRoot, "--backup-root", (Join-Path $StateRoot "..\dawnstrike-state-backups"),
+            "--candidate-sha", $CandidateSha, "--candidate-tree", $CandidateTree,
+            "--verify-receipt", $receiptPath
+        ) `
+        -WorkingDirectory $CandidateRoot `
+        -Label "State-preparation receipt verification" `
+        -TimeoutSeconds $TimeoutSeconds
+    try { $parsed = [string]$receipt.Stdout | ConvertFrom-Json }
+    catch { throw "State-preparation receipt verification did not return valid JSON." }
+    if ($parsed.status -ne "COMPLETE") { throw "State-preparation receipt is not COMPLETE." }
+    $liveProcess = Invoke-DawnstrikeActivationProcess `
+        -FilePath $PythonPath `
+        -ArgumentList @($tool, "--db-path", (Join-Path $StateRoot "shadow_real.sqlite"), "--inspect-live") `
+        -WorkingDirectory $CandidateRoot `
+        -Label "Live state-preparation inventory verification" `
+        -TimeoutSeconds $TimeoutSeconds
+    try { $live = [string]$liveProcess.Stdout | ConvertFrom-Json }
+    catch { throw "Live state-preparation inventory verification did not return valid JSON." }
+    if (
+        [string]$live.db_sha256 -ne [string]$parsed.after_db_sha256 -or
+        [string]$live.wal_sha256 -ne [string]$parsed.after_wal_sha256 -or
+        [string]$live.shm_sha256 -ne [string]$parsed.after_shm_sha256 -or
+        [string]$live.inventory_sha256 -ne [string]$parsed.inventory_sha256 -or
+        [int]$live.schema_marker -ne 30 -or
+        [string]$live.quick_check -ne "ok"
+    ) {
+        throw "Live state does not match the COMPLETE state-preparation receipt."
+    }
+    return [pscustomobject]@{
+        receipt = $parsed
+        receipt_sha256 = [string]$parsed.receipt_sha256
+        receipt_file_sha256 = Get-DawnstrikeSha256File $receiptPath
+        after_db_sha256 = [string]$parsed.after_db_sha256
+        after_wal_sha256 = [string]$parsed.after_wal_sha256
+        after_shm_sha256 = [string]$parsed.after_shm_sha256
+        inventory_sha256 = [string]$parsed.inventory_sha256
+    }
+}
+
 function Enter-DawnstrikeRuntimeActivationLock {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string]$StateRoot)
@@ -957,6 +1246,7 @@ function Invoke-DawnstrikeRuntimeActivation {
         -Label "Candidate origin/main refresh" `
         -TimeoutSeconds $ProcessTimeoutSeconds
     $candidateContract = Get-DawnstrikeGitContract $gitPath $candidate $ProcessTimeoutSeconds $ExpectedSha
+    $stateDeclaration = Get-DawnstrikeStatePreparationDeclaration $candidate
     . (Join-Path $PSScriptRoot "invoke_dawnstrike_stage.ps1")
     $remoteMain = (Get-DawnstrikeGitValue $gitPath $candidate @("rev-parse", "refs/remotes/origin/main") "origin/main verification" $ProcessTimeoutSeconds).ToLowerInvariant()
     if ($remoteMain -ne $ExpectedSha) {
@@ -980,6 +1270,17 @@ function Invoke-DawnstrikeRuntimeActivation {
         -Arguments @("validate-evidence", "--ci", $ci, "--sol", $sol, "--candidate-sha", $ExpectedSha, "--candidate-tree", $candidateContract.tree) `
         -Label "Runtime activation evidence validation" `
         -TimeoutSeconds $ProcessTimeoutSeconds
+
+    $statePreparation = $null
+    if ($stateDeclaration.required) {
+        $statePreparation = Get-DawnstrikeStatePreparationProof `
+            -CandidateRoot $candidate `
+            -StateRoot $state `
+            -CandidateSha $ExpectedSha `
+            -CandidateTree $candidateContract.tree `
+            -PythonPath $pythonPath `
+            -TimeoutSeconds $ProcessTimeoutSeconds
+    }
 
     $runtimeContract = Get-DawnstrikeGitContract $gitPath $runtime $ProcessTimeoutSeconds
     if ($runtimeContract.head -eq $ExpectedSha) {
@@ -1006,6 +1307,22 @@ function Invoke-DawnstrikeRuntimeActivation {
                             [string]$receipt.task_action_contract_sha256
                     ) {
                         throw "Existing activation receipt does not match exact Ready task XML."
+                    }
+                    if ($stateDeclaration.required) {
+                        $existingAuxiliary = Get-DawnstrikeAuxiliaryCaptureTask $runtime $state
+                        if (
+                            [bool]$receipt.auxiliary_capture_present -ne [bool]$existingAuxiliary.present -or
+                            ($existingAuxiliary.present -and (
+                                $existingAuxiliary.state -ne "Disabled" -or
+                                $existingAuxiliary.definition_contract_sha256 -ne [string]$receipt.auxiliary_capture_definition_contract_sha256 -or
+                                $existingAuxiliary.action_contract_sha256 -ne [string]$receipt.auxiliary_capture_action_contract_sha256
+                            ))
+                        ) { throw "Existing activation receipt does not match auxiliary capture state." }
+                        if (
+                            [string]$receipt.state_preparation_receipt_sha256 -ne [string]$statePreparation.receipt_sha256 -or
+                            [string]$receipt.state_preparation_after_db_sha256 -ne [string]$statePreparation.after_db_sha256 -or
+                            [string]$receipt.state_preparation_inventory_sha256 -ne [string]$statePreparation.inventory_sha256
+                        ) { throw "Existing activation receipt does not match live state preparation." }
                     }
                     $null = Assert-DawnstrikeTaskXmlBackup `
                         -StateRoot $state `
@@ -1037,6 +1354,22 @@ function Invoke-DawnstrikeRuntimeActivation {
     $stateInfo = Invoke-DawnstrikeContractCli $pythonPath $candidate @("inspect-state", "--db-path", $dbPath) "Durable state validation" $ProcessTimeoutSeconds
     Assert-DawnstrikeNoDailyLocks $state
     $taskBefore = Get-DawnstrikeTaskContract $runtime $state
+    $auxiliaryBefore = if ($stateDeclaration.required) {
+        Get-DawnstrikeAuxiliaryCaptureTask $runtime $state
+    }
+    else {
+        [pscustomobject]@{
+            present = $false; task_name = $script:DawnstrikeAuxiliaryCaptureTaskName;
+            state = "ABSENT"; enabled = $false; xml = "";
+            xml_sha256 = Get-DawnstrikeSha256Text "";
+            xml_file_sha256 = Get-DawnstrikeSha256Text "";
+            definition_contract_sha256 = Get-DawnstrikeSha256Text "";
+            action_contract_sha256 = Get-DawnstrikeSha256Text ""; task_path = "NONE"
+        }
+    }
+    if ($auxiliaryBefore.present -and -not $stateDeclaration.required) {
+        throw "Auxiliary capture task is present but the candidate does not declare its governed sidecar contract."
+    }
 
     if ($PreflightOnly) {
         return [pscustomobject]@{
@@ -1053,6 +1386,10 @@ function Invoke-DawnstrikeRuntimeActivation {
             task_definition_contract_sha256 = $taskBefore.task_definition_contract_sha256
             ci_evidence_sha256 = $evidence.ci_evidence_sha256
             sol_evidence_sha256 = $evidence.sol_evidence_sha256
+            auxiliary_capture_present = [bool]$auxiliaryBefore.present
+            auxiliary_capture_state_before = if ($auxiliaryBefore.present) { [string]$auxiliaryBefore.state } else { "ABSENT" }
+            auxiliary_capture_state_after = if ($auxiliaryBefore.present) { [string]$auxiliaryBefore.state } else { "ABSENT" }
+            auxiliary_capture_action = if ($auxiliaryBefore.present) { "PREPARED_FOR_QUIESCE" } else { "ABSENT_ALLOWED" }
             research_only = $true
             broker_execution_enabled = $false
         }
@@ -1089,6 +1426,17 @@ function Invoke-DawnstrikeRuntimeActivation {
                 [string]$existing.task_action_contract_sha256
         ) {
             throw "Existing activation receipt does not match exact Ready task XML."
+        }
+        if ($stateDeclaration.required) {
+            $currentAuxiliary = Get-DawnstrikeAuxiliaryCaptureTask $runtime $state
+            if (
+                [bool]$existing.auxiliary_capture_present -ne [bool]$currentAuxiliary.present -or
+                ($currentAuxiliary.present -and (
+                    $currentAuxiliary.state -ne "Disabled" -or
+                    $currentAuxiliary.definition_contract_sha256 -ne [string]$existing.auxiliary_capture_definition_contract_sha256 -or
+                    $currentAuxiliary.action_contract_sha256 -ne [string]$existing.auxiliary_capture_action_contract_sha256
+                ))
+            ) { throw "Existing activation receipt does not match auxiliary capture state." }
         }
         $null = Assert-DawnstrikeTaskXmlBackup `
             -StateRoot $state `
@@ -1140,6 +1488,7 @@ function Invoke-DawnstrikeRuntimeActivation {
         $swapStarted = $false
         $candidateInstalled = $false
         $tasksDisabled = $false
+        $auxiliaryDisabled = $false
         $preserveLocks = $false
         try {
             $activationLock = Enter-DawnstrikeRuntimeActivationLock $state
@@ -1160,7 +1509,8 @@ function Invoke-DawnstrikeRuntimeActivation {
                 -StateRoot $state `
                 -BackupName $schedulerBackupName `
                 -ActivationId $activationId `
-                -TaskContract $taskLocked
+                -TaskContract $taskLocked `
+                -AuxiliaryCapture $auxiliaryBefore
             $tasksDisabled = $true
             Disable-DawnstrikeCanonicalTasks
             $taskDisabled = Get-DawnstrikeTaskContract $runtime $state -AllowDisabled
@@ -1173,6 +1523,13 @@ function Invoke-DawnstrikeRuntimeActivation {
                     $taskLocked.task_action_contract_sha256
             ) {
                 throw "Canonical tasks did not enter the exact disabled swap boundary."
+            }
+            if ($auxiliaryBefore.present) {
+                $auxiliaryDisabled = $true
+                $auxiliaryBoundary = Disable-DawnstrikeAuxiliaryCaptureTask $runtime $state
+                if ($auxiliaryBoundary.xml_sha256 -ne $auxiliaryBefore.xml_sha256) {
+                    throw "Auxiliary capture task XML changed while entering the disabled boundary."
+                }
             }
             $stateLocked = Invoke-DawnstrikeContractCli $pythonPath $candidate @("inspect-state", "--db-path", $dbPath) "Locked durable state validation" $ProcessTimeoutSeconds
             if ($stateLocked.main_file_sha256 -ne $stateInfo.main_file_sha256) {
@@ -1248,6 +1605,25 @@ function Invoke-DawnstrikeRuntimeActivation {
                 research_only = $true
                 broker_execution_enabled = $false
             }
+            if ($stateDeclaration.required) {
+                $receiptPayload.state_preparation_required = $true
+                $receiptPayload.state_preparation_contract = [string]$stateDeclaration.sidecar_contract
+                $receiptPayload.state_preparation_receipt_sha256 = [string]$statePreparation.receipt_sha256
+                $receiptPayload.state_preparation_after_db_sha256 = [string]$statePreparation.after_db_sha256
+                $receiptPayload.state_preparation_after_wal_sha256 = [string]$statePreparation.after_wal_sha256
+                $receiptPayload.state_preparation_after_shm_sha256 = [string]$statePreparation.after_shm_sha256
+                $receiptPayload.state_preparation_inventory_sha256 = [string]$statePreparation.inventory_sha256
+                $receiptPayload.auxiliary_capture_present = [bool]$auxiliaryBefore.present
+                $receiptPayload.auxiliary_capture_state_before = if ($auxiliaryBefore.present) { [string]$auxiliaryBefore.state } else { "ABSENT" }
+                $receiptPayload.auxiliary_capture_state_after = if ($auxiliaryBefore.present) { "Disabled" } else { "ABSENT" }
+                $receiptPayload.auxiliary_capture_action = if ($auxiliaryBefore.present) { "DISABLED_UNTIL_EXACT_SHA_REBIND" } else { "ABSENT_ALLOWED" }
+                $receiptPayload.auxiliary_capture_xml_sha256 = [string]$auxiliaryBefore.xml_sha256
+                $receiptPayload.auxiliary_capture_xml_file_sha256 = [string]$auxiliaryBefore.xml_file_sha256
+                $receiptPayload.auxiliary_capture_definition_contract_sha256 = [string]$auxiliaryBefore.definition_contract_sha256
+                $receiptPayload.auxiliary_capture_action_contract_sha256 = [string]$auxiliaryBefore.action_contract_sha256
+                $receiptPayload.auxiliary_capture_backup_name = if ($auxiliaryBefore.present) { [string]$taskBackup.backup_name } else { "NONE" }
+                $receiptPayload.auxiliary_capture_backup_manifest_sha256 = [string]$taskBackup.manifest_sha256
+            }
             $inputReceipt = Join-Path $receiptRoot ".$activationId.input.json"
             Write-DawnstrikeActivationJson $receiptPayload $inputReceipt
             try {
@@ -1304,6 +1680,18 @@ function Invoke-DawnstrikeRuntimeActivation {
             ) {
                 throw "Task definitions changed across the runtime swap."
             }
+            $auxiliaryAfterDisabled = Get-DawnstrikeAuxiliaryCaptureTask $runtime $state
+            if ($auxiliaryBefore.present) {
+                if (
+                    -not $auxiliaryAfterDisabled.present -or
+                    $auxiliaryAfterDisabled.state -ne "Disabled" -or
+                    $auxiliaryAfterDisabled.definition_contract_sha256 -ne $auxiliaryBefore.definition_contract_sha256 -or
+                    $auxiliaryAfterDisabled.action_contract_sha256 -ne $auxiliaryBefore.action_contract_sha256
+                ) { throw "Auxiliary capture task changed across the runtime swap." }
+            }
+            elseif ($auxiliaryAfterDisabled.present) {
+                throw "An auxiliary capture task appeared during the runtime swap."
+            }
             $null = Assert-DawnstrikeReceiptRecoveryArtifacts `
                 -Receipt $receiptPayload `
                 -StateRoot $state `
@@ -1317,6 +1705,15 @@ function Invoke-DawnstrikeRuntimeActivation {
             $taskAfter = Get-DawnstrikeTaskContract $runtime $state
             if ($taskAfter.task_contract_sha256 -ne $taskLocked.task_contract_sha256) {
                 throw "Task XML was not restored exactly after runtime activation."
+            }
+            $auxiliaryAfter = Get-DawnstrikeAuxiliaryCaptureTask $runtime $state
+            if ($auxiliaryBefore.present) {
+                if ($auxiliaryAfter.state -ne "Disabled" -or $auxiliaryAfter.definition_contract_sha256 -ne $auxiliaryBefore.definition_contract_sha256) {
+                    throw "Auxiliary capture task must remain Disabled until exact-SHA rebind."
+                }
+            }
+            elseif ($auxiliaryAfter.present) {
+                throw "An auxiliary capture task appeared after activation."
             }
             $tasksDisabled = $false
             $receiptPayload.status = "COMPLETE"
@@ -1337,6 +1734,10 @@ function Invoke-DawnstrikeRuntimeActivation {
                 try {
                     $null = Set-DawnstrikeTasksFailClosedDisabled $runtime $state
                     $tasksDisabled = $true
+                    if ($stateDeclaration.required -and $auxiliaryBefore.present) {
+                        $null = Disable-DawnstrikeAuxiliaryCaptureTask $runtime $state
+                        $auxiliaryDisabled = $true
+                    }
                 }
                 catch {
                     $preserveLocks = $true
@@ -1378,6 +1779,13 @@ function Invoke-DawnstrikeRuntimeActivation {
                                 $taskLocked.task_definition_contract_sha256
                         ) {
                             throw "Automatic restore did not recover exact disabled task definitions."
+                        }
+                        if ($stateDeclaration.required) {
+                            $null = Restore-DawnstrikeAuxiliaryCaptureTask `
+                                -Expected $auxiliaryBefore `
+                                -RuntimeRoot $runtime `
+                                -StateRoot $state
+                            $auxiliaryDisabled = $false
                         }
                         Enable-DawnstrikeCanonicalTasks
                         $restoredTasks = Get-DawnstrikeTaskContract $runtime $state

@@ -1,0 +1,9 @@
+{
+  "schema_version": "dawnstrike.state_preparation_contract.v1",
+  "sidecar_contract": "dawnstrike.account_capture_trial_sidecar.v1",
+  "sidecar_version": 1,
+  "legacy_schema_marker": 30,
+  "required_before_activation": true,
+  "research_only": true,
+  "broker_execution_enabled": false
+}
