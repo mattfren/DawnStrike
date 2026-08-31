@@ -3,12 +3,19 @@ param(
     [string]$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")),
     [string]$StageRoot = "build\vercel-stage",
     [Parameter(Mandatory = $true)][string]$ExpectedSourceSha,
+    [Parameter(Mandatory = $true)][string]$ExpectedSourceTree,
     [switch]$AllowDegraded
 )
 
 $ErrorActionPreference = "Stop"
 $resolvedRoot = (Resolve-Path $ProjectRoot).Path
 $stage = Join-Path $resolvedRoot $StageRoot
+. (Join-Path $resolvedRoot "scripts\vercel_source_contract.ps1")
+Assert-VercelGitSourceStable `
+    -Root $resolvedRoot `
+    -ExpectedSourceSha $ExpectedSourceSha `
+    -ExpectedSourceTree $ExpectedSourceTree `
+    -AllowedStageRoot $stage
 $public = Join-Path $stage "public"
 $config = Get-Content -Raw -LiteralPath (Join-Path $stage "vercel.json") | ConvertFrom-Json
 if ($config.outputDirectory -ne "public") { throw "Unexpected Vercel output directory" }
@@ -28,6 +35,13 @@ if (@(Compare-Object -ReferenceObject ($expectedFunctions | Sort-Object) -Differ
 if ($ExpectedSourceSha -notmatch '^[0-9a-f]{40}$') {
     throw "ExpectedSourceSha must be the exact 40-character lowercase runtime commit SHA."
 }
+if ($ExpectedSourceTree -notmatch '^[0-9a-f]{40}$') {
+    throw "ExpectedSourceTree must be the exact 40-character lowercase Git tree SHA."
+}
+Assert-VercelStagedSourceManifest `
+    -StageRoot $stage `
+    -ExpectedSourceSha $ExpectedSourceSha `
+    -ExpectedSourceTree $ExpectedSourceTree
 $verifyArgs = @(
     "scripts\verify_public_artifact.py", "--root", $public,
     "--expected-source-sha", $ExpectedSourceSha
