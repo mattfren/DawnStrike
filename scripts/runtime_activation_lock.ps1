@@ -1,5 +1,28 @@
 # Shared, strict activation-lock implementation. Callers set operation and
 # immutable source identity before acquisition; credentials are never accepted.
+$script:DawnstrikeApprovedPythonPath='C:\Users\MattFields\AppData\Local\Programs\Python\Python313\python.exe'
+$script:DawnstrikeApprovedPythonSha256='ef8f51028ac5329641985112f8efb1c2d4c47c86b8011ddf7e6fae21e2b4e5a1'
+$script:DawnstrikeApprovedPythonSubject='CN=Python Software Foundation, O=Python Software Foundation, L=Beaverton, S=Oregon, C=US'
+$script:DawnstrikeApprovedPythonThumbprint='9BA3C2E210C7E8296C5056515BFC0B0BBA78AC48'
+
+function Get-DawnstrikeApprovedLockInterpreter {
+    Assert-DawnstrikeSharedLockNoReparse $script:DawnstrikeApprovedPythonPath 'Approved lock-contract interpreter'
+    if(-not (Test-Path -LiteralPath $script:DawnstrikeApprovedPythonPath -PathType Leaf)){throw 'Approved lock-contract interpreter is missing.'}
+    if((Get-DawnstrikeRuntimeLockHash $script:DawnstrikeApprovedPythonPath)-ne $script:DawnstrikeApprovedPythonSha256){throw 'Approved lock-contract interpreter hash changed.'}
+    try{$certificate=[Security.Cryptography.X509Certificates.X509Certificate2]::new([Security.Cryptography.X509Certificates.X509Certificate]::CreateFromSignedFile($script:DawnstrikeApprovedPythonPath))}
+    catch{throw 'Approved lock-contract interpreter has no readable Authenticode signer.'}
+    if($certificate.Subject -ne $script:DawnstrikeApprovedPythonSubject -or $certificate.Thumbprint -ne $script:DawnstrikeApprovedPythonThumbprint){throw 'Approved lock-contract interpreter signer is invalid.'}
+    return [pscustomobject]@{path=$script:DawnstrikeApprovedPythonPath;sha256=$script:DawnstrikeApprovedPythonSha256}
+}
+
+function Assert-DawnstrikeSharedLockNoReparse([string]$Path,[string]$Label){
+    $full=[IO.Path]::GetFullPath($Path);$cursor=[IO.FileInfo]::new($full)
+    if(-not $cursor.Exists){$cursor=[IO.DirectoryInfo]::new((Split-Path $full -Parent))}
+    while($null-ne $cursor){
+        if($cursor.Exists-and($cursor.Attributes-band [IO.FileAttributes]::ReparsePoint)){throw "$Label contains a reparse point."}
+        $cursor=if($cursor-is [IO.FileInfo]){$cursor.Directory}else{$cursor.Parent}
+    }
+}
 function Get-DawnstrikeSharedLockSha256Text([string]$Text) {
     $sha=[Security.Cryptography.SHA256]::Create()
     try { return ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Text)))).Replace('-','').ToLowerInvariant() }
@@ -41,10 +64,14 @@ function Assert-DawnstrikeRuntimeLockStateRoot([string]$StateRoot) {
 
 function Get-DawnstrikeStrictRuntimeLock([string]$Path,[string]$PythonPath,[string]$PythonSha256) {
     $contract = Join-Path $PSScriptRoot "runtime_activation_lock_contract.py"
+    Assert-DawnstrikeSharedLockNoReparse $contract 'Runtime activation lock contract'
+    Assert-DawnstrikeSharedLockNoReparse $Path 'Runtime activation lock'
     if (-not [IO.Path]::IsPathRooted($PythonPath) -or -not (Test-Path -LiteralPath $PythonPath -PathType Leaf)) { throw "Approved lock-contract interpreter is invalid." }
+    $item=Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if(($item.Attributes-band [IO.FileAttributes]::ReparsePoint)-or $item.Length -gt 16384){throw 'Runtime activation lock leaf is unsafe.'}
+    if($PythonPath -ne $script:DawnstrikeApprovedPythonPath -or $PythonSha256 -ne $script:DawnstrikeApprovedPythonSha256){throw 'Lock-contract interpreter is not the approved exact identity.'}
     if ((Get-DawnstrikeRuntimeLockHash $PythonPath) -ne $PythonSha256) { throw "Approved lock-contract interpreter hash changed." }
-    if ((Get-AuthenticodeSignature -FilePath $PythonPath).Status -ne [Management.Automation.SignatureStatus]::Valid) { throw "Approved lock-contract interpreter signature is invalid." }
-    $arguments = if ([IO.Path]::GetFileName($PythonPath) -ieq 'py.exe') { @('-3.13','-I','-B',$contract,$Path) } else { @('-I','-B',$contract,$Path) }
+    $arguments = @('-I','-B',$contract,$Path)
     $output = & $PythonPath @arguments 2>$null
     if ($LASTEXITCODE -ne 0) { throw "Runtime activation lock is malformed or unsafe." }
     try { return ([string]($output -join "")) | ConvertFrom-Json }
@@ -64,7 +91,9 @@ function Test-DawnstrikeRuntimeLockOwnerDead([object]$Payload) {
 function Convert-DawnstrikeCanonicalOriginIdentity([string]$Origin) {
     $value=$Origin.Trim()
     if ($value -match '^(?:https://|ssh://git@)github\.com[/:]([^/]+)/([^/]+?)(?:\.git)?$' -or $value -match '^git@github\.com:([^/]+)/([^/]+?)(?:\.git)?$') {
-        return ("github.com/{0}/{1}" -f $Matches[1].ToLowerInvariant(),$Matches[2].ToLowerInvariant())
+        $identity=("github.com/{0}/{1}" -f $Matches[1].ToLowerInvariant(),$Matches[2].ToLowerInvariant())
+        if($identity -ne 'github.com/mattfren/dawnstrike'){throw 'Origin is not the governed Dawnstrike repository.'}
+        return $identity
     }
     throw "Origin URL cannot be reduced to an approved canonical identity."
 }
@@ -103,6 +132,8 @@ function Enter-DawnstrikeGovernedRuntimeLock {
     $lockRoot = Join-Path $state "locks"
     New-Item -ItemType Directory -Path $lockRoot -Force | Out-Null
     $null = Assert-DawnstrikeRuntimeLockStateRoot $state
+    $lockRootItem=Get-Item -LiteralPath $lockRoot -Force
+    if($lockRootItem.Attributes-band [IO.FileAttributes]::ReparsePoint){throw 'Runtime activation lock root is unsafe.'}
     $path = Join-Path $lockRoot "dawnstrike-runtime-activation.lock"
     $mutex = Enter-DawnstrikeRuntimeLockMutex
     try {
@@ -116,6 +147,14 @@ function Enter-DawnstrikeGovernedRuntimeLock {
         try { $stream.Write($bytes,0,$bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
         $strict = Get-DawnstrikeStrictRuntimeLock $path $PythonPath $PythonSha256
         if ($strict.payload.lock_token -ne $token) { throw "Runtime activation lock read-back token mismatch." }
+        $dailyAfter=@(Get-ChildItem -LiteralPath $lockRoot -Filter 'dawnstrike-daily-*.lock' -File -Force -ErrorAction SilentlyContinue)
+        if($dailyAfter.Count){
+            $owned=Get-DawnstrikeStrictRuntimeLock $path $PythonPath $PythonSha256
+            if($owned.payload.lock_token-ne $token-or $owned.raw_file_sha256-ne $strict.raw_file_sha256){throw 'Activation lock changed during daily-lock race; lock retained.'}
+            Remove-Item -LiteralPath $path -Force
+            if(Test-Path -LiteralPath $path){throw 'Owned activation lock could not be relinquished after daily-lock race.'}
+            throw 'A daily run lock appeared during activation lock acquisition.'
+        }
         return [pscustomobject]@{ path=$path; token=$token; bytes_sha256=[string]$strict.raw_file_sha256; operation=$Operation; python_path=$PythonPath; python_sha256=$PythonSha256; acquired=$true }
     } finally { Exit-DawnstrikeRuntimeLockMutex $mutex }
 }
@@ -131,10 +170,12 @@ function Adopt-DawnstrikeGovernedRuntimeLock {
         if ($stale.payload.lock_token -ne $ExpectedToken -or $stale.raw_file_sha256 -ne $ExpectedFileSha256 -or $stale.payload.operation -ne $ExpectedOperation -or $stale.payload.candidate_sha -ne $CandidateSha -or $stale.payload.candidate_tree -ne $CandidateTree -or $stale.payload.origin_identity -ne $OriginIdentity) { throw "Stale runtime lock does not match the PREPARED contract." }
         if (-not (Test-DawnstrikeRuntimeLockOwnerDead $stale.payload)) { throw "Runtime activation lock owner is still active." }
         $archive = Join-Path (Split-Path $path -Parent) ("recovered-stale-" + $ExpectedFileSha256 + ".lock")
+        Assert-DawnstrikeSharedLockNoReparse $archive 'Stale lock archive'
         if (Test-Path -LiteralPath $archive) { throw "Stale lock archive already exists; adoption is ambiguous." }
         $token=[guid]::NewGuid().ToString("N")
         $json=(New-DawnstrikeRuntimeLockPayload "recovery" $CandidateSha $CandidateTree $OriginIdentity $token)|ConvertTo-Json -Compress
         $temp=Join-Path (Split-Path $path -Parent) (".lock-recovery-"+[guid]::NewGuid().ToString('N')+".tmp")
+        Assert-DawnstrikeSharedLockNoReparse $temp 'Recovery lock temporary file'
         $bytes=[Text.UTF8Encoding]::new($false).GetBytes($json)
         $stream=[IO.File]::Open($temp,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
         try{$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)}finally{$stream.Dispose()}

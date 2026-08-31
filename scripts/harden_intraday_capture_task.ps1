@@ -579,8 +579,13 @@ $taskPassword = $RunAsCredential.GetNetworkCredential().Password
 if ([string]::IsNullOrWhiteSpace($taskPassword)) { throw "RunAsCredential must contain a non-empty Windows password." }
 $contractScript = Join-Path $PSScriptRoot "capture_task_hardening_contract.py"
 if (-not (Test-Path -LiteralPath $contractScript -PathType Leaf)) { throw "Hardening receipt contract is missing." }
+. (Join-Path $PSScriptRoot "runtime_activation_lock.ps1")
+$lockOrigin = Convert-DawnstrikeCanonicalOriginIdentity $script:HardeningOriginUrl
+$lockInterpreter = Get-DawnstrikeApprovedLockInterpreter
 
-$hardeningLock = Enter-HardeningActivationLock -StateRoot $StateRoot
+$hardeningLock = Enter-DawnstrikeGovernedRuntimeLock -StateRoot $StateRoot -Operation capture_task_hardening `
+    -CandidateSha $CandidateSha -CandidateTree $CandidateTree -OriginIdentity $lockOrigin `
+    -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
 try {
     # The task and its scheduler history are re-read only after the shared
     # activation lock is held; no stale pre-lock observation may be replaced.
@@ -750,5 +755,5 @@ catch {
     throw "Delayed SIP task hardening failed; exact original XML and enablement were restored."
 }
 finally {
-    Exit-HardeningActivationLock -Lock $hardeningLock
+    Exit-DawnstrikeGovernedRuntimeLock -Lock $hardeningLock
 }

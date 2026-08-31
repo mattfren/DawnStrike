@@ -2095,10 +2095,10 @@ function Invoke-DawnstrikeRuntimeActivation {
         $preserveLocks = $false
         try {
             $lockOrigin = Convert-DawnstrikeCanonicalOriginIdentity $origin
-            $lockPythonSha = Get-DawnstrikeRuntimeLockHash $pythonPath
+            $lockInterpreter = Get-DawnstrikeApprovedLockInterpreter
             $activationLock = Enter-DawnstrikeGovernedRuntimeLock -StateRoot $state -Operation runtime_activation `
                 -CandidateSha $ExpectedSha -CandidateTree ([string]$candidateContract.tree) `
-                -OriginIdentity $lockOrigin -PythonPath $pythonPath -PythonSha256 $lockPythonSha
+                -OriginIdentity $lockOrigin -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
             Assert-DawnstrikeNoDailyLocks $state
             $dailyLock = Enter-DawnstrikeDailyRunLock -StateRoot $state -MarketDate $MarketDate -Owner "runtime_activation"
             if (-not $dailyLock.acquired) {
