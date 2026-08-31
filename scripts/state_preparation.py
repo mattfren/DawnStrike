@@ -194,9 +194,7 @@ class StatePreparationError(ValueError):
 
 
 def canonical_json(value: object) -> bytes:
-    return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode(
-        "utf-8"
-    )
+    return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
 
 
 def self_hash(payload: Mapping[str, Any], field: str) -> str:
@@ -341,9 +339,7 @@ def inventory(connection: sqlite3.Connection) -> dict[str, Any]:
             for name in SIDECAR_TABLES
         },
         "paper_account_daily_ledger_columns": list(PAPER_LEDGER_COLUMNS),
-        "triggers": {
-            name: _normalize_sql(trigger_sql[name]) for name in SIDECAR_TRIGGERS
-        },
+        "triggers": {name: _normalize_sql(trigger_sql[name]) for name in SIDECAR_TRIGGERS},
         "invariants": {
             "quick_check": quick_check,
             "research_only_checks": True,
@@ -400,10 +396,17 @@ def inspect_live(db_path: str | Path) -> dict[str, Any]:
 
     db = _safe_database(db_path)
     hashes = _hashes(db)
-    with closing(sqlite3.connect(f"file:{quote(db.as_posix(), safe='/:')}?mode=ro", uri=True)) as connection:
+    with closing(
+        sqlite3.connect(f"file:{quote(db.as_posix(), safe='/:')}?mode=ro", uri=True)
+    ) as connection:
         connection.execute("PRAGMA query_only = ON")
         current = inventory(connection)
-    return {**hashes, "inventory_sha256": current["inventory_contract_sha256"], "schema_marker": CURRENT_SCHEMA_VERSION, "quick_check": "ok"}
+    return {
+        **hashes,
+        "inventory_sha256": current["inventory_contract_sha256"],
+        "schema_marker": CURRENT_SCHEMA_VERSION,
+        "quick_check": "ok",
+    }
 
 
 def _load_receipt(path: Path) -> dict[str, Any]:
@@ -451,10 +454,15 @@ def validate_receipt(
         "receipt_sha256",
     }
     if set(payload) != expected:
-        raise StatePreparationError("state-preparation receipt fields do not match the strict contract")
+        raise StatePreparationError(
+            "state-preparation receipt fields do not match the strict contract"
+        )
     if payload.get("receipt_sha256") != self_hash(payload, "receipt_sha256"):
         raise StatePreparationError("state-preparation receipt self-hash mismatch")
-    if payload.get("schema_version") != STATE_PREPARATION_SCHEMA or payload.get("status") != "COMPLETE":
+    if (
+        payload.get("schema_version") != STATE_PREPARATION_SCHEMA
+        or payload.get("status") != "COMPLETE"
+    ):
         raise StatePreparationError("state-preparation receipt is not COMPLETE")
     if payload.get("contract") != STATE_SIDECAR_CONTRACT:
         raise StatePreparationError("state-preparation sidecar contract mismatch")
@@ -485,7 +493,10 @@ def validate_receipt(
             raise StatePreparationError(f"state-preparation {field} is invalid")
     if payload.get("initialization_idempotent") is not True:
         raise StatePreparationError("state-preparation did not prove idempotence")
-    if payload.get("research_only") is not True or payload.get("broker_execution_enabled") is not False:
+    if (
+        payload.get("research_only") is not True
+        or payload.get("broker_execution_enabled") is not False
+    ):
         raise StatePreparationError("state-preparation safety flags are invalid")
     for field in ("prepared_at_utc", "completed_at_utc"):
         value = payload.get(field)
@@ -540,7 +551,7 @@ def prepare_state(
     if state not in db.parents:
         raise StatePreparationError("state database must be contained by state root")
     backup = _safe_backup_root(backup_root, state)
-    proof = inspect_task_proof(task_proof)
+    inspect_task_proof(task_proof)
     proof_hash = _sha256_file(Path(task_proof).resolve())  # type: ignore[arg-type]
     target_receipt = (
         Path(receipt_path).resolve()
@@ -548,16 +559,30 @@ def prepare_state(
         else state / "receipts" / "state-preparation" / f"state-preparation-{candidate_sha}.json"
     )
     if target_receipt.exists() or target_receipt.is_symlink():
-        existing = validate_receipt(_load_receipt(target_receipt), candidate_sha=candidate_sha, candidate_tree=candidate_tree)
+        existing = validate_receipt(
+            _load_receipt(target_receipt),
+            candidate_sha=candidate_sha,
+            candidate_tree=candidate_tree,
+        )
         live = _hashes(db)
-        if live["db_sha256"] != existing["after_db_sha256"] or live["wal_sha256"] != existing["after_wal_sha256"] or live["shm_sha256"] != existing["after_shm_sha256"]:
-            raise StatePreparationError("existing COMPLETE preparation receipt does not match live database hashes")
+        if (
+            live["db_sha256"] != existing["after_db_sha256"]
+            or live["wal_sha256"] != existing["after_wal_sha256"]
+            or live["shm_sha256"] != existing["after_shm_sha256"]
+        ):
+            raise StatePreparationError(
+                "existing COMPLETE preparation receipt does not match live database hashes"
+            )
         with closing(sqlite3.connect(db)) as connection:
             current = inventory(connection)
         if current["inventory_contract_sha256"] != existing["inventory_sha256"]:
-            raise StatePreparationError("existing COMPLETE preparation receipt does not match live inventory")
+            raise StatePreparationError(
+                "existing COMPLETE preparation receipt does not match live inventory"
+            )
         if existing["task_proof_sha256"] != proof_hash:
-            raise StatePreparationError("existing COMPLETE preparation receipt does not match task proof")
+            raise StatePreparationError(
+                "existing COMPLETE preparation receipt does not match task proof"
+            )
         return existing
 
     locks = state / "locks"
@@ -633,12 +658,16 @@ def prepare_state(
             "initialization_idempotent": True,
             "task_proof_sha256": proof_hash,
             "prepared_at_utc": prepared_at,
-            "completed_at_utc": datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z"),
+            "completed_at_utc": datetime.now(UTC)
+            .isoformat(timespec="microseconds")
+            .replace("+00:00", "Z"),
             "research_only": True,
             "broker_execution_enabled": False,
         }
         payload["receipt_sha256"] = self_hash(payload, "receipt_sha256")
-        validated = validate_receipt(payload, candidate_sha=candidate_sha, candidate_tree=candidate_tree)
+        validated = validate_receipt(
+            payload, candidate_sha=candidate_sha, candidate_tree=candidate_tree
+        )
         _atomic_json(target_receipt, validated)
         return validated
     except Exception as exc:
@@ -658,14 +687,21 @@ def prepare_state(
             "research_only": True,
             "broker_execution_enabled": False,
         }
-        failure_path = state / "receipts" / "state-preparation" / f"state-preparation-{candidate_sha}.failed.json"
+        failure_path = (
+            state
+            / "receipts"
+            / "state-preparation"
+            / f"state-preparation-{candidate_sha}.failed.json"
+        )
         try:
             _atomic_json(failure_path, recovery)
         except Exception:
             pass
         if isinstance(exc, StatePreparationError):
             raise
-        raise StatePreparationError("state preparation failed; recovery evidence was retained") from exc
+        raise StatePreparationError(
+            "state preparation failed; recovery evidence was retained"
+        ) from exc
 
 
 def _parser() -> argparse.ArgumentParser:

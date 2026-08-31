@@ -8,7 +8,7 @@ import json
 import re
 import tempfile
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -24,9 +24,7 @@ class CaptureTaskContractError(ValueError):
 
 
 def canonical_json(value: object) -> bytes:
-    return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode(
-        "utf-8"
-    )
+    return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
 
 
 def self_hash(payload: Mapping[str, Any], field: str) -> str:
@@ -47,7 +45,10 @@ def _reject_sensitive_keys(value: object, path: str = "$") -> None:
 
 
 def validate_receipt(
-    payload: Mapping[str, Any], *, candidate_sha: str | None = None, candidate_tree: str | None = None
+    payload: Mapping[str, Any],
+    *,
+    candidate_sha: str | None = None,
+    candidate_tree: str | None = None,
 ) -> dict[str, Any]:
     _reject_sensitive_keys(payload)
     expected = {
@@ -80,10 +81,15 @@ def validate_receipt(
         "receipt_sha256",
     }
     if set(payload) != expected:
-        raise CaptureTaskContractError("capture-task receipt fields do not match the strict contract")
+        raise CaptureTaskContractError(
+            "capture-task receipt fields do not match the strict contract"
+        )
     if payload.get("receipt_sha256") != self_hash(payload, "receipt_sha256"):
         raise CaptureTaskContractError("capture-task receipt self-hash mismatch")
-    if payload.get("schema_version") != CAPTURE_TASK_RECEIPT_SCHEMA or payload.get("status") != "COMPLETE":
+    if (
+        payload.get("schema_version") != CAPTURE_TASK_RECEIPT_SCHEMA
+        or payload.get("status") != "COMPLETE"
+    ):
         raise CaptureTaskContractError("capture-task receipt is not COMPLETE")
     if payload.get("task_name") != CAPTURE_TASK_NAME:
         raise CaptureTaskContractError("capture-task receipt task name is invalid")
@@ -112,12 +118,19 @@ def validate_receipt(
         if not _SHA256.fullmatch(str(payload.get(field) or "")):
             raise CaptureTaskContractError(f"capture-task {field} is invalid")
     if payload.get("enablement_before") != "Disabled" or payload.get("enablement_after") != "Ready":
-        raise CaptureTaskContractError("capture task was not disabled before rebind and Ready after rebind")
+        raise CaptureTaskContractError(
+            "capture task was not disabled before rebind and Ready after rebind"
+        )
     if payload.get("changed_field") != "candidate_sha":
         raise CaptureTaskContractError("capture-task rebind changed more than candidate SHA")
     if payload.get("preserved_contract") is not True:
-        raise CaptureTaskContractError("capture-task principal/triggers/settings were not preserved")
-    if payload.get("research_only") is not True or payload.get("broker_execution_enabled") is not False:
+        raise CaptureTaskContractError(
+            "capture-task principal/triggers/settings were not preserved"
+        )
+    if (
+        payload.get("research_only") is not True
+        or payload.get("broker_execution_enabled") is not False
+    ):
         raise CaptureTaskContractError("capture-task receipt safety flags are invalid")
     completed = payload.get("completed_at_utc")
     if not isinstance(completed, str) or not completed.endswith("Z"):
@@ -137,7 +150,9 @@ def seal_receipt(payload: Mapping[str, Any], output_path: str | Path) -> dict[st
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists() or path.is_symlink():
         raise CaptureTaskContractError("capture-task receipt already exists")
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
     try:
         import os
 
@@ -149,7 +164,9 @@ def seal_receipt(payload: Mapping[str, Any], output_path: str | Path) -> dict[st
     return validated
 
 
-def load_receipt(path: str | Path, *, candidate_sha: str | None = None, candidate_tree: str | None = None) -> dict[str, Any]:
+def load_receipt(
+    path: str | Path, *, candidate_sha: str | None = None, candidate_tree: str | None = None
+) -> dict[str, Any]:
     try:
         value = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -181,7 +198,9 @@ def main(argv: list[str] | None = None) -> int:
                 raise CaptureTaskContractError("capture-task receipt input must be an object")
             result = seal_receipt(value, args.output)
         else:
-            result = load_receipt(args.receipt, candidate_sha=args.candidate_sha, candidate_tree=args.candidate_tree)
+            result = load_receipt(
+                args.receipt, candidate_sha=args.candidate_sha, candidate_tree=args.candidate_tree
+            )
     except (OSError, CaptureTaskContractError, ValueError, json.JSONDecodeError) as exc:
         print(json.dumps({"status": "FAIL", "error": str(exc)}, sort_keys=True))
         return 2
@@ -191,4 +210,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

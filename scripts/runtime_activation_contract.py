@@ -463,9 +463,7 @@ def _validate_extended_receipt(payload: Mapping[str, Any]) -> None:
 
     if payload.get("state_preparation_required") is not True:
         raise ActivationContractError("sidecar runtime receipt does not require state preparation")
-    if payload.get("state_preparation_contract") != (
-        "dawnstrike.account_capture_trial_sidecar.v1"
-    ):
+    if payload.get("state_preparation_contract") != ("dawnstrike.account_capture_trial_sidecar.v1"):
         raise ActivationContractError("runtime state-preparation contract is invalid")
     for field in (
         "state_preparation_receipt_sha256",
@@ -501,7 +499,9 @@ def _validate_extended_receipt(payload: Mapping[str, Any]) -> None:
             raise ActivationContractError("runtime receipt auxiliary backup name is invalid")
     else:
         if before != "ABSENT" or after != "ABSENT" or action != "ABSENT_ALLOWED":
-            raise ActivationContractError("runtime receipt has an inconsistent absent auxiliary task")
+            raise ActivationContractError(
+                "runtime receipt has an inconsistent absent auxiliary task"
+            )
         if payload.get("auxiliary_capture_backup_name") != "NONE":
             raise ActivationContractError("absent auxiliary task must not have a backup name")
 

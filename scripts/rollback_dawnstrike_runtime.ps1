@@ -11,6 +11,62 @@ param(
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "activate_dawnstrike_runtime.ps1")
 
+function Get-DawnstrikeActivationAuxiliaryRecoveryContract {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][object]$Activation,
+        [Parameter(Mandatory = $true)][string]$StateRoot
+    )
+
+    if (-not [bool]$Activation.auxiliary_capture_present) {
+        return [pscustomobject]@{
+            present = $false
+            task_path = "NONE"
+            xml = ""
+            xml_sha256 = Get-DawnstrikeSha256Text ""
+            enabled = $false
+        }
+    }
+    $backupName = [string]$Activation.scheduler_backup_name
+    $manifestPath = Join-Path $StateRoot "scheduler-backups\$backupName\manifest.json"
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        throw "Activation auxiliary capture XML backup is missing."
+    }
+    if ((Get-DawnstrikeSha256File $manifestPath) -ne [string]$Activation.scheduler_backup_manifest_sha256) {
+        throw "Activation auxiliary capture XML backup manifest hash does not match the receipt."
+    }
+    try {
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    }
+    catch {
+        throw "Activation auxiliary capture XML backup manifest is invalid JSON."
+    }
+    $auxiliary = $manifest.auxiliary_capture
+    if ($null -eq $auxiliary -or $auxiliary.present -ne $true) {
+        throw "Activation auxiliary capture XML backup does not attest the governed task."
+    }
+    $xmlPath = Join-Path (Split-Path -Parent $manifestPath) ([string]$auxiliary.file_name)
+    if (-not (Test-Path -LiteralPath $xmlPath -PathType Leaf)) {
+        throw "Activation auxiliary capture XML file is missing."
+    }
+    $xml = [System.IO.File]::ReadAllText($xmlPath)
+    if (
+        (Get-DawnstrikeSha256File $xmlPath) -ne [string]$auxiliary.xml_file_sha256 -or
+        (Get-DawnstrikeSha256Text $xml) -ne [string]$auxiliary.xml_sha256 -or
+        [string]$auxiliary.xml_sha256 -ne [string]$Activation.auxiliary_capture_xml_sha256 -or
+        [string]$auxiliary.xml_file_sha256 -ne [string]$Activation.auxiliary_capture_xml_file_sha256
+    ) {
+        throw "Activation auxiliary capture XML backup does not match the receipt."
+    }
+    return [pscustomobject]@{
+        present = $true
+        task_path = [string]$auxiliary.task_path
+        xml = $xml
+        xml_sha256 = [string]$auxiliary.xml_sha256
+        enabled = ([string]$Activation.auxiliary_capture_state_before -eq "Ready")
+    }
+}
+
 function Invoke-DawnstrikeRuntimeRollback {
     [CmdletBinding()]
     param(
@@ -388,13 +444,9 @@ function Invoke-DawnstrikeRuntimeRollback {
             -PythonPath $pythonPath `
             -TimeoutSeconds $ProcessTimeoutSeconds
         if ($stateDeclaration.required -and $activation.PSObject.Properties.Name -contains "auxiliary_capture_present") {
-            $expectedAuxiliary = [pscustomobject]@{
-                present = [bool]$activation.auxiliary_capture_present
-                task_path = [string]$auxiliaryBefore.task_path
-                xml = [string]$auxiliaryBefore.xml
-                xml_sha256 = [string]$activation.auxiliary_capture_xml_sha256
-                enabled = ([string]$activation.auxiliary_capture_state_before -eq "Ready")
-            }
+            $expectedAuxiliary = Get-DawnstrikeActivationAuxiliaryRecoveryContract `
+                -Activation $activation `
+                -StateRoot $state
             if ($expectedAuxiliary.present) {
                 $null = Restore-DawnstrikeAuxiliaryCaptureTask `
                     -Expected $expectedAuxiliary `

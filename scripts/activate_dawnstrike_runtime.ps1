@@ -1606,6 +1606,9 @@ function Invoke-DawnstrikeRuntimeActivation {
                 broker_execution_enabled = $false
             }
             if ($stateDeclaration.required) {
+                $auxiliaryBackupManifest = Get-Content `
+                    -LiteralPath (Join-Path $taskBackup.backup_path "manifest.json") `
+                    -Raw -Encoding UTF8 | ConvertFrom-Json
                 $receiptPayload.state_preparation_required = $true
                 $receiptPayload.state_preparation_contract = [string]$stateDeclaration.sidecar_contract
                 $receiptPayload.state_preparation_receipt_sha256 = [string]$statePreparation.receipt_sha256
@@ -1618,7 +1621,12 @@ function Invoke-DawnstrikeRuntimeActivation {
                 $receiptPayload.auxiliary_capture_state_after = if ($auxiliaryBefore.present) { "Disabled" } else { "ABSENT" }
                 $receiptPayload.auxiliary_capture_action = if ($auxiliaryBefore.present) { "DISABLED_UNTIL_EXACT_SHA_REBIND" } else { "ABSENT_ALLOWED" }
                 $receiptPayload.auxiliary_capture_xml_sha256 = [string]$auxiliaryBefore.xml_sha256
-                $receiptPayload.auxiliary_capture_xml_file_sha256 = [string]$auxiliaryBefore.xml_file_sha256
+                $receiptPayload.auxiliary_capture_xml_file_sha256 = if ($auxiliaryBefore.present) {
+                    [string]$auxiliaryBackupManifest.auxiliary_capture.xml_file_sha256
+                }
+                else {
+                    Get-DawnstrikeSha256Text ""
+                }
                 $receiptPayload.auxiliary_capture_definition_contract_sha256 = [string]$auxiliaryBefore.definition_contract_sha256
                 $receiptPayload.auxiliary_capture_action_contract_sha256 = [string]$auxiliaryBefore.action_contract_sha256
                 $receiptPayload.auxiliary_capture_backup_name = if ($auxiliaryBefore.present) { [string]$taskBackup.backup_name } else { "NONE" }

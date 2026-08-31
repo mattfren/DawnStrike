@@ -6,7 +6,5 @@ contract tests can import it without invoking a process.
 
 from scripts.state_preparation import main
 
-
 if __name__ == "__main__":
     raise SystemExit(main())
-
