@@ -123,4 +123,10 @@ $sourceManifestJson = $sourceManifest | ConvertTo-Json -Depth 8
     $sourceManifestJson,
     $utf8NoBom
 )
+# Keep the same provenance receipt in the static/function package so the
+# promoted deployment can be inspected remotely without trusting build logs.
+Copy-Item -LiteralPath (Join-Path $stage "vercel-source-manifest.json") `
+    -Destination (Join-Path $stagePublic "vercel-source-manifest.json") -Force
+Copy-Item -LiteralPath (Join-Path $stage "vercel-source-manifest.json") `
+    -Destination (Join-Path $functionPublic "vercel-source-manifest.json") -Force
 Write-Output "Staged minimal Vercel publication at $stage"
