@@ -155,7 +155,13 @@ _EXTENDED_RECEIPT_KEYS = frozenset(
         "state_preparation_after_db_sha256",
         "state_preparation_after_wal_sha256",
         "state_preparation_after_shm_sha256",
+        "state_preparation_after_logical_snapshot_sha256",
         "state_preparation_inventory_sha256",
+        "state_preparation_backup_id",
+        "state_preparation_backup_bundle_path",
+        "state_preparation_backup_db_sha256",
+        "state_preparation_backup_manifest_sha256",
+        "state_preparation_backup_manifest_file_sha256",
         "auxiliary_capture_present",
         "auxiliary_capture_state_before",
         "auxiliary_capture_state_after",
@@ -470,6 +476,7 @@ def _validate_extended_receipt(payload: Mapping[str, Any]) -> None:
         "state_preparation_after_db_sha256",
         "state_preparation_after_wal_sha256",
         "state_preparation_after_shm_sha256",
+        "state_preparation_after_logical_snapshot_sha256",
         "state_preparation_inventory_sha256",
         "auxiliary_capture_xml_sha256",
         "auxiliary_capture_xml_file_sha256",
@@ -479,6 +486,25 @@ def _validate_extended_receipt(payload: Mapping[str, Any]) -> None:
     ):
         if not _SHA256.fullmatch(str(payload.get(field) or "")):
             raise ActivationContractError(f"runtime receipt {field} is invalid")
+    for field in (
+        "state_preparation_backup_db_sha256",
+        "state_preparation_backup_manifest_sha256",
+        "state_preparation_backup_manifest_file_sha256",
+    ):
+        if not _SHA256.fullmatch(str(payload.get(field) or "")):
+            raise ActivationContractError(f"runtime receipt {field} is invalid")
+    backup_id = payload.get("state_preparation_backup_id")
+    backup_path = payload.get("state_preparation_backup_bundle_path")
+    if (
+        not isinstance(backup_id, str)
+        or not re.fullmatch(r"state-preparation-[0-9a-f]{16}-[0-9a-f]{16}", backup_id)
+        or not isinstance(backup_path, str)
+        or not Path(backup_path).is_absolute()
+        or Path(backup_path).name != backup_id
+    ):
+        raise ActivationContractError(
+            "runtime receipt state-preparation backup identity is invalid"
+        )
     if payload.get("auxiliary_capture_present") not in {True, False}:
         raise ActivationContractError("runtime receipt auxiliary capture presence is invalid")
     before = payload.get("auxiliary_capture_state_before")

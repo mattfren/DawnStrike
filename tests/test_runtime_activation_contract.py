@@ -365,6 +365,7 @@ $global:MockTaskState = 'Ready'
 $global:MockDefinition = 'morning-v1'
 function Get-ScheduledTask {{
     [CmdletBinding()] param([string]$TaskName)
+    if ($TaskName -eq 'Dawnstrike Delayed SIP Capture') {{ return @() }}
     [pscustomobject]@{{
         State=$global:MockTaskState; TaskPath='\';
         Actions=@([pscustomobject]@{{
@@ -624,6 +625,7 @@ foreach ($name in $script:DawnstrikeCanonicalTaskNames) {{
 }}
 function Get-ScheduledTask {{
     [CmdletBinding()] param([string]$TaskName)
+    if ($TaskName -eq 'Dawnstrike Delayed SIP Capture') {{ return @() }}
     [pscustomobject]@{{
         State=$global:MockTaskStates[$TaskName]; TaskPath='\';
         Actions=@([pscustomobject]@{{

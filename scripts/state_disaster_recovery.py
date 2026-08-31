@@ -36,6 +36,7 @@ MANIFEST_NAME = "manifest.json"
 RECEIPT_NAME = "receipt.json"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GIT_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
+_REPARSE_POINT = 0x400
 
 
 class RecoveryValidationError(ValueError):
@@ -67,8 +68,31 @@ def _utc_now() -> str:
     return datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
+def _is_reparse_point(path: Path) -> bool:
+    try:
+        attributes = int(getattr(path.lstat(), "st_file_attributes", 0))
+    except OSError:
+        return False
+    return path.is_symlink() or bool(attributes & _REPARSE_POINT)
+
+
+def _assert_no_reparse_components(path: str | Path) -> Path:
+    absolute = Path(os.path.abspath(Path(path).expanduser()))
+    current = Path(absolute.anchor)
+    for component in absolute.parts[1:]:
+        current /= component
+        if current.exists() and _is_reparse_point(current):
+            raise RecoveryValidationError(
+                f"reparse-point path component is forbidden: {current}"
+            )
+    return absolute
+
+
 def _resolve(path: str | Path) -> Path:
-    return Path(path).expanduser().resolve()
+    supplied = _assert_no_reparse_components(path)
+    resolved = supplied.resolve()
+    _assert_no_reparse_components(resolved)
+    return resolved
 
 
 def _is_within(path: Path, parent: Path) -> bool:
@@ -133,12 +157,16 @@ def _db_metadata(path: Path, *, read_only: bool) -> dict[str, Any]:
 
 
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
+    _assert_no_reparse_components(path)
+    _assert_no_reparse_components(path.parent)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     try:
+        _assert_no_reparse_components(temporary)
         with temporary.open("xb") as handle:
             handle.write(_canonical_json(payload))
             handle.flush()
             os.fsync(handle.fileno())
+        _assert_no_reparse_components(path)
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
@@ -207,9 +235,13 @@ def create_backup(
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T.*Z", timestamp):
         raise RecoveryValidationError("created_at must be an RFC3339 UTC timestamp")
     bundle_name = _bundle_id(timestamp, source_hash, backup_id)
+    _assert_no_reparse_components(root.parent)
+    _assert_no_reparse_components(root)
     root.mkdir(parents=True, exist_ok=True)
+    _assert_no_reparse_components(root)
     final_dir = root / bundle_name
     temporary_dir = Path(tempfile.mkdtemp(prefix=f".incomplete-{bundle_name}-", dir=root))
+    _assert_no_reparse_components(temporary_dir)
     existing_result: dict[str, Any] | None = None
     try:
         target = temporary_dir / DB_NAME
@@ -336,6 +368,8 @@ def validate_backup(
     expected_files = {DB_NAME, MANIFEST_NAME, RECEIPT_NAME}
     if {item.name for item in path.iterdir()} != expected_files:
         raise RecoveryValidationError("backup bundle contains partial or unexpected files")
+    for name in expected_files:
+        _assert_no_reparse_components(path / name)
     manifest = _load_json(path / MANIFEST_NAME)
     receipt = _load_json(path / RECEIPT_NAME)
     required_manifest = {

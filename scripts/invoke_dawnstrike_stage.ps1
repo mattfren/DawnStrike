@@ -15,6 +15,15 @@ function Enter-DawnstrikeDailyRunLock {
     }
     $lockRoot = Join-Path $StateRoot "locks"
     New-Item -ItemType Directory -Path $lockRoot -Force | Out-Null
+    $activationLockPath = Join-Path $lockRoot "dawnstrike-runtime-activation.lock"
+    if ($Owner -notin @("runtime_activation", "runtime_rollback") -and (Test-Path -LiteralPath $activationLockPath -PathType Leaf)) {
+        return [pscustomobject]@{
+            acquired = $false
+            lock_path = Join-Path $lockRoot ("dawnstrike-daily-" + $MarketDate + ".lock")
+            reason = "runtime_activation_lock"
+            age_minutes = $null
+        }
+    }
     $lockPath = Join-Path $lockRoot ("dawnstrike-daily-" + $MarketDate + ".lock")
     if (Test-Path -LiteralPath $lockPath -PathType Leaf) {
         $age = ((Get-Date).ToUniversalTime() - (Get-Item -LiteralPath $lockPath).LastWriteTimeUtc).TotalMinutes

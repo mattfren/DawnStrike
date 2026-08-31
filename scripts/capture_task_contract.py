@@ -17,11 +17,33 @@ CAPTURE_TASK_RECEIPT_SCHEMA = "dawnstrike.capture_task_rebind_receipt.v1"
 CAPTURE_TASK_NAME = "Dawnstrike Delayed SIP Capture"
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_ACTIVATION_ID = re.compile(r"^[0-9a-f]{24}$")
 _FORBIDDEN_KEY_PARTS = ("secret", "password", "credential", "private_key", "token")
+_REPARSE_POINT = 0x400
 
 
 class CaptureTaskContractError(ValueError):
     """The task or rebind receipt is unsafe or ambiguous."""
+
+
+def _is_reparse_point(path: Path) -> bool:
+    try:
+        attributes = int(getattr(path.lstat(), "st_file_attributes", 0))
+    except OSError:
+        return False
+    return path.is_symlink() or bool(attributes & _REPARSE_POINT)
+
+
+def _assert_no_reparse_components(path: str | Path) -> Path:
+    absolute = Path(os.path.abspath(Path(path).expanduser()))
+    current = Path(absolute.anchor)
+    for component in absolute.parts[1:]:
+        current /= component
+        if current.exists() and _is_reparse_point(current):
+            raise CaptureTaskContractError(
+                f"reparse-point path component is forbidden: {current}"
+            )
+    return absolute
 
 
 def canonical_json(value: object) -> bytes:
@@ -58,6 +80,9 @@ def validate_receipt(
         "task_name",
         "candidate_sha",
         "candidate_tree",
+        "activation_id",
+        "activation_receipt_name",
+        "activation_receipt_sha256",
         "runtime_origin_sha256",
         "previous_candidate_sha",
         "xml_before_sha256",
@@ -97,12 +122,19 @@ def validate_receipt(
     for field in ("candidate_sha", "candidate_tree", "previous_candidate_sha"):
         if not _GIT_SHA.fullmatch(str(payload.get(field) or "")):
             raise CaptureTaskContractError(f"capture-task {field} is invalid")
+    if not _ACTIVATION_ID.fullmatch(str(payload.get("activation_id") or "")):
+        raise CaptureTaskContractError("capture-task activation id is invalid")
+    if payload.get("activation_receipt_name") != (
+        "runtime-activation-" + str(payload.get("activation_id")) + ".json"
+    ):
+        raise CaptureTaskContractError("capture-task activation receipt name is invalid")
     if candidate_sha is not None and payload.get("candidate_sha") != candidate_sha:
         raise CaptureTaskContractError("capture-task candidate SHA mismatch")
     if candidate_tree is not None and payload.get("candidate_tree") != candidate_tree:
         raise CaptureTaskContractError("capture-task candidate tree mismatch")
     for field in (
         "runtime_origin_sha256",
+        "activation_receipt_sha256",
         "xml_before_sha256",
         "xml_after_sha256",
         "action_before_sha256",
@@ -147,8 +179,10 @@ def seal_receipt(payload: Mapping[str, Any], output_path: str | Path) -> dict[st
     value = dict(payload)
     value["receipt_sha256"] = self_hash(value, "receipt_sha256")
     validated = validate_receipt(value)
-    path = Path(output_path)
+    path = _assert_no_reparse_components(output_path)
+    _assert_no_reparse_components(path.parent)
     path.parent.mkdir(parents=True, exist_ok=True)
+    _assert_no_reparse_components(path.parent)
     if path.exists() or path.is_symlink():
         raise CaptureTaskContractError("capture-task receipt already exists")
     descriptor, temporary_name = tempfile.mkstemp(
@@ -157,10 +191,12 @@ def seal_receipt(payload: Mapping[str, Any], output_path: str | Path) -> dict[st
     temporary = Path(temporary_name)
     try:
         os.close(descriptor)
+        _assert_no_reparse_components(temporary)
         temporary.write_bytes(canonical_json(validated))
         with temporary.open("r+b") as handle:
             handle.flush()
             os.fsync(handle.fileno())
+        _assert_no_reparse_components(path)
         os.link(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
@@ -171,7 +207,7 @@ def load_receipt(
     path: str | Path, *, candidate_sha: str | None = None, candidate_tree: str | None = None
 ) -> dict[str, Any]:
     try:
-        value = json.loads(Path(path).read_text(encoding="utf-8"))
+        value = json.loads(_assert_no_reparse_components(path).read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise CaptureTaskContractError("capture-task receipt is invalid JSON") from exc
     if not isinstance(value, dict):
