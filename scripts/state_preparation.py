@@ -189,7 +189,7 @@ SIDECAR_COLUMNS = {
 # NOT NULL boundary, primary key, or default.
 SIDECAR_COLUMN_CONTRACT = {
     "expected_market_sessions": (
-        ("session_id", "TEXT", 0, None, 1),
+        ("session_id", "TEXT", 1, None, 1),
         ("market_date", "TEXT", 1, None, 0),
         ("exchange", "TEXT", 1, None, 0),
         ("session_open_utc", "TEXT", 1, None, 0),
@@ -203,7 +203,7 @@ SIDECAR_COLUMN_CONTRACT = {
         ("payload_json", "TEXT", 1, None, 0),
     ),
     "intraday_capture_runs": (
-        ("capture_run_id", "TEXT", 0, None, 1),
+        ("capture_run_id", "TEXT", 1, None, 1),
         ("session_id", "TEXT", 1, None, 0),
         ("market_date", "TEXT", 1, None, 0),
         ("evidence_mode", "TEXT", 1, None, 0),
@@ -227,7 +227,7 @@ SIDECAR_COLUMN_CONTRACT = {
         ("broker_execution_enabled", "INTEGER", 1, None, 0),
     ),
     "committed_fill_truth_receipts": (
-        ("receipt_id", "TEXT", 0, None, 1),
+        ("receipt_id", "TEXT", 1, None, 1),
         ("receipt_hash_sha256", "TEXT", 1, None, 0),
         ("account_id", "TEXT", 1, None, 0),
         ("strategy_id", "TEXT", 1, None, 0),
@@ -261,7 +261,7 @@ SIDECAR_COLUMN_CONTRACT = {
         ("broker_execution_enabled", "INTEGER", 1, None, 0),
     ),
     "no_trade_session_receipts": (
-        ("receipt_id", "TEXT", 0, None, 1),
+        ("receipt_id", "TEXT", 1, None, 1),
         ("receipt_hash_sha256", "TEXT", 1, None, 0),
         ("account_id", "TEXT", 1, None, 0),
         ("strategy_id", "TEXT", 1, None, 0),
@@ -284,7 +284,7 @@ SIDECAR_COLUMN_CONTRACT = {
         ("broker_execution_enabled", "INTEGER", 1, None, 0),
     ),
     "experiment_trial_ledger": (
-        ("trial_id", "TEXT", 0, None, 1),
+        ("trial_id", "TEXT", 1, None, 1),
         ("trial_number", "INTEGER", 1, None, 0),
         ("experiment_id", "TEXT", 1, None, 0),
         ("arm_id", "TEXT", 1, None, 0),
@@ -324,7 +324,7 @@ PAPER_LEDGER_COLUMN_CONTRACT = (
 # prove the actual primary-key, uniqueness, NOT NULL, CHECK, and FK shape.
 SIDECAR_TABLE_SQL_FRAGMENTS = {
     "expected_market_sessions": (
-        "session_id text primary key",
+        "session_id text primary key not null",
         "market_date text not null unique",
         "status text not null check (status in ('expected', 'open', 'closed', 'cancelled', 'quarantined'))",
         "research_only integer not null check (research_only = 1)",
@@ -332,7 +332,7 @@ SIDECAR_TABLE_SQL_FRAGMENTS = {
         "payload_json text not null",
     ),
     "intraday_capture_runs": (
-        "capture_run_id text primary key",
+        "capture_run_id text primary key not null",
         "session_id text not null",
         "evidence_mode text not null check (evidence_mode in ('forward_observed', 'retrospective_research'))",
         "status text not null check (status in ('pending', 'running', 'complete', 'partial', 'failed', 'source_conflict', 'quarantined'))",
@@ -342,7 +342,7 @@ SIDECAR_TABLE_SQL_FRAGMENTS = {
         "foreign key (session_id) references expected_market_sessions(session_id)",
     ),
     "committed_fill_truth_receipts": (
-        "receipt_id text primary key",
+        "receipt_id text primary key not null",
         "receipt_hash_sha256 text not null unique",
         "account_id text not null",
         "market_date text not null",
@@ -355,7 +355,7 @@ SIDECAR_TABLE_SQL_FRAGMENTS = {
         "broker_execution_enabled integer not null check ( broker_execution_enabled = 0 )",
     ),
     "no_trade_session_receipts": (
-        "receipt_id text primary key",
+        "receipt_id text primary key not null",
         "receipt_hash_sha256 text not null unique",
         "account_id text not null",
         "market_date text not null",
@@ -370,7 +370,7 @@ SIDECAR_TABLE_SQL_FRAGMENTS = {
         "broker_execution_enabled integer not null check ( broker_execution_enabled = 0 )",
     ),
     "experiment_trial_ledger": (
-        "trial_id text primary key",
+        "trial_id text primary key not null",
         "trial_number integer not null unique check (trial_number > 0)",
         "experiment_id text not null",
         "arm_id text not null",
@@ -615,7 +615,14 @@ def _safety_probe_value(table: str, column: str, declared_type: str) -> object:
 
 
 def _probe_sidecar_safety(connection: sqlite3.Connection, table: str) -> None:
-    """Prove both safety CHECKs reject unsafe inserts without persistence."""
+    """Prove the complete boolean domain rejects unsafe inserts.
+
+    SQLite CHECK expressions evaluate NULL as unknown, and a weakened
+    ``research_only <> 0`` constraint would reject only the old zero probe
+    while accepting other non-canonical values.  Exercise representative
+    integer, numeric-text, arbitrary-text, and NULL values for each field in
+    isolation, accepting only an error attributable to that field.
+    """
 
     columns = [
         (str(row[1]), str(row[2] or ""), int(row[3]), int(row[5]))
@@ -624,60 +631,76 @@ def _probe_sidecar_safety(connection: sqlite3.Connection, table: str) -> None:
     ]
     if not columns:
         raise StatePreparationError(f"sidecar safety probe has no required columns: {table}")
-    for probe_index, (research_only, broker_enabled) in enumerate(((0, 0), (1, 1))):
-        savepoint = f"sidecar_safety_probe_{probe_index}"
-        connection.execute(f"SAVEPOINT {savepoint}")
-        try:
-            if table == "intraday_capture_runs":
-                parent = {
-                    "session_id": "state-preparation-safety-probe-session",
-                    "market_date": "2099-01-01",
-                    "exchange": "XNYS",
-                    "session_open_utc": "2099-01-01T14:30:00Z",
-                    "session_close_utc": "2099-01-01T21:00:00Z",
-                    "status": "EXPECTED",
-                    "calendar_source": "safety-probe",
-                    "calendar_source_hash_sha256": "a" * 64,
-                    "created_at": "2099-01-01T00:00:00Z",
-                    "research_only": 1,
-                    "broker_execution_enabled": 0,
-                    "payload_json": "{}",
+    invalid_values: tuple[tuple[str, tuple[object, ...]], ...] = (
+        (
+            "research_only",
+            (0, 2, -1, "0", "2", "not-a-boolean", None),
+        ),
+        (
+            "broker_execution_enabled",
+            (1, 2, -1, "1", "2", "not-a-boolean", None),
+        ),
+    )
+    probe_index = 0
+    for field, values_to_reject in invalid_values:
+        for invalid_value in values_to_reject:
+            savepoint = f"sidecar_safety_probe_{probe_index}"
+            probe_index += 1
+            connection.execute(f"SAVEPOINT {savepoint}")
+            research_only: object = 1
+            broker_enabled: object = 0
+            if field == "research_only":
+                research_only = invalid_value
+            else:
+                broker_enabled = invalid_value
+            try:
+                if table == "intraday_capture_runs":
+                    parent = {
+                        "session_id": "state-preparation-safety-probe-session",
+                        "market_date": "2099-01-01",
+                        "exchange": "XNYS",
+                        "session_open_utc": "2099-01-01T14:30:00Z",
+                        "session_close_utc": "2099-01-01T21:00:00Z",
+                        "status": "EXPECTED",
+                        "calendar_source": "safety-probe",
+                        "calendar_source_hash_sha256": "a" * 64,
+                        "created_at": "2099-01-01T00:00:00Z",
+                        "research_only": 1,
+                        "broker_execution_enabled": 0,
+                        "payload_json": "{}",
+                    }
+                    names = tuple(parent)
+                    connection.execute(
+                        f"INSERT INTO expected_market_sessions ({', '.join(names)}) "
+                        f"VALUES ({', '.join('?' for _ in names)})",
+                        tuple(parent.values()),
+                    )
+                values: dict[str, object] = {
+                    name: _safety_probe_value(table, name, declared_type)
+                    for name, declared_type, _not_null, _primary_key in columns
                 }
-                names = tuple(parent)
+                if table == "intraday_capture_runs":
+                    values["session_id"] = "state-preparation-safety-probe-session"
+                values["research_only"] = research_only
+                values["broker_execution_enabled"] = broker_enabled
+                names = tuple(values)
                 connection.execute(
-                    f"INSERT INTO expected_market_sessions ({', '.join(names)}) "
+                    f"INSERT INTO {table} ({', '.join(names)}) "
                     f"VALUES ({', '.join('?' for _ in names)})",
-                    tuple(parent.values()),
+                    tuple(values.values()),
                 )
-            values: dict[str, object] = {
-                name: _safety_probe_value(table, name, declared_type)
-                for name, declared_type, _not_null, _primary_key in columns
-            }
-            if table == "intraday_capture_runs":
-                values["session_id"] = "state-preparation-safety-probe-session"
-            values["research_only"] = research_only
-            values["broker_execution_enabled"] = broker_enabled
-            names = tuple(values)
-            connection.execute(
-                f"INSERT INTO {table} ({', '.join(names)}) "
-                f"VALUES ({', '.join('?' for _ in names)})",
-                tuple(values.values()),
-            )
-        except sqlite3.IntegrityError as exc:
-            expected_field = (
-                "research_only" if research_only == 0 else "broker_execution_enabled"
-            )
-            if expected_field not in str(exc).lower():
+            except sqlite3.IntegrityError as exc:
+                if field not in str(exc).lower():
+                    raise StatePreparationError(
+                        f"sidecar safety probe hit an unrelated constraint: {table}"
+                    ) from exc
+            else:
                 raise StatePreparationError(
-                    f"sidecar safety probe hit an unrelated constraint: {table}"
-                ) from exc
-        else:
-            raise StatePreparationError(
-                f"sidecar safety constraint accepted an unsafe row: {table}"
-            )
-        finally:
-            connection.execute(f"ROLLBACK TO {savepoint}")
-            connection.execute(f"RELEASE {savepoint}")
+                    f"sidecar safety constraint accepted unsafe {field}={invalid_value!r}: {table}"
+                )
+            finally:
+                connection.execute(f"ROLLBACK TO {savepoint}")
+                connection.execute(f"RELEASE {savepoint}")
 
 
 def inventory(connection: sqlite3.Connection) -> dict[str, Any]:
@@ -1349,7 +1372,7 @@ def prepare_state(
 
     prepared_at = datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
     try:
-        with _connect_rw(db) as connection:
+        with closing(_connect_rw(db)) as connection:
             run_migrations(connection)
             connection.commit()
             first = inventory(connection)

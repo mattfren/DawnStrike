@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -44,6 +45,13 @@ _ACCOUNT_TRUTH_TRIGGERS = (
     "experiment_trial_ledger_no_update",
     "experiment_trial_ledger_no_delete",
 )
+_ACCOUNT_TRUTH_IDENTITY_COLUMNS = {
+    "expected_market_sessions": "session_id",
+    "intraday_capture_runs": "capture_run_id",
+    "committed_fill_truth_receipts": "receipt_id",
+    "no_trade_session_receipts": "receipt_id",
+    "experiment_trial_ledger": "trial_id",
+}
 
 Migration = Callable[[sqlite3.Connection], None]
 
@@ -70,6 +78,12 @@ def set_schema_version(connection: sqlite3.Connection, version: int) -> None:
 
 def run_migrations(connection: sqlite3.Connection) -> int:
     _ensure_schema_table(connection)
+    # Early sidecar publications used SQLite's historical
+    # ``TEXT PRIMARY KEY`` spelling, whose PRAGMA metadata permits NULL.
+    # Repair that known shape before any version gate can skip the additive
+    # migration (including stores already carrying marker 31+).
+    if _account_truth_identity_needs_repair(connection):
+        _repair_account_truth_identity_contract(connection)
     version = get_schema_version(connection)
     for target_version, migration in MIGRATIONS:
         if version >= target_version:
@@ -2508,7 +2522,7 @@ def _migration_031_account_session_truth(connection: sqlite3.Connection) -> None
     connection.executescript(
         """
         CREATE TABLE IF NOT EXISTS expected_market_sessions (
-            session_id TEXT PRIMARY KEY,
+            session_id TEXT PRIMARY KEY NOT NULL,
             market_date TEXT NOT NULL UNIQUE,
             exchange TEXT NOT NULL,
             session_open_utc TEXT NOT NULL,
@@ -2529,7 +2543,7 @@ def _migration_031_account_session_truth(connection: sqlite3.Connection) -> None
         ON expected_market_sessions(market_date, status);
 
         CREATE TABLE IF NOT EXISTS intraday_capture_runs (
-            capture_run_id TEXT PRIMARY KEY,
+            capture_run_id TEXT PRIMARY KEY NOT NULL,
             session_id TEXT NOT NULL,
             market_date TEXT NOT NULL,
             evidence_mode TEXT NOT NULL CHECK (evidence_mode IN (
@@ -2564,7 +2578,7 @@ def _migration_031_account_session_truth(connection: sqlite3.Connection) -> None
         ON intraday_capture_runs(market_date, session_id, status);
 
         CREATE TABLE IF NOT EXISTS committed_fill_truth_receipts (
-            receipt_id TEXT PRIMARY KEY,
+            receipt_id TEXT PRIMARY KEY NOT NULL,
             receipt_hash_sha256 TEXT NOT NULL UNIQUE,
             account_id TEXT NOT NULL,
             strategy_id TEXT NOT NULL,
@@ -2608,7 +2622,7 @@ def _migration_031_account_session_truth(connection: sqlite3.Connection) -> None
         ON committed_fill_truth_receipts(experiment_id, arm_id, market_date);
 
         CREATE TABLE IF NOT EXISTS no_trade_session_receipts (
-            receipt_id TEXT PRIMARY KEY,
+            receipt_id TEXT PRIMARY KEY NOT NULL,
             receipt_hash_sha256 TEXT NOT NULL UNIQUE,
             account_id TEXT NOT NULL,
             strategy_id TEXT NOT NULL,
@@ -2636,7 +2650,7 @@ def _migration_031_account_session_truth(connection: sqlite3.Connection) -> None
         ON no_trade_session_receipts(account_id, market_date, session_id, run_id);
 
         CREATE TABLE IF NOT EXISTS experiment_trial_ledger (
-            trial_id TEXT PRIMARY KEY,
+            trial_id TEXT PRIMARY KEY NOT NULL,
             trial_number INTEGER NOT NULL UNIQUE CHECK (trial_number > 0),
             experiment_id TEXT NOT NULL,
             arm_id TEXT NOT NULL,
@@ -2735,6 +2749,208 @@ def _migration_031_account_session_truth(connection: sqlite3.Connection) -> None
             """
         )
     _add_column_if_missing(connection, "committed_fill_truth_receipts", "side TEXT")
+
+
+def _account_truth_identity_needs_repair(connection: sqlite3.Connection) -> bool:
+    """Return whether a published sidecar still has nullable PK identity."""
+
+    for table, identity_column in _ACCOUNT_TRUTH_IDENTITY_COLUMNS.items():
+        table_exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        ).fetchone()
+        if table_exists is None:
+            continue
+        identity = next(
+            (
+                row
+                for row in connection.execute(f"PRAGMA table_info({table})")
+                if str(row[1]) == identity_column
+            ),
+            None,
+        )
+        if identity is None:
+            raise RuntimeError(f"sidecar identity column is missing: {table}.{identity_column}")
+        if int(identity[3]) not in (0, 1):
+            raise RuntimeError(f"sidecar identity nullability is invalid: {table}")
+        if int(identity[3]) == 0:
+            return True
+    return False
+
+
+def _recreate_account_truth_support(connection: sqlite3.Connection) -> None:
+    """Recreate the immutable indexes/triggers lost by table replacement."""
+
+    connection.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS idx_expected_market_sessions_date
+        ON expected_market_sessions(market_date, status);
+        CREATE INDEX IF NOT EXISTS idx_intraday_capture_runs_session
+        ON intraday_capture_runs(market_date, session_id, status);
+        CREATE INDEX IF NOT EXISTS idx_committed_fill_truth_account_day
+        ON committed_fill_truth_receipts(account_id, market_date, receipt_id);
+        CREATE INDEX IF NOT EXISTS idx_committed_fill_truth_experiment
+        ON committed_fill_truth_receipts(experiment_id, arm_id, market_date);
+        CREATE INDEX IF NOT EXISTS idx_no_trade_session_receipts_identity
+        ON no_trade_session_receipts(account_id, market_date, session_id, run_id);
+        CREATE INDEX IF NOT EXISTS idx_experiment_trial_ledger_experiment
+        ON experiment_trial_ledger(experiment_id, arm_id, trial_number);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_experiment_trial_ledger_attempt
+        ON experiment_trial_ledger(json_extract(payload_json, '$.attempt_id'));
+
+        CREATE TRIGGER IF NOT EXISTS expected_market_sessions_no_update
+        BEFORE UPDATE ON expected_market_sessions BEGIN
+            SELECT RAISE(ABORT, 'expected_market_sessions is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS expected_market_sessions_no_delete
+        BEFORE DELETE ON expected_market_sessions BEGIN
+            SELECT RAISE(ABORT, 'expected_market_sessions is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS intraday_capture_runs_no_update
+        BEFORE UPDATE ON intraday_capture_runs BEGIN
+            SELECT RAISE(ABORT, 'intraday_capture_runs is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS intraday_capture_runs_no_delete
+        BEFORE DELETE ON intraday_capture_runs BEGIN
+            SELECT RAISE(ABORT, 'intraday_capture_runs is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS committed_fill_truth_receipts_no_update
+        BEFORE UPDATE ON committed_fill_truth_receipts BEGIN
+            SELECT RAISE(ABORT, 'committed_fill_truth_receipts is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS committed_fill_truth_receipts_no_delete
+        BEFORE DELETE ON committed_fill_truth_receipts BEGIN
+            SELECT RAISE(ABORT, 'committed_fill_truth_receipts is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS no_trade_session_receipts_no_update
+        BEFORE UPDATE ON no_trade_session_receipts BEGIN
+            SELECT RAISE(ABORT, 'no_trade_session_receipts is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS no_trade_session_receipts_no_delete
+        BEFORE DELETE ON no_trade_session_receipts BEGIN
+            SELECT RAISE(ABORT, 'no_trade_session_receipts is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS experiment_trial_ledger_no_update
+        BEFORE UPDATE ON experiment_trial_ledger BEGIN
+            SELECT RAISE(ABORT, 'experiment_trial_ledger is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS experiment_trial_ledger_no_delete
+        BEFORE DELETE ON experiment_trial_ledger BEGIN
+            SELECT RAISE(ABORT, 'experiment_trial_ledger is append-only');
+        END;
+        """
+    )
+
+
+def _repair_account_truth_identity_contract(connection: sqlite3.Connection) -> None:
+    """Upgrade nullable historical PKs without dropping or rewriting rows.
+
+    SQLite cannot alter a column's NOT NULL property.  Rebuild only the
+    known historical ``TEXT PRIMARY KEY`` shape inside an explicit
+    transaction, copy every column and row, and restore all sidecar support
+    objects.  A NULL identity, unexpected schema, active caller transaction,
+    or foreign-key verification failure aborts before a durable change.
+    """
+
+    table_metadata: dict[str, tuple[str, str, tuple[str, ...], int]] = {}
+    nullable_tables: set[str] = set()
+    for table, identity_column in _ACCOUNT_TRUTH_IDENTITY_COLUMNS.items():
+        table_row = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        ).fetchone()
+        if table_row is None:
+            continue
+        identity = next(
+            (
+                row
+                for row in connection.execute(f"PRAGMA table_info({table})")
+                if str(row[1]) == identity_column
+            ),
+            None,
+        )
+        if identity is None:
+            raise RuntimeError(f"sidecar identity column is missing: {table}.{identity_column}")
+        if int(identity[3]) not in (0, 1):
+            raise RuntimeError(f"sidecar identity nullability is invalid: {table}")
+        columns = tuple(str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})"))
+        if not columns:
+            raise RuntimeError(f"sidecar table has no columns: {table}")
+        old_sql = str(table_row[0] or "")
+        row_count = int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+        table_metadata[table] = (identity_column, old_sql, columns, row_count)
+        if int(identity[3]) == 0:
+            null_count = int(
+                connection.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE {identity_column} IS NULL"
+                ).fetchone()[0]
+            )
+            if null_count:
+                raise RuntimeError(
+                    f"cannot enforce identity NOT NULL without losing rows: {table}"
+                )
+            nullable_tables.add(table)
+    # ALTER TABLE RENAME rewrites child foreign-key SQL to the temporary
+    # parent name.  If the expected-session parent is rebuilt, rebuild its
+    # capture child as well so the final FK points back to the canonical
+    # parent.  Its strict historical SQL is captured before any rename.
+    rebuild_tables = set(nullable_tables)
+    if "expected_market_sessions" in nullable_tables and "intraday_capture_runs" in table_metadata:
+        rebuild_tables.add("intraday_capture_runs")
+    repair_tables: list[tuple[str, str, str, tuple[str, ...], int]] = []
+    for table, (identity_column, old_sql, columns, row_count) in table_metadata.items():
+        if table not in rebuild_tables:
+            continue
+        pattern = re.compile(
+            rf"(\b{re.escape(identity_column)}\s+TEXT\s+PRIMARY\s+KEY)(?!\s+NOT\s+NULL)",
+            re.IGNORECASE,
+        )
+        strict_sql, substitutions = pattern.subn(r"\1 NOT NULL", old_sql, count=1)
+        if table in nullable_tables and substitutions != 1:
+            raise RuntimeError(
+                "sidecar identity SQL is not the canonical historical shape: "
+                f"{table}"
+            )
+        if table not in nullable_tables:
+            strict_sql = old_sql
+        repair_tables.append((table, identity_column, strict_sql, columns, row_count))
+    if not repair_tables:
+        return
+    if connection.in_transaction:
+        raise RuntimeError("sidecar identity repair requires an idle SQLite connection")
+    foreign_keys = int(connection.execute("PRAGMA foreign_keys").fetchone()[0])
+    if foreign_keys:
+        connection.execute("PRAGMA foreign_keys=OFF")
+        if int(connection.execute("PRAGMA foreign_keys").fetchone()[0]) != 0:
+            raise RuntimeError(
+                "could not disable SQLite foreign-key checks for atomic sidecar repair"
+            )
+    try:
+        connection.execute("BEGIN")
+        for table, _identity_column, strict_sql, columns, row_count in repair_tables:
+            temporary = f"__dawnstrike_identity_repair_{table}"
+            connection.execute(f"DROP TABLE IF EXISTS {temporary}")
+            connection.execute(f"ALTER TABLE {table} RENAME TO {temporary}")
+            connection.execute(strict_sql)
+            column_list = ", ".join(columns)
+            connection.execute(
+                f"INSERT INTO {table} ({column_list}) SELECT {column_list} FROM {temporary}"
+            )
+            copied_count = int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+            if copied_count != row_count:
+                raise RuntimeError(f"sidecar identity repair changed row count: {table}")
+            connection.execute(f"DROP TABLE {temporary}")
+        _recreate_account_truth_support(connection)
+        if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+            raise RuntimeError("sidecar identity repair produced a foreign-key violation")
+        connection.commit()
+    except Exception:
+        if connection.in_transaction:
+            connection.rollback()
+        raise
+    finally:
+        if foreign_keys:
+            connection.execute("PRAGMA foreign_keys=ON")
 
 
 def _migration_032_v6_decision_availability(connection: sqlite3.Connection) -> None:
