@@ -14,7 +14,7 @@ import csv
 import hashlib
 import json
 import re
-import subprocess
+import subprocess  # nosec B404
 from collections.abc import Iterable
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -484,7 +484,7 @@ def _validate_runtime_release_sha(
     claimed = str(cycle_contract.get("code_sha") or "").strip()
     runtime_root = Path(__file__).resolve().parents[3]
     try:
-        result = subprocess.run(
+        result = subprocess.run(  # nosec B603, B607
             ["git", "-C", str(runtime_root), "rev-parse", "HEAD"],
             check=True,
             capture_output=True,
@@ -497,14 +497,14 @@ def _validate_runtime_release_sha(
     if not re.fullmatch(r"[0-9a-f]{40}", actual) or claimed != actual:
         raise UniverseHandoffError("Morning release SHA does not match executing runtime HEAD")
     try:
-        status = subprocess.run(
+        status = subprocess.run(  # nosec B603, B607
             [
                 "git",
                 "-C",
                 str(runtime_root),
                 "status",
                 "--porcelain=v1",
-                "--untracked-files=no",
+                "--untracked-files=all",
                 "--ignore-submodules=none",
             ],
             check=True,
@@ -516,6 +516,21 @@ def _validate_runtime_release_sha(
         raise UniverseHandoffError("executing runtime Git cleanliness is unavailable") from exc
     if status.stdout.strip():
         raise UniverseHandoffError("executing runtime worktree is dirty")
+    try:
+        after_result = subprocess.run(  # nosec B603, B607
+            ["git", "-C", str(runtime_root), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise UniverseHandoffError(
+            "executing runtime Git HEAD changed during verification"
+        ) from exc
+    after = after_result.stdout.strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", after) or after != actual or after != claimed:
+        raise UniverseHandoffError("executing runtime Git HEAD changed during verification")
 
 
 def _validate_core_claims(

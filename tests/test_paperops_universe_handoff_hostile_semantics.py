@@ -214,6 +214,40 @@ def test_production_builder_rejects_dirty_tracked_runtime(monkeypatch: pytest.Mo
         _validate_runtime_release_sha({"code_sha": "a" * 40}, allow_test_override=False)
 
 
+def test_production_builder_rejects_nonignored_untracked_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(args: list[str], **_: object) -> SimpleNamespace:
+        if args[-2:] == ["rev-parse", "HEAD"]:
+            return SimpleNamespace(stdout="a" * 40)
+        assert "--untracked-files=all" in args
+        return SimpleNamespace(stdout="?? hashlib.py\n")
+
+    monkeypatch.setattr("intraday_scanner.v2.paper_ops.universe_handoff.subprocess.run", fake_run)
+
+    with pytest.raises(UniverseHandoffError, match="worktree is dirty"):
+        _validate_runtime_release_sha({"code_sha": "a" * 40}, allow_test_override=False)
+
+
+def test_production_builder_rejects_runtime_checkout_switch_during_verification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rev_parse_calls = 0
+
+    def fake_run(args: list[str], **_: object) -> SimpleNamespace:
+        nonlocal rev_parse_calls
+        if args[-2:] == ["rev-parse", "HEAD"]:
+            rev_parse_calls += 1
+            return SimpleNamespace(stdout=("a" if rev_parse_calls == 1 else "b") * 40)
+        return SimpleNamespace(stdout="")
+
+    monkeypatch.setattr("intraday_scanner.v2.paper_ops.universe_handoff.subprocess.run", fake_run)
+
+    with pytest.raises(UniverseHandoffError, match="HEAD changed during verification"):
+        _validate_runtime_release_sha({"code_sha": "a" * 40}, allow_test_override=False)
+    assert rev_parse_calls == 2
+
+
 @pytest.mark.parametrize("generated_at", ["2026-08-28garbage", "2026-08-28T13:00:00"])
 def test_cycle_generated_at_rejects_malformed_non_null_timestamp(
     tmp_path: Path, generated_at: str
