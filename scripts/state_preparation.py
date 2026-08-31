@@ -671,7 +671,7 @@ def _probe_sidecar_safety(connection: sqlite3.Connection, table: str) -> None:
                     }
                     names = tuple(parent)
                     connection.execute(
-                        f"INSERT INTO expected_market_sessions ({', '.join(names)}) "
+                        f"INSERT INTO expected_market_sessions ({', '.join(names)}) "  # nosec B608 -- fixed contract columns
                         f"VALUES ({', '.join('?' for _ in names)})",
                         tuple(parent.values()),
                     )
@@ -685,7 +685,7 @@ def _probe_sidecar_safety(connection: sqlite3.Connection, table: str) -> None:
                 values["broker_execution_enabled"] = broker_enabled
                 names = tuple(values)
                 connection.execute(
-                    f"INSERT INTO {table} ({', '.join(names)}) "
+                    f"INSERT INTO {table} ({', '.join(names)}) "  # nosec B608 -- fixed sidecar schema allowlist
                     f"VALUES ({', '.join('?' for _ in names)})",
                     tuple(values.values()),
                 )
@@ -781,14 +781,14 @@ def inventory(connection: sqlite3.Connection) -> dict[str, Any]:
         for table in SIDECAR_TABLES:
             identity_column = SIDECAR_IDENTITY_COLUMNS[table]
             null_identities = connection.execute(
-                f"SELECT COUNT(*) FROM {table} WHERE {identity_column} IS NULL"
+                f"SELECT COUNT(*) FROM {table} WHERE {identity_column} IS NULL"  # nosec B608 -- fixed sidecar schema allowlist
             ).fetchone()[0]
             if int(null_identities) != 0:
                 raise StatePreparationError(
                     f"sidecar contains NULL identity values: {table}"
                 )
             unsafe_rows = connection.execute(
-                f"SELECT COUNT(*) FROM {table} WHERE research_only IS NULL "
+                f"SELECT COUNT(*) FROM {table} WHERE research_only IS NULL "  # nosec B608 -- fixed sidecar table allowlist
                 "OR broker_execution_enabled IS NULL "
                 "OR research_only <> 1 OR broker_execution_enabled <> 0"
             ).fetchone()[0]

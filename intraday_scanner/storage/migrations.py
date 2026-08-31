@@ -2877,12 +2877,16 @@ def _repair_account_truth_identity_contract(connection: sqlite3.Connection) -> N
         if not columns:
             raise RuntimeError(f"sidecar table has no columns: {table}")
         old_sql = str(table_row[0] or "")
-        row_count = int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+        row_count = int(
+            connection.execute(
+                f"SELECT COUNT(*) FROM {table}"  # nosec B608 -- fixed table allowlist
+            ).fetchone()[0]
+        )
         table_metadata[table] = (identity_column, old_sql, columns, row_count)
         if int(identity[3]) == 0:
             null_count = int(
                 connection.execute(
-                    f"SELECT COUNT(*) FROM {table} WHERE {identity_column} IS NULL"
+                    f"SELECT COUNT(*) FROM {table} WHERE {identity_column} IS NULL"  # nosec B608 -- fixed schema allowlist
                 ).fetchone()[0]
             )
             if null_count:
@@ -2934,9 +2938,13 @@ def _repair_account_truth_identity_contract(connection: sqlite3.Connection) -> N
             connection.execute(strict_sql)
             column_list = ", ".join(columns)
             connection.execute(
-                f"INSERT INTO {table} ({column_list}) SELECT {column_list} FROM {temporary}"
+                f"INSERT INTO {table} ({column_list}) SELECT {column_list} FROM {temporary}"  # nosec B608 -- fixed schema allowlist
             )
-            copied_count = int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+            copied_count = int(
+                connection.execute(
+                    f"SELECT COUNT(*) FROM {table}"  # nosec B608 -- fixed table allowlist
+                ).fetchone()[0]
+            )
             if copied_count != row_count:
                 raise RuntimeError(f"sidecar identity repair changed row count: {table}")
             connection.execute(f"DROP TABLE {temporary}")
