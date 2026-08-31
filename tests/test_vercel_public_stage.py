@@ -69,6 +69,8 @@ def test_stage_builder_declares_dependency_free_python_stage() -> None:
     assert "ExpectedSourceTree" in script
     assert "Write-VercelGitBlob" in script
     assert "vercel-source-manifest.json" in script
+    assert 'Destination (Join-Path $stagePublic "vercel-source-manifest.json")' in script
+    assert 'Destination (Join-Path $functionPublic "vercel-source-manifest.json")' in script
     assert "Assert-VercelGitSourceStable" in script
 
 
