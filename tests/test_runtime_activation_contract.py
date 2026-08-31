@@ -1618,6 +1618,9 @@ def test_disposable_activation_and_rollback_preserve_exact_runtime_and_state(
     rollback_script = str(
         (candidate / "scripts" / "rollback_dawnstrike_runtime.ps1").resolve()
     ).replace("'", "''")
+    stage_script = str(
+        (candidate / "scripts" / "invoke_dawnstrike_stage.ps1").resolve()
+    ).replace("'", "''")
     values = {
         "candidate": str(candidate).replace("'", "''"),
         "runtime": str(runtime).replace("'", "''"),
@@ -1628,6 +1631,7 @@ def test_disposable_activation_and_rollback_preserve_exact_runtime_and_state(
     }
     command = rf"""
 . '{activation_script}'
+. '{stage_script}'
 $global:MockRuntime = '{values["runtime"]}'
 $global:MockState = '{values["state"]}'
 $global:MockTaskStates = @{{}}
@@ -1688,6 +1692,50 @@ try {{
 }}
 catch {{ $activationMissingBundleBlocked = $true }}
 finally {{ [System.IO.File]::Move($heldBundlePath, $bundlePath) }}
+$preparedForRecovery = Get-Content -LiteralPath (
+    Join-Path '{values["state"]}' (
+        'receipts\runtime-activation\runtime-activation-' +
+        $activated.activation_id + '.prepared.json'
+    )
+) -Raw | ConvertFrom-Json
+$preparedName = 'runtime-activation-' + $activated.activation_id + '.prepared.json'
+$recoveryActivationLock = Enter-DawnstrikeRuntimeActivationLock `
+    -StateRoot '{values["state"]}' -ActivationId $activated.activation_id `
+    -PreparedReceiptName $preparedName
+$recoveryDailyLock = Enter-DawnstrikeDailyRunLock `
+    -StateRoot '{values["state"]}' -MarketDate '2026-08-31' `
+    -Owner 'runtime_activation' -ActivationId $activated.activation_id `
+    -PreparedReceiptName $preparedName
+$preparedRecoveryHash = Get-DawnstrikeSha256File (
+    Join-Path '{values["state"]}' (
+        'receipts\runtime-activation\runtime-activation-' +
+        $activated.activation_id + '.prepared.json'
+    )
+)
+Set-DawnstrikeReceiptBoundLock `
+    -LockPath $recoveryActivationLock.path -LockToken $recoveryActivationLock.token `
+    -ActivationId $activated.activation_id `
+    -PreparedReceiptPath (
+        Join-Path '{values["state"]}' (
+            'receipts\runtime-activation\runtime-activation-' +
+            $activated.activation_id + '.prepared.json'
+        )
+    ) -PreparedReceiptFileSha256 $preparedRecoveryHash -Receipt $preparedForRecovery
+Set-DawnstrikeReceiptBoundLock `
+    -LockPath $recoveryDailyLock.lock_path -LockToken $recoveryDailyLock.lock_token `
+    -ActivationId $activated.activation_id `
+    -PreparedReceiptPath (
+        Join-Path '{values["state"]}' (
+            'receipts\runtime-activation\runtime-activation-' +
+            $activated.activation_id + '.prepared.json'
+        )
+    ) -PreparedReceiptFileSha256 $preparedRecoveryHash -Receipt $preparedForRecovery
+foreach ($recoveryPath in @($recoveryActivationLock.path, $recoveryDailyLock.lock_path)) {{
+    $recoveryPayload = Get-Content -LiteralPath $recoveryPath -Raw | ConvertFrom-Json
+    $recoveryPayload.process_id = 2147483647
+    $recoveryPayload.process_started_at_utc = '2020-01-01T00:00:00.0000000Z'
+    $recoveryPayload | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $recoveryPath
+}}
 $activatedAgain = Invoke-DawnstrikeRuntimeActivation `
   -ExpectedSha '{candidate_sha}' -MarketDate '2026-08-31' `
   -CiEvidencePath '{values["ci"]}' -SolEvidencePath '{values["sol"]}' `
@@ -1729,6 +1777,10 @@ $output = [pscustomobject]@{{
     rolled_back_again=$rolledBackAgain
     activation_missing_bundle_blocked=$activationMissingBundleBlocked
     rollback_missing_backup_blocked=$rollbackMissingBackupBlocked
+    same_sha_recovery_archives=@(
+        Get-ChildItem -LiteralPath (Join-Path '{values["state"]}' 'locks') `
+            -Filter '*.archived.*' -File -Force -ErrorAction SilentlyContinue
+    ).Count
     task_states=$global:MockTaskStates
     task_events=$global:TaskEvents
 }}
@@ -1747,6 +1799,7 @@ $output | ConvertTo-Json -Depth 12 -Compress
     assert payload["activated"]["status"] == "COMPLETE"
     assert payload["activated"]["candidate_sha"] == candidate_sha
     assert payload["activated_again"]["receipt_sha256"] == payload["activated"]["receipt_sha256"]
+    assert payload["same_sha_recovery_archives"] == 2
     assert payload["activation_missing_bundle_blocked"] is True
     assert payload["rolled_back"]["status"] == "ROLLED_BACK"
     assert payload["rolled_back"]["restored_sha"] == previous_sha
