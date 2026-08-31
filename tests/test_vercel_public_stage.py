@@ -188,4 +188,13 @@ def test_promotion_rollback_restores_each_alias_snapshot() -> None:
     assert "Rollback verification for $AliasUrl resolved the wrong deployment ID" in script
     assert "Rollback verification for $AliasUrl resolved the wrong deployment URL" in script
     assert "daily-deployment-rollback-result.json" in script
-    assert "candidate_no_longer_live = $true" in script
+    assert "candidate_no_longer_live = [bool]$rollbackSucceeded" in script
+    assert 'status = if ($rollbackSucceeded) { "ROLLED_BACK" } else { "ROLLBACK_FAILED" }' in script
+    assert "alias_errors = @($rollbackErrors)" in script
+    assert "source_manifest_available" in script
+    assert 'Arguments @("rollback", [string]$priorPrimary.id, "--yes")' in script
+    assert "primary_rollback_proof" in script
+    assert "Add-VercelFunctionPublicBindings" in script
+    assert "Assert-VercelNoEnvironmentArtifacts" in script
+    assert "provider diagnostics suppressed" in script
+    assert "$($result.Stderr)" not in script
