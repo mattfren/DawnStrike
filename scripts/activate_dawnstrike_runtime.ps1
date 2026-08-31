@@ -583,7 +583,8 @@ function Restore-DawnstrikeAuxiliaryCaptureTask {
     param(
         [Parameter(Mandatory = $true)][object]$Expected,
         [Parameter(Mandatory = $true)][string]$RuntimeRoot,
-        [Parameter(Mandatory = $true)][string]$StateRoot
+        [Parameter(Mandatory = $true)][string]$StateRoot,
+        [pscredential]$RunAsCredential
     )
     $current = Get-DawnstrikeAuxiliaryCaptureTask $RuntimeRoot $StateRoot -AllowDisabled
     if (-not $Expected.present) {
@@ -591,14 +592,82 @@ function Restore-DawnstrikeAuxiliaryCaptureTask {
         return $current
     }
     if (-not $current.present) { throw "The receipt-bound auxiliary capture task is missing." }
-    # Re-registering from the exact exported XML restores principal, triggers,
-    # settings, and action atomically as one task definition.  Never construct
-    # those fields from guessed defaults during recovery.
-    Register-ScheduledTask -TaskName $script:DawnstrikeAuxiliaryCaptureTaskName `
-        -TaskPath ([string]$Expected.task_path) -Xml ([string]$Expected.xml) -Force -ErrorAction Stop | Out-Null
+    # Password-logon task XML cannot safely be re-registered without threading
+    # a password through recovery.  Preserve the existing principal/triggers/
+    # settings and restore only the action and enablement fields that governed
+    # activation/rebind are allowed to change.
+    $expectedDocument = [System.Xml.XmlDocument]::new()
+    $expectedDocument.PreserveWhitespace = $true
+    $expectedDocument.LoadXml([string]$Expected.xml)
+    $currentDocument = [System.Xml.XmlDocument]::new()
+    $currentDocument.PreserveWhitespace = $true
+    $currentDocument.LoadXml([string]$current.xml)
+    foreach ($sectionName in @("Principal", "Triggers", "Settings")) {
+        $expectedNodes = @($expectedDocument.SelectNodes("//*[local-name()='$sectionName']"))
+        $currentNodes = @($currentDocument.SelectNodes("//*[local-name()='$sectionName']"))
+        if ($expectedNodes.Count -ne 1 -or $currentNodes.Count -ne 1) {
+            throw "Auxiliary capture $sectionName policy is ambiguous during compensation."
+        }
+        if ($sectionName -eq "Settings") {
+            $expectedEnabled = @($expectedNodes[0].ChildNodes | Where-Object { $_.LocalName -eq "Enabled" })
+            $currentEnabled = @($currentNodes[0].ChildNodes | Where-Object { $_.LocalName -eq "Enabled" })
+            if ($expectedEnabled.Count -gt 1 -or $currentEnabled.Count -gt 1) {
+                throw "Auxiliary capture enablement policy is ambiguous during compensation."
+            }
+            if ($expectedEnabled.Count -eq 1 -and $currentEnabled.Count -eq 1) {
+                $currentEnabled[0].InnerText = [string]$expectedEnabled[0].InnerText
+            }
+        }
+        if ([string]$expectedNodes[0].OuterXml -ne [string]$currentNodes[0].OuterXml) {
+            throw "Auxiliary capture principal, trigger, or settings policy drifted during compensation."
+        }
+    }
+    $expectedActions = @($expectedDocument.SelectNodes("//*[local-name()='Actions']"))
+    $currentActions = @($currentDocument.SelectNodes("//*[local-name()='Actions']"))
+    if ($expectedActions.Count -ne 1 -or $currentActions.Count -ne 1) {
+        throw "Auxiliary capture action policy is ambiguous during compensation."
+    }
+    if ([string]$expectedActions[0].OuterXml -ne [string]$currentActions[0].OuterXml) {
+        if ($null -eq $RunAsCredential -or [string]::IsNullOrWhiteSpace($RunAsCredential.UserName)) {
+            throw "Auxiliary action drift requires the locally prompted RunAsCredential for Password-task compensation."
+        }
+        $restorePassword = $RunAsCredential.GetNetworkCredential().Password
+        if ([string]::IsNullOrWhiteSpace($restorePassword)) { throw "Auxiliary compensation credential is incomplete." }
+        $expectedExec = @($expectedActions[0].ChildNodes | Where-Object { $_.LocalName -eq "Exec" })
+        if ($expectedExec.Count -ne 1) { throw "Auxiliary capture action policy is invalid during compensation." }
+        $command = @($expectedExec[0].ChildNodes | Where-Object { $_.LocalName -eq "Command" })
+        $arguments = @($expectedExec[0].ChildNodes | Where-Object { $_.LocalName -eq "Arguments" })
+        $working = @($expectedExec[0].ChildNodes | Where-Object { $_.LocalName -eq "WorkingDirectory" })
+        if ($command.Count -ne 1 -or $arguments.Count -ne 1 -or $working.Count -ne 1) {
+            throw "Auxiliary capture action contract is incomplete during compensation."
+        }
+        $restoreAction = New-ScheduledTaskAction `
+            -Execute ([string]$command[0].InnerText) `
+            -Argument ([string]$arguments[0].InnerText) `
+            -WorkingDirectory ([string]$working[0].InnerText)
+        Set-ScheduledTask -TaskName $script:DawnstrikeAuxiliaryCaptureTaskName `
+            -TaskPath ([string]$Expected.task_path) -Action @($restoreAction) `
+            -User $RunAsCredential.UserName -Password $restorePassword -ErrorAction Stop | Out-Null
+    }
     $restored = Get-DawnstrikeAuxiliaryCaptureTask $RuntimeRoot $StateRoot -AllowDisabled
-    if ($restored.xml_sha256 -ne [string]$Expected.xml_sha256) {
-        throw "Auxiliary capture XML was not restored exactly."
+    $restoredDocument = [System.Xml.XmlDocument]::new()
+    $restoredDocument.PreserveWhitespace = $true
+    $restoredDocument.LoadXml([string]$restored.xml)
+    foreach ($sectionName in @("Principal", "Triggers", "Actions")) {
+        $expectedNodes = @($expectedDocument.SelectNodes("//*[local-name()='$sectionName']"))
+        $restoredNodes = @($restoredDocument.SelectNodes("//*[local-name()='$sectionName']"))
+        if ($expectedNodes.Count -ne 1 -or $restoredNodes.Count -ne 1 -or [string]$expectedNodes[0].OuterXml -ne [string]$restoredNodes[0].OuterXml) {
+            throw "Auxiliary capture $sectionName was not restored exactly."
+        }
+    }
+    $expectedSettings = @($expectedDocument.SelectNodes("//*[local-name()='Settings']"))
+    $restoredSettings = @($restoredDocument.SelectNodes("//*[local-name()='Settings']"))
+    if ($expectedSettings.Count -ne 1 -or $restoredSettings.Count -ne 1) { throw "Auxiliary capture settings are ambiguous after compensation." }
+    $expectedEnabled = @($expectedSettings[0].ChildNodes | Where-Object { $_.LocalName -eq "Enabled" })
+    $restoredEnabled = @($restoredSettings[0].ChildNodes | Where-Object { $_.LocalName -eq "Enabled" })
+    if ($expectedEnabled.Count -eq 1 -and $restoredEnabled.Count -eq 1) { $restoredEnabled[0].InnerText = [string]$expectedEnabled[0].InnerText }
+    if ($expectedEnabled.Count -ne $restoredEnabled.Count -or ($expectedEnabled.Count -eq 1 -and [string]$expectedSettings[0].OuterXml -ne [string]$restoredSettings[0].OuterXml)) {
+        throw "Auxiliary capture settings were not restored exactly."
     }
     if ($Expected.enabled) {
         if ($restored.state -eq "Disabled") {
@@ -611,8 +680,13 @@ function Restore-DawnstrikeAuxiliaryCaptureTask {
         }
     }
     $final = Get-DawnstrikeAuxiliaryCaptureTask $RuntimeRoot $StateRoot -AllowDisabled
-    if ($final.xml_sha256 -ne [string]$Expected.xml_sha256 -or $final.enabled -ne [bool]$Expected.enabled) {
-        throw "Auxiliary capture task XML or enablement did not restore exactly."
+    if (
+        $final.task_path -ne [string]$Expected.task_path -or
+        $final.definition_contract_sha256 -ne [string]$Expected.definition_contract_sha256 -or
+        $final.enabled -ne [bool]$Expected.enabled -or
+        $final.action_contract_sha256 -ne [string]$Expected.action_contract_sha256
+    ) {
+        throw "Auxiliary capture task action or enablement did not restore exactly."
     }
     return $final
 }
@@ -1680,6 +1754,7 @@ function Invoke-DawnstrikeRuntimeActivation {
         [Parameter(Mandatory = $true)][string]$BackupRoot,
         [Parameter(Mandatory = $true)][int]$BackupRetention,
         [Parameter(Mandatory = $true)][int]$ProcessTimeoutSeconds,
+        [pscredential]$RunAsCredential,
         [switch]$PreflightOnly
     )
 
@@ -2469,7 +2544,8 @@ function Invoke-DawnstrikeRuntimeActivation {
                             $null = Restore-DawnstrikeAuxiliaryCaptureTask `
                                 -Expected $auxiliaryBefore `
                                 -RuntimeRoot $runtime `
-                                -StateRoot $state
+                                -StateRoot $state `
+                                -RunAsCredential $RunAsCredential
                             $auxiliaryDisabled = $false
                         }
                         Enable-DawnstrikeCanonicalTasks
