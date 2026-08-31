@@ -37,6 +37,55 @@ RECEIPT_NAME = "receipt.json"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GIT_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 _REPARSE_POINT = 0x400
+_MANIFEST_KEYS = frozenset(
+    {
+        "artifact",
+        "schema_version",
+        "backup_id",
+        "created_at",
+        "source_db_name",
+        "source_live_main_file_bytes",
+        "source_live_main_file_sha256",
+        "source_live_main_file_hash_semantics",
+        "source_release_sha",
+        "source_logical_snapshot_sha256",
+        "source_quick_check",
+        "source_schema_version",
+        "source_sqlite_user_version",
+        "backup_db_name",
+        "backup_db_bytes",
+        "backup_db_sha256",
+        "backup_logical_snapshot_sha256",
+        "backup_quick_check",
+        "backup_schema_version",
+        "backup_sqlite_user_version",
+        "research_only",
+        "broker_execution_enabled",
+        "manifest_sha256",
+    }
+)
+_RECEIPT_KEYS = frozenset(
+    {
+        "artifact",
+        "schema_version",
+        "backup_id",
+        "created_at",
+        "manifest_sha256",
+        "source_release_sha",
+        "source_live_main_file_sha256",
+        "source_logical_snapshot_sha256",
+        "source_schema_version",
+        "backup_schema_version",
+        "backup_db_sha256",
+        "backup_logical_snapshot_sha256",
+        "status",
+        "write_mode",
+        "automatic_restore",
+        "research_only",
+        "broker_execution_enabled",
+        "receipt_sha256",
+    }
+)
 
 
 class RecoveryValidationError(ValueError):
@@ -62,6 +111,23 @@ def _sha256(path: Path) -> tuple[int, str]:
             size += len(chunk)
             digest.update(chunk)
     return size, digest.hexdigest()
+
+
+def _file_hash_or_empty(path: Path) -> str:
+    """Hash an optional SQLite sidecar without following reparses."""
+
+    _assert_no_reparse_components(path)
+    if not path.is_file():
+        return hashlib.sha256(b"").hexdigest()
+    return _sha256(path)[1]
+
+
+def _snapshot_hashes(path: Path) -> dict[str, str]:
+    return {
+        "db_sha256": _sha256(path)[1],
+        "wal_sha256": _file_hash_or_empty(path.with_name(path.name + "-wal")),
+        "shm_sha256": _file_hash_or_empty(path.with_name(path.name + "-shm")),
+    }
 
 
 def _utc_now() -> str:
@@ -231,8 +297,22 @@ def create_backup(
     retention: int = 7,
     backup_id: str | None = None,
     created_at: str | None = None,
+    expected_db_sha256: str | None = None,
+    expected_wal_sha256: str | None = None,
+    expected_shm_sha256: str | None = None,
+    expected_logical_snapshot_sha256: str | None = None,
 ) -> dict[str, Any]:
-    """Create or idempotently return one validated, atomic backup bundle."""
+    """Create or idempotently return one validated, atomic backup bundle.
+
+    When expected snapshot hashes are supplied they are the caller's locked
+    proof (activation uses the exact state-preparation receipt).  The source
+    is checked immediately before and after SQLite's online copy, so a commit
+    that lands after the preflight proof cannot be silently included.
+
+    CLI integration must pass ``--expected-db-sha256``,
+    ``--expected-wal-sha256``, ``--expected-shm-sha256``, and
+    ``--expected-logical-snapshot-sha256`` from that locked proof.
+    """
 
     if retention < 1:
         raise RecoveryValidationError("retention must be at least one")
@@ -251,6 +331,30 @@ def create_backup(
             "source release SHA is required and must be exactly 40 hex characters"
         )
     normalized_source_sha = source_sha.lower()
+    expected_hashes = {
+        "db_sha256": expected_db_sha256,
+        "wal_sha256": expected_wal_sha256,
+        "shm_sha256": expected_shm_sha256,
+        "logical_snapshot_sha256": expected_logical_snapshot_sha256,
+    }
+    for field, value in expected_hashes.items():
+        if value is not None and not _SHA256.fullmatch(value):
+            raise RecoveryValidationError(f"expected {field} is invalid")
+    expected_file_hashes = tuple(
+        expected_hashes[field] for field in ("db_sha256", "wal_sha256", "shm_sha256")
+    )
+    if any(value is not None for value in expected_file_hashes) and not all(
+        value is not None for value in expected_file_hashes
+    ):
+        raise RecoveryValidationError(
+            "expected source snapshot requires all db, WAL, and SHM hashes"
+        )
+    if any(value is not None for value in expected_hashes.values()) and (
+        expected_logical_snapshot_sha256 is None
+    ):
+        raise RecoveryValidationError(
+            "expected source snapshot requires a logical snapshot hash"
+        )
     metadata = _db_metadata(source, read_only=True)
     timestamp = created_at or _utc_now()
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T.*Z", timestamp):
@@ -268,15 +372,27 @@ def create_backup(
         target = temporary_dir / DB_NAME
         source_uri = f"file:{quote(source.as_posix(), safe='/:')}?mode=ro"
         source_logical_snapshot = _logical_snapshot_sha256(source, immutable=False)
+        source_snapshot_before = _snapshot_hashes(source)
+        source_snapshot_before["logical_snapshot_sha256"] = source_logical_snapshot
+        if any(
+            source_snapshot_before[field] != expected_hashes[field]
+            for field in expected_hashes
+            if expected_hashes[field] is not None
+        ):
+            raise RecoveryValidationError(
+                "source snapshot does not match the expected locked proof"
+            )
         with closing(sqlite3.connect(source_uri, uri=True, timeout=30)) as source_connection:
             source_connection.execute("PRAGMA query_only = ON")
             with closing(sqlite3.connect(target, timeout=30)) as target_connection:
                 source_connection.backup(target_connection, pages=128, sleep=0.05)
                 target_connection.commit()
         source_logical_snapshot_after = _logical_snapshot_sha256(source, immutable=False)
-        if source_logical_snapshot_after != source_logical_snapshot:
+        source_snapshot_after = _snapshot_hashes(source)
+        source_snapshot_after["logical_snapshot_sha256"] = source_logical_snapshot_after
+        if source_snapshot_after != source_snapshot_before:
             raise RecoveryValidationError(
-                "source SQLite logical snapshot changed during online backup"
+                "source SQLite logical snapshot or file snapshot changed during online backup"
             )
         backup_size, backup_hash = _sha256(target)
         # An immutable read avoids SQLite creating -wal/-shm sidecars next to
@@ -288,6 +404,12 @@ def create_backup(
         if backup_logical_snapshot != source_logical_snapshot:
             raise RecoveryValidationError(
                 "online backup logical snapshot does not match its source"
+            )
+        if expected_logical_snapshot_sha256 is not None and (
+            backup_logical_snapshot != expected_logical_snapshot_sha256
+        ):
+            raise RecoveryValidationError(
+                "online backup does not match the expected locked logical snapshot"
             )
         if {item.name for item in temporary_dir.iterdir()} != {DB_NAME}:
             raise RecoveryValidationError(
@@ -434,23 +556,10 @@ def validate_backup(
         _assert_no_reparse_components(path / name)
     manifest = _load_json(path / MANIFEST_NAME)
     receipt = _load_json(path / RECEIPT_NAME)
-    required_manifest = {
-        "artifact",
-        "schema_version",
-        "backup_id",
-        "created_at",
-        "source_quick_check",
-        "source_schema_version",
-        "source_logical_snapshot_sha256",
-        "backup_db_bytes",
-        "backup_db_sha256",
-        "backup_logical_snapshot_sha256",
-        "backup_quick_check",
-        "backup_schema_version",
-        "manifest_sha256",
-    }
-    if not required_manifest.issubset(manifest):
-        raise RecoveryValidationError("manifest is missing required fields")
+    if frozenset(manifest) != _MANIFEST_KEYS:
+        raise RecoveryValidationError("manifest fields do not match the strict contract")
+    if frozenset(receipt) != _RECEIPT_KEYS:
+        raise RecoveryValidationError("receipt fields do not match the strict contract")
     if manifest["artifact"] != "dawnstrike-durable-state-backup":
         raise RecoveryValidationError("manifest artifact type mismatch")
     if manifest["schema_version"] != SCHEMA_VERSION:
@@ -646,6 +755,10 @@ def _parser() -> argparse.ArgumentParser:
     backup.add_argument("--source-sha", required=True)
     backup.add_argument("--backup-id")
     backup.add_argument("--created-at")
+    backup.add_argument("--expected-db-sha256")
+    backup.add_argument("--expected-wal-sha256")
+    backup.add_argument("--expected-shm-sha256")
+    backup.add_argument("--expected-logical-snapshot-sha256")
     for name, function_name in (("restore-verify", "verify"), ("restore-plan", "plan")):
         command = subparsers.add_parser(name)
         command.add_argument("--bundle", required=True)
@@ -675,6 +788,10 @@ def main(argv: list[str] | None = None) -> int:
                 source_sha=args.source_sha,
                 backup_id=args.backup_id,
                 created_at=args.created_at,
+                expected_db_sha256=args.expected_db_sha256,
+                expected_wal_sha256=args.expected_wal_sha256,
+                expected_shm_sha256=args.expected_shm_sha256,
+                expected_logical_snapshot_sha256=args.expected_logical_snapshot_sha256,
             )
         elif args.command == "restore" or args.command.startswith("restore-"):
             is_plan = (

@@ -235,13 +235,30 @@ def test_online_backup_rejects_a_wal_commit_during_the_copy(
         return original(path, immutable=immutable)
 
     monkeypatch.setattr(recovery, "_logical_snapshot_sha256", inject_commit)
-    with pytest.raises(RecoveryValidationError, match="logical snapshot changed"):
+    with pytest.raises(RecoveryValidationError, match="logical snapshot.*changed"):
         create_backup(
             db,
             backup,
             state_root=state,
             source_sha=CANDIDATE_SHA,
             backup_id="wal-drift-fixture",
+        )
+
+
+def test_online_backup_requires_exact_locked_snapshot_hashes(tmp_path: Path) -> None:
+    db, state, _proof, backup = _state_fixture(tmp_path)
+    expected = inspect_live(db)
+    with pytest.raises(RecoveryValidationError, match="expected locked proof"):
+        create_backup(
+            db,
+            backup,
+            state_root=state,
+            source_sha=CANDIDATE_SHA,
+            backup_id="locked-snapshot-mismatch",
+            expected_db_sha256=expected["db_sha256"],
+            expected_wal_sha256=expected["wal_sha256"],
+            expected_shm_sha256=expected["shm_sha256"],
+            expected_logical_snapshot_sha256="f" * 64,
         )
 
 
@@ -264,6 +281,76 @@ def test_inventory_rejects_weakened_pragma_column_contract(tmp_path: Path) -> No
     with sqlite3.connect(db) as connection:
         with pytest.raises(StatePreparationError, match="PRAGMA table_info contract"):
             inventory(connection)
+
+
+def test_inventory_rejects_null_text_primary_key_identity(tmp_path: Path) -> None:
+    _receipt, db, _state, _proof, _backup = _prepare(tmp_path)
+    with sqlite3.connect(db) as connection:
+        connection.execute(
+            "INSERT INTO expected_market_sessions "
+            "(session_id, market_date, exchange, session_open_utc, session_close_utc, "
+            "status, calendar_source, calendar_source_hash_sha256, created_at, "
+            "research_only, broker_execution_enabled, payload_json) "
+            "VALUES (NULL, '2099-02-02', 'XNYS', '2099-02-02T14:30:00Z', "
+            "'2099-02-02T21:00:00Z', 'EXPECTED', 'test', ?, '2099-02-02T00:00:00Z', 1, 0, '{}')",
+            ("a" * 64,),
+        )
+        connection.commit()
+        with pytest.raises(StatePreparationError, match="NULL identity"):
+            inventory(connection)
+
+
+def test_inventory_rejects_comment_hidden_weakened_safety_check(tmp_path: Path) -> None:
+    _receipt, db, _state, _proof, _backup = _prepare(tmp_path)
+    with sqlite3.connect(db) as connection:
+        sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+            ("expected_market_sessions",),
+        ).fetchone()[0]
+        weakened = str(sql).replace(
+            "CHECK (research_only = 1)",
+            "CHECK (research_only = 0) /* research_only INTEGER NOT NULL CHECK (research_only = 1) */",
+        )
+        assert weakened != sql
+        connection.execute("PRAGMA writable_schema=ON")
+        connection.execute(
+            "UPDATE sqlite_master SET sql=? WHERE type='table' AND name=?",
+            (weakened, "expected_market_sessions"),
+        )
+        connection.execute("PRAGMA writable_schema=OFF")
+        connection.commit()
+    with sqlite3.connect(db) as connection:
+        with pytest.raises(StatePreparationError, match="safety constraint"):
+            inventory(connection)
+
+
+@pytest.mark.parametrize("field", ["manifest", "receipt"])
+def test_backup_rejects_contradictory_extra_keys(tmp_path: Path, field: str) -> None:
+    _result, _db, _state, _proof, backup = _prepare(tmp_path)
+    bundle = next(backup.glob("state-preparation-*"))
+    path = bundle / f"{field}.json"
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value["contradictory_extra"] = True
+    _write_json(path, value)
+    with pytest.raises(RecoveryValidationError, match="strict contract"):
+        validate_backup(bundle, backup_root=backup)
+
+
+def test_idempotent_preparation_revalidates_the_complete_backup_bundle(
+    tmp_path: Path,
+) -> None:
+    _receipt, db, state, proof, backup = _prepare(tmp_path)
+    bundle = next(backup.glob("state-preparation-*"))
+    (bundle / "receipt.json").unlink()
+    with pytest.raises(RecoveryValidationError, match="incomplete"):
+        prepare_state(
+            db,
+            state_root=state,
+            backup_root=backup,
+            candidate_sha=CANDIDATE_SHA,
+            candidate_tree=CANDIDATE_TREE,
+            task_proof=proof,
+        )
 
 
 @pytest.mark.parametrize("loader", [load_recovery_json, load_state_receipt])

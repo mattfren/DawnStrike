@@ -61,6 +61,13 @@ SIDECAR_TRIGGERS = (
     "experiment_trial_ledger_no_update",
     "experiment_trial_ledger_no_delete",
 )
+SIDECAR_IDENTITY_COLUMNS = {
+    "expected_market_sessions": "session_id",
+    "intraday_capture_runs": "capture_run_id",
+    "committed_fill_truth_receipts": "receipt_id",
+    "no_trade_session_receipts": "receipt_id",
+    "experiment_trial_ledger": "trial_id",
+}
 SIDECAR_COLUMNS = {
     "expected_market_sessions": (
         "session_id",
@@ -575,18 +582,18 @@ def _safety_probe_value(table: str, column: str, declared_type: str) -> object:
 
     if column == "status":
         return {
-            "expected_market_sessions": "expected",
-            "intraday_capture_runs": "pending",
-            "committed_fill_truth_receipts": "pending",
-            "no_trade_session_receipts": "finalized",
-            "experiment_trial_ledger": "attempted",
+            "expected_market_sessions": "EXPECTED",
+            "intraday_capture_runs": "PENDING",
+            "committed_fill_truth_receipts": "PENDING",
+            "no_trade_session_receipts": "FINALIZED",
+            "experiment_trial_ledger": "ATTEMPTED",
         }[table]
     if column == "evidence_mode":
         return "forward_observed"
     if column == "execution_status":
-        return "pending"
+        return "PENDING"
     if column == "decision":
-        return "no_trade"
+        return "NO_TRADE"
     if column == "no_entry":
         return 1
     if column == "trial_number":
@@ -628,7 +635,7 @@ def _probe_sidecar_safety(connection: sqlite3.Connection, table: str) -> None:
                     "exchange": "XNYS",
                     "session_open_utc": "2099-01-01T14:30:00Z",
                     "session_close_utc": "2099-01-01T21:00:00Z",
-                    "status": "expected",
+                    "status": "EXPECTED",
                     "calendar_source": "safety-probe",
                     "calendar_source_hash_sha256": "a" * 64,
                     "created_at": "2099-01-01T00:00:00Z",
@@ -646,6 +653,8 @@ def _probe_sidecar_safety(connection: sqlite3.Connection, table: str) -> None:
                 name: _safety_probe_value(table, name, declared_type)
                 for name, declared_type, _not_null, _primary_key in columns
             }
+            if table == "intraday_capture_runs":
+                values["session_id"] = "state-preparation-safety-probe-session"
             values["research_only"] = research_only
             values["broker_execution_enabled"] = broker_enabled
             names = tuple(values)
@@ -654,9 +663,14 @@ def _probe_sidecar_safety(connection: sqlite3.Connection, table: str) -> None:
                 f"VALUES ({', '.join('?' for _ in names)})",
                 tuple(values.values()),
             )
-        except sqlite3.IntegrityError:
-            # The expected CHECK/constraint rejection is the proof.
-            pass
+        except sqlite3.IntegrityError as exc:
+            expected_field = (
+                "research_only" if research_only == 0 else "broker_execution_enabled"
+            )
+            if expected_field not in str(exc).lower():
+                raise StatePreparationError(
+                    f"sidecar safety probe hit an unrelated constraint: {table}"
+                ) from exc
         else:
             raise StatePreparationError(
                 f"sidecar safety constraint accepted an unsafe row: {table}"
@@ -733,17 +747,23 @@ def inventory(connection: sqlite3.Connection) -> dict[str, Any]:
                 "sidecar PRAGMA table_info contract is invalid: "
                 "paper_account_daily_ledger"
             )
-    # ``inspect_live`` and activation intentionally hold a read-only handle.
-    # Clone that exact logical view once into memory before running all write
-    # probes; never weaken validation or repeatedly copy the live DB.
-    probe_connection = connection
-    shadow: sqlite3.Connection | None = None
-    if int(connection.execute("PRAGMA query_only").fetchone()[0]) == 1:
-        shadow = sqlite3.connect(":memory:")
-        connection.backup(shadow)
-        probe_connection = shadow
+    # Clone the exact logical view once into memory before running all write
+    # probes.  This is required for read-only activation inspection and also
+    # prevents a supposedly observational inventory from changing live WAL
+    # bytes through rolled-back probe transactions.
+    shadow = sqlite3.connect(":memory:")
+    connection.backup(shadow)
+    probe_connection = shadow
     try:
         for table in SIDECAR_TABLES:
+            identity_column = SIDECAR_IDENTITY_COLUMNS[table]
+            null_identities = connection.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE {identity_column} IS NULL"
+            ).fetchone()[0]
+            if int(null_identities) != 0:
+                raise StatePreparationError(
+                    f"sidecar contains NULL identity values: {table}"
+                )
             unsafe_rows = connection.execute(
                 f"SELECT COUNT(*) FROM {table} WHERE research_only IS NULL "
                 "OR broker_execution_enabled IS NULL "
@@ -753,8 +773,7 @@ def inventory(connection: sqlite3.Connection) -> dict[str, Any]:
                 raise StatePreparationError(f"sidecar contains unsafe existing rows: {table}")
             _probe_sidecar_safety(probe_connection, table)
     finally:
-        if shadow is not None:
-            shadow.close()
+        shadow.close()
 
     structural_errors: list[str] = []
     for table, fragments in SIDECAR_TABLE_SQL_FRAGMENTS.items():
@@ -1201,6 +1220,23 @@ def prepare_state(
     )
     proof_path = _assert_no_reparse_components(Path(task_proof)).resolve()
     proof_hash = _sha256_file(proof_path)
+    # Import lazily so read-only contract importers do not gain a write path.
+    # Runtime invokes this file by absolute path (rather than as a package), so
+    # the sibling fallback is required for the real PowerShell entry point.
+    try:
+        from scripts.state_disaster_recovery import (
+            create_backup,
+            restore_verify,
+            validate_backup,
+        )
+    except ModuleNotFoundError as exc:
+        if exc.name != "scripts":
+            raise
+        from state_disaster_recovery import (
+            create_backup,
+            restore_verify,
+            validate_backup,
+        )
     target_receipt = (
         _assert_no_reparse_components(receipt_path)
         if receipt_path is not None
@@ -1221,6 +1257,20 @@ def prepare_state(
         if existing_bundle.parent != backup:
             raise StatePreparationError(
                 "existing COMPLETE preparation receipt backup is outside the supplied backup root"
+            )
+        verified_bundle = validate_backup(existing_bundle, backup_root=backup)
+        if (
+            Path(verified_bundle["bundle_path"]).resolve() != existing_bundle
+            or verified_bundle["backup_id"] != existing["backup_id"]
+            or verified_bundle["manifest_sha256"] != existing["backup_manifest_sha256"]
+            or verified_bundle["backup_db_sha256"] != existing["backup_db_sha256"]
+            or verified_bundle["backup_logical_snapshot_sha256"]
+            != existing["backup_logical_snapshot_sha256"]
+            or _sha256_file(existing_bundle / "manifest.json")
+            != existing["backup_manifest_file_sha256"]
+        ):
+            raise StatePreparationError(
+                "existing COMPLETE preparation receipt does not bind the exact backup bundle"
             )
         live = _hashes(db)
         live["logical_snapshot_sha256"] = _logical_snapshot_for_path(db)
@@ -1259,16 +1309,6 @@ def prepare_state(
 
     before = _hashes(db)
     before["logical_snapshot_sha256"] = _logical_snapshot_for_path(db)
-    # Import lazily so read-only contract importers do not gain a write path.
-    # Runtime invokes this file by absolute path (rather than as a package), so
-    # the sibling fallback is required for the real PowerShell entry point.
-    try:
-        from scripts.state_disaster_recovery import create_backup, restore_verify
-    except ModuleNotFoundError as exc:
-        if exc.name != "scripts":
-            raise
-        from state_disaster_recovery import create_backup, restore_verify
-
     backup_id = f"state-preparation-{candidate_sha[:16]}-{before['db_sha256'][:16]}"
     try:
         backup_result = create_backup(
@@ -1278,6 +1318,10 @@ def prepare_state(
             retention=retention,
             source_sha=candidate_sha,
             backup_id=backup_id,
+            expected_db_sha256=before["db_sha256"],
+            expected_wal_sha256=before["wal_sha256"],
+            expected_shm_sha256=before["shm_sha256"],
+            expected_logical_snapshot_sha256=before["logical_snapshot_sha256"],
         )
         backup_bundle = _assert_no_reparse_components(backup / backup_result["backup_id"])
         for backup_file in (DB_NAME, "manifest.json", "receipt.json"):

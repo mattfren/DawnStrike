@@ -135,7 +135,7 @@ def test_source_release_sha_is_required_for_backup(tmp_path: Path) -> None:
 def test_tamper_and_partial_bundles_fail_closed(tmp_path: Path) -> None:
     _, root, bundle = _make_backup(tmp_path)
     (bundle / "receipt.json").write_text("{}", encoding="utf-8")
-    with pytest.raises(RecoveryValidationError, match="self-hash"):
+    with pytest.raises(RecoveryValidationError, match="strict contract"):
         validate_backup(bundle, backup_root=root)
     partial = root / "partial"
     partial.mkdir()
