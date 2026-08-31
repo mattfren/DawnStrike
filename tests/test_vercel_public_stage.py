@@ -167,3 +167,25 @@ def test_daily_vercel_publisher_builds_once_verifies_and_can_roll_back() -> None
     # immediately before prebuilt deploy, and once more before promotion.
     assert build_position < built_positions[0] < built_positions[1] < deploy_position
     assert built_positions[2] > deploy_position
+
+
+def test_promotion_rollback_restores_each_alias_snapshot() -> None:
+    script = Path("scripts/publish_vercel_public.ps1").read_text(encoding="utf-8")
+    snapshot_loop = script.index(
+        'foreach ($alias in $allProductionAliases) {',
+        script.index("$priorProductionAliases"),
+    )
+    promotion_marker = script.index("$promoted = $true")
+    rollback_loop = script.index('foreach ($alias in $allProductionAliases) {', promotion_marker)
+    assert snapshot_loop < promotion_marker < rollback_loop
+    assert 'Arguments @("inspect", [string]$alias, "--json")' in script
+    assert "$priorProductionAliases[[string]$alias]" in script
+    assert "$priorAlias = $priorProductionAliases[[string]$alias]" in script
+    assert "-DeploymentUrl ([string]$priorAlias.url)" in script
+    assert "a complete per-alias production snapshot was not captured" in script
+    assert "function Assert-VercelAliasRestored" in script
+    assert 'Arguments @("inspect", [string]$AliasUrl, "--json")' in script
+    assert "Rollback verification for $AliasUrl resolved the wrong deployment ID" in script
+    assert "Rollback verification for $AliasUrl resolved the wrong deployment URL" in script
+    assert "daily-deployment-rollback-result.json" in script
+    assert "candidate_no_longer_live = $true" in script

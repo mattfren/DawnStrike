@@ -9,6 +9,196 @@ if (Test-Path -LiteralPath $jobProcessScript -PathType Leaf) {
     . $jobProcessScript
 }
 
+# Windows PowerShell's ConvertFrom-Json keeps the last value for a duplicate
+# object key.  That is unsafe for a receipt/config boundary: an attacker can
+# append a second handler or route and rely on a different parser downstream.
+# Keep a tiny dependency-free JSON grammar guard beside the contract so every
+# JSON object is rejected before PowerShell materializes it.
+if (-not ("Dawnstrike.Native.VercelJsonGuard" -as [type])) {
+    Add-Type -Language CSharp -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Text;
+
+namespace Dawnstrike.Native {
+    public static class VercelJsonGuard {
+        public static void AssertUniqueObjectKeys(string json) {
+            new Parser(json).ParseDocument();
+        }
+
+        private sealed class Parser {
+            private readonly string text;
+            private int index;
+
+            internal Parser(string value) {
+                if (value == null) { throw new ArgumentNullException("json"); }
+                text = value;
+            }
+
+            internal void ParseDocument() {
+                SkipWhitespace();
+                ParseValue();
+                SkipWhitespace();
+                ExpectEnd();
+            }
+
+            private void ParseValue() {
+                SkipWhitespace();
+                if (index >= text.Length) { Fail("value is missing"); }
+                switch (text[index]) {
+                    case '{': ParseObject(); return;
+                    case '[': ParseArray(); return;
+                    case '"': ParseString(); return;
+                    case 't': ParseLiteral("true"); return;
+                    case 'f': ParseLiteral("false"); return;
+                    case 'n': ParseLiteral("null"); return;
+                    default: ParseNumber(); return;
+                }
+            }
+
+            private void ParseObject() {
+                index++;
+                var keys = new HashSet<string>(StringComparer.Ordinal);
+                SkipWhitespace();
+                if (Take('}')) { return; }
+                while (true) {
+                    SkipWhitespace();
+                    if (index >= text.Length || text[index] != '"') {
+                        Fail("object key must be a string");
+                    }
+                    string key = ParseString();
+                    if (!keys.Add(key)) { Fail("duplicate object key: " + key); }
+                    SkipWhitespace();
+                    Expect(':');
+                    ParseValue();
+                    SkipWhitespace();
+                    if (Take('}')) { return; }
+                    Expect(',');
+                }
+            }
+
+            private void ParseArray() {
+                index++;
+                SkipWhitespace();
+                if (Take(']')) { return; }
+                while (true) {
+                    ParseValue();
+                    SkipWhitespace();
+                    if (Take(']')) { return; }
+                    Expect(',');
+                }
+            }
+
+            private string ParseString() {
+                Expect('"');
+                var value = new StringBuilder();
+                while (index < text.Length) {
+                    char current = text[index++];
+                    if (current == '"') { return value.ToString(); }
+                    if (current < 0x20) { Fail("control character in string"); }
+                    if (current != '\\') { value.Append(current); continue; }
+                    if (index >= text.Length) { Fail("truncated string escape"); }
+                    char escaped = text[index++];
+                    switch (escaped) {
+                        case '"': value.Append('"'); break;
+                        case '\\': value.Append('\\'); break;
+                        case '/': value.Append('/'); break;
+                        case 'b': value.Append('\b'); break;
+                        case 'f': value.Append('\f'); break;
+                        case 'n': value.Append('\n'); break;
+                        case 'r': value.Append('\r'); break;
+                        case 't': value.Append('\t'); break;
+                        case 'u': value.Append(ParseUnicodeEscape()); break;
+                        default: Fail("invalid string escape"); break;
+                    }
+                }
+                Fail("unterminated string");
+                return null;
+            }
+
+            private char ParseUnicodeEscape() {
+                if (index + 4 > text.Length) { Fail("truncated unicode escape"); }
+                int code = 0;
+                for (int i = 0; i < 4; i++) {
+                    int digit = Hex(text[index++]);
+                    if (digit < 0) { Fail("invalid unicode escape"); }
+                    code = (code * 16) + digit;
+                }
+                return (char)code;
+            }
+
+            private void ParseNumber() {
+                int start = index;
+                if (Take('-')) { }
+                if (Take('0')) { }
+                else {
+                    RequireDigits();
+                }
+                if (Take('.')) { RequireDigits(); }
+                if (Take('e') || Take('E')) {
+                    if (Take('+') || Take('-')) { }
+                    RequireDigits();
+                }
+                if (index == start) { Fail("invalid value"); }
+            }
+
+            private void RequireDigits() {
+                int start = index;
+                while (index < text.Length && text[index] >= '0' && text[index] <= '9') { index++; }
+                if (index == start) { Fail("digits are missing"); }
+            }
+
+            private void ParseLiteral(string literal) {
+                if (index + literal.Length > text.Length ||
+                    !String.Equals(text.Substring(index, literal.Length), literal, StringComparison.Ordinal)) {
+                    Fail("invalid literal");
+                }
+                index += literal.Length;
+            }
+
+            private void SkipWhitespace() {
+                while (index < text.Length && " \t\r\n".IndexOf(text[index]) >= 0) { index++; }
+            }
+
+            private bool Take(char expected) {
+                if (index < text.Length && text[index] == expected) { index++; return true; }
+                return false;
+            }
+
+            private void Expect(char expected) {
+                if (!Take(expected)) { Fail("expected '" + expected + "'"); }
+            }
+
+            private void ExpectEnd() {
+                if (index != text.Length) { Fail("trailing JSON content"); }
+            }
+
+            private static int Hex(char value) {
+                if (value >= '0' && value <= '9') return value - '0';
+                if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+                if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+                return -1;
+            }
+
+            private void Fail(string message) {
+                throw new FormatException("Invalid JSON at offset " + index + ": " + message);
+            }
+        }
+    }
+}
+'@ -ErrorAction Stop
+}
+
+function Assert-VercelJsonObjectKeysUnique {
+    param([Parameter(Mandatory = $true)][string]$RawJson)
+    try {
+        [Dawnstrike.Native.VercelJsonGuard]::AssertUniqueObjectKeys($RawJson)
+    }
+    catch {
+        throw "Vercel JSON is invalid or contains duplicate object keys: $($_.Exception.Message)"
+    }
+}
+
 function Invoke-VercelGitText {
     param(
         [Parameter(Mandatory = $true)][string]$Root,
@@ -163,6 +353,7 @@ function Get-VercelFileSha256 {
 
 function Convert-VercelSourceManifestToCanonicalJson {
     param([Parameter(Mandatory = $true)][string]$RawJson)
+    Assert-VercelJsonObjectKeysUnique -RawJson $RawJson
     try { $parsed = $RawJson | ConvertFrom-Json }
     catch { throw "Vercel source manifest is unreadable." }
     $health = $parsed.api_sha256.PSObject.Properties["api/health.py"]
@@ -296,6 +487,106 @@ function Assert-VercelBuiltPackage {
     if (-not (Test-Path -LiteralPath $output -PathType Container)) {
         throw "Vercel prebuilt output package is missing."
     }
+
+    # The Build Output API package is deliberately a tiny closed-world
+    # boundary.  Do not let an additional generated config, middleware, or
+    # function become reachable merely because Vercel happened to accept it.
+    $expectedOutputEntries = @("config.json", "functions", "static")
+    $actualOutputEntries = @(
+        Get-ChildItem -LiteralPath $output -Force -ErrorAction SilentlyContinue |
+            ForEach-Object { [string]$_.Name }
+    )
+    $unexpectedOutputEntries = @(
+        Compare-Object `
+            -ReferenceObject ($expectedOutputEntries | Sort-Object) `
+            -DifferenceObject ($actualOutputEntries | Sort-Object) |
+            Where-Object { $_.SideIndicator -eq ">" } |
+            ForEach-Object { [string]$_.InputObject }
+    )
+    if ($unexpectedOutputEntries.Count -gt 0) {
+        throw "Vercel prebuilt output contains unexpected entries: $($unexpectedOutputEntries -join ', ')"
+    }
+    foreach ($requiredEntry in $expectedOutputEntries) {
+        if (-not (Test-Path -LiteralPath (Join-Path $output $requiredEntry))) {
+            throw "Vercel prebuilt output is missing required entry: $requiredEntry"
+        }
+    }
+
+    $configPath = Join-Path $output "config.json"
+    try {
+        $configRaw = Get-Content -Raw -LiteralPath $configPath
+        Assert-VercelJsonObjectKeysUnique -RawJson $configRaw
+        $config = $configRaw | ConvertFrom-Json
+    }
+    catch {
+        throw "Vercel prebuilt output config is unreadable."
+    }
+    if ($config.version -ne 3) {
+        throw "Vercel prebuilt output config must use Build Output API version 3."
+    }
+    $allowedConfigProperties = @("version", "routes")
+    $unexpectedConfigProperties = @(
+        $config.PSObject.Properties |
+            Where-Object { $_.Name -notin $allowedConfigProperties } |
+            ForEach-Object { [string]$_.Name }
+    )
+    if ($unexpectedConfigProperties.Count -gt 0) {
+        throw "Vercel prebuilt output config contains unexpected properties: $($unexpectedConfigProperties -join ', ')"
+    }
+    $routesProperty = $config.PSObject.Properties["routes"]
+    if ($null -eq $routesProperty -or $null -eq $routesProperty.Value) {
+        throw "Vercel prebuilt output config is missing routes."
+    }
+    $routeBindings = @()
+    $filesystemRoutes = 0
+    foreach ($route in @($routesProperty.Value)) {
+        $routeProperties = @($route.PSObject.Properties | ForEach-Object { [string]$_.Name })
+        $handle = $route.PSObject.Properties["handle"]
+        $destination = $route.PSObject.Properties["dest"]
+        if ($null -ne $handle -and [string]$handle.Value -eq "filesystem") {
+            if (@(Compare-Object `
+                    -ReferenceObject @("handle") `
+                    -DifferenceObject ($routeProperties | Sort-Object)).Count -ne 0) {
+                throw "Vercel prebuilt output config contains an unexpected filesystem route field."
+            }
+            $filesystemRoutes++
+            continue
+        }
+        if ($null -eq $destination) {
+            throw "Vercel prebuilt output config contains an unexpected route."
+        }
+        $dest = ([string]$destination.Value).TrimStart("/")
+        $apiName = switch -Regex ($dest) {
+            '^api/health(?:\.py)?$' { "health.py"; break }
+            '^api/readiness(?:\.py)?$' { "readiness.py"; break }
+            default { $null }
+        }
+        $source = $route.PSObject.Properties["src"]
+        if (-not $apiName -or $null -eq $source) {
+            throw "Vercel prebuilt output config contains an unexpected route destination."
+        }
+        if (@(Compare-Object `
+                -ReferenceObject @("dest", "src") `
+                -DifferenceObject ($routeProperties | Sort-Object)).Count -ne 0) {
+            throw "Vercel prebuilt output config contains an unexpected API route field."
+        }
+        $sourcePattern = [string]$source.Value
+        $routeName = [System.IO.Path]::GetFileNameWithoutExtension($apiName)
+        if ($sourcePattern -notmatch ("(^|/)api/" + [regex]::Escape($routeName) + "(?:[^A-Za-z0-9_]|$)")) {
+            throw "Vercel prebuilt output config route does not bind api/$apiName exactly."
+        }
+        $routeBindings += $apiName
+    }
+    if ($filesystemRoutes -ne 1) {
+        throw "Vercel prebuilt output config must contain exactly one filesystem route."
+    }
+    $expectedRouteBindings = @("health.py", "readiness.py")
+    if (@(Compare-Object `
+            -ReferenceObject ($expectedRouteBindings | Sort-Object) `
+            -DifferenceObject ($routeBindings | Sort-Object)).Count -ne 0) {
+        throw "Vercel prebuilt output config does not bind exactly the expected API routes."
+    }
+
     if (-not (Test-Path -LiteralPath $staticManifest -PathType Leaf)) {
         throw "Vercel prebuilt static source manifest is missing."
     }
@@ -305,6 +596,62 @@ function Assert-VercelBuiltPackage {
         -Label "Vercel prebuilt static package"
     if (-not (Test-Path -LiteralPath $functions -PathType Container)) {
         throw "Vercel prebuilt function package is missing."
+    }
+
+    $expectedFunctionRouteNames = @(
+        "api\health.func", "api\readiness.func",
+        "api_health.func", "api_readiness.func",
+        "api\health.py.func", "api\readiness.py.func",
+        "api_health.py.func", "api_readiness.py.func"
+    )
+    $functionRouteDirs = @(
+        Get-ChildItem -LiteralPath $functions -Recurse -Directory -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -like "*.func" }
+    )
+    if ($functionRouteDirs.Count -ne 2) {
+        throw "Vercel prebuilt function package must contain exactly two function routes."
+    }
+    $functionsPrefix = [System.IO.Path]::GetFullPath($functions).TrimEnd("\") + "\"
+    foreach ($routeDir in $functionRouteDirs) {
+        $routeFullPath = [System.IO.Path]::GetFullPath($routeDir.FullName)
+        if (-not $routeFullPath.StartsWith(
+                $functionsPrefix,
+                [System.StringComparison]::OrdinalIgnoreCase
+            )) {
+            throw "Vercel prebuilt function route escaped the functions root."
+        }
+        # Path.GetRelativePath is unavailable in Windows PowerShell 5.1.
+        $relativeRoute = $routeFullPath.Substring($functionsPrefix.Length)
+        if ($relativeRoute -notin $expectedFunctionRouteNames) {
+            throw "Vercel prebuilt function package contains an unexpected function route: $relativeRoute"
+        }
+        $routeApiName = if ($relativeRoute -match "health(?:\.py)?\.func$") {
+            "health.py"
+        }
+        elseif ($relativeRoute -match "readiness(?:\.py)?\.func$") {
+            "readiness.py"
+        }
+        else { $null }
+        $vcConfigs = @(
+            Get-ChildItem -LiteralPath $routeDir.FullName -Recurse -File -Force -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -eq ".vc-config.json" }
+        )
+        if ($vcConfigs.Count -ne 1) {
+            throw "Vercel prebuilt function route must contain exactly one .vc-config.json binding."
+        }
+        try {
+            $vcConfigRaw = Get-Content -Raw -LiteralPath $vcConfigs[0].FullName
+            Assert-VercelJsonObjectKeysUnique -RawJson $vcConfigRaw
+            $vcConfig = $vcConfigRaw | ConvertFrom-Json
+        }
+        catch {
+            throw "Vercel prebuilt function route has an unreadable .vc-config.json binding."
+        }
+        $handler = $vcConfig.PSObject.Properties["handler"]
+        if ($null -eq $handler -or [string]$handler.Value -match "\.\.[\\/]" -or
+            ([string]$handler.Value -replace "\\", "/").TrimStart("/") -notmatch ("(?:^|/)" + [regex]::Escape($routeApiName) + "$")) {
+            throw "Vercel prebuilt function route .vc-config.json does not bind the expected handler."
+        }
     }
     foreach ($apiName in @("health.py", "readiness.py")) {
         $stageApi = Join-Path $StageRoot ("api\" + $apiName)

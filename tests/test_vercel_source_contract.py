@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -172,6 +173,7 @@ def test_postbuild_function_bundle_tamper_is_rejected(tmp_path: Path) -> None:
     output_readiness = (
         stage / ".vercel" / "output" / "functions" / "api" / "readiness.func" / "readiness.py"
     )
+    output_config = stage / ".vercel" / "output" / "config.json"
     command = (
         f". '{repo / 'scripts' / HELPER.name}'; "
         f"$m = [ordered]@{{schema_version='dawnstrike.vercel_source_manifest.v1'; "
@@ -182,6 +184,15 @@ def test_postbuild_function_bundle_tamper_is_rejected(tmp_path: Path) -> None:
         f"[IO.File]::WriteAllText($r, ($m | ConvertTo-Json -Depth 8), $u); "
         f"Copy-Item $r '{static_manifest}'; Copy-Item $r '{function_manifest}'; "
         f"Copy-Item $r '{output_static_manifest}'; "
+        f"[IO.File]::WriteAllText('{output_config}', "
+        "'{\"version\":3,\"routes\":["
+        "{\"src\":\"/api/health(?:/)?\",\"dest\":\"/api/health.py\"},"
+        "{\"src\":\"/api/readiness(?:/)?\",\"dest\":\"/api/readiness.py\"},"
+        "{\"handle\":\"filesystem\"}]}' , $u); "
+        f"[IO.File]::WriteAllText('{output_health.parent / '.vc-config.json'}', "
+        "'{\"handler\":\"api/health.py\"}', $u); "
+        f"[IO.File]::WriteAllText('{output_readiness.parent / '.vc-config.json'}', "
+        "'{\"handler\":\"api/readiness.py\"}', $u); "
         f"Copy-Item '{stage / 'api' / 'health.py'}' '{output_health}'; "
         f"Copy-Item '{stage / 'api' / 'readiness.py'}' '{output_readiness}'; "
         f"[IO.File]::WriteAllText('{output_static_manifest}', '{'{'}\"tampered\":true{'}'}', $u); "
@@ -200,3 +211,184 @@ def test_postbuild_function_bundle_tamper_is_rejected(tmp_path: Path) -> None:
     result = _powershell(command)
     assert result.returncode != 0
     assert "prebuilt function bytes" in result.stderr.lower()
+
+
+def _valid_built_package(tmp_path: Path) -> tuple[Path, str, str]:
+    repo, commit, tree = _fixture(tmp_path)
+    stage = repo / "build" / "vercel-stage"
+    for path in (
+        stage / "api" / "public",
+        stage / "public",
+        stage / ".vercel" / "output" / "static",
+        stage / ".vercel" / "output" / "functions" / "api" / "health.func",
+        stage / ".vercel" / "output" / "functions" / "api" / "readiness.func",
+    ):
+        path.mkdir(parents=True)
+    health = b"HEALTH-COMMITTED\n"
+    readiness = b"READINESS-COMMITTED\n"
+    (stage / "api" / "health.py").write_bytes(health)
+    (stage / "api" / "readiness.py").write_bytes(readiness)
+    manifest = {
+        "schema_version": "dawnstrike.vercel_source_manifest.v1",
+        "source_sha": commit,
+        "source_tree": tree,
+        "api_sha256": {
+            "api/health.py": hashlib.sha256(health).hexdigest(),
+            "api/readiness.py": hashlib.sha256(readiness).hexdigest(),
+        },
+    }
+    readiness_hash = manifest["api_sha256"]["api/readiness.py"]
+    manifest_path = stage / "vercel-source-manifest.json"
+    manifest_path.write_text(
+        "{\n"
+        f'    "schema_version":  "{manifest["schema_version"]}",\n'
+        f'    "source_sha":  "{commit}",\n'
+        f'    "source_tree":  "{tree}",\n'
+        '    "api_sha256":  {\n'
+        f'                       "api/health.py":  "{manifest["api_sha256"]["api/health.py"]}",\n'
+        f'                       "api/readiness.py":  "{readiness_hash}"\n'
+        "                   }\n"
+        "}",
+        encoding="utf-8",
+    )
+    for destination in (
+        stage / "public" / "vercel-source-manifest.json",
+        stage / "api" / "public" / "vercel-source-manifest.json",
+        stage / ".vercel" / "output" / "static" / "vercel-source-manifest.json",
+    ):
+        shutil.copy2(manifest_path, destination)
+    health_output = stage / ".vercel" / "output" / "functions" / "api" / "health.func"
+    readiness_output = stage / ".vercel" / "output" / "functions" / "api" / "readiness.func"
+    shutil.copy2(stage / "api" / "health.py", health_output / "health.py")
+    shutil.copy2(stage / "api" / "readiness.py", readiness_output / "readiness.py")
+    (health_output / ".vc-config.json").write_text(
+        '{"handler":"api/health.py"}', encoding="utf-8"
+    )
+    (readiness_output / ".vc-config.json").write_text(
+        '{"handler":"api/readiness.py"}', encoding="utf-8"
+    )
+    (stage / ".vercel" / "output" / "config.json").write_text(
+        json.dumps(
+            {
+                "version": 3,
+                "routes": [
+                    {"src": "/api/health(?:/)?", "dest": "/api/health.py"},
+                    {"src": "/api/readiness(?:/)?", "dest": "/api/readiness.py"},
+                    {"handle": "filesystem"},
+                ],
+            },
+            indent=4,
+        ),
+        encoding="utf-8",
+    )
+    return stage, commit, tree
+
+
+def test_postbuild_extra_function_route_is_rejected(tmp_path: Path) -> None:
+    stage, commit, tree = _valid_built_package(tmp_path)
+    (stage / ".vercel" / "output" / "functions" / "api" / "attacker.func").mkdir()
+    command = (
+        f". '{stage.parent.parent / 'scripts' / HELPER.name}'; "
+        f"Assert-VercelBuiltPackage -StageRoot '{stage}' "
+        f"-ExpectedSourceSha '{commit}' -ExpectedSourceTree '{tree}'"
+    )
+    result = _powershell(command)
+    assert result.returncode != 0
+    assert "exactly two function routes" in result.stderr.lower()
+
+
+def test_postbuild_extra_route_in_output_config_is_rejected(tmp_path: Path) -> None:
+    stage, commit, tree = _valid_built_package(tmp_path)
+    config_path = stage / ".vercel" / "output" / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["routes"].insert(0, {"src": "/api/attacker", "dest": "/api/attacker.py"})
+    config_path.write_text(json.dumps(config, indent=4), encoding="utf-8")
+    command = (
+        f". '{stage.parent.parent / 'scripts' / HELPER.name}'; "
+        f"Assert-VercelBuiltPackage -StageRoot '{stage}' "
+        f"-ExpectedSourceSha '{commit}' -ExpectedSourceTree '{tree}'"
+    )
+    result = _powershell(command)
+    assert result.returncode != 0
+    assert "unexpected route destination" in result.stderr.lower()
+
+
+def test_postbuild_duplicate_expected_route_is_rejected(tmp_path: Path) -> None:
+    stage, commit, tree = _valid_built_package(tmp_path)
+    config_path = stage / ".vercel" / "output" / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["routes"].insert(0, config["routes"][0])
+    config_path.write_text(json.dumps(config, indent=4), encoding="utf-8")
+    command = (
+        f". '{stage.parent.parent / 'scripts' / HELPER.name}'; "
+        f"Assert-VercelBuiltPackage -StageRoot '{stage}' "
+        f"-ExpectedSourceSha '{commit}' -ExpectedSourceTree '{tree}'"
+    )
+    result = _powershell(command)
+    assert result.returncode != 0
+    assert "exactly the expected api routes" in result.stderr.lower()
+
+
+def test_postbuild_extra_output_config_property_is_rejected(tmp_path: Path) -> None:
+    stage, commit, tree = _valid_built_package(tmp_path)
+    config_path = stage / ".vercel" / "output" / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["attacker"] = {"dest": "/api/attacker.py"}
+    config_path.write_text(json.dumps(config, indent=4), encoding="utf-8")
+    command = (
+        f". '{stage.parent.parent / 'scripts' / HELPER.name}'; "
+        f"Assert-VercelBuiltPackage -StageRoot '{stage}' "
+        f"-ExpectedSourceSha '{commit}' -ExpectedSourceTree '{tree}'"
+    )
+    result = _powershell(command)
+    assert result.returncode != 0
+    assert "unexpected properties" in result.stderr.lower()
+
+
+def test_postbuild_duplicate_output_config_key_is_rejected(tmp_path: Path) -> None:
+    stage, commit, tree = _valid_built_package(tmp_path)
+    config_path = stage / ".vercel" / "output" / "config.json"
+    config = config_path.read_text(encoding="utf-8")
+    config_path.write_text(config[:-1] + ',"routes":[]}', encoding="utf-8")
+    command = (
+        f". '{stage.parent.parent / 'scripts' / HELPER.name}'; "
+        f"Assert-VercelBuiltPackage -StageRoot '{stage}' "
+        f"-ExpectedSourceSha '{commit}' -ExpectedSourceTree '{tree}'"
+    )
+    result = _powershell(command)
+    assert result.returncode != 0
+    assert "duplicate" in result.stderr.lower()
+
+
+def test_postbuild_handler_redirect_is_rejected(tmp_path: Path) -> None:
+    stage, commit, tree = _valid_built_package(tmp_path)
+    handler_path = (
+        stage / ".vercel" / "output" / "functions" / "api" / "health.func" / ".vc-config.json"
+    )
+    handler_path.write_text('{"handler":"api/attacker.py"}', encoding="utf-8")
+    command = (
+        f". '{stage.parent.parent / 'scripts' / HELPER.name}'; "
+        f"Assert-VercelBuiltPackage -StageRoot '{stage}' "
+        f"-ExpectedSourceSha '{commit}' -ExpectedSourceTree '{tree}'"
+    )
+    result = _powershell(command)
+    assert result.returncode != 0
+    assert "expected handler" in result.stderr.lower()
+
+
+def test_postbuild_duplicate_handler_key_is_rejected(tmp_path: Path) -> None:
+    stage, commit, tree = _valid_built_package(tmp_path)
+    handler_path = (
+        stage / ".vercel" / "output" / "functions" / "api" / "health.func" / ".vc-config.json"
+    )
+    handler_path.write_text(
+        '{"handler":"api/health.py","handler":"api/attacker.py"}', encoding="utf-8"
+    )
+    command = (
+        f". '{stage.parent.parent / 'scripts' / HELPER.name}'; "
+        f"Assert-VercelBuiltPackage -StageRoot '{stage}' "
+        f"-ExpectedSourceSha '{commit}' -ExpectedSourceTree '{tree}'"
+    )
+    result = _powershell(command)
+    assert result.returncode != 0
+    assert "duplicate" in result.stderr.lower()
