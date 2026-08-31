@@ -102,21 +102,27 @@ def test_head_and_tree_race_is_rejected_after_identity_capture(tmp_path: Path) -
 def test_staged_api_byte_mismatch_is_rejected(tmp_path: Path) -> None:
     repo, commit, tree = _fixture(tmp_path)
     stage = repo / "build" / "vercel-stage"
-    (stage / "api").mkdir(parents=True)
+    (stage / "api" / "public").mkdir(parents=True)
+    (stage / "public").mkdir(parents=True)
     (stage / "api" / "health.py").write_bytes(b"HEALTH-COMMITTED\n")
     (stage / "api" / "readiness.py").write_bytes(b"READINESS-COMMITTED\n")
     health_hash = hashlib.sha256(b"HEALTH-COMMITTED\n").hexdigest()
     readiness_hash = hashlib.sha256(b"READINESS-COMMITTED\n").hexdigest()
-    manifest = (
-        '{"schema_version":"dawnstrike.vercel_source_manifest.v1",'
-        f'"source_sha":"{commit}","source_tree":"{tree}","api_sha256":{{'
-        f'"api/health.py":"{health_hash}",'
-        f'"api/readiness.py":"{readiness_hash}"}}}}'
-    )
-    (stage / "vercel-source-manifest.json").write_text(manifest, encoding="utf-8")
-    (stage / "api" / "health.py").write_bytes(b"TAMPERED-STAGE\n")
+    root_manifest = stage / "vercel-source-manifest.json"
+    static_manifest = stage / "public" / "vercel-source-manifest.json"
+    function_manifest = stage / "api" / "public" / "vercel-source-manifest.json"
     command = (
         f". '{repo / 'scripts' / HELPER.name}'; "
+        f"$m = [ordered]@{{schema_version='dawnstrike.vercel_source_manifest.v1'; "
+        f"source_sha='{commit}'; source_tree='{tree}'; api_sha256=[ordered]@{{"
+        f"'api/health.py'='{health_hash}'; 'api/readiness.py'='{readiness_hash}'}}}}; "
+        f"$u = New-Object Text.UTF8Encoding($false); "
+        f"[IO.File]::WriteAllText('{root_manifest}', "
+        f"($m | ConvertTo-Json -Depth 8), $u); "
+        f"Copy-Item '{root_manifest}' '{static_manifest}'; "
+        f"Copy-Item '{root_manifest}' '{function_manifest}'; "
+        f"[IO.File]::WriteAllBytes('{stage / 'api' / 'health.py'}', "
+        "[Text.Encoding]::UTF8.GetBytes('TAMPERED-STAGE`n')); "
         f"Assert-VercelStagedSourceManifest -StageRoot '{stage}' "
         f"-ExpectedSourceSha '{commit}' -ExpectedSourceTree '{tree}'"
     )
@@ -136,3 +142,61 @@ def test_git_blob_extraction_is_byte_exact_under_windows_powershell(tmp_path: Pa
     result = _powershell(command)
     assert result.returncode == 0, result.stderr
     assert destination.read_bytes() == b"HEALTH-COMMITTED\n"
+
+
+def test_postbuild_function_bundle_tamper_is_rejected(tmp_path: Path) -> None:
+    repo, commit, tree = _fixture(tmp_path)
+    stage = repo / "build" / "vercel-stage"
+    (stage / "api" / "public").mkdir(parents=True)
+    (stage / "public").mkdir(parents=True)
+    (stage / ".vercel" / "output" / "static").mkdir(parents=True)
+    (stage / ".vercel" / "output" / "functions" / "api" / "health.func").mkdir(
+        parents=True
+    )
+    (stage / ".vercel" / "output" / "functions" / "api" / "readiness.func").mkdir(
+        parents=True
+    )
+    (stage / "api" / "health.py").write_bytes(b"HEALTH-COMMITTED\n")
+    (stage / "api" / "readiness.py").write_bytes(b"READINESS-COMMITTED\n")
+    health_hash = hashlib.sha256(b"HEALTH-COMMITTED\n").hexdigest()
+    readiness_hash = hashlib.sha256(b"READINESS-COMMITTED\n").hexdigest()
+    root_manifest = stage / "vercel-source-manifest.json"
+    static_manifest = stage / "public" / "vercel-source-manifest.json"
+    function_manifest = stage / "api" / "public" / "vercel-source-manifest.json"
+    output_static_manifest = (
+        stage / ".vercel" / "output" / "static" / "vercel-source-manifest.json"
+    )
+    output_health = (
+        stage / ".vercel" / "output" / "functions" / "api" / "health.func" / "health.py"
+    )
+    output_readiness = (
+        stage / ".vercel" / "output" / "functions" / "api" / "readiness.func" / "readiness.py"
+    )
+    command = (
+        f". '{repo / 'scripts' / HELPER.name}'; "
+        f"$m = [ordered]@{{schema_version='dawnstrike.vercel_source_manifest.v1'; "
+        f"source_sha='{commit}'; source_tree='{tree}'; api_sha256=[ordered]@{{"
+        f"'api/health.py'='{health_hash}'; 'api/readiness.py'='{readiness_hash}'}}}}; "
+        f"$u = New-Object Text.UTF8Encoding($false); "
+        f"$r = '{root_manifest}'; "
+        f"[IO.File]::WriteAllText($r, ($m | ConvertTo-Json -Depth 8), $u); "
+        f"Copy-Item $r '{static_manifest}'; Copy-Item $r '{function_manifest}'; "
+        f"Copy-Item $r '{output_static_manifest}'; "
+        f"Copy-Item '{stage / 'api' / 'health.py'}' '{output_health}'; "
+        f"Copy-Item '{stage / 'api' / 'readiness.py'}' '{output_readiness}'; "
+        f"[IO.File]::WriteAllText('{output_static_manifest}', '{'{'}\"tampered\":true{'}'}', $u); "
+        "$copyTamperRejected = $false; "
+        "try { Assert-VercelBuiltPackage -StageRoot '"
+        f"{stage}' -ExpectedSourceSha '{commit}' -ExpectedSourceTree '{tree}' "
+        "} catch { $copyTamperRejected = $true; "
+        "if ($_.Exception.Message -notmatch 'static package') { throw } }; "
+        "if (-not $copyTamperRejected) { throw 'Static package copy tamper was accepted.' }; "
+        f"Copy-Item '{root_manifest}' '{output_static_manifest}' -Force; "
+        f"[IO.File]::WriteAllBytes('{output_health}', "
+        "[Text.Encoding]::UTF8.GetBytes('TAMPERED-PACKAGE`n')); "
+        f"Assert-VercelBuiltPackage -StageRoot '{stage}' "
+        f"-ExpectedSourceSha '{commit}' -ExpectedSourceTree '{tree}'"
+    )
+    result = _powershell(command)
+    assert result.returncode != 0
+    assert "prebuilt function bytes" in result.stderr.lower()

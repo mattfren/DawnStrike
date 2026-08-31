@@ -135,6 +135,23 @@ function Invoke-VercelProcess {
     return $result
 }
 
+function Assert-RemoteVercelSourceManifest {
+    param(
+        [Parameter(Mandatory = $true)][string]$Url,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    $remote = Invoke-VercelProcess `
+        -Arguments @("curl", $Url) `
+        -Label "$Label source manifest" `
+        -TimeoutSeconds $VercelCommandTimeoutSeconds
+    $expectedCanonical = Get-VercelSourceManifestCanonicalJson `
+        -Path (Join-Path $stage "vercel-source-manifest.json")
+    Assert-VercelSourceManifestJson `
+        -RawJson ([string]$remote.Stdout) `
+        -ExpectedCanonicalJson $expectedCanonical `
+        -Label $Label
+}
+
 function Get-OptionalJsonProperty {
     param(
         [AllowNull()][object]$InputObject,
@@ -284,7 +301,6 @@ function Assert-PublicationState {
     -ExpectedSourceSha $expectedSourceSha `
     -ExpectedSourceTree $expectedSourceTree `
     -AllowDegraded:$AllowDegraded
-
 Assert-VercelGitSourceStable `
     -Root $resolvedRoot `
     -ExpectedSourceSha $expectedSourceSha `
@@ -307,12 +323,20 @@ try {
     if ($buildResult.Stderr) {
         [Console]::Error.WriteLine($buildResult.Stderr)
     }
+    Assert-VercelBuiltPackage `
+        -StageRoot $stage `
+        -ExpectedSourceSha $expectedSourceSha `
+        -ExpectedSourceTree $expectedSourceTree
     Assert-VercelGitSourceStable `
         -Root $resolvedRoot `
         -ExpectedSourceSha $expectedSourceSha `
         -ExpectedSourceTree $expectedSourceTree `
         -AllowedStageRoot $stage
     Assert-VercelStagedSourceManifest `
+        -StageRoot $stage `
+        -ExpectedSourceSha $expectedSourceSha `
+        -ExpectedSourceTree $expectedSourceTree
+    Assert-VercelBuiltPackage `
         -StageRoot $stage `
         -ExpectedSourceSha $expectedSourceSha `
         -ExpectedSourceTree $expectedSourceTree
@@ -355,6 +379,9 @@ $previewManifest = Invoke-VercelJson `
 $previewReleaseManifest = Invoke-VercelJson `
     -Arguments @("curl", "$previewUrl/release-manifest.json") `
     -Label "Preview release manifest"
+Assert-RemoteVercelSourceManifest `
+    -Url "$previewUrl/vercel-source-manifest.json" `
+    -Label "Preview"
 Assert-PublicationState `
     -Health $previewHealth `
     -Readiness $previewReadiness `
@@ -377,6 +404,10 @@ try {
             -ExpectedSourceTree $expectedSourceTree `
             -AllowedStageRoot $stage
         Assert-VercelStagedSourceManifest `
+            -StageRoot $stage `
+            -ExpectedSourceSha $expectedSourceSha `
+            -ExpectedSourceTree $expectedSourceTree
+        Assert-VercelBuiltPackage `
             -StageRoot $stage `
             -ExpectedSourceSha $expectedSourceSha `
             -ExpectedSourceTree $expectedSourceTree
@@ -452,6 +483,9 @@ try {
                         "$promotedUrl/release-manifest.json?verify=$cacheBuster"
                     ) `
                     -Label "Promoted deployment release manifest"
+                Assert-RemoteVercelSourceManifest `
+                    -Url "$promotedUrl/vercel-source-manifest.json?verify=$cacheBuster" `
+                    -Label "Promoted deployment"
                 Assert-PublicationState `
                     -Health $promotedHealth `
                     -Readiness $promotedReadiness `
@@ -523,6 +557,9 @@ try {
                         "$ProductionAlias/release-manifest.json?verify=$cacheBuster"
                     ) `
                     -Label "Production release manifest"
+                Assert-RemoteVercelSourceManifest `
+                    -Url "$ProductionAlias/vercel-source-manifest.json?verify=$cacheBuster" `
+                    -Label "Production"
                 Assert-PublicationState `
                     -Health $productionHealth `
                     -Readiness $productionReadiness `
