@@ -377,8 +377,12 @@ function Get-ScheduledTask {{
 }}
 function Export-ScheduledTask {{
     [CmdletBinding()] param([string]$TaskName,[string]$TaskPath)
-    $enabled = if ($global:MockTaskState -eq 'Disabled') {{ 'false' }} else {{ 'true' }}
-    "<Task><Name>$TaskName</Name><Description>$global:MockDefinition</Description><Settings><Enabled>$enabled</Enabled></Settings></Task>"
+    $enabled = if ($global:MockTaskState -eq 'Disabled') {{
+        '<Enabled>false</Enabled>'
+    }} else {{
+        ''
+    }}
+    "<Task><Name>$TaskName</Name><Description>$global:MockDefinition</Description><Settings>$enabled</Settings></Task>"
 }}
 $ready = Get-DawnstrikeTaskContract -RuntimeRoot 'C:\runtime' -StateRoot 'C:\state'
 $blocked = @{{}}

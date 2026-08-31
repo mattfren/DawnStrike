@@ -307,7 +307,11 @@ function Get-DawnstrikeTaskDefinitionText {
 
     try {
         $document = [System.Xml.XmlDocument]::new()
-        $document.PreserveWhitespace = $true
+        # Task Scheduler omits Settings/Enabled when the task is Ready because
+        # the schema default is true, but emits it after Disable-ScheduledTask.
+        # Parse structurally and remove that one state-only element so the
+        # definition contract remains stable across the enable/disable window.
+        $document.PreserveWhitespace = $false
         $document.LoadXml($Xml)
         $namespace = [string]$document.DocumentElement.NamespaceURI
         if ([string]::IsNullOrWhiteSpace($namespace)) {
@@ -318,10 +322,12 @@ function Get-DawnstrikeTaskDefinitionText {
             $manager.AddNamespace("task", $namespace)
             $enabledNodes = @($document.SelectNodes("/task:Task/task:Settings/task:Enabled", $manager))
         }
-        if ($enabledNodes.Count -ne 1) {
-            throw "Task XML must contain exactly one Settings/Enabled element."
+        if ($enabledNodes.Count -gt 1) {
+            throw "Task XML must contain at most one Settings/Enabled element."
         }
-        $enabledNodes[0].InnerText = "DAWNSTRIKE_ENABLEMENT_STATE"
+        if ($enabledNodes.Count -eq 1) {
+            $null = $enabledNodes[0].ParentNode.RemoveChild($enabledNodes[0])
+        }
         return [string]$document.OuterXml
     }
     catch {
