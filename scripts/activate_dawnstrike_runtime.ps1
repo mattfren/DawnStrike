@@ -2534,6 +2534,7 @@ function Invoke-DawnstrikeRuntimeActivation {
     $auxiliaryDisabled = $false
     $preserveLocks = $false
     $activationBodyStarted = $false
+    $journalPhase = "INIT"
     $lockOrigin = Convert-DawnstrikeCanonicalOriginIdentity $origin
     $lockInterpreter = Get-DawnstrikeApprovedLockInterpreter
     $emptyJournalHash = Get-DawnstrikeSha256Text ""
@@ -2572,7 +2573,6 @@ function Invoke-DawnstrikeRuntimeActivation {
             throw "Staged runtime origin does not match the accepted candidate origin."
         }
 
-        $activationBodyStarted = $true
         try {
             Assert-DawnstrikeNoDailyLocks $state
             $dailyLock = Enter-DawnstrikeDailyRunLock -StateRoot $state -MarketDate $MarketDate -Owner "runtime_activation"
@@ -2612,6 +2612,11 @@ function Invoke-DawnstrikeRuntimeActivation {
                 -TaskContractSha256 ([string]$taskLocked.task_contract_sha256) `
                 -RuntimeStageContractSha256 $stageJournalHash `
                 -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
+            $journalPhase = "PRE_QUIESCE"
+            # From this durable boundary onward, ordinary failures are part of
+            # the journaled activation transaction.  Leave the exact lock pair
+            # in place for the next process to adopt after compensation.
+            $activationBodyStarted = $true
             $tasksDisabled = $true
             Disable-DawnstrikeCanonicalTasks
             $taskDisabled = Get-DawnstrikeTaskContract $runtime $state -AllowDisabled
@@ -2958,6 +2963,7 @@ function Invoke-DawnstrikeRuntimeActivation {
                 -TaskContractSha256 ([string]$taskFinalCheck.task_contract_sha256) `
                 -RuntimeStageContractSha256 $stageJournalHash `
                 -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
+            $journalPhase = "PRE_SWAP"
 
             $swapStarted = $true
             [System.IO.Directory]::Move($runtime, $rollbackCheckout)
@@ -3014,6 +3020,7 @@ function Invoke-DawnstrikeRuntimeActivation {
                 -TaskContractSha256 ([string]$taskAfterDisabled.task_contract_sha256) `
                 -RuntimeStageContractSha256 $stageJournalHash `
                 -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
+            $journalPhase = "POST_SWAP"
             $null = Assert-DawnstrikeReceiptRecoveryArtifacts `
                 -Receipt $receiptPayload `
                 -StateRoot $state `
@@ -3067,11 +3074,27 @@ function Invoke-DawnstrikeRuntimeActivation {
                 -TaskContractSha256 ([string]$taskAfter.task_contract_sha256) `
                 -RuntimeStageContractSha256 $stageJournalHash `
                 -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
+            $journalPhase = "COMPLETE"
             if ($TestStageCrashPoint -eq "after_complete_journal") { Stop-Process -Id $PID -Force }
             return $complete
         }
         catch {
             $failure = $_
+            # A journal transition can durably replace the file and still
+            # throw before its assignment above (for example, a readback or
+            # output fault).  Reconcile the phase while the owned lock is
+            # still held; otherwise the outer staging cleanup could mistake a
+            # PRE_QUIESCE transaction for INIT and strand its artifacts.
+            try {
+                $failureJournal = Get-DawnstrikeStrictRuntimeOperationJournal `
+                    $operationJournal $lockInterpreter.path $lockInterpreter.sha256
+                $journalPhase = [string]$failureJournal.payload.phase
+            }
+            catch {
+                # An unproven journal phase is itself governed evidence. Keep
+                # both locks so an operator/next process can recover it.
+                $preserveLocks = $true
+            }
             if ($swapStarted -or $tasksDisabled) {
                 try {
                     $null = Set-DawnstrikeTasksFailClosedDisabled $runtime $state
@@ -3149,18 +3172,41 @@ function Invoke-DawnstrikeRuntimeActivation {
                 throw "Runtime activation failed and automatic restore could not be completed; canonical tasks are proven Disabled and the prepared receipt/rollback tool are required. Original failure: $($failure.Exception.Message)"
                 }
             }
+            if ($journalPhase -in @("PRE_QUIESCE", "PRE_SWAP", "POST_SWAP")) {
+                if ($null -eq $activationLock -or $null -eq $dailyLock) {
+                    throw "Nonterminal activation recovery lacks its adoptable lock pair."
+                }
+                if (
+                    -not (Test-Path -LiteralPath $activationLock.path -PathType Leaf) -or
+                    -not (Test-Path -LiteralPath $dailyLock.lock_path -PathType Leaf)
+                ) { throw "Nonterminal activation recovery lock pair was not preserved." }
+                # Recovery artifacts are still bound to this journal phase.
+                # Releasing either lock would make the next invocation reject
+                # the otherwise valid nonterminal evidence as orphaned.
+                $preserveLocks = $true
+            }
             throw $failure
         }
         finally {
             if (-not $preserveLocks) {
-                if ($null -ne $dailyLock) { Exit-DawnstrikeDailyRunLock -Lock $dailyLock }
-                Exit-DawnstrikeGovernedRuntimeLock $activationLock
+                if ($null -ne $dailyLock) {
+                    Exit-DawnstrikeDailyRunLock -Lock $dailyLock
+                    $dailyLock = $null
+                }
+                # Keep INIT's runtime lock for the outer staging cleanup. It
+                # releases this final lock before removing the journal so a
+                # crash leaves an adoptable INIT tombstone, without a
+                # double-release on ordinary pre-transition failures.
+                if ($activationBodyStarted) {
+                    Exit-DawnstrikeGovernedRuntimeLock $activationLock
+                    $activationLock = $null
+                }
             }
         }
     }
     catch {
         $stagingFailure = $_
-        if (-not $activationBodyStarted -and $null -ne $activationLock) {
+        if (-not $activationBodyStarted -and -not $preserveLocks -and $null -ne $activationLock) {
             try {
                 $stagingJournal = Get-DawnstrikeStrictRuntimeOperationJournal `
                     $operationJournal $lockInterpreter.path $lockInterpreter.sha256
@@ -3191,6 +3237,25 @@ function Invoke-DawnstrikeRuntimeActivation {
                     Assert-DawnstrikeNoReparseComponents $failedStageQuarantine "Failed stage quarantine destination"
                     Move-Item -LiteralPath $stage -Destination $failedStageQuarantine -ErrorAction Stop
                     if (Test-Path -LiteralPath $stage) { throw "Failed activation stage quarantine did not complete." }
+                }
+                if (Test-Path -LiteralPath $schedulerBackupPath) {
+                    # Task-backup creation can finish its final rename and
+                    # still throw before PRE_QUIESCE is sealed.  Preserve that
+                    # exact INIT-bound artifact so it cannot strand the next
+                    # activation behind the partial-artifact guard.
+                    Assert-DawnstrikeNoReparseComponents $schedulerBackupPath "Failed scheduler backup"
+                    $failedSchedulerBackupItem = Get-Item -LiteralPath $schedulerBackupPath -Force -ErrorAction Stop
+                    if (
+                        -not $failedSchedulerBackupItem.PSIsContainer -or
+                        ($failedSchedulerBackupItem.Attributes -band [IO.FileAttributes]::ReparsePoint)
+                    ) { throw "Failed scheduler backup is not a safe directory." }
+                    $failedSchedulerQuarantineRoot = Join-Path $state "recovery-quarantine"
+                    Assert-DawnstrikeNoReparseComponents $failedSchedulerQuarantineRoot "Failed scheduler backup quarantine"
+                    New-Item -ItemType Directory -Path $failedSchedulerQuarantineRoot -Force | Out-Null
+                    $failedSchedulerQuarantine = Join-Path $failedSchedulerQuarantineRoot ("runtime-activation-$activationId-scheduler-backup-failure-$([DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ'))")
+                    Assert-DawnstrikeNoReparseComponents $failedSchedulerQuarantine "Failed scheduler backup quarantine destination"
+                    Move-Item -LiteralPath $schedulerBackupPath -Destination $failedSchedulerQuarantine -ErrorAction Stop
+                    if (Test-Path -LiteralPath $schedulerBackupPath) { throw "Failed scheduler backup quarantine did not complete." }
                 }
                 Exit-DawnstrikeGovernedRuntimeLock $activationLock
                 $activationLock = $null
