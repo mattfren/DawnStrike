@@ -2,7 +2,6 @@ import hashlib
 import json
 import os
 import re
-import sys
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -588,7 +587,7 @@ def _auxiliary_task(runtime: Path, state: Path, *, candidate_sha: str = "a" * 40
         "symbols_manifest_sha256": input_hashes["symbols.json"],
         "entitlement_receipt_sha256": input_hashes["entitlement.json"],
         "source_config_sha256": input_hashes["web_sources.yaml"],
-        "execute": sys.executable,
+        "execute": str(scheduler_service.AUXILIARY_INTERPRETER),
         "arguments": arguments,
         "working_directory": str(runtime),
         "last_task_result": 0,

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -14,15 +17,45 @@ pytestmark = pytest.mark.skipif(
 
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / "scripts" / "capture_task_safety.ps1"
-APPROVED_PYTHON = Path(
-    r"C:\Users\MattFields\AppData\Local\Programs\Python\Python313\python.exe"
-)
-APPROVED_PYTHON_SHA256 = (
-    "ef8f51028ac5329641985112f8efb1c2d4c47c86b8011ddf7e6fae21e2b4e5a1"  # pragma: allowlist secret
-)
-APPROVED_PYTHON_SIGNER_THUMBPRINT = (
-    "9BA3C2E210C7E8296C5056515BFC0B0BBA78AC48"  # pragma: allowlist secret
-)
+APPROVED_PYTHON = Path(sys.executable).resolve()
+APPROVED_PYTHON_SHA256 = hashlib.sha256(APPROVED_PYTHON.read_bytes()).hexdigest()
+
+
+def _host_python_signer_thumbprint() -> str:
+    if shutil.which("powershell.exe") is None:
+        return "9BA3C2E210C7E8296C5056515BFC0B0BBA78AC48"  # pragma: allowlist secret
+    environment = os.environ.copy()
+    environment["DAWNSTRIKE_TEST_PYTHON"] = str(APPROVED_PYTHON)
+    result = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "[Console]::OutputEncoding=[Text.Encoding]::ASCII; "
+            "$certificate=[Security.Cryptography.X509Certificates.X509Certificate2]::new("
+            "[Security.Cryptography.X509Certificates.X509Certificate]::CreateFromSignedFile("
+            "$env:DAWNSTRIKE_TEST_PYTHON)); "
+            "[Console]::Out.Write([string]$certificate.Thumbprint)",
+        ],
+        capture_output=True,
+        env=environment,
+        check=False,
+    )
+    if result.returncode != 0:
+        error_text = result.stderr.replace(b"\x00", b"").decode(errors="replace").strip()
+        raise RuntimeError(f"test interpreter signer lookup failed: {error_text}")
+    signer_text = result.stdout.replace(b"\x00", b"").decode(errors="replace")
+    match = re.search(r"[0-9A-Fa-f]{40}", signer_text)
+    if match is None:
+        raise RuntimeError(
+            "test interpreter has no exact Authenticode signer thumbprint: "
+            f"stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+    return match.group(0).upper()
+
+
+APPROVED_PYTHON_SIGNER_THUMBPRINT = _host_python_signer_thumbprint()
 BOOTSTRAP_PRELOADER = (
     "import hashlib,sys; p=sys.argv[1]; e=sys.argv[2]; b=open(p,'rb').read(); "
     "a=hashlib.sha256(b).hexdigest(); a==e or (_ for _ in ()).throw("
