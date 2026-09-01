@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -100,18 +100,24 @@ def load_latest_opportunity_projection(
         else:
             rows = connection.execute(
                 """
-                SELECT run_id, decision_at
+                SELECT run_id, decision_at, first_recorded_at
                 FROM opportunity_pipeline_runs
                 ORDER BY decision_at DESC, first_recorded_at DESC, run_id DESC
                 """
             ).fetchall()
-            latest = next(
-                (
-                    row
-                    for row in rows
-                    if _market_date_for_timestamp(row[1]) == normalized_market_date
+            matching = [
+                row
+                for row in rows
+                if _market_date_for_timestamp(row[1]) == normalized_market_date
+            ]
+            latest = max(
+                matching,
+                key=lambda row: (
+                    _timestamp_for_order(row[1]),
+                    _timestamp_for_order(row[2]),
+                    str(row[0]),
                 ),
-                None,
+                default=None,
             )
         if latest is None:
             return unavailable_projection(OpportunityProjectionReason.NO_PERSISTED_RUN)
@@ -217,6 +223,23 @@ def _market_date_for_timestamp(value: object) -> str | None:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         return None
     return parsed.astimezone(MARKET_TIMEZONE).date().isoformat()
+
+
+def _timestamp_for_order(value: object) -> datetime:
+    """Return an aware UTC timestamp for deterministic chronological ordering."""
+
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            parsed = None
+    else:
+        parsed = None
+    if parsed is None or parsed.tzinfo is None or parsed.utcoffset() is None:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 __all__ = [
