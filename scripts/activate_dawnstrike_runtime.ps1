@@ -2926,7 +2926,10 @@ function Invoke-DawnstrikeRuntimeActivation {
     # artifact absent, and the exact previous runtime/task contracts unchanged.
     $activationLockPath = Join-Path $state "locks\dawnstrike-runtime-activation.lock"
     $pendingCompleteReceipt = $false
-    if (Test-Path -LiteralPath $completeReceipt -PathType Leaf -and Test-Path -LiteralPath $operationJournal -PathType Leaf) {
+    if (
+        (Test-Path -LiteralPath $completeReceipt -PathType Leaf) -and
+        (Test-Path -LiteralPath $operationJournal -PathType Leaf)
+    ) {
         try {
             $pendingJournalProbe = Get-DawnstrikeStrictRuntimeOperationJournal $operationJournal $lockInterpreter.path $lockInterpreter.sha256
             $pendingCompleteReceipt = [string]$pendingJournalProbe.payload.phase -eq "POST_SWAP_READY"
@@ -4066,7 +4069,7 @@ function Invoke-DawnstrikeRuntimeActivation {
                 -CompleteReceiptRelativePath $completeReceiptRelative `
                 -CompleteReceiptSha256 (Get-DawnstrikeSha256File $completeReceipt) `
                 -BackupContractSha256 ([string]$taskBackup.manifest_sha256) `
-                -TaskContractSha256 ([string]$taskAfter.task_contract_sha256) `
+                -TaskContractSha256 ([string]$taskAfterDisabled.task_contract_sha256) `
                 -RuntimeStageContractSha256 $stageJournalHash `
                 -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
             $journalPhase = "POST_SWAP_READY"
