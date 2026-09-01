@@ -379,6 +379,64 @@ function Invoke-DawnstrikeRuntimeRollback {
             -GitPath $gitPath `
             -PythonPath $pythonPath `
             -TimeoutSeconds $ProcessTimeoutSeconds
+        $completeLockPath = Join-Path $state "locks\dawnstrike-runtime-activation.lock"
+        $completeLock = $null
+        $completeDailyLock = $null
+        $completeLockRoot = Join-Path $state "locks"
+        Assert-DawnstrikeNoReparseComponents $completeLockRoot "Completed rollback lock root"
+        $expectedCompleteDailyPath = Join-Path $completeLockRoot ("dawnstrike-daily-" + $marketDate + ".lock")
+        $completeDailyPaths = @(
+            Get-ChildItem -LiteralPath $completeLockRoot -Filter "dawnstrike-daily-*.lock" -File -Force -ErrorAction SilentlyContinue |
+                ForEach-Object { [System.IO.Path]::GetFullPath($_.FullName) }
+        )
+        $unexpectedCompleteDaily = @($completeDailyPaths | Where-Object {
+            $_ -ne [System.IO.Path]::GetFullPath($expectedCompleteDailyPath)
+        })
+        if ($unexpectedCompleteDaily.Count -gt 0) {
+            throw "Completed rollback has a foreign or multiple daily lock set."
+        }
+        if (Test-Path -LiteralPath $completeLockPath -PathType Leaf) {
+            $completeInterpreter = Get-DawnstrikeApprovedLockInterpreter
+            $completeLockSnapshot = Get-DawnstrikeStrictRuntimeLock $completeLockPath $completeInterpreter.path $completeInterpreter.sha256
+            if ([string]$completeLockSnapshot.payload.operation -ne "runtime_rollback") {
+                throw "Completed rollback lock belongs to a different operation."
+            }
+            $completeLock = Adopt-DawnstrikeGovernedRuntimeLockWithJournal `
+                -StateRoot $state -JournalPath $operationJournalPath `
+                -CandidateSha $candidateSha -CandidateTree ([string]$activation.candidate_tree) `
+                -OriginIdentity (Convert-DawnstrikeCanonicalOriginIdentity $currentOrigin) `
+                -PythonPath $completeInterpreter.path -PythonSha256 $completeInterpreter.sha256
+            $completeJournal = Get-DawnstrikeStrictRuntimeOperationJournal `
+                $operationJournalPath $completeInterpreter.path $completeInterpreter.sha256
+            if (
+                [string]$completeJournal.payload.phase -ne "COMPLETE" -or
+                [string]$completeJournal.payload.prepared_receipt_sha256 -ne (Get-DawnstrikeSha256File $receiptPath) -or
+                [string]$completeJournal.payload.backup_contract_sha256 -ne [string]$existingRollbackReceipt.scheduler_backup_manifest_sha256 -or
+                [string]$completeJournal.payload.complete_receipt_sha256 -ne (Get-DawnstrikeSha256File $rollbackReceipt)
+            ) { throw "Completed rollback lock recovery changed the sealed journal." }
+            if (Test-Path -LiteralPath $expectedCompleteDailyPath -PathType Leaf) {
+                $completeDailyLock = Enter-DawnstrikeDailyRunLock `
+                    -StateRoot $state -MarketDate $marketDate -Owner "runtime_rollback"
+                if (-not $completeDailyLock.acquired) {
+                    throw "Completed rollback could not reacquire its exact daily lock."
+                }
+                Confirm-DawnstrikeActivationDailyLockHandshake `
+                    -StateRoot $state -ActivationLock $completeLock -DailyLock $completeDailyLock | Out-Null
+                Exit-DawnstrikeDailyRunLock -Lock $completeDailyLock
+                if (Test-Path -LiteralPath $expectedCompleteDailyPath -PathType Leaf) {
+                    throw "Completed rollback daily lock release was not proven."
+                }
+                $completeDailyLock = $null
+            }
+            Exit-DawnstrikeGovernedRuntimeLock $completeLock
+            if (Test-Path -LiteralPath $completeLockPath -PathType Leaf) {
+                throw "Completed rollback runtime lock release was not proven."
+            }
+            $completeLock = $null
+        }
+        else {
+            Assert-DawnstrikeNoDailyLocks $state
+        }
         return $existingRollbackReceipt
         }
     }
@@ -927,6 +985,10 @@ function Invoke-DawnstrikeRuntimeRollback {
                 -TaskContractSha256 $journalTaskContractSha256 `
                 -RuntimeStageContractSha256 $stageContractSha256 `
                 -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256 | Out-Null
+            if ($env:DAWNSTRIKE_TEST_ROLLBACK_CRASH_POINT -eq "after_complete") {
+                if ($env:DAWNSTRIKE_TEST_LOCK_JOURNAL -ne "1") { throw "Rollback crash injection is test-only." }
+                Stop-Process -Id $PID -Force
+            }
             return $sealedRollback
         }
         finally {
