@@ -83,6 +83,8 @@ def _write_publishable_fixture(
         json.dumps(
             {
                 "status": snapshot_status,
+                "market_date": "2026-08-28",
+                "manifest_id": "performance-fixture",
                 "input_hash_sha256": canonical_hash,
                 "payload_sha256": snapshot_hash,
                 "byte_count": snapshot.stat().st_size,
@@ -101,6 +103,7 @@ def _write_publishable_fixture(
     (root / "data" / "scenarios.json.manifest.json").write_text(
         json.dumps(
             {
+                "schema_version": "dawnstrike.scenarios_public_manifest.v1",
                 "payload_sha256": hashlib.sha256(scenarios.read_bytes()).hexdigest(),
                 "calibration_status": "UNCALIBRATED",
             }
@@ -108,6 +111,62 @@ def _write_publishable_fixture(
         encoding="utf-8",
     )
     scenario_hash = hashlib.sha256(scenarios.read_bytes()).hexdigest()
+    current_ledger_lineage = "4" * 64
+    current_session_lineage_sha256 = hashlib.sha256(
+        json.dumps(
+            [current_ledger_lineage], sort_keys=True, separators=(",", ":")
+        ).encode()
+    ).hexdigest()
+    account_session_report = {
+        "schema_version": "dawnstrike.account_session_report.v1",
+        "status": "COMPLETE",
+        "market_date": "2026-08-28",
+        "code_sha": "clean-sha",
+        "account_id": "alphaops_v5_simulated",
+        "version_bucket": "v5",
+        "cohort": "official_forward_paper",
+        "strategy_id": "alphaops_v5",
+        "strategy_version": "dawnstrike-alphaops-v5.0.0",
+        "expected_session_count": 1,
+        "ledger_row_count": 1,
+        "complete_count": 1,
+        "missing_count": 0,
+        "partial_count": 0,
+        "quarantined_count": 0,
+        "unsafe_ledger_count": 0,
+        "input_hash_sha256": "1" * 64,
+        "expected_calendar_hash_sha256": "2" * 64,
+        "source_hashes_sha256": "3" * 64,
+        "ledger_lineage_sha256": current_session_lineage_sha256,
+        "current_session_lineage_sha256": current_session_lineage_sha256,
+        "expected_current_session_lineage_sha256": current_session_lineage_sha256,
+        "current_session_lineage_match": True,
+        "research_only": True,
+        "broker_execution_enabled": False,
+        "series": [
+            {
+                "status": "COMPLETE",
+                "market_date": "2026-08-28",
+                "code_sha": "clean-sha",
+                "account_id": "alphaops_v5_simulated",
+                "version_bucket": "v5",
+                "cohort": "official_forward_paper",
+                "strategy_id": "alphaops_v5",
+                "strategy_version": "dawnstrike-alphaops-v5.0.0",
+                "expected_session_count": 1,
+                "ledger_row_count": 1,
+                "complete_count": 1,
+                "ledger_lineage_sha256": current_session_lineage_sha256,
+                "current_session_lineage_sha256": current_session_lineage_sha256,
+                "expected_current_session_lineage_sha256": (
+                    current_session_lineage_sha256
+                ),
+                "current_session_lineage_match": True,
+                "research_only": True,
+                "broker_execution_enabled": False,
+            }
+        ],
+    }
     opportunity = root / "data" / "opportunity-projection.json"
     opportunity.write_text(
         json.dumps(
@@ -143,6 +202,7 @@ def _write_publishable_fixture(
     calendar_hash = hashlib.sha256(calendar.read_bytes()).hexdigest()
     calendar_manifest = {
         "status": snapshot_status,
+        "manifest_id": "calendar-fixture",
         "canonical_input_hash_sha256": canonical_hash,
         "performance_payload_sha256": snapshot_hash,
         "payload_sha256": calendar_hash,
@@ -151,16 +211,74 @@ def _write_publishable_fixture(
         json.dumps(calendar_manifest),
         encoding="utf-8",
     )
+    publication_pair = {
+        "market_date": "2026-08-28",
+        "canonical_input_hash_sha256": canonical_hash,
+        "performance_payload_sha256": snapshot_hash,
+        "calendar_payload_sha256": calendar_hash,
+        "performance_manifest_id": "performance-fixture",
+        "calendar_manifest_id": "calendar-fixture",
+        "scenario_payload_sha256": scenario_hash,
+        "scenario_schema_version": "dawnstrike.scenarios_public_manifest.v1",
+        "account_session_status": "COMPLETE",
+        "account_session_input_hash_sha256": "1" * 64,
+        "account_session_expected_calendar_hash_sha256": "2" * 64,
+        "account_session_code_sha": "clean-sha",
+        "account_session_account_id": "alphaops_v5_simulated",
+        "account_session_version_bucket": "v5",
+        "account_session_cohort": "official_forward_paper",
+        "account_session_strategy_id": "alphaops_v5",
+        "account_session_strategy_version": "dawnstrike-alphaops-v5.0.0",
+        "account_session_ledger_lineage_sha256": current_session_lineage_sha256,
+        "account_session_current_session_lineage_sha256": (
+            current_session_lineage_sha256
+        ),
+        "account_session_expected_current_session_lineage_sha256": (
+            current_session_lineage_sha256
+        ),
+        "account_session_current_session_lineage_match": True,
+    }
     publication_set_hash = hashlib.sha256(
-        f"{snapshot_hash}:{calendar_hash}".encode()
+        json.dumps(publication_pair, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    scenario_manifest_hash = hashlib.sha256(
+        (root / "data" / "scenarios.json.manifest.json").read_bytes()
     ).hexdigest()
     (root / "data" / "publication-set.json").write_text(
         json.dumps(
             {
+                "schema_version": "dawnstrike.publication_set.v2",
+                "market_date": "2026-08-28",
+                "canonical_input_hash_sha256": canonical_hash,
                 "performance_payload_sha256": snapshot_hash,
                 "calendar_payload_sha256": calendar_hash,
+                "performance_manifest_id": "performance-fixture",
+                "calendar_manifest_id": "calendar-fixture",
                 "scenario_payload_sha256": scenario_hash,
+                "scenario_manifest_sha256": scenario_manifest_hash,
+                "account_session_status": "COMPLETE",
+                "account_session_input_hash_sha256": "1" * 64,
+                "account_session_expected_calendar_hash_sha256": "2" * 64,
+                "account_session_code_sha": "clean-sha",
+                "account_session_account_id": "alphaops_v5_simulated",
+                "account_session_version_bucket": "v5",
+                "account_session_cohort": "official_forward_paper",
+                "account_session_strategy_id": "alphaops_v5",
+                "account_session_strategy_version": "dawnstrike-alphaops-v5.0.0",
+                "account_session_ledger_lineage_sha256": (
+                    current_session_lineage_sha256
+                ),
+                "account_session_current_session_lineage_sha256": (
+                    current_session_lineage_sha256
+                ),
+                "account_session_expected_current_session_lineage_sha256": (
+                    current_session_lineage_sha256
+                ),
+                "account_session_current_session_lineage_match": True,
                 "publication_set_sha256": publication_set_hash,
+                "generated_at": "2026-08-28T21:00:00+00:00",
+                "research_only": True,
+                "live_trading_enabled": False,
             }
         ),
         encoding="utf-8",
@@ -181,12 +299,21 @@ def _write_publishable_fixture(
         "v6_learning_sha256": v6_hash,
         "build_id": build_id,
         "deployed_build_sha": build_sha,
+        "publication_set_sha256": publication_set_hash,
+        "account_session_report": account_session_report,
+        "account_session_reconciliation": {
+            "schema_version": "dawnstrike.daily_account_reconciliation.v1",
+            "status": "COMPLETE",
+            "market_date": "2026-08-28",
+            "release_sha": "clean-sha",
+            "account_id": "alphaops_v5_simulated",
+            "account_status": "AUTHENTICATED_NO_TRADE",
+            "ledger_lineage_sha256": current_ledger_lineage,
+            "research_only": True,
+            "broker_execution_enabled": False,
+        },
     }
     (root / "readiness.json").write_text(json.dumps(readiness_payload), encoding="utf-8")
-    (root / "release-manifest.json").write_text(
-        json.dumps({"build_sha": build_sha, "v6_learning_sha256": v6_hash}),
-        encoding="utf-8",
-    )
     required["readiness.json"] = (root / "readiness.json").read_bytes()
     required.update(
         {
@@ -200,19 +327,49 @@ def _write_publishable_fixture(
             "data/scenarios.json.manifest.json": (
                 root / "data" / "scenarios.json.manifest.json"
             ).read_bytes(),
-            "release-manifest.json": (root / "release-manifest.json").read_bytes(),
             "data/opportunity-projection.json": opportunity.read_bytes(),
             "data/opportunity-projection.json.manifest.json": (
                 root / "data" / "opportunity-projection.json.manifest.json"
             ).read_bytes(),
         }
     )
+    release_payload = {
+        "schema_version": "dawnstrike.release_manifest.v1",
+        "source_sha": "clean-sha",
+        "build_sha": build_sha,
+        "v6_learning_sha256": v6_hash,
+        "deployment_boundary": "configured_runtime_and_durable_state",
+        "deployment_boundary_sha256": "a" * 64,
+        "database_schema_version": 30,
+        "data_watermark": "2026-08-28",
+        "strategy_versions": {
+            "alphaops_v5": "dawnstrike-alphaops-v5.0.0",
+            "alphaops_v6_shadow": "dawnstrike-alphaops-v6-shadow",
+            "paperops": "immutable-strategy-semantics-manifest",
+        },
+        "scheduler_version": "dawnstrike-scheduler-v6",
+        "artifact_hashes": {
+            name: hashlib.sha256((root / name).read_bytes()).hexdigest()
+            for name in required
+        },
+        "created_at": "2026-08-28T21:00:00+00:00",
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+    release_payload["release_manifest_sha256"] = hashlib.sha256(
+        json.dumps(release_payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    (root / "release-manifest.json").write_text(
+        json.dumps(release_payload), encoding="utf-8"
+    )
+    required["release-manifest.json"] = (root / "release-manifest.json").read_bytes()
     file_hashes = {
         name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in required
     }
     (root / "build-manifest.json").write_text(
         json.dumps(
             {
+                "schema_version": "dawnstrike.public_build.v1",
                 "source_sha": "clean-sha",
                 "source_clean": True,
                 "build_id": build_id,
@@ -222,7 +379,14 @@ def _write_publishable_fixture(
                 "data_hash_sha256": snapshot_hash,
                 "publication_set_sha256": publication_set_hash,
                 "opportunity_projection_sha256": opportunity_hash,
+                "release_manifest_sha256": release_payload["release_manifest_sha256"],
+                "generated_at": "2026-08-28T21:00:00+00:00",
+                "status": "READY",
+                "readiness": {},
                 "file_hashes": file_hashes,
+                "research_only": True,
+                "live_trading_enabled": False,
+                "broker_execution_enabled": False,
             }
         ),
         encoding="utf-8",

@@ -4,6 +4,10 @@ $script:DawnstrikeApprovedPythonPath='C:\Users\MattFields\AppData\Local\Programs
 $script:DawnstrikeApprovedPythonSha256='ef8f51028ac5329641985112f8efb1c2d4c47c86b8011ddf7e6fae21e2b4e5a1'
 $script:DawnstrikeApprovedPythonSubject='CN=Python Software Foundation, O=Python Software Foundation, L=Beaverton, S=Oregon, C=US'
 $script:DawnstrikeApprovedPythonThumbprint='9BA3C2E210C7E8296C5056515BFC0B0BBA78AC48'
+$script:DawnstrikeApprovedGitPath='C:\Program Files\Git\cmd\git.exe'
+$script:DawnstrikeApprovedGitSha256='37c5725818d602e951ba2563b870d62763322956b73373da4c33a0b566a80bc9'
+$script:DawnstrikeApprovedGitSubject='CN=Johannes Schindelin, O=Johannes Schindelin, S=Nordrhein-Westfalen, C=DE'
+$script:DawnstrikeApprovedGitThumbprint='3EB14A3AEF84B7153E139397F0A49E2FAC662B0E'
 
 function Get-DawnstrikeApprovedLockInterpreter {
     Assert-DawnstrikeSharedLockNoReparse $script:DawnstrikeApprovedPythonPath 'Approved lock-contract interpreter'
@@ -72,7 +76,7 @@ function Get-DawnstrikeStrictRuntimeLock([string]$Path,[string]$PythonPath,[stri
     if(($item.Attributes-band [IO.FileAttributes]::ReparsePoint)-or $item.Length -gt 16384){throw 'Runtime activation lock leaf is unsafe.'}
     if($PythonPath -ne $script:DawnstrikeApprovedPythonPath -or $PythonSha256 -ne $script:DawnstrikeApprovedPythonSha256){throw 'Lock-contract interpreter is not the approved exact identity.'}
     if ((Get-DawnstrikeRuntimeLockHash $PythonPath) -ne $PythonSha256) { throw "Approved lock-contract interpreter hash changed." }
-    $arguments = @('-I','-B',$contract,$Path)
+    $arguments = @('-I','-B','-S',$contract,$Path)
     $output = & $PythonPath @arguments 2>$null
     if ($LASTEXITCODE -ne 0) { throw "Runtime activation lock is malformed or unsafe." }
     try { return ([string]($output -join "")) | ConvertFrom-Json }
@@ -121,7 +125,7 @@ function Enter-DawnstrikeGovernedRuntimeLock {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory=$true)][string]$StateRoot,
-        [ValidateSet("capture_task_hardening","capture_task_rebind","runtime_activation","runtime_rollback","recovery")][string]$Operation = "runtime_activation",
+[ValidateSet("capture_task_hardening","capture_task_rebind","runtime_activation","runtime_rollback","state_preparation","recovery")][string]$Operation = "runtime_activation",
         [ValidatePattern('^[0-9a-f]{40}$')][string]$CandidateSha = $script:DawnstrikeLockCandidateSha,
         [ValidatePattern('^[0-9a-f]{40}$')][string]$CandidateTree = $script:DawnstrikeLockCandidateTree,
         [Parameter(Mandatory=$true)][string]$OriginIdentity,
@@ -163,7 +167,7 @@ function Enter-DawnstrikeGovernedRuntimeLock {
 
 function Adopt-DawnstrikeGovernedRuntimeLock {
     [CmdletBinding()]
-    param([string]$StateRoot,[string]$ExpectedToken,[string]$ExpectedFileSha256,[string]$ExpectedOperation,[string]$CandidateSha,[string]$CandidateTree,[string]$OriginIdentity,[string]$PythonPath,[string]$PythonSha256,[ValidateSet("capture_task_rebind","runtime_activation","runtime_rollback","recovery")][string]$RecoveryOperation="recovery")
+param([string]$StateRoot,[string]$ExpectedToken,[string]$ExpectedFileSha256,[string]$ExpectedOperation,[string]$CandidateSha,[string]$CandidateTree,[string]$OriginIdentity,[string]$PythonPath,[string]$PythonSha256,[ValidateSet("capture_task_rebind","runtime_activation","runtime_rollback","state_preparation","recovery")][string]$RecoveryOperation="recovery")
     $state = Assert-DawnstrikeRuntimeLockStateRoot $StateRoot
     $path = Join-Path $state "locks\dawnstrike-runtime-activation.lock"
     $mutex = Enter-DawnstrikeRuntimeLockMutex
@@ -198,9 +202,253 @@ function Get-DawnstrikeStrictRuntimeOperationJournal {
     $item=Get-Item -LiteralPath $Path -Force -ErrorAction Stop
     if($item.PSIsContainer-or($item.Attributes-band [IO.FileAttributes]::ReparsePoint)-or$item.Length-gt 65536){throw 'Runtime operation journal leaf is unsafe.'}
     $state=(Split-Path (Split-Path (Split-Path $Path -Parent) -Parent) -Parent)
-    $output=& $PythonPath '-I' '-B' $contract 'verify' $Path '--state-root' $state 2>$null
+    $output=& $PythonPath '-I' '-B' '-S' $contract 'verify' $Path '--state-root' $state 2>$null
     if($LASTEXITCODE-ne 0){throw 'Runtime operation journal is malformed or unsafe.'}
     try{return ([string]($output-join''))|ConvertFrom-Json}catch{throw 'Runtime operation journal validator returned invalid output.'}
+}
+
+function Get-DawnstrikeApprovedGit {
+    Assert-DawnstrikeSharedLockNoReparse $script:DawnstrikeApprovedGitPath 'Approved Git executable'
+    if(-not(Test-Path -LiteralPath $script:DawnstrikeApprovedGitPath -PathType Leaf)){throw 'Approved Git executable is missing.'}
+    if((Get-DawnstrikeRuntimeLockHash $script:DawnstrikeApprovedGitPath)-ne$script:DawnstrikeApprovedGitSha256){throw 'Approved Git executable hash changed.'}
+    # Windows PowerShell exposes Get-AuthenticodeSignature directly, while
+    # PowerShell 7 on Windows may not import the Microsoft.PowerShell.Security
+    # module in a non-interactive runner.  Keep the cmdlet path where present
+    # and use the same embedded Authenticode certificate fallback as the
+    # pinned Python check otherwise; both paths require the exact signer.
+    $signatureCommand=Get-Command Get-AuthenticodeSignature -CommandType Cmdlet -ErrorAction SilentlyContinue
+    if($null-ne$signatureCommand){
+        $signature=Get-AuthenticodeSignature -LiteralPath $script:DawnstrikeApprovedGitPath -ErrorAction Stop
+        if(
+            [string]$signature.Status-ne'Valid'-or
+            $null-eq$signature.SignerCertificate-or
+            [string]$signature.SignerCertificate.Subject-ne$script:DawnstrikeApprovedGitSubject-or
+            [string]$signature.SignerCertificate.Thumbprint-ne$script:DawnstrikeApprovedGitThumbprint
+        ){throw 'Approved Git executable signer is invalid.'}
+    }else{
+        try{$certificate=[Security.Cryptography.X509Certificates.X509Certificate2]::new([Security.Cryptography.X509Certificates.X509Certificate]::CreateFromSignedFile($script:DawnstrikeApprovedGitPath))}
+        catch{throw 'Approved Git executable has no readable Authenticode signer.'}
+        if($certificate.Subject-ne$script:DawnstrikeApprovedGitSubject-or$certificate.Thumbprint-ne$script:DawnstrikeApprovedGitThumbprint){throw 'Approved Git executable signer is invalid.'}
+    }
+    return [pscustomobject]@{path=$script:DawnstrikeApprovedGitPath;sha256=$script:DawnstrikeApprovedGitSha256}
+}
+
+function Move-DawnstrikeBoundRuntimeOperationTemps {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)][string]$StateRoot,
+        [Parameter(Mandatory=$true)][string]$JournalRoot,
+        [Parameter(Mandatory=$true)][string]$LockRoot,
+        [Parameter(Mandatory=$true)][object]$Lock,
+        [Parameter(Mandatory=$true)][string]$Operation,
+        [Parameter(Mandatory=$true)][string]$CandidateSha,
+        [Parameter(Mandatory=$true)][string]$CandidateTree,
+        [Parameter(Mandatory=$true)][string]$OriginIdentity
+    )
+
+    # Crash-left journal inputs/transitions are deliberately not parsed as
+    # journals.  Only a small, regular, hash/owner-bound temporary may be
+    # quarantined, and only while the global mutex is held.  Malformed or
+    # foreign bytes remain untouched for operator review and never poison the
+    # canonical-journal scan.
+    if (-not (Test-DawnstrikeRuntimeLockOwnerDead $Lock.payload)) { return }
+    $referencedNext = @{}
+    foreach ($canonicalItem in @(Get-ChildItem -LiteralPath $JournalRoot -File -Force -ErrorAction SilentlyContinue | Where-Object {
+        $_.Name -match '^runtime-activation-[0-9a-f]{24}\.json$' -or
+        $_.Name -match '^runtime-rollback-[0-9a-f]{24}\.json$' -or
+        $_.Name -match '^capture-task-rebind-[0-9a-f]{40}\.json$' -or
+        $_.Name -match '^capture-task-hardening-[0-9a-f]{40}\.json$' -or
+        $_.Name -match '^state-preparation-[0-9a-f]{40}\.json$'
+    })) {
+        try {
+            $canonicalPayload = [IO.File]::ReadAllText($canonicalItem.FullName) | ConvertFrom-Json
+            if ([string]$canonicalPayload.adoption_state -eq 'ADOPTION_PREPARED' -and
+                [string]$canonicalPayload.next_lock_relative_path -ne 'NONE' -and
+                [string]$canonicalPayload.next_lock_file_sha256 -match '^[0-9a-f]{64}$') {
+                $referencedNext[[string]$canonicalPayload.next_lock_relative_path.Replace('/', '\')] = $true
+            }
+        } catch { }
+    }
+    $candidates = @(
+        Get-ChildItem -LiteralPath $JournalRoot -File -Force -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.Name -match '^\.journal-(?:input|transition|init)-[0-9a-f]{32}\.json$'
+            }
+    )
+    $candidates += @(
+        Get-ChildItem -LiteralPath $LockRoot -File -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^\.next-runtime-lock-[0-9a-f]{64}\.tmp$' }
+    )
+    foreach ($item in $candidates) {
+        Assert-DawnstrikeSharedLockNoReparse $item.FullName 'Runtime operation temporary evidence'
+        if ($item.Length -gt 65536 -or $item.PSIsContainer -or
+            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+        $bound = $false
+        try {
+            $raw = [IO.File]::ReadAllText($item.FullName)
+            if ($item.Name -match '^\.next-runtime-lock-([0-9a-f]{64})\.tmp$') {
+                $relativeName = 'locks\' + $item.Name
+                if ($referencedNext.ContainsKey($relativeName)) { continue }
+                $bound = (
+                    (Get-DawnstrikeSharedLockSha256Text $raw) -eq [string]$Matches[1] -and
+                    (($raw | ConvertFrom-Json).operation -eq $Operation) -and
+                    (($raw | ConvertFrom-Json).candidate_sha -eq $CandidateSha) -and
+                    (($raw | ConvertFrom-Json).candidate_tree -eq $CandidateTree) -and
+                    (($raw | ConvertFrom-Json).origin_identity -eq $OriginIdentity)
+                )
+            }
+            else {
+                $tempPayload = $raw | ConvertFrom-Json
+                $bound = (
+                    [string]$tempPayload.operation -eq $Operation -and
+                    [string]$tempPayload.candidate_sha -eq $CandidateSha -and
+                    [string]$tempPayload.candidate_tree -eq $CandidateTree -and
+                    [string]$tempPayload.origin_identity -eq $OriginIdentity
+                )
+            }
+        }
+        catch { $bound = $false }
+        if (-not $bound) { continue }
+        $quarantineRoot = Join-Path $StateRoot 'recovery-quarantine'
+        Assert-DawnstrikeSharedLockNoReparse $quarantineRoot 'Runtime operation temporary quarantine'
+        New-Item -ItemType Directory -Path $quarantineRoot -Force | Out-Null
+        Assert-DawnstrikeSharedLockNoReparse $quarantineRoot 'Runtime operation temporary quarantine'
+        $stamp = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')
+        $destination = Join-Path $quarantineRoot ('runtime-operation-' + $stamp + '-' + $item.Name.TrimStart('.'))
+        Assert-DawnstrikeSharedLockNoReparse $destination 'Runtime operation temporary quarantine destination'
+        if (Test-Path -LiteralPath $destination) { continue }
+        [IO.File]::Move($item.FullName, $destination)
+        if ((Test-Path -LiteralPath $item.FullName) -or -not (Test-Path -LiteralPath $destination -PathType Leaf)) {
+            throw 'Runtime operation temporary quarantine was not proven.'
+        }
+    }
+}
+
+function Get-DawnstrikeAdvancedOriginRecoveryAdmission {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)][string]$StateRoot,
+        [ValidateSet('','runtime_activation','runtime_rollback','capture_task_rebind','capture_task_hardening','state_preparation')][string]$Operation = '',
+        [ValidatePattern('^$|^[0-9a-f]{40}$')][string]$CandidateSha = '',
+        [ValidatePattern('^$|^[0-9a-f]{40}$')][string]$CandidateTree = '',
+        [string]$OriginIdentity = '',
+        [Parameter(Mandatory=$true)][string]$PythonPath,
+        [Parameter(Mandatory=$true)][ValidatePattern('^[0-9a-f]{64}$')][string]$PythonSha256
+    )
+
+    $mutex = Enter-DawnstrikeRuntimeLockMutex
+    try {
+        $state=Assert-DawnstrikeRuntimeLockStateRoot $StateRoot
+        $lockPath=Join-Path $state 'locks\dawnstrike-runtime-activation.lock'
+        if(-not(Test-Path -LiteralPath $lockPath -PathType Leaf)){return $null}
+        $lock=Get-DawnstrikeStrictRuntimeLock $lockPath $PythonPath $PythonSha256
+        if(-not(Test-DawnstrikeRuntimeLockOwnerDead $lock.payload)){
+            throw 'Advanced-origin recovery lock owner is still active.'
+        }
+        # In recovery-discovery mode the sealed journal is the authority.  Any
+        # caller-supplied identity is only an optional consistency filter; it
+        # can never select a journal or manufacture an old candidate/date.
+        $lockOperation = [string]$lock.payload.operation
+        $lockCandidateSha = [string]$lock.payload.candidate_sha
+        $lockCandidateTree = [string]$lock.payload.candidate_tree
+        $lockOriginIdentity = [string]$lock.payload.origin_identity
+        if (($Operation -and $lockOperation -cne $Operation) -or
+            ($CandidateSha -and $lockCandidateSha -cne $CandidateSha) -or
+            ($CandidateTree -and $lockCandidateTree -cne $CandidateTree) -or
+            ($OriginIdentity -and $lockOriginIdentity -cne $OriginIdentity)) {
+            throw 'Advanced-origin recovery lock identity is not the requested exact transaction.'
+        }
+        $discoveryOperation = if ($Operation) { $Operation } else { $lockOperation }
+        $discoveryCandidateSha = if ($CandidateSha) { $CandidateSha } else { $lockCandidateSha }
+        $discoveryCandidateTree = if ($CandidateTree) { $CandidateTree } else { $lockCandidateTree }
+        $discoveryOriginIdentity = if ($OriginIdentity) { $OriginIdentity } else { $lockOriginIdentity }
+        $journalRoot=Join-Path $state 'receipts\runtime-operation'
+        Assert-DawnstrikeSharedLockNoReparse $journalRoot 'Runtime operation journal root'
+        if(-not(Test-Path -LiteralPath $journalRoot -PathType Container)){
+            throw 'Advanced-origin recovery lock has no operation journal root.'
+        }
+        Move-DawnstrikeBoundRuntimeOperationTemps `
+            -StateRoot $state -JournalRoot $journalRoot -LockRoot (Join-Path $state 'locks') -Lock $lock -Operation $discoveryOperation `
+            -CandidateSha $discoveryCandidateSha -CandidateTree $discoveryCandidateTree -OriginIdentity $discoveryOriginIdentity
+        $matches=@()
+        # Only canonical operation journals are admissible.  In particular,
+        # crash-left .journal-input/.journal-transition files must never be
+        # strict-parsed as independent operations.
+        $canonical = @(Get-ChildItem -LiteralPath $journalRoot -File -Force -ErrorAction Stop | Where-Object {
+            $_.Name -match '^runtime-activation-[0-9a-f]{24}\.json$' -or
+            $_.Name -match '^runtime-rollback-[0-9a-f]{24}\.json$' -or
+            $_.Name -match '^capture-task-rebind-[0-9a-f]{40}\.json$' -or
+            $_.Name -match '^capture-task-hardening-[0-9a-f]{40}\.json$' -or
+            $_.Name -match '^state-preparation-[0-9a-f]{40}\.json$'
+        })
+        foreach($item in $canonical){
+            Assert-DawnstrikeSharedLockNoReparse $item.FullName 'Canonical runtime operation journal'
+            $journal=Get-DawnstrikeStrictRuntimeOperationJournal $item.FullName $PythonPath $PythonSha256
+            $payload=$journal.payload
+            $nameOperation = if ($item.Name -like 'runtime-activation-*') { 'runtime_activation' }
+                elseif ($item.Name -like 'runtime-rollback-*') { 'runtime_rollback' }
+                elseif ($item.Name -like 'capture-task-rebind-*') { 'capture_task_rebind' }
+                elseif ($item.Name -like 'capture-task-hardening-*') { 'capture_task_hardening' }
+                else { 'state_preparation' }
+            if ([string]$payload.operation -ne $nameOperation) { throw 'Canonical runtime operation journal filename binding is invalid.' }
+            $bound=$false
+            if([string]$payload.adoption_state-in@('NONE','ADOPTED')){
+                $bound=(
+                    [string]$payload.lock_token-eq[string]$lock.payload.lock_token-and
+                    [string]$payload.lock_file_sha256-eq[string]$lock.raw_file_sha256
+                )
+            }elseif([string]$payload.adoption_state-eq'ADOPTION_PREPARED'){
+                $oldBound=(
+                    [string]$payload.old_lock_token-eq[string]$lock.payload.lock_token-and
+                    [string]$payload.old_lock_file_sha256-eq[string]$lock.raw_file_sha256
+                )
+                $nextBound=(
+                    [string]$payload.next_lock_token-eq[string]$lock.payload.lock_token-and
+                    [string]$payload.next_lock_file_sha256-eq[string]$lock.raw_file_sha256
+                )
+                $bound=($oldBound-or$nextBound)
+            }
+            if($bound){
+                if(
+                    [string]$payload.operation-ne$lockOperation-or
+                    [string]$payload.candidate_sha-ne$lockCandidateSha-or
+                    [string]$payload.candidate_tree-ne$lockCandidateTree-or
+                    [string]$payload.origin_identity-ne$lockOriginIdentity
+                ){throw 'Advanced-origin recovery journal and lock identities disagree.'}
+                $matches+=,[pscustomobject]@{path=$item.FullName;journal=$journal}
+            }
+        }
+        if($matches.Count-ne1){throw 'Advanced-origin recovery requires exactly one lock-bound operation journal.'}
+        $selected = $matches[0]
+        $selectedPayload = $selected.journal.payload
+        # Re-apply optional filters to the selected sealed journal, and expose
+        # the complete recovery identity so callers do not derive operation,
+        # phase, receipt paths, or market-date context from the stale request.
+        if (($Operation -and [string]$selectedPayload.operation -cne $Operation) -or
+            ($CandidateSha -and [string]$selectedPayload.candidate_sha -cne $CandidateSha) -or
+            ($CandidateTree -and [string]$selectedPayload.candidate_tree -cne $CandidateTree) -or
+            ($OriginIdentity -and [string]$selectedPayload.origin_identity -cne $OriginIdentity)) {
+            throw 'Advanced-origin recovery journal does not match the requested exact transaction.'
+        }
+        return [pscustomobject]@{
+            path = $selected.path
+            journal = $selected.journal
+            operation = [string]$selectedPayload.operation
+            candidate_sha = [string]$selectedPayload.candidate_sha
+            candidate_tree = [string]$selectedPayload.candidate_tree
+            previous_sha = [string]$selectedPayload.previous_sha
+            previous_tree = [string]$selectedPayload.previous_tree
+            current_sha = [string]$selectedPayload.current_sha
+            current_tree = [string]$selectedPayload.current_tree
+            phase = [string]$selectedPayload.phase
+            origin_identity = [string]$selectedPayload.origin_identity
+            prepared_receipt_relative_path = [string]$selectedPayload.prepared_receipt_relative_path
+            complete_receipt_relative_path = [string]$selectedPayload.complete_receipt_relative_path
+            compensation_receipt_relative_path = [string]$selectedPayload.compensation_receipt_relative_path
+            market_date = if ($selectedPayload.PSObject.Properties.Name -contains 'market_date') { [string]$selectedPayload.market_date } else { 'NONE' }
+        }
+    }
+    finally { Exit-DawnstrikeRuntimeLockMutex $mutex }
 }
 
 function Set-DawnstrikeRuntimeOperationJournalAdoption {
@@ -303,8 +551,8 @@ function Set-DawnstrikeRuntimeOperationJournalPhase {
         [Parameter(Mandatory=$true)][string]$StateRoot,
         [Parameter(Mandatory=$true)][string]$JournalPath,
         [Parameter(Mandatory=$true)][object]$Lock,
-        [ValidateSet('runtime_activation','runtime_rollback','capture_task_rebind','capture_task_hardening')][string]$Operation,
-        [ValidateSet('INIT','PRE_QUIESCE','PRE_SWAP','POST_SWAP','PRE_ENABLE','POST_ENABLE','PRE_TASK_UPDATE','POST_TASK_UPDATE','COMPLETE','COMPENSATED')][string]$Phase,
+[ValidateSet('runtime_activation','runtime_rollback','capture_task_rebind','capture_task_hardening','state_preparation')][string]$Operation,
+[ValidateSet('INIT','PRE_QUIESCE','PRE_SWAP','POST_SWAP','PRE_ENABLE','POST_ENABLE','PRE_TASK_UPDATE','POST_TASK_UPDATE','PREPARE','COMPLETE','COMPENSATED')][string]$Phase,
         [ValidatePattern('^[0-9a-f]{40}$')][string]$CandidateSha,
         [ValidatePattern('^[0-9a-f]{40}$')][string]$CandidateTree,
         [ValidatePattern('^[0-9a-f]{40}$')][string]$CurrentSha,
@@ -334,10 +582,11 @@ function Set-DawnstrikeRuntimeOperationJournalPhase {
     if($current.payload.lock_token-ne$Lock.token-or$current.raw_file_sha256-ne$Lock.bytes_sha256-or[int]$current.payload.process_id-ne[int]$PID-or[string]$current.payload.process_started_at_utc-ne$processStart){throw 'Journal transition requires the exact live lock owned by this process.'}
     if($current.payload.operation-ne$Operation-or$current.payload.candidate_sha-ne$CandidateSha-or$current.payload.candidate_tree-ne$CandidateTree-or$current.payload.origin_identity-ne$OriginIdentity){throw 'Journal transition lock identity does not match the operation.'}
     $phases=@{
-        runtime_activation=@('INIT','PRE_QUIESCE','PRE_SWAP','POST_SWAP','COMPLETE','COMPENSATED')
-        runtime_rollback=@('INIT','PRE_SWAP','POST_SWAP','COMPLETE','COMPENSATED')
-        capture_task_rebind=@('INIT','PRE_ENABLE','POST_ENABLE','COMPLETE','COMPENSATED')
-        capture_task_hardening=@('INIT','PRE_TASK_UPDATE','POST_TASK_UPDATE','COMPLETE','COMPENSATED')
+runtime_activation=@('INIT','PRE_QUIESCE','PRE_SWAP','POST_SWAP','COMPLETE','COMPENSATED')
+runtime_rollback=@('INIT','PRE_SWAP','POST_SWAP','COMPLETE','COMPENSATED')
+capture_task_rebind=@('INIT','PRE_ENABLE','POST_ENABLE','COMPLETE','COMPENSATED')
+capture_task_hardening=@('INIT','PRE_TASK_UPDATE','POST_TASK_UPDATE','COMPLETE','COMPENSATED')
+        state_preparation=@('INIT','PREPARE','COMPLETE','COMPENSATED')
     }
     $sequence=[array]::IndexOf([object[]]$phases[$Operation],$Phase)
     if($sequence-lt 0){throw 'Journal phase is invalid for the operation.'}
@@ -380,7 +629,7 @@ function Set-DawnstrikeRuntimeOperationJournalPhase {
     try{$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)}finally{$stream.Dispose()}
     try{
         $contract=Join-Path $PSScriptRoot 'runtime_operation_journal.py'
-        $arguments=@('-I','-B',$contract,'transition',$input,$journalFull,'--state-root',$state)
+        $arguments=@('-I','-B','-S',$contract,'transition',$input,$journalFull,'--state-root',$state)
         if($Phase-ne'INIT'){$arguments+=@('--previous',$journalFull)}
         $output=& $PythonPath @arguments 2>$null
         if($LASTEXITCODE-ne 0){throw 'Runtime operation journal phase transition failed.'}
@@ -393,7 +642,7 @@ function Clear-DawnstrikeCompensatedJournalTombstone {
     param(
         [Parameter(Mandatory=$true)][string]$StateRoot,
         [Parameter(Mandatory=$true)][string]$JournalPath,
-        [Parameter(Mandatory=$true)][ValidateSet('capture_task_rebind','capture_task_hardening','runtime_activation','runtime_rollback')][string]$Operation,
+[Parameter(Mandatory=$true)][ValidateSet('capture_task_rebind','capture_task_hardening','runtime_activation','runtime_rollback','state_preparation')][string]$Operation,
         [Parameter(Mandatory=$true)][ValidatePattern('^[0-9a-f]{40}$')][string]$CandidateSha,
         [Parameter(Mandatory=$true)][ValidatePattern('^[0-9a-f]{40}$')][string]$CandidateTree,
         [Parameter(Mandatory=$true)][string]$OriginIdentity,
@@ -432,7 +681,7 @@ function Enter-DawnstrikeGovernedRuntimeLockWithJournal {
     param(
         [Parameter(Mandatory=$true)][string]$StateRoot,
         [Parameter(Mandatory=$true)][string]$JournalPath,
-        [ValidateSet('runtime_activation','runtime_rollback','capture_task_rebind','capture_task_hardening')][string]$Operation,
+[ValidateSet('runtime_activation','runtime_rollback','capture_task_rebind','capture_task_hardening','state_preparation')][string]$Operation,
         [ValidatePattern('^[0-9a-f]{40}$')][string]$CandidateSha,
         [ValidatePattern('^[0-9a-f]{40}$')][string]$CandidateTree,
         [ValidatePattern('^[0-9a-f]{40}$')][string]$CurrentSha,
@@ -524,7 +773,7 @@ function Enter-DawnstrikeGovernedRuntimeLockWithJournal {
         try{$inputStream.Write($inputBytes,0,$inputBytes.Length);$inputStream.Flush($true)}finally{$inputStream.Dispose()}
         try{
             $contract=Join-Path $PSScriptRoot 'runtime_operation_journal.py'
-            $output=& $PythonPath '-I' '-B' $contract 'transition' $input $journalFull '--state-root' $state 2>$null
+            $output=& $PythonPath '-I' '-B' '-S' $contract 'transition' $input $journalFull '--state-root' $state 2>$null
             if($LASTEXITCODE -ne 0){throw 'INIT journal sealing failed.'}
         }finally{if(Test-Path $input){Remove-Item $input -Force}}
         if($TestCrashPoint-eq'after_init'){Stop-Process -Id $PID -Force}

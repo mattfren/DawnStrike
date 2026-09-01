@@ -20,7 +20,7 @@ def test_activation_boundary_allows_next_session_after_completed_monday() -> Non
 
     assert result["status"] == "PASS"
     assert result["expected_market_date"] == "2026-09-01"
-    assert result["window"] == "POST_MORNING_NEXT_SESSION"
+    assert result["window"] == "POST_SESSION_NEXT_SESSION"
     assert result["research_only"] is True
     assert result["broker_execution_enabled"] is False
 
@@ -50,6 +50,20 @@ def test_activation_boundary_allows_target_before_morning_but_not_after_morning(
     assert before_morning["window"] == "PRE_MORNING"
     assert after_morning["status"] == "BLOCKED"
     assert after_morning["expected_market_date"] == "2026-09-02"
+    assert after_morning["window"] == "ACTIVE_SESSION_BLOCKED"
+    assert "activation_requires_next_session_pre_morning_window" in after_morning["errors"]
+
+
+def test_activation_boundary_blocks_next_session_during_active_session() -> None:
+    result = activation_boundary(
+        "2026-09-02",
+        now=_at("2026-09-01T14:00:00Z"),  # Tuesday 10:00 ET
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["expected_market_date"] == "2026-09-02"
+    assert result["window"] == "ACTIVE_SESSION_BLOCKED"
+    assert "activation_requires_next_session_pre_morning_window" in result["errors"]
 
 
 def test_activation_boundary_blocks_target_date_public_build(tmp_path: Path) -> None:

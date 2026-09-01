@@ -121,6 +121,19 @@ function Assert-VercelPublicArtifactInventory {
         throw "Public build manifest is missing file hashes: $($missingHashes -join ',')"
     }
 }
+
+function Get-VercelPublicArtifactFingerprint {
+    param([Parameter(Mandatory = $true)][string]$Root)
+    Assert-VercelPublicArtifactInventory -Root $Root
+    $lines = foreach ($name in @($script:VercelPublicArtifactFiles | Sort-Object)) {
+        $path = Join-Path $Root ($name.Replace('/', '\'))
+        "$name=$(Get-VercelFileSha256 -Path $path)"
+    }
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes(($lines -join "`n"))
+    $digest = [System.Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($digest.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant() }
+    finally { $digest.Dispose() }
+}
 $publicSource = Join-Path $resolvedRoot "build\public"
 $buildRoot = [System.IO.Path]::GetFullPath((Join-Path $resolvedRoot "build"))
 $stageCandidate = if ([System.IO.Path]::IsPathRooted($StageRoot)) {
@@ -166,19 +179,30 @@ if (-not (Test-Path -LiteralPath (Join-Path $publicSource "build-manifest.json")
     throw "Build the public artifact before staging it."
 }
 Assert-VercelPublicArtifactInventory -Root $publicSourcePath
+$authorizedSourceFingerprint = Get-VercelPublicArtifactFingerprint -Root $publicSourcePath
 New-Item -ItemType Directory -Force -Path $stagePublic, $functionPublic | Out-Null
 Assert-VercelContainedPathNoReparse -Root $resolvedRoot -Target $publicSourcePath -Label "Public artifact root"
 Assert-VercelContainedPathNoReparse -Root $resolvedRoot -Target $stage -Label "Vercel stage root"
 Assert-VercelTreeHasNoReparseDescendants -Root $publicSourcePath -Label "Public artifact copy source"
 Assert-VercelTreeHasNoReparseDescendants -Root $stage -Label "Vercel stage copy destination"
 Copy-Item -Path (Join-Path $publicSource "*") -Destination $stagePublic -Recurse -Force
-Assert-VercelPublicArtifactInventory -Root $stagePublic
+$stagedFingerprint = Get-VercelPublicArtifactFingerprint -Root $stagePublic
 Assert-VercelContainedPathNoReparse -Root $resolvedRoot -Target $publicSourcePath -Label "Public artifact root"
 Assert-VercelContainedPathNoReparse -Root $resolvedRoot -Target $stage -Label "Vercel stage root"
 Assert-VercelTreeHasNoReparseDescendants -Root $publicSourcePath -Label "Public artifact copy source"
 Assert-VercelTreeHasNoReparseDescendants -Root $stage -Label "Vercel stage copy destination"
-Copy-Item -Path (Join-Path $publicSource "*") -Destination $functionPublic -Recurse -Force
-Assert-VercelPublicArtifactInventory -Root $functionPublic
+$sourceAfterFingerprint = Get-VercelPublicArtifactFingerprint -Root $publicSourcePath
+if ($authorizedSourceFingerprint -cne $stagedFingerprint -or
+    $authorizedSourceFingerprint -cne $sourceAfterFingerprint) {
+    throw "Public artifact changed while the immutable Vercel snapshot was copied."
+}
+# The function package is derived only from the already verified snapshot.  It
+# never rereads mutable build/public, so static and function bytes cannot split.
+Copy-Item -Path (Join-Path $stagePublic "*") -Destination $functionPublic -Recurse -Force
+$functionFingerprint = Get-VercelPublicArtifactFingerprint -Root $functionPublic
+if ($functionFingerprint -cne $stagedFingerprint) {
+    throw "Static and function public artifact snapshots diverged."
+}
 Assert-VercelTreeHasNoReparseDescendants -Root $stage -Label "Vercel staged public copies"
 # Extract executable entrypoints from the verified commit, rather than copying
 # a mutable working-tree file.  This also makes a staged API-byte mismatch

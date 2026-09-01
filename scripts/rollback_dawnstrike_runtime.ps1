@@ -200,6 +200,182 @@ function Assert-DawnstrikeCapturePreparedRecovery {
     return $prepared
 }
 
+function Archive-DawnstrikeTerminalRollbackAttemptBackup {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$StateRoot,
+        [Parameter(Mandatory = $true)][string]$ActivationId,
+        [Parameter(Mandatory = $true)][string]$JournalSha256,
+        [Parameter(Mandatory = $true)][string]$ExpectedManifestSha256,
+        [switch]$AllowMissing
+    )
+
+    if ($JournalSha256 -notmatch '^[0-9a-f]{64}$') {
+        throw "Terminal rollback attempt journal hash is invalid."
+    }
+    if ($ExpectedManifestSha256 -notmatch '^[0-9a-f]{64}$') {
+        throw "Terminal rollback attempt backup hash is invalid."
+    }
+    if ($ActivationId -notmatch '^[0-9a-f]{24}$') {
+        throw "Terminal rollback attempt activation id is invalid."
+    }
+    $backupRoot = Join-Path $StateRoot ("scheduler-backups\runtime-rollback-" + $ActivationId)
+    $manifestPath = Join-Path $backupRoot "manifest.json"
+    $archiveRoot = Join-Path $StateRoot "scheduler-backups\archive"
+    $archiveRootPath = Join-Path $archiveRoot ("runtime-rollback-" + $ActivationId + "-" + $JournalSha256)
+    $archiveManifestPath = Join-Path $archiveRootPath "manifest.json"
+    Assert-DawnstrikeNoReparseComponents $backupRoot "Terminal rollback attempt backup"
+    Assert-DawnstrikeNoReparseComponents $manifestPath "Terminal rollback attempt backup manifest"
+    Assert-DawnstrikeNoReparseComponents $archiveRoot "Terminal rollback backup archive root"
+    Assert-DawnstrikeNoReparseComponents $archiveRootPath "Terminal rollback backup archive"
+    Assert-DawnstrikeNoReparseComponents $archiveManifestPath "Terminal rollback backup archive manifest"
+
+    $sourceExists = Test-Path -LiteralPath $backupRoot -PathType Container
+    $archiveExists = Test-Path -LiteralPath $archiveRootPath -PathType Container
+    if (-not $sourceExists -and -not $archiveExists) {
+        if ($AllowMissing) {
+            return [pscustomobject]@{
+                path = $null
+                manifest_path = $null
+                manifest_sha256 = $ExpectedManifestSha256
+                archived = $false
+            }
+        }
+        throw "Terminal rollback attempt backup is missing before compensation tombstone cleanup."
+    }
+    if ($sourceExists) {
+        if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+            throw "Terminal rollback attempt backup manifest is missing."
+        }
+        if ((Get-DawnstrikeSha256File $manifestPath) -ne $ExpectedManifestSha256) {
+            throw "Terminal rollback attempt backup manifest changed before archival."
+        }
+        if ($archiveExists) {
+            throw "Terminal rollback attempt backup has both live and archived copies."
+        }
+        New-Item -ItemType Directory -Path $archiveRoot -Force | Out-Null
+        [IO.Directory]::Move($backupRoot, $archiveRootPath)
+        if (Test-Path -LiteralPath $backupRoot) {
+            throw "Terminal rollback attempt backup remained after archival."
+        }
+    }
+    if (-not (Test-Path -LiteralPath $archiveManifestPath -PathType Leaf)) {
+        throw "Terminal rollback attempt backup archive manifest is missing."
+    }
+    if ((Get-DawnstrikeSha256File $archiveManifestPath) -ne $ExpectedManifestSha256) {
+        throw "Terminal rollback attempt backup archive manifest was not proven."
+    }
+    return [pscustomobject]@{
+        path = $archiveRootPath
+        manifest_path = $archiveManifestPath
+        manifest_sha256 = $ExpectedManifestSha256
+        archived = $sourceExists
+    }
+}
+
+function Assert-DawnstrikeRollbackCompleteTerminal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][object]$Journal,
+        [Parameter(Mandatory = $true)][object]$Activation,
+        [Parameter(Mandatory = $true)][string]$ReceiptPath,
+        [Parameter(Mandatory = $true)][string]$CandidateRoot,
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot,
+        [Parameter(Mandatory = $true)][string]$StateRoot,
+        [Parameter(Mandatory = $true)][string]$BackupRoot,
+        [Parameter(Mandatory = $true)][string]$GitPath,
+        [Parameter(Mandatory = $true)][string]$PythonPath,
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds,
+        [Parameter(Mandatory = $true)][string]$CandidateSha,
+        [Parameter(Mandatory = $true)][string]$CandidateTree,
+        [Parameter(Mandatory = $true)][string]$PreviousSha,
+        [Parameter(Mandatory = $true)][string]$PreviousTree,
+        [Parameter(Mandatory = $true)][string]$OriginIdentity,
+        [Parameter(Mandatory = $true)][string]$MarketDate,
+        [Parameter(Mandatory = $true)][object]$StateDeclaration
+    )
+
+    if ([string]$Journal.payload.operation -ne "runtime_rollback" -or
+        [string]$Journal.payload.phase -ne "COMPLETE" -or
+        [string]$Journal.payload.candidate_sha -ne $CandidateSha -or
+        [string]$Journal.payload.candidate_tree -ne $CandidateTree -or
+        [string]$Journal.payload.current_sha -ne $PreviousSha -or
+        [string]$Journal.payload.current_tree -ne $PreviousTree -or
+        [string]$Journal.payload.origin_identity -ne $OriginIdentity) {
+        throw "Complete rollback journal identity is not exact."
+    }
+    Assert-DawnstrikeNoReparseComponents $ReceiptPath "Complete rollback receipt"
+    if (-not (Test-Path -LiteralPath $ReceiptPath -PathType Leaf)) {
+        throw "Complete rollback journal has no exact complete receipt."
+    }
+    $statePrefix = [IO.Path]::GetFullPath($StateRoot).TrimEnd('\') + '\'
+    $receiptFull = [IO.Path]::GetFullPath($ReceiptPath)
+    if (-not $receiptFull.StartsWith($statePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Complete rollback receipt escaped StateRoot."
+    }
+    $receiptRelative = ($receiptFull.Substring($statePrefix.Length) -replace '\\','/')
+    if ([string]$Journal.payload.complete_receipt_relative_path -cne $receiptRelative -or
+        [string]$Journal.payload.complete_receipt_sha256 -notmatch '^[0-9a-f]{64}$' -or
+        [string]$Journal.payload.complete_receipt_sha256 -cne (Get-DawnstrikeSha256File $ReceiptPath)) {
+        throw "Complete rollback journal is not bound to the exact receipt bytes."
+    }
+    $verified = Invoke-DawnstrikeContractCli $PythonPath $CandidateRoot `
+        -Arguments @("verify-receipt", "--receipt", $ReceiptPath, "--expected-status", "ROLLED_BACK") `
+        -Label "Complete rollback receipt terminal validation" -TimeoutSeconds $TimeoutSeconds
+    if ([string]$verified.candidate_sha -ne $CandidateSha -or
+        [string]$verified.candidate_tree -ne $CandidateTree -or
+        [string]$verified.previous_sha -ne $PreviousSha -or
+        [string]$verified.previous_tree -ne $PreviousTree -or
+        [string]$verified.market_date -ne $MarketDate) {
+        throw "Complete rollback receipt is not bound to the exact terminal identity."
+    }
+    $live = Get-DawnstrikeGitContract $GitPath $RuntimeRoot $TimeoutSeconds $PreviousSha
+    if ($live.tree -ne $PreviousTree) { throw "Complete rollback runtime HEAD/tree is not exact." }
+    $liveOrigin = Get-DawnstrikeGitValue $GitPath $RuntimeRoot @("remote", "get-url", "origin") `
+        "Complete rollback runtime origin validation" $TimeoutSeconds
+    Assert-DawnstrikeSafeOrigin $liveOrigin
+    $receiptOriginHash = [string]$verified.runtime_origin_sha256
+    if ($receiptOriginHash -notmatch '^[0-9a-f]{64}$' -or
+        (Convert-DawnstrikeCanonicalOriginIdentity $liveOrigin) -ne $OriginIdentity -or
+        (Get-DawnstrikeSha256Text $liveOrigin) -ne $receiptOriginHash -or
+        [string]$verified.runtime_origin_sha256 -ne [string]$Activation.runtime_origin_sha256) {
+        throw "Complete rollback runtime origin is not receipt/journal-bound."
+    }
+    $tasks = Get-DawnstrikeTaskContract $RuntimeRoot $StateRoot
+    if ([string]$tasks.task_contract_sha256 -ne [string]$verified.task_contract_sha256 -or
+        [string]$tasks.task_definition_contract_sha256 -ne [string]$verified.task_definition_contract_sha256 -or
+        [string]$tasks.task_action_contract_sha256 -ne [string]$verified.task_action_contract_sha256 -or
+        [int]$tasks.enabled_count -ne 5 -or [int]$tasks.disabled_count -ne 0) {
+        throw "Complete rollback canonical task contract is not exact."
+    }
+    # A successful COMPLETE rollback still uses the live scheduler backup as
+    # terminal evidence.  Archive/move is compensation-only; consuming this
+    # directory here would make the validator unable to prove the same
+    # receipt on a crash/retry boundary.
+    $null = Assert-DawnstrikeTaskXmlBackup `
+        -StateRoot $StateRoot -BackupName ([string]$verified.scheduler_backup_name) `
+        -ExpectedManifestSha256 ([string]$verified.scheduler_backup_manifest_sha256) `
+        -ExpectedTaskContractSha256 ([string]$verified.task_contract_sha256) `
+        -ExpectedTaskDefinitionContractSha256 ([string]$verified.task_definition_contract_sha256) `
+        -ExpectedTaskActionContractSha256 ([string]$verified.task_action_contract_sha256)
+    $null = Assert-DawnstrikeReceiptRecoveryArtifacts `
+        -Receipt $Activation -StateRoot $StateRoot -BackupRoot $BackupRoot `
+        -ToolRoot $CandidateRoot -GitPath $GitPath -PythonPath $PythonPath `
+        -TimeoutSeconds $TimeoutSeconds
+    if ($StateDeclaration.required -and $Activation.PSObject.Properties.Name -contains "state_preparation_receipt_sha256") {
+        $proof = Get-DawnstrikeStatePreparationProof `
+            -CandidateRoot $CandidateRoot -StateRoot $StateRoot -BackupRoot $BackupRoot `
+            -CandidateSha $CandidateSha -CandidateTree $CandidateTree `
+            -PythonPath $PythonPath -TimeoutSeconds $TimeoutSeconds
+        if ([string]$verified.state_preparation_receipt_sha256 -ne [string]$proof.receipt_sha256 -or
+            [string]$verified.state_preparation_after_db_sha256 -ne [string]$proof.after_db_sha256 -or
+            [string]$verified.state_preparation_inventory_sha256 -ne [string]$proof.inventory_sha256) {
+            throw "Complete rollback state-preparation lineage is not exact."
+        }
+    }
+    return $verified
+}
+
 function Invoke-DawnstrikeRuntimeRollback {
     [CmdletBinding()]
     param(
@@ -235,10 +411,8 @@ function Invoke-DawnstrikeRuntimeRollback {
     }
     Assert-DawnstrikeNoReparseComponents $receiptPath "Activation receipt"
 
-    $gitCommand = @(Get-Command git.exe -CommandType Application -ErrorAction Stop)[0]
-    $pythonCommand = @(Get-Command py.exe -CommandType Application -ErrorAction Stop)[0]
-    $gitPath = $gitCommand.Source
-    $pythonPath = $pythonCommand.Source
+    $gitPath = (Get-DawnstrikeApprovedGit).path
+    $pythonPath = (Get-DawnstrikeApprovedLockInterpreter).path
     $toolRoot = Resolve-DawnstrikeActivationRoot (Join-Path $PSScriptRoot "..") "ToolRoot"
     if (-not [string]::Equals(
         $contract,
@@ -299,9 +473,6 @@ function Invoke-DawnstrikeRuntimeRollback {
     $deactivatedCandidate = Join-Path $rollbackRoot "deactivated-candidate-runtime"
     $rollbackReceiptRoot = Join-Path $state "receipts\runtime-rollback"
     $rollbackReceipt = Join-Path $rollbackReceiptRoot "runtime-rollback-$activationId.json"
-    $compensationReceipt = Join-Path $rollbackReceiptRoot "runtime-rollback-$activationId.compensated.json"
-    $compensationReceiptRelative = "receipts/runtime-rollback/runtime-rollback-$activationId.compensated.json"
-    $failureReceipt = Join-Path $rollbackReceiptRoot "runtime-rollback-$activationId.failed.json"
     $rollbackSchedulerBackupName = "runtime-rollback-$activationId"
     $rollbackSchedulerBackupPath = Join-Path $state "scheduler-backups\$rollbackSchedulerBackupName"
     $operationJournalPath = Join-Path $state "receipts\runtime-operation\runtime-rollback-$activationId.json"
@@ -310,11 +481,31 @@ function Invoke-DawnstrikeRuntimeRollback {
     $journalEmptySha256 = Get-DawnstrikeSha256Text ""
     Assert-DawnstrikeNoReparseComponents $rollbackReceiptRoot "Rollback receipt root"
     Assert-DawnstrikeNoReparseComponents $rollbackReceipt "Rollback receipt"
-    Assert-DawnstrikeNoReparseComponents $compensationReceipt "Rollback compensation receipt"
-    Assert-DawnstrikeNoReparseComponents $failureReceipt "Rollback failure receipt"
     Assert-DawnstrikeNoReparseComponents $operationJournalPath "Rollback operation journal"
     Assert-DawnstrikeSameVolume @($runtime, $rollbackStage, $rollbackRoot)
     $approvedJournalInterpreter = Get-DawnstrikeApprovedLockInterpreter
+    $contractOrigin = Get-DawnstrikeGitValue `
+        $gitPath $contract @("remote", "get-url", "origin") `
+        "Rollback contract origin verification" $ProcessTimeoutSeconds
+    Assert-DawnstrikeSafeOrigin $contractOrigin
+    $contractOriginIdentity = Convert-DawnstrikeCanonicalOriginIdentity $contractOrigin
+    # Resolve the declaration before any existing COMPLETE receipt fast path
+    # so every terminal return uses the same exact candidate contract.  This
+    # is read-only and does not authorize a stale/nonterminal rollback.
+    $stateDeclaration = Get-DawnstrikeStatePreparationDeclaration `
+        -CandidateRoot $contract `
+        -GitPath $gitPath `
+        -CandidateSha $candidateSha `
+        -CandidateTree $activation.candidate_tree `
+        -PythonPath $pythonPath `
+        -TimeoutSeconds $ProcessTimeoutSeconds
+    $null = Assert-DawnstrikeCandidateIdentityAndDeclaration `
+        -GitPath $gitPath `
+        -CandidateRoot $contract `
+        -CandidateSha $candidateSha `
+        -CandidateTree $activation.candidate_tree `
+        -Declaration $stateDeclaration `
+        -TimeoutSeconds $ProcessTimeoutSeconds
 
     $existingRollbackReceipt = $null
     if (Test-Path -LiteralPath $rollbackReceipt -PathType Leaf) {
@@ -343,6 +534,14 @@ function Invoke-DawnstrikeRuntimeRollback {
             }
         }
         if ([string]$existingJournal.payload.phase -eq "COMPLETE") {
+        $null = Assert-DawnstrikeRollbackCompleteTerminal `
+            -Journal $existingJournal -Activation $activation -ReceiptPath $rollbackReceipt `
+            -CandidateRoot $contract -RuntimeRoot $runtime -StateRoot $state `
+            -BackupRoot $safeBackupRoot -GitPath $gitPath -PythonPath $pythonPath `
+            -TimeoutSeconds $ProcessTimeoutSeconds -CandidateSha $candidateSha `
+            -CandidateTree ([string]$activation.candidate_tree) -PreviousSha $previousSha `
+            -PreviousTree $previousTree -OriginIdentity ([string]$existingJournal.payload.origin_identity) `
+            -MarketDate $marketDate -StateDeclaration $stateDeclaration
         if (-not (Test-Path -LiteralPath $runtime -PathType Container)) {
             throw "Rollback receipt exists but the runtime is missing."
         }
@@ -456,20 +655,32 @@ function Invoke-DawnstrikeRuntimeRollback {
         if ([string]$compensatedJournal.payload.phase -eq "COMPENSATED") {
             $compensatedRelative = [string]$compensatedJournal.payload.compensation_receipt_relative_path
             $compensatedPath = Join-Path $state ($compensatedRelative.Replace('/', '\'))
-            $compensationCheck = & $approvedJournalInterpreter.path -I -B (Join-Path $PSScriptRoot "runtime_operation_journal.py") verify-compensation `
+            $compensationCheck = & $approvedJournalInterpreter.path -I -B -S (Join-Path $PSScriptRoot "runtime_operation_journal.py") verify-compensation `
                 --receipt $compensatedPath --state-root $state 2>$null
             if ($LASTEXITCODE -ne 0) { throw "Compensated rollback receipt failed strict validation." }
             $compensationPayload = (($compensationCheck -join "") | ConvertFrom-Json).payload
             $compensatedRuntime = Get-DawnstrikeGitContract $gitPath $runtime $ProcessTimeoutSeconds $candidateSha
+            $compensationOrigin = Get-DawnstrikeGitValue `
+                $gitPath $runtime @("remote", "get-url", "origin") `
+                "Compensated rollback origin verification" $ProcessTimeoutSeconds
+            Assert-DawnstrikeSafeOrigin $compensationOrigin
+            if ((Get-DawnstrikeSha256Text $compensationOrigin) -ne [string]$activation.runtime_origin_sha256) {
+                throw "Compensated rollback origin does not match the activation receipt."
+            }
+            $compensationOriginIdentity = Convert-DawnstrikeCanonicalOriginIdentity $compensationOrigin
             $compensatedTasks = Get-DawnstrikeTaskContract $runtime $state
             if (
                 $compensationPayload.operation -ne "runtime_rollback" -or
                 $compensationPayload.candidate_sha -ne $candidateSha -or
                 $compensationPayload.candidate_tree -ne [string]$activation.candidate_tree -or
+                $compensationPayload.prior_journal_file_sha256 -ne [string]$compensatedJournal.payload.prior_journal_file_sha256 -or
                 $compensationPayload.task_state -ne "Ready" -or
                 $compensatedRuntime.tree -ne [string]$activation.candidate_tree -or
                 $compensatedTasks.task_contract_sha256 -ne [string]$compensatedJournal.payload.task_contract_sha256 -or
                 $compensatedTasks.task_contract_sha256 -ne [string]$compensationPayload.task_contract_sha256 -or
+                $compensatedTasks.task_contract_sha256 -ne [string]$compensationPayload.task_xml_sha256 -or
+                $compensatedTasks.task_action_contract_sha256 -ne [string]$compensationPayload.task_action_contract_sha256 -or
+                $compensatedTasks.task_definition_contract_sha256 -ne [string]$compensationPayload.task_definition_contract_sha256 -or
                 $compensatedJournal.payload.compensation_receipt_sha256 -ne (Get-DawnstrikeSha256File $compensatedPath)
             ) { throw "Compensated rollback tombstone does not attest the exact restored boundary." }
             $compensationLock = $null
@@ -477,7 +688,7 @@ function Invoke-DawnstrikeRuntimeRollback {
             if (Test-Path -LiteralPath $compensationLockPath -PathType Leaf) {
                 $compensationLock = Adopt-DawnstrikeGovernedRuntimeLockWithJournal `
                     -StateRoot $state -JournalPath $operationJournalPath -CandidateSha $candidateSha `
-                    -CandidateTree ([string]$activation.candidate_tree) -OriginIdentity (Convert-DawnstrikeCanonicalOriginIdentity $origin) `
+                    -CandidateTree ([string]$activation.candidate_tree) -OriginIdentity $compensationOriginIdentity `
                     -PythonPath $approvedJournalInterpreter.path -PythonSha256 $approvedJournalInterpreter.sha256
             }
             if (@(Get-ChildItem -LiteralPath (Join-Path $state "locks") -Filter "dawnstrike-daily-*.lock" -File -Force -ErrorAction SilentlyContinue).Count -gt 0) {
@@ -486,10 +697,27 @@ function Invoke-DawnstrikeRuntimeRollback {
                 if (-not $compensationDaily.acquired) { throw "Compensated rollback could not recover its daily lock." }
                 Exit-DawnstrikeDailyRunLock $compensationDaily
             }
+            # The failed cycle's scheduler backup is terminal evidence.  A
+            # recursive retry must not encounter it as a live fresh-attempt
+            # backup (the cycle-1 -> cycle-2 poison).  Move it under an
+            # immutable prior-journal-hash name only after proving its exact
+            # sealed manifest; the helper is idempotent for a crash between
+            # archival and tombstone cleanup.
+            $archiveAttemptArgs = @{
+                StateRoot = $state
+                ActivationId = $activationId
+                JournalSha256 = [string]$compensatedJournal.raw_file_sha256
+                ExpectedManifestSha256 = [string]$compensatedJournal.payload.backup_contract_sha256
+            }
+            if (-not $tasksInitiallyEnabled) { $archiveAttemptArgs.AllowMissing = $true }
+            # Invoke on every terminal retry.  The helper proves source/archive
+            # exclusivity and the sealed manifest even when the source was
+            # already moved by a previous interrupted cleanup.
+            $null = Archive-DawnstrikeTerminalRollbackAttemptBackup @archiveAttemptArgs
             if ($null -ne $compensationLock) { Exit-DawnstrikeGovernedRuntimeLock $compensationLock }
             Clear-DawnstrikeCompensatedJournalTombstone -StateRoot $state -JournalPath $operationJournalPath `
                 -Operation runtime_rollback -CandidateSha $candidateSha -CandidateTree ([string]$activation.candidate_tree) `
-                -OriginIdentity (Convert-DawnstrikeCanonicalOriginIdentity $origin) -PythonPath $approvedJournalInterpreter.path -PythonSha256 $approvedJournalInterpreter.sha256
+                -OriginIdentity $compensationOriginIdentity -PythonPath $approvedJournalInterpreter.path -PythonSha256 $approvedJournalInterpreter.sha256
             return Invoke-DawnstrikeRuntimeRollback @PSBoundParameters
         }
     }
@@ -534,20 +762,6 @@ function Invoke-DawnstrikeRuntimeRollback {
     }
 
     $taskBefore = Get-DawnstrikeTaskContract $runtime $state -AllowDisabled
-    $stateDeclaration = Get-DawnstrikeStatePreparationDeclaration `
-        -CandidateRoot $contract `
-        -GitPath $gitPath `
-        -CandidateSha $candidateSha `
-        -CandidateTree $activation.candidate_tree `
-        -PythonPath $pythonPath `
-        -TimeoutSeconds $ProcessTimeoutSeconds
-    $null = Assert-DawnstrikeCandidateIdentityAndDeclaration `
-        -GitPath $gitPath `
-        -CandidateRoot $contract `
-        -CandidateSha $candidateSha `
-        -CandidateTree $activation.candidate_tree `
-        -Declaration $stateDeclaration `
-        -TimeoutSeconds $ProcessTimeoutSeconds
     # Always inventory the auxiliary.  A task present during rollback without
     # an explicit governed sidecar declaration is an ungoverned task and must
     # fail closed rather than being silently carried through a legacy path.
@@ -747,7 +961,7 @@ function Invoke-DawnstrikeRuntimeRollback {
         }
         else { throw "Rollback task backup state is ambiguous." }
         if ($journalPhase -eq "INIT") {
-            $null = Set-DawnstrikeRuntimeOperationJournalPhase -StateRoot $state -JournalPath $operationJournalPath `
+            $operationJournal = Set-DawnstrikeRuntimeOperationJournalPhase -StateRoot $state -JournalPath $operationJournalPath `
                 -Lock $activationLock -Operation runtime_rollback -Phase PRE_SWAP `
                 -CandidateSha $candidateSha -CandidateTree ([string]$activation.candidate_tree) `
                 -CurrentSha $candidateSha -CurrentTree ([string]$activation.candidate_tree) `
@@ -873,7 +1087,7 @@ function Invoke-DawnstrikeRuntimeRollback {
             throw "Task definitions changed across the rollback swap."
         }
         if ($journalPhase -eq "PRE_SWAP") {
-            $null = Set-DawnstrikeRuntimeOperationJournalPhase -StateRoot $state -JournalPath $operationJournalPath `
+            $operationJournal = Set-DawnstrikeRuntimeOperationJournalPhase -StateRoot $state -JournalPath $operationJournalPath `
                 -Lock $activationLock -Operation runtime_rollback -Phase POST_SWAP `
                 -CandidateSha $candidateSha -CandidateTree ([string]$activation.candidate_tree) `
                 -CurrentSha $previousSha -CurrentTree $previousTree -PreviousSha $previousSha -PreviousTree $previousTree `
@@ -930,7 +1144,7 @@ function Invoke-DawnstrikeRuntimeRollback {
                 [string]$existingRollbackReceipt.task_action_contract_sha256 -ne [string]$taskAfter.task_action_contract_sha256
             ) { throw "Existing rollback receipt does not match the recovered task boundary." }
             $existingReceiptHash = Get-DawnstrikeSha256File $rollbackReceipt
-            $null = Set-DawnstrikeRuntimeOperationJournalPhase -StateRoot $state -JournalPath $operationJournalPath `
+            $operationJournal = Set-DawnstrikeRuntimeOperationJournalPhase -StateRoot $state -JournalPath $operationJournalPath `
                 -Lock $activationLock -Operation runtime_rollback -Phase COMPLETE `
                 -CandidateSha $candidateSha -CandidateTree ([string]$activation.candidate_tree) `
                 -CurrentSha $previousSha -CurrentTree $previousTree -PreviousSha $previousSha -PreviousTree $previousTree `
@@ -941,6 +1155,14 @@ function Invoke-DawnstrikeRuntimeRollback {
                 -TaskContractSha256 $journalTaskContractSha256 `
                 -RuntimeStageContractSha256 $stageContractSha256 `
                 -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256 | Out-Null
+            $null = Assert-DawnstrikeRollbackCompleteTerminal `
+                -Journal $operationJournal -Activation $activation -ReceiptPath $rollbackReceipt `
+                -CandidateRoot $contract -RuntimeRoot $runtime -StateRoot $state `
+                -BackupRoot $safeBackupRoot -GitPath $gitPath -PythonPath $pythonPath `
+                -TimeoutSeconds $ProcessTimeoutSeconds -CandidateSha $candidateSha `
+                -CandidateTree ([string]$activation.candidate_tree) -PreviousSha $previousSha `
+                -PreviousTree $previousTree -OriginIdentity $lockOrigin `
+                -MarketDate $marketDate -StateDeclaration $stateDeclaration
             return $existingRollbackReceipt
         }
         if ($env:DAWNSTRIKE_TEST_ROLLBACK_CRASH_POINT -eq "after_enable") {
@@ -1033,7 +1255,7 @@ function Invoke-DawnstrikeRuntimeRollback {
             if (Test-Path -LiteralPath $input -PathType Leaf) {
                 Remove-Item -LiteralPath $input -Force
             }
-            $null = Set-DawnstrikeRuntimeOperationJournalPhase -StateRoot $state -JournalPath $operationJournalPath `
+            $operationJournal = Set-DawnstrikeRuntimeOperationJournalPhase -StateRoot $state -JournalPath $operationJournalPath `
                 -Lock $activationLock -Operation runtime_rollback -Phase COMPLETE `
                 -CandidateSha $candidateSha -CandidateTree ([string]$activation.candidate_tree) `
                 -CurrentSha $previousSha -CurrentTree $previousTree -PreviousSha $previousSha -PreviousTree $previousTree `
@@ -1045,6 +1267,14 @@ function Invoke-DawnstrikeRuntimeRollback {
                 -RuntimeStageContractSha256 $stageContractSha256 `
                 -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256 | Out-Null
             $journalPhase = "COMPLETE"
+            $null = Assert-DawnstrikeRollbackCompleteTerminal `
+                -Journal $operationJournal -Activation $activation -ReceiptPath $rollbackReceipt `
+                -CandidateRoot $contract -RuntimeRoot $runtime -StateRoot $state `
+                -BackupRoot $safeBackupRoot -GitPath $gitPath -PythonPath $pythonPath `
+                -TimeoutSeconds $ProcessTimeoutSeconds -CandidateSha $candidateSha `
+                -CandidateTree ([string]$activation.candidate_tree) -PreviousSha $previousSha `
+                -PreviousTree $previousTree -OriginIdentity $lockOrigin `
+                -MarketDate $marketDate -StateDeclaration $stateDeclaration
             if ($env:DAWNSTRIKE_TEST_ROLLBACK_CRASH_POINT -eq "after_complete") {
                 if ($env:DAWNSTRIKE_TEST_LOCK_JOURNAL -ne "1") { throw "Rollback crash injection is test-only." }
                 Stop-Process -Id $PID -Force
@@ -1076,32 +1306,14 @@ function Invoke-DawnstrikeRuntimeRollback {
         }
         if ($journalPhase -eq "COMPLETE") {
             try {
-                if (-not (Test-Path -LiteralPath $rollbackReceipt -PathType Leaf)) {
-                    throw "Complete rollback journal has no exact complete receipt."
-                }
-                $terminalRollbackReceipt = Invoke-DawnstrikeContractCli `
-                    $pythonPath $runtime @("verify-receipt", "--receipt", $rollbackReceipt, "--expected-status", "ROLLED_BACK") `
-                    "Complete rollback terminal reconciliation" $ProcessTimeoutSeconds
-                $terminalRuntime = Get-DawnstrikeGitContract $gitPath $runtime $ProcessTimeoutSeconds $previousSha
-                if ($terminalRuntime.tree -ne $previousTree) {
-                    throw "Complete rollback terminal runtime identity is not exact."
-                }
-                $terminalTasks = Get-DawnstrikeTaskContract $runtime $state
-                if ($terminalTasks.task_contract_sha256 -ne [string]$activation.task_contract_sha256) {
-                    throw "Complete rollback terminal task identity is not exact."
-                }
-                if ($stateDeclaration.required -and [bool]$activation.auxiliary_capture_present) {
-                    $terminalAuxiliary = Get-DawnstrikeAuxiliaryCaptureTask $runtime $state
-                    $expectedAuxiliary = Get-DawnstrikeActivationAuxiliaryRecoveryContract `
-                        -Activation $activation -StateRoot $state
-                    if (-not $terminalAuxiliary.present -or
-                        $terminalAuxiliary.state -ne "Disabled" -or
-                        $terminalAuxiliary.xml_sha256 -ne $expectedAuxiliary.xml_sha256 -or
-                        $terminalAuxiliary.definition_contract_sha256 -ne $expectedAuxiliary.definition_contract_sha256 -or
-                        $terminalAuxiliary.action_contract_sha256 -ne $expectedAuxiliary.action_contract_sha256) {
-                        throw "Complete rollback terminal auxiliary task identity is not exact."
-                    }
-                }
+                $terminalRollbackReceipt = Assert-DawnstrikeRollbackCompleteTerminal `
+                    -Journal $terminalJournal -Activation $activation -ReceiptPath $rollbackReceipt `
+                    -CandidateRoot $contract -RuntimeRoot $runtime -StateRoot $state `
+                    -BackupRoot $safeBackupRoot -GitPath $gitPath -PythonPath $pythonPath `
+                    -TimeoutSeconds $ProcessTimeoutSeconds -CandidateSha $candidateSha `
+                    -CandidateTree ([string]$activation.candidate_tree) -PreviousSha $previousSha `
+                    -PreviousTree $previousTree -OriginIdentity ([string]$terminalJournal.payload.origin_identity) `
+                    -MarketDate $marketDate -StateDeclaration $stateDeclaration
                 return $terminalRollbackReceipt
             }
             catch {
@@ -1125,7 +1337,13 @@ function Invoke-DawnstrikeRuntimeRollback {
         }
         try {
             if ($previousInstalled -and $candidateMoved -and (Test-Path -LiteralPath $runtime -PathType Container)) {
-                $failedPrevious = Join-Path $rollbackRoot "failed-previous-runtime"
+                $failedAttemptJournal = Get-DawnstrikeStrictRuntimeOperationJournal `
+                    $operationJournalPath $lockInterpreter.path $lockInterpreter.sha256
+                if ([string]$failedAttemptJournal.payload.phase -notin @("PRE_SWAP", "POST_SWAP")) {
+                    throw "Failed previous-runtime preservation lacks a nonterminal journal."
+                }
+                $failedAttemptKey = [string]$failedAttemptJournal.raw_file_sha256
+                $failedPrevious = Join-Path $rollbackRoot "failed-previous-runtime-$failedAttemptKey"
                 if (Test-Path -LiteralPath $failedPrevious) {
                     throw "Failed previous-runtime preservation path already exists."
                 }
@@ -1199,8 +1417,19 @@ function Invoke-DawnstrikeRuntimeRollback {
                 }
                 $journalBefore = Get-DawnstrikeStrictRuntimeOperationJournal `
                     $operationJournalPath $lockInterpreter.path $lockInterpreter.sha256
+                $compensationAttemptKey = [string]$journalBefore.raw_file_sha256
+                $compensationReceiptRelative = "receipts/runtime-rollback/runtime-rollback-$activationId.compensated-$compensationAttemptKey.json"
+                $compensationReceipt = Join-Path $state ($compensationReceiptRelative.Replace('/', '\'))
+                $failureReceipt = Join-Path $rollbackReceiptRoot "runtime-rollback-$activationId.failed-$compensationAttemptKey.json"
+                Assert-DawnstrikeNoReparseComponents $compensationReceipt "Rollback compensation receipt"
+                Assert-DawnstrikeNoReparseComponents $failureReceipt "Rollback failure receipt"
                 $empty = Get-DawnstrikeSha256Text ""
-                $priorReceiptRelative = [System.IO.Path]::GetRelativePath($state, $receiptPath) -replace '\\','/'
+                $statePrefix = [System.IO.Path]::GetFullPath($state).TrimEnd('\') + '\'
+                $receiptFullPath = [System.IO.Path]::GetFullPath($receiptPath)
+                if (-not $receiptFullPath.StartsWith($statePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    throw "Rollback activation receipt is outside StateRoot."
+                }
+                $priorReceiptRelative = $receiptFullPath.Substring($statePrefix.Length) -replace '\\','/'
                 $priorReceiptHash = Get-DawnstrikeSha256File $receiptPath
                 $failurePayload = [ordered]@{
                     schema_version = "dawnstrike.runtime_rollback_failure.v1"
@@ -1239,8 +1468,8 @@ function Invoke-DawnstrikeRuntimeRollback {
                 }
                 try {
                     Write-DawnstrikeActivationJson $compensationPayload $compensationInput
-                    & $lockInterpreter.path -I -B (Join-Path $PSScriptRoot "runtime_operation_journal.py") seal-compensation `
-                        --input $compensationInput --output $compensationReceipt --state-root $state 2>$null | Out-Null
+                    & $lockInterpreter.path -I -B -S (Join-Path $PSScriptRoot "runtime_operation_journal.py") seal-compensation `
+                        --input $compensationInput --output $compensationReceipt --state-root $state --reuse-existing 2>$null | Out-Null
                     if ($LASTEXITCODE -ne 0) { throw "Rollback compensation receipt strict sealing failed." }
                 }
                 finally { if (Test-Path -LiteralPath $compensationInput) { Remove-Item -LiteralPath $compensationInput -Force } }

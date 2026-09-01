@@ -456,6 +456,28 @@ def test_compensation_receipt_cannot_be_overwritten(tmp_path: Path) -> None:
         seal_compensation(source, target, tmp_path)
 
 
+def test_repeated_compensation_attempts_publish_distinct_immutable_receipts(
+    tmp_path: Path,
+) -> None:
+    receipt_hashes: list[str] = []
+    for marker in ("c", "d"):
+        payload = _compensation_payload(tmp_path)
+        payload["prior_journal_file_sha256"] = marker * 64
+        source = tmp_path / f"compensation-{marker}.input.json"
+        target = tmp_path / f"compensated-{payload['prior_journal_file_sha256']}.json"
+        source.write_text(json.dumps(payload), encoding="utf-8")
+        sealed = seal_compensation(source, target, tmp_path)
+        receipt_hashes.append(sealed["raw_file_sha256"])
+        assert target.is_file()
+        assert (
+            sealed["payload"]["prior_journal_file_sha256"]
+            == payload["prior_journal_file_sha256"]
+        )
+
+    assert len(set(receipt_hashes)) == 2
+    assert len(list(tmp_path.glob("compensated-*.json"))) == 2
+
+
 def test_v2_compensated_journal_is_terminal_and_requires_compensation_proof(tmp_path: Path) -> None:
     initial = _payload("capture_task_rebind", "INIT")
     initial.update(

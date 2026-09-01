@@ -17,6 +17,8 @@ import re
 import sqlite3
 import sys
 import tempfile
+import urllib.error
+import urllib.request
 from collections.abc import Mapping
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -32,6 +34,7 @@ sys.path.insert(0, _REPO_ROOT_TEXT)
 from intraday_scanner.market_calendar import (  # noqa: E402
     MARKET_TIMEZONE,
     MarketSessionStatus,
+    core_session_phase,
     market_session,
     next_market_day,
     session_for_timestamp,
@@ -54,6 +57,29 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _ACTIVATION_ID = re.compile(r"^[0-9a-f]{24}$")
 _MARKET_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _GITHUB_RUN = re.compile(r"^https://github\.com/[^/?#]+/[^/?#]+/actions/runs/[1-9][0-9]*$")
+_GITHUB_RUN_EXACT = re.compile(
+    r"^https://github\.com/mattfren/DawnStrike/actions/runs/([1-9][0-9]*)$"
+)
+_GITHUB_REPOSITORY_ID = 1_275_588_712
+_GITHUB_WORKFLOW_ID = 325_410_148
+_GITHUB_ACTIONS_APP_ID = 15_368
+_GITHUB_RELEASE_ACTOR_ID = 274_126_974
+_GITHUB_API_ROOT = "https://api.github.com"
+_GITHUB_COMMENT_HTML = re.compile(
+    r"^https://github\.com/mattfren/DawnStrike/commit/([0-9a-f]{40})#commitcomment-([1-9][0-9]*)$"
+)
+_GITHUB_COMMENT_API = re.compile(
+    r"^https://api\.github\.com/repos/mattfren/DawnStrike/comments/([1-9][0-9]*)$"
+)
+_CODEX_SHARE_URL = re.compile(r"^https://chatgpt\.com/share/[A-Za-z0-9_-]+$")
+_CI_JOB_NAMES = frozenset(
+    {
+        *(f"Pytest shard {index} of 16" for index in range(16)),
+        "Python and public-contract verification",
+        "Dependency, static, and SBOM verification",
+        "Windows schedule and secret verification",
+    }
+)
 _FORBIDDEN_KEY_PARTS = ("secret", "password", "credential", "private_key", "token")
 _MAX_EVIDENCE_AGE = timedelta(days=30)
 _REPARSE_POINT = 0x400
@@ -105,6 +131,7 @@ _SOL_KEYS = frozenset(
         "evidence_sha256",
     }
 )
+_SOL_AUTHORIZATION_KEYS = frozenset({"report_sha256", "codex_share_url"})
 _ACTIVATION_RECEIPT_KEYS = frozenset(
     {
         "schema_version",
@@ -355,7 +382,9 @@ def validate_evidence(
         ):
             raise ActivationContractError("CI check totals do not prove complete success")
     elif schema == SOL_SCHEMA:
-        _require_exact_keys(payload, _SOL_KEYS, "SOL evidence")
+        actual_keys = frozenset(payload)
+        if actual_keys not in {_SOL_KEYS, _SOL_KEYS | _SOL_AUTHORIZATION_KEYS}:
+            raise ActivationContractError("SOL evidence fields do not match the strict contract")
         _validate_common_evidence(payload, now=now, enforce_age=enforce_age)
         if payload.get("auditor_model") != "gpt-5.6-sol":
             raise ActivationContractError("SOL evidence uses an unapproved auditor model")
@@ -375,6 +404,8 @@ def validate_evidence_pair(
     candidate_sha: str,
     candidate_tree: str,
     now: datetime | None = None,
+    require_live_github_ci: bool = False,
+    require_live_github_owner_authorization: bool = False,
 ) -> dict[str, Any]:
     """Validate CI and SOL evidence against one exact commit and tree."""
 
@@ -391,7 +422,7 @@ def validate_evidence_pair(
             raise ActivationContractError(f"{label} evidence candidate SHA mismatch")
         if value.get("candidate_tree") != candidate_tree:
             raise ActivationContractError(f"{label} evidence candidate tree mismatch")
-    return {
+    result = {
         "status": "PASS",
         "candidate_sha": candidate_sha,
         "candidate_tree": candidate_tree,
@@ -399,6 +430,292 @@ def validate_evidence_pair(
         "sol_evidence_sha256": sol["evidence_sha256"],
         "research_only": True,
         "broker_execution_enabled": False,
+    }
+    if require_live_github_ci:
+        live = validate_live_github_ci(
+            ci,
+            candidate_sha=candidate_sha,
+            candidate_tree=candidate_tree,
+        )
+        local_hash = str(result["ci_evidence_sha256"])
+        authority_hash = str(live["github_authority_sha256"])
+        result["ci_local_evidence_sha256"] = local_hash
+        result["ci_github_authority_sha256"] = authority_hash
+        result["ci_evidence_sha256"] = hashlib.sha256(
+            f"{local_hash}:{authority_hash}".encode()
+        ).hexdigest()
+    if require_live_github_owner_authorization:
+        owner = validate_live_github_owner_authorization(
+            sol,
+            candidate_sha=candidate_sha,
+            candidate_tree=candidate_tree,
+        )
+        local_hash = str(result["sol_evidence_sha256"])
+        authority_hash = str(owner["github_owner_authorization_sha256"])
+        result["sol_local_evidence_sha256"] = local_hash
+        result["github_owner_authorization_sha256"] = authority_hash
+        result["sol_evidence_sha256"] = hashlib.sha256(
+            f"{local_hash}:{authority_hash}".encode()
+        ).hexdigest()
+    return result
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        raise ActivationContractError("GitHub authority endpoint redirected unexpectedly")
+
+
+def _github_api_object(path: str) -> tuple[Any, str]:
+    if not path.startswith("/") or ".." in path or "//" in path:
+        raise ActivationContractError("GitHub authority API path is invalid")
+    request = urllib.request.Request(
+        f"{_GITHUB_API_ROOT}{path}",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "Dawnstrike-runtime-activation/1",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        method="GET",
+    )
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+    try:
+        with opener.open(request, timeout=15) as response:
+            if response.status != 200:
+                raise ActivationContractError("GitHub authority response is not HTTP 200")
+            content_length = response.headers.get("Content-Length")
+            if content_length and int(content_length) > 2_000_000:
+                raise ActivationContractError("GitHub authority response is oversized")
+            raw = response.read(2_000_001)
+    except (OSError, ValueError, urllib.error.URLError) as exc:
+        if isinstance(exc, ActivationContractError):
+            raise
+        raise ActivationContractError("GitHub authority request failed") from exc
+    if len(raw) > 2_000_000:
+        raise ActivationContractError("GitHub authority response is oversized")
+    try:
+        value = json.loads(raw, object_pairs_hook=_reject_duplicate_keys)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ActivationContractError("GitHub authority response is invalid JSON") from exc
+    if not isinstance(value, (dict, list)):
+        raise ActivationContractError("GitHub authority response must be an object or array")
+    return value, hashlib.sha256(raw).hexdigest()
+
+
+def validate_live_github_ci(
+    ci: Mapping[str, Any], *, candidate_sha: str, candidate_tree: str
+) -> dict[str, Any]:
+    """Reprove exact CI from GitHub's live, pinned Actions authority."""
+
+    match = _GITHUB_RUN_EXACT.fullmatch(str(ci.get("run_url") or ""))
+    if match is None:
+        raise ActivationContractError("CI evidence is not from the governed GitHub repository")
+    run_id = int(match.group(1))
+    run, run_raw_sha = _github_api_object(
+        f"/repos/mattfren/DawnStrike/actions/runs/{run_id}"
+    )
+    jobs, jobs_raw_sha = _github_api_object(
+        f"/repos/mattfren/DawnStrike/actions/runs/{run_id}/jobs?per_page=100"
+    )
+    commit, commit_raw_sha = _github_api_object(
+        f"/repos/mattfren/DawnStrike/git/commits/{candidate_sha}"
+    )
+    if not isinstance(run, dict) or not isinstance(jobs, dict) or not isinstance(commit, dict):
+        raise ActivationContractError("live GitHub CI responses are not objects")
+    exact_run = {
+        "id": run_id,
+        "workflow_id": _GITHUB_WORKFLOW_ID,
+        "path": ".github/workflows/ci.yml",
+        "event": "push",
+        "run_attempt": 1,
+        "head_branch": "main",
+        "head_sha": candidate_sha,
+        "status": "completed",
+        "conclusion": "success",
+        "repository_id": _GITHUB_REPOSITORY_ID,
+        "head_repository_id": _GITHUB_REPOSITORY_ID,
+        "actor_id": _GITHUB_RELEASE_ACTOR_ID,
+        "triggering_actor_id": _GITHUB_RELEASE_ACTOR_ID,
+    }
+    observed_run = {
+        "id": run.get("id"),
+        "workflow_id": run.get("workflow_id"),
+        "path": run.get("path"),
+        "event": run.get("event"),
+        "run_attempt": run.get("run_attempt"),
+        "head_branch": run.get("head_branch"),
+        "head_sha": run.get("head_sha"),
+        "status": run.get("status"),
+        "conclusion": run.get("conclusion"),
+        "repository_id": (run.get("repository") or {}).get("id"),
+        "head_repository_id": (run.get("head_repository") or {}).get("id"),
+        "actor_id": (run.get("actor") or {}).get("id"),
+        "triggering_actor_id": (run.get("triggering_actor") or {}).get("id"),
+    }
+    if observed_run != exact_run:
+        raise ActivationContractError("live GitHub CI run identity is invalid")
+    if ci.get("completed_at_utc") != run.get("updated_at"):
+        raise ActivationContractError("CI evidence completion time does not match GitHub")
+    job_rows = jobs.get("jobs")
+    if jobs.get("total_count") != 19 or not isinstance(job_rows, list) or len(job_rows) != 19:
+        raise ActivationContractError("live GitHub CI job count is not exact")
+    names = [item.get("name") for item in job_rows if isinstance(item, dict)]
+    if len(names) != 19 or len(set(names)) != 19 or set(names) != _CI_JOB_NAMES:
+        raise ActivationContractError("live GitHub CI job names are not exact")
+    if any(
+        item.get("status") != "completed"
+        or item.get("conclusion") != "success"
+        or item.get("run_attempt") != 1
+        for item in job_rows
+        if isinstance(item, dict)
+    ):
+        raise ActivationContractError("live GitHub CI contains an unsuccessful job")
+    if (
+        commit.get("sha") != candidate_sha
+        or (commit.get("tree") or {}).get("sha") != candidate_tree
+    ):
+        raise ActivationContractError("GitHub candidate commit/tree identity mismatch")
+    authority = {
+        "repository_id": _GITHUB_REPOSITORY_ID,
+        "workflow_id": _GITHUB_WORKFLOW_ID,
+        "actions_app_id": _GITHUB_ACTIONS_APP_ID,
+        "run_id": run_id,
+        "run_attempt": 1,
+        "run_response_sha256": run_raw_sha,
+        "jobs_response_sha256": jobs_raw_sha,
+        "commit_response_sha256": commit_raw_sha,
+    }
+    return {
+        **authority,
+        "github_authority_sha256": hashlib.sha256(
+            json.dumps(authority, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+    }
+
+
+def _owner_authorization_body(
+    sol: Mapping[str, Any], *, candidate_sha: str, candidate_tree: str
+) -> str:
+    """Build the exact body that the owner must publish in the commit comment.
+
+    This is an authorization binding, not a cryptographic identity assertion:
+    the remote OWNER comment authorizes an independently reviewed report whose
+    content remains identified by its report hash and immutable Codex share.
+    """
+
+    report_sha256 = sol.get("report_sha256")
+    codex_share_url = sol.get("codex_share_url")
+    if not _SHA256.fullmatch(str(report_sha256 or "")):
+        raise ActivationContractError("SOL report SHA-256 is required for owner authorization")
+    if not isinstance(codex_share_url, str) or not _CODEX_SHARE_URL.fullmatch(codex_share_url):
+        raise ActivationContractError("SOL Codex share URL is not immutable")
+    body = {
+        "authorization": "OWNER_RELEASE_AUTHORIZATION",
+        "auditor_model": sol.get("auditor_model"),
+        "broker_execution_enabled": False,
+        "candidate_sha": candidate_sha,
+        "candidate_tree": candidate_tree,
+        "codex_share_url": codex_share_url,
+        "critical_findings": 0,
+        "high_findings": 0,
+        "report_sha256": report_sha256,
+        "research_only": True,
+        "verdict": "ZERO_CRITICAL_HIGH",
+    }
+    # Commit-comment bodies are JSON values, not files; omit the file-oriented
+    # trailing newline used by ``canonical_json`` while retaining its exact
+    # key ordering and separator rules.
+    return canonical_json(body).decode("utf-8").rstrip("\n")
+
+
+def validate_live_github_owner_authorization(
+    sol: Mapping[str, Any], *, candidate_sha: str, candidate_tree: str
+) -> dict[str, Any]:
+    """Require a live, exact-commit OWNER comment for the SOL report.
+
+    GitHub's API is contacted without proxies and redirects.  The returned
+    authority hash binds the raw commit/comment responses into the activation
+    evidence hash, so a locally fabricated SOL cannot authorize activation.
+    This proves owner authorization of an independently reviewed report; it
+    does not prove cryptographic identity of the Sol model.
+    """
+
+    if not _GIT_SHA.fullmatch(candidate_sha) or not _GIT_SHA.fullmatch(candidate_tree):
+        raise ActivationContractError("owner authorization candidate identity is invalid")
+    expected_body = _owner_authorization_body(
+        sol, candidate_sha=candidate_sha, candidate_tree=candidate_tree
+    )
+    comments, comments_raw_sha = _github_api_object(
+        f"/repos/mattfren/DawnStrike/commits/{candidate_sha}/comments?per_page=100"
+    )
+    commit, commit_raw_sha = _github_api_object(
+        f"/repos/mattfren/DawnStrike/git/commits/{candidate_sha}"
+    )
+    if (
+        not isinstance(commit, dict)
+        or commit.get("sha") != candidate_sha
+        or (commit.get("tree") or {}).get("sha") != candidate_tree
+    ):
+        raise ActivationContractError("GitHub owner authorization commit/tree mismatch")
+    if not isinstance(comments, list):
+        raise ActivationContractError("GitHub commit comments response is not an array")
+    matches: list[dict[str, Any]] = []
+    for comment in comments:
+        if not isinstance(comment, dict):
+            continue
+        if comment.get("body") == expected_body:
+            matches.append(comment)
+    if len(matches) != 1:
+        raise ActivationContractError("GitHub owner authorization comment is not unique")
+    comment = matches[0]
+    comment_id = comment.get("id")
+    if type(comment_id) is not int or comment_id < 1:
+        raise ActivationContractError("GitHub owner authorization comment id is invalid")
+    html_url = comment.get("html_url")
+    expected_html_url = (
+        f"https://github.com/mattfren/DawnStrike/commit/{candidate_sha}"
+        f"#commitcomment-{comment_id}"
+    )
+    if html_url != expected_html_url or _GITHUB_COMMENT_HTML.fullmatch(str(html_url)) is None:
+        raise ActivationContractError("GitHub owner authorization comment URL is invalid")
+    api_url = comment.get("url")
+    expected_api_url = f"https://api.github.com/repos/mattfren/DawnStrike/comments/{comment_id}"
+    if api_url != expected_api_url or _GITHUB_COMMENT_API.fullmatch(str(api_url)) is None:
+        raise ActivationContractError("GitHub owner authorization API URL is invalid")
+    if comment.get("commit_id") != candidate_sha:
+        raise ActivationContractError("GitHub owner authorization comment commit is invalid")
+    if comment.get("author_association") != "OWNER":
+        raise ActivationContractError("GitHub owner authorization author is not OWNER")
+    user = comment.get("user")
+    if not isinstance(user, dict) or user.get("id") != _GITHUB_RELEASE_ACTOR_ID:
+        raise ActivationContractError("GitHub owner authorization actor is invalid")
+    created = comment.get("created_at")
+    updated = comment.get("updated_at")
+    if not isinstance(created, str) or created != updated:
+        raise ActivationContractError("GitHub owner authorization timestamps are not immutable")
+    try:
+        _parse_utc(created)
+    except ActivationContractError as exc:
+        raise ActivationContractError(
+            "GitHub owner authorization timestamp is invalid"
+        ) from exc
+    if comment.get("body") != expected_body:
+        raise ActivationContractError("GitHub owner authorization body is not canonical")
+    authority = {
+        "repository_id": _GITHUB_REPOSITORY_ID,
+        "owner_actor_id": _GITHUB_RELEASE_ACTOR_ID,
+        "candidate_sha": candidate_sha,
+        "candidate_tree": candidate_tree,
+        "comment_id": comment_id,
+        "comment_html_url": html_url,
+        "comment_api_url": api_url,
+        "comments_response_sha256": comments_raw_sha,
+        "commit_response_sha256": commit_raw_sha,
+    }
+    return {
+        **authority,
+        "github_owner_authorization_sha256": hashlib.sha256(
+            canonical_json(authority)
+        ).hexdigest(),
     }
 
 
@@ -940,10 +1257,15 @@ def activation_boundary(
             if session.status != MarketSessionStatus.CLOSED and local_et < morning:
                 expected_date = market_day
                 window = "PRE_MORNING"
+            elif core_session_phase(observed) in {"after_core_session", "market_closed"}:
+                anchor = market_day + timedelta(days=1)
+                expected_date = next_market_day(anchor)
+                window = "POST_SESSION_NEXT_SESSION"
             else:
                 anchor = market_day + timedelta(days=1)
                 expected_date = next_market_day(anchor)
-                window = "POST_MORNING_NEXT_SESSION"
+                window = "ACTIVE_SESSION_BLOCKED"
+                errors.append("activation_requires_next_session_pre_morning_window")
         except Exception as exc:
             errors.append(f"calendar_unavailable:{type(exc).__name__}")
             window = "UNAVAILABLE"
@@ -1130,6 +1452,10 @@ def main(argv: list[str] | None = None) -> int:
     evidence.add_argument("--sol", required=True)
     evidence.add_argument("--candidate-sha", required=True)
     evidence.add_argument("--candidate-tree", required=True)
+    evidence.add_argument("--require-live-github-ci", action="store_true")
+    evidence.add_argument(
+        "--require-live-github-owner-authorization", action="store_true"
+    )
 
     evidence_seal = subparsers.add_parser("seal-evidence")
     evidence_seal.add_argument("--input", required=True)
@@ -1163,6 +1489,10 @@ def main(argv: list[str] | None = None) -> int:
                 args.sol,
                 candidate_sha=args.candidate_sha,
                 candidate_tree=args.candidate_tree,
+                require_live_github_ci=args.require_live_github_ci,
+                require_live_github_owner_authorization=(
+                    args.require_live_github_owner_authorization
+                ),
             )
         elif args.command == "seal-evidence":
             result = seal_evidence(_load_object(args.input))

@@ -16,6 +16,7 @@ OPERATIONS = {
     "capture_task_rebind",
     "runtime_activation",
     "runtime_rollback",
+    "state_preparation",
     "recovery",
 }
 KEYS = {

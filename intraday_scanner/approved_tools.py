@@ -161,3 +161,34 @@ def run_git(
     )
     _assert_local_git_config_safe(resolved_root)
     return completed
+
+
+def read_git_bytes(
+    root: str | Path,
+    *arguments: str,
+    timeout: int = 30,
+    max_bytes: int = 16 * 1024 * 1024,
+) -> bytes:
+    """Run exact Git and return bounded raw stdout without text transcoding."""
+
+    resolved_root = Path(root).resolve()
+    _assert_local_git_config_safe(resolved_root)
+    completed = subprocess.run(  # noqa: S603 - exact executable is verified on Windows
+        [
+            str(approved_git_path()),
+            *SAFE_GIT_CONFIGURATION,
+            "-C",
+            str(resolved_root),
+            *arguments,
+        ],
+        cwd=resolved_root,
+        env=sanitized_git_environment(),
+        check=True,
+        capture_output=True,
+        text=False,
+        timeout=timeout,
+    )
+    if len(completed.stdout) > max_bytes:
+        raise ApprovedToolError("Git raw output exceeds the governed byte ceiling")
+    _assert_local_git_config_safe(resolved_root)
+    return completed.stdout

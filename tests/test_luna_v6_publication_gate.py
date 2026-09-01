@@ -38,6 +38,42 @@ def test_artifact_rejects_malformed_v6_hash_even_when_bytes_are_unchanged(tmp_pa
     assert "build_v6_learning_sha256_invalid" in result["errors"]
 
 
+def test_artifact_rejects_unsafe_or_ambiguous_build_manifest(tmp_path: Path) -> None:
+    root = _write_publishable_fixture(
+        tmp_path,
+        snapshot_status="no_trade",
+        readiness_status="ready",
+        readiness_http_status=200,
+    )
+    manifest_path = root / "build-manifest.json"
+    original = json.loads(manifest_path.read_text(encoding="utf-8"))
+    cases = (
+        ({"schema_version": "hostile"}, "build_manifest_schema_invalid"),
+        ({"research_only": False}, "build_manifest_research_only_invalid"),
+        ({"live_trading_enabled": True}, "build_manifest_live_trading_enabled_invalid"),
+        (
+            {"broker_execution_enabled": True},
+            "build_manifest_broker_execution_enabled_invalid",
+        ),
+    )
+    for mutation, expected_error in cases:
+        manifest_path.write_text(
+            json.dumps({**original, **mutation}), encoding="utf-8"
+        )
+        result = verify_artifact(root, expected_source_sha="clean-sha")
+        assert result["status"] == "FAIL"
+        assert expected_error in result["errors"]
+
+    manifest_path.write_text(
+        json.dumps({key: value for key, value in original.items() if key != "research_only"}),
+        encoding="utf-8",
+    )
+    result = verify_artifact(root)
+    assert result["status"] == "FAIL"
+    assert "build_manifest_keys_invalid" in result["errors"]
+    assert "build_manifest_research_only_invalid" in result["errors"]
+
+
 def test_publisher_propagates_and_compares_v6_lineage_across_deployments() -> None:
     script = Path("scripts/publish_vercel_public.ps1").read_text(encoding="utf-8")
 

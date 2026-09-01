@@ -12,6 +12,11 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from intraday_scanner.alpha.v5_policy import (
+    ALPHAOPS_V5_ACCOUNT_ID,
+    ALPHAOPS_V5_STRATEGY_ID,
+    ALPHAOPS_V5_STRATEGY_VERSION,
+)
 from intraday_scanner.errors import (
     ConfigError,
     DataProviderError,
@@ -156,12 +161,14 @@ class DailyFinalizeService:
                     account_session_reconciliation = reconcile_daily_account_sessions(
                         self.db_path,
                         market_date=market_date,
+                        account_id=ALPHAOPS_V5_ACCOUNT_ID,
                         release_sha=self.release_sha,
                         now=now,
                     )
                     account_session_report = build_account_session_report(
                         self.db_path,
                         market_date=market_date,
+                        account_id=ALPHAOPS_V5_ACCOUNT_ID,
                         code_sha=self.release_sha,
                     )
                     reconciliation_gate = _reconciliation_gate(
@@ -229,6 +236,7 @@ class DailyFinalizeService:
                         publication=publication,
                         calendar_publication=calendar_publication,
                         scenario_publication=scenario_publication,
+                        account_session_report=account_session_report,
                         generated_at=now,
                     )
                     self._record_shared_stage(
@@ -252,6 +260,7 @@ class DailyFinalizeService:
                         upstream_status,
                         reconciliation_gate=reconciliation_gate,
                         account_session_report=account_session_report,
+                        account_session_reconciliation=account_session_reconciliation,
                         publication_timestamp=now,
                     )
                     readiness_stage_status = (
@@ -623,6 +632,7 @@ class DailyFinalizeService:
         publication: dict[str, Any],
         calendar_publication: dict[str, Any],
         scenario_publication: dict[str, Any] | None = None,
+        account_session_report: dict[str, Any] | None = None,
         generated_at: str | None = None,
     ) -> dict[str, Any]:
         """Promote one staged performance/calendar generation as a bound set."""
@@ -684,10 +694,39 @@ class DailyFinalizeService:
             publication_set["scenario_manifest_sha256"] = hashlib.sha256(
                 Path(scenario_publication["manifest_path"]).read_bytes()
             ).hexdigest()
+        report = account_session_report if isinstance(account_session_report, dict) else {}
+        publication_set.update(
+            {
+                "account_session_status": report.get("status"),
+                "account_session_input_hash_sha256": report.get("input_hash_sha256"),
+                "account_session_expected_calendar_hash_sha256": report.get(
+                    "expected_calendar_hash_sha256"
+                ),
+                "account_session_code_sha": report.get("code_sha"),
+                "account_session_account_id": report.get("account_id"),
+                "account_session_version_bucket": report.get("version_bucket"),
+                "account_session_cohort": report.get("cohort"),
+                "account_session_strategy_id": report.get("strategy_id"),
+                "account_session_strategy_version": report.get("strategy_version"),
+                "account_session_ledger_lineage_sha256": report.get(
+                    "ledger_lineage_sha256"
+                ),
+                "account_session_current_session_lineage_sha256": report.get(
+                    "current_session_lineage_sha256"
+                ),
+                "account_session_expected_current_session_lineage_sha256": report.get(
+                    "expected_current_session_lineage_sha256"
+                ),
+                "account_session_current_session_lineage_match": report.get(
+                    "current_session_lineage_match"
+                ),
+            }
+        )
         publication_set["publication_set_sha256"] = _publication_pair_hash(
             performance_manifest,
             calendar_manifest,
             scenario_manifest,
+            report,
         )
         _atomic_write_json(destination / "publication-set.json", publication_set)
         staging_root.rmdir()
@@ -724,6 +763,7 @@ class DailyFinalizeService:
         upstream_status: str = "not_recorded",
         reconciliation_gate: dict[str, Any] | None = None,
         account_session_report: dict[str, Any] | None = None,
+        account_session_reconciliation: dict[str, Any] | None = None,
         publication_timestamp: str | None = None,
     ) -> dict[str, Any]:
         snapshot_status = str(publication["manifest"].get("status") or "degraded")
@@ -744,6 +784,12 @@ class DailyFinalizeService:
             "warnings": [],
             "blocking": ["reconciliation gate was not evaluated"],
         }
+        account_session_ready = _account_session_report_ready(
+            account_session_report,
+            market_date=market_date,
+            release_sha=self.release_sha,
+            reconciliation=account_session_reconciliation,
+        )
         status = (
             "ready"
             if (
@@ -753,6 +799,7 @@ class DailyFinalizeService:
                 and upstream_status == "complete"
                 and safety_verified
                 and gate.get("ready") is True
+                and account_session_ready
             )
             else "not_ready"
         )
@@ -783,11 +830,19 @@ class DailyFinalizeService:
                 market_date,
             ),
             "account_session_report": account_session_report,
+            "account_session_reconciliation": _public_account_session_reconciliation(
+                account_session_reconciliation
+            ),
+            "account_session_status": (
+                str(account_session_report.get("status") or "")
+                if isinstance(account_session_report, dict)
+                else "MISSING"
+            ),
             "publication_timestamp": publication_timestamp or _utc_now(),
             "live_trading_enabled": False,
             "research_only": True,
             "broker_execution_enabled": False,
-            "reason": "complete_or_explicit_no_trade_with_upstream_success_and_safety"
+            "reason": "complete_or_explicit_no_trade_with_upstream_safety_and_account_truth"
             if status == "ready"
             else "missing_or_degraded_upstream_truth_or_safety",
         }
@@ -1281,6 +1336,7 @@ def _publication_pair_hash(
     performance_manifest: dict[str, Any],
     calendar_manifest: dict[str, Any],
     scenario_manifest: dict[str, Any] | None = None,
+    account_session_report: dict[str, Any] | None = None,
 ) -> str:
     payload = {
         "market_date": performance_manifest.get("market_date"),
@@ -1293,9 +1349,181 @@ def _publication_pair_hash(
     if scenario_manifest is not None:
         payload["scenario_payload_sha256"] = scenario_manifest.get("payload_sha256")
         payload["scenario_schema_version"] = scenario_manifest.get("schema_version")
+    report = account_session_report if isinstance(account_session_report, dict) else {}
+    payload.update(
+        {
+            "account_session_status": report.get("status"),
+            "account_session_input_hash_sha256": report.get("input_hash_sha256"),
+            "account_session_expected_calendar_hash_sha256": report.get(
+                "expected_calendar_hash_sha256"
+            ),
+            "account_session_code_sha": report.get("code_sha"),
+            "account_session_account_id": report.get("account_id"),
+            "account_session_version_bucket": report.get("version_bucket"),
+            "account_session_cohort": report.get("cohort"),
+            "account_session_strategy_id": report.get("strategy_id"),
+            "account_session_strategy_version": report.get("strategy_version"),
+            "account_session_ledger_lineage_sha256": report.get(
+                "ledger_lineage_sha256"
+            ),
+            "account_session_current_session_lineage_sha256": report.get(
+                "current_session_lineage_sha256"
+            ),
+            "account_session_expected_current_session_lineage_sha256": report.get(
+                "expected_current_session_lineage_sha256"
+            ),
+            "account_session_current_session_lineage_match": report.get(
+                "current_session_lineage_match"
+            ),
+        }
+    )
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def _account_session_report_ready(
+    report: dict[str, Any] | None,
+    *,
+    market_date: str,
+    release_sha: str,
+    reconciliation: dict[str, Any] | None = None,
+) -> bool:
+    if not isinstance(report, dict):
+        return False
+    expected_count = report.get("expected_session_count")
+    exact_counts = (
+        isinstance(expected_count, int)
+        and not isinstance(expected_count, bool)
+        and expected_count > 0
+        and report.get("ledger_row_count") == expected_count
+        and report.get("complete_count") == expected_count
+        and report.get("missing_count") == 0
+        and report.get("partial_count") == 0
+        and report.get("quarantined_count") == 0
+    )
+    series = report.get("series")
+    series_row = (
+        series[0]
+        if isinstance(series, list) and len(series) == 1 and isinstance(series[0], dict)
+        else None
+    )
+    series_ready = isinstance(series_row, dict) and all(
+        (
+            series_row.get("status") == "COMPLETE",
+            series_row.get("expected_session_count") == expected_count,
+            series_row.get("ledger_row_count") == expected_count,
+            series_row.get("complete_count") == expected_count,
+            series_row.get("code_sha") == release_sha,
+            series_row.get("market_date") == market_date,
+            series_row.get("research_only") is True,
+            series_row.get("broker_execution_enabled") is False,
+            series_row.get("account_id") == ALPHAOPS_V5_ACCOUNT_ID,
+            series_row.get("version_bucket") == "v5",
+            series_row.get("cohort") == "official_forward_paper",
+            series_row.get("strategy_id") == ALPHAOPS_V5_STRATEGY_ID,
+            series_row.get("strategy_version") == ALPHAOPS_V5_STRATEGY_VERSION,
+        )
+    )
+    hashes_ready = all(
+        isinstance(report.get(field), str)
+        and re.fullmatch(r"[0-9a-f]{64}", str(report.get(field))) is not None
+        for field in (
+            "input_hash_sha256",
+            "expected_calendar_hash_sha256",
+            "source_hashes_sha256",
+            "ledger_lineage_sha256",
+            "current_session_lineage_sha256",
+            "expected_current_session_lineage_sha256",
+        )
+    )
+    lineage_ready = bool(
+        report.get("current_session_lineage_match") is True
+        and report.get("current_session_lineage_sha256")
+        == report.get("expected_current_session_lineage_sha256")
+        and isinstance(series_row, dict)
+        and series_row.get("current_session_lineage_match") is True
+        and series_row.get("current_session_lineage_sha256")
+        == report.get("current_session_lineage_sha256")
+        and series_row.get("expected_current_session_lineage_sha256")
+        == report.get("expected_current_session_lineage_sha256")
+    )
+    return bool(
+        report.get("schema_version") == "dawnstrike.account_session_report.v1"
+        and report.get("status") == "COMPLETE"
+        and report.get("market_date") == market_date
+        and report.get("code_sha") == release_sha
+        and report.get("unsafe_ledger_count") == 0
+        and report.get("research_only") is True
+        and report.get("broker_execution_enabled") is False
+        and report.get("account_id") == ALPHAOPS_V5_ACCOUNT_ID
+        and report.get("version_bucket") == "v5"
+        and report.get("cohort") == "official_forward_paper"
+        and report.get("strategy_id") == ALPHAOPS_V5_STRATEGY_ID
+        and report.get("strategy_version") == ALPHAOPS_V5_STRATEGY_VERSION
+        and exact_counts
+        and series_ready
+        and hashes_ready
+        and lineage_ready
+        and _account_session_reconciliation_ready(
+            reconciliation,
+            report=report,
+            market_date=market_date,
+            release_sha=release_sha,
+        )
+    )
+
+
+def _public_account_session_reconciliation(
+    value: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    accounts = value.get("accounts")
+    account = accounts[0] if isinstance(accounts, list) and len(accounts) == 1 else {}
+    ledger = account.get("ledger_row") if isinstance(account, dict) else {}
+    return {
+        "schema_version": value.get("schema_version"),
+        "status": value.get("status"),
+        "market_date": value.get("market_date"),
+        "release_sha": value.get("release_sha"),
+        "account_id": account.get("account_id") if isinstance(account, dict) else None,
+        "account_status": account.get("status") if isinstance(account, dict) else None,
+        "ledger_lineage_sha256": (
+            ledger.get("lineage_sha256") if isinstance(ledger, dict) else None
+        ),
+        "research_only": value.get("research_only"),
+        "broker_execution_enabled": value.get("broker_execution_enabled"),
+    }
+
+
+def _account_session_reconciliation_ready(
+    value: dict[str, Any] | None,
+    *,
+    report: dict[str, Any],
+    market_date: str,
+    release_sha: str,
+) -> bool:
+    public = _public_account_session_reconciliation(value)
+    if not isinstance(public, dict):
+        return False
+    lineage = public.get("ledger_lineage_sha256")
+    lineage_list_hash = hashlib.sha256(
+        json.dumps([lineage], sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return bool(
+        public.get("schema_version") == "dawnstrike.daily_account_reconciliation.v1"
+        and public.get("status") == "COMPLETE"
+        and public.get("market_date") == market_date
+        and public.get("release_sha") == release_sha
+        and public.get("account_id") == ALPHAOPS_V5_ACCOUNT_ID
+        and public.get("account_status") in {"AUTHENTICATED_NO_TRADE", "TRADE"}
+        and public.get("research_only") is True
+        and public.get("broker_execution_enabled") is False
+        and isinstance(lineage, str)
+        and re.fullmatch(r"[0-9a-f]{64}", lineage) is not None
+        and lineage_list_hash == report.get("current_session_lineage_sha256")
+    )
 
 
 def _utc_now() -> str:

@@ -126,6 +126,6 @@ def test_runner_child_uses_isolated_exact_interpreter(tmp_path: Path, monkeypatc
 
     assert module.main() == 0
     command = captured["command"]
-    assert command[:3] == [sys.executable, "-I", "-u"]
-    assert Path(command[3]).resolve() == Path("scripts/capture_intraday_operations.py").resolve()
+    assert command[:4] == [sys.executable, "-I", "-B", "-u"]
+    assert Path(command[4]).resolve() == Path("scripts/capture_intraday_operations.py").resolve()
     assert captured["kwargs"]["cwd"] == tmp_path

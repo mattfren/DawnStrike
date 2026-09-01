@@ -21,6 +21,15 @@ def _operations_module():
     return module
 
 
+def _daily_module():
+    path = Path("scripts/run_daily_intraday_capture.py").resolve()
+    spec = importlib.util.spec_from_file_location("run_daily_intraday_capture", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _evidence_module():
     path = Path("scripts/capture_intraday_evidence.py").resolve()
     spec = importlib.util.spec_from_file_location("capture_intraday_evidence", path)
@@ -32,6 +41,32 @@ def _evidence_module():
 
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _clean_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "candidate-repo"
+    repo.mkdir()
+    subprocess.run(
+        ["git", "init", "--initial-branch=main", str(repo)],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "test@example.invalid"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "Capture Test"],
+        check=True,
+    )
+    (repo / "candidate.txt").write_text("clean\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "candidate.txt"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-m", "candidate"],
+        check=True,
+        capture_output=True,
+    )
+    return repo
 
 
 def _plan(tmp_path: Path, repo: Path) -> CapturePlan:
@@ -110,12 +145,13 @@ def _plan(tmp_path: Path, repo: Path) -> CapturePlan:
 
 
 def test_plan_requires_delayed_sip_and_separate_external_roots(tmp_path: Path) -> None:
-    repo = Path(__file__).resolve().parents[1]
+    repo = _clean_repo(tmp_path)
     plan = _plan(tmp_path, repo)
     result = plan_as_dict(plan, now=datetime(2026, 8, 30, 12, tzinfo=UTC))
     assert result["status"] == "READY"
     assert result["symbols"] == ["SPY", "IWM", "QQQ", "DIA", "TLT"]
     assert result["broker_execution"] == "disabled"
+    assert len(result["git_executable_sha256"]) == 64
     assert result["required_endpoints"] == [
         "bars",
         "trades",
@@ -136,7 +172,7 @@ def test_plan_requires_delayed_sip_and_separate_external_roots(tmp_path: Path) -
 def test_plan_rejects_feed_substitution_and_non_alpaca_provider(
     tmp_path: Path, field: str, value: str, message: str
 ) -> None:
-    repo = Path(__file__).resolve().parents[1]
+    repo = _clean_repo(tmp_path)
     plan = _plan(tmp_path, repo)
     object.__setattr__(plan, field, value)
     with pytest.raises(CapturePlanError, match=message):
@@ -144,7 +180,7 @@ def test_plan_rejects_feed_substitution_and_non_alpaca_provider(
 
 
 def test_plan_rejects_active_state_output(tmp_path: Path) -> None:
-    repo = Path(__file__).resolve().parents[1]
+    repo = _clean_repo(tmp_path)
     plan = _plan(tmp_path, repo)
     object.__setattr__(plan, "output_root", Path(r"C:\r\dawnstrike-state\capture"))
     with pytest.raises(CapturePlanError, match="active state"):
@@ -152,7 +188,7 @@ def test_plan_rejects_active_state_output(tmp_path: Path) -> None:
 
 
 def test_plan_rejects_recent_window(tmp_path: Path) -> None:
-    repo = Path(__file__).resolve().parents[1]
+    repo = _clean_repo(tmp_path)
     plan = _plan(tmp_path, repo)
     session = plan.expected_session
     session.write_text(
@@ -195,7 +231,7 @@ def test_plan_rejects_dirty_candidate_worktree(tmp_path: Path) -> None:
 
 
 def test_plan_rejects_unproven_entitlement_receipt(tmp_path: Path) -> None:
-    repo = Path(__file__).resolve().parents[1]
+    repo = _clean_repo(tmp_path)
     plan = _plan(tmp_path, repo)
     plan.entitlement_receipt.write_text(
         json.dumps({"entitlement": "claimed", "proof_id": "forged"}),
@@ -246,6 +282,28 @@ def test_capture_script_is_plan_only_without_execute() -> None:
     assert "-RestartInterval (New-TimeSpan -Minutes 15)" in registration
     assert "-At $StartAt" in registration
     assert "$StartAt.TimeOfDay" not in registration
+
+
+def test_nested_capture_python_is_isolated_and_scrubs_startup_environment(monkeypatch) -> None:
+    daily = _daily_module()
+    operations = _operations_module()
+    monkeypatch.setenv("PYTHONPATH", r"C:\hostile")
+    monkeypatch.setenv("PYTHONHOME", r"C:\hostile-home")
+    monkeypatch.setenv("PYTHONSTARTUP", r"C:\hostile-startup.py")
+    for module in (daily, operations):
+        env = module._isolated_child_environment()
+        assert "PYTHONPATH" not in env
+        assert "PYTHONHOME" not in env
+        assert "PYTHONSTARTUP" not in env
+        assert env["PYTHONDONTWRITEBYTECODE"] == "1"
+    for path in (
+        Path("scripts/run_daily_intraday_capture.py"),
+        Path("scripts/capture_intraday_operations.py"),
+    ):
+        source = path.read_text(encoding="utf-8")
+        assert '"-I",' in source
+        assert '"-B",' in source
+        assert "_approved_child_python()" in source
 
 
 def test_inner_capture_exit_codes_only_accept_complete() -> None:

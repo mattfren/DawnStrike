@@ -2,8 +2,10 @@
 
 The backup is made with SQLite's online backup API while the source remains
 open.  A completed backup is an atomic directory containing the database,
-manifest, and receipt.  Restore is intentionally limited to VERIFY and PLAN;
-this module never overwrites a state database.
+manifest, and receipt.  ``restore_verify`` and ``restore_plan`` never
+overwrite a state database.  ``restore_exact`` is the small, governed
+recovery primitive used only after state preparation has sealed an exact
+pre-mutation backup and source identity.
 """
 
 from __future__ import annotations
@@ -726,6 +728,178 @@ def restore_verify(
         "would_overwrite": target.exists(),
         "write_performed": False,
         "automatic_overwrite": False,
+    }
+
+
+def _restore_archive_sidecar(
+    source: Path, archive: Path, *, label: str
+) -> dict[str, Any]:
+    """Move one live SQLite sidecar to an attempt-bound archive idempotently."""
+
+    _assert_no_reparse_components(source)
+    _assert_no_reparse_components(archive.parent)
+    _assert_no_reparse_components(archive)
+    if source.exists() and not source.is_file():
+        raise RecoveryValidationError(f"{label} is not a regular file")
+    if archive.exists():
+        if not archive.is_file():
+            raise RecoveryValidationError(f"{label} archive is not a regular file")
+        if source.exists():
+            _, source_hash = _sha256(source)
+            _, archive_hash = _sha256(archive)
+            if source_hash != archive_hash:
+                raise RecoveryValidationError(f"{label} archive conflicts with live sidecar")
+            source.unlink()
+            if source.exists():
+                raise RecoveryValidationError(f"{label} sidecar could not be retired")
+        return {"path": str(archive), "sha256": _sha256(archive)[1], "moved": False}
+    if not source.exists():
+        return {"path": "NONE", "sha256": hashlib.sha256(b"").hexdigest(), "moved": False}
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    _assert_no_reparse_components(archive.parent)
+    _assert_no_reparse_components(source)
+    _assert_no_reparse_components(archive)
+    os.replace(source, archive)
+    if source.exists() or not archive.is_file():
+        raise RecoveryValidationError(f"{label} sidecar archive was not proven")
+    return {"path": str(archive), "sha256": _sha256(archive)[1], "moved": True}
+
+
+def restore_exact(
+    bundle: str | Path,
+    target_db: str | Path,
+    *,
+    backup_root: str | Path,
+    state_root: str | Path,
+    expected_source_sha: str,
+    expected_before: dict[str, str] | None = None,
+    archive_root: str | Path | None = None,
+    attempt_id: str | None = None,
+) -> dict[str, Any]:
+    """Restore one sealed state-preparation snapshot.
+
+    Unlike VERIFY and PLAN, this operation is explicitly mutating.  It is
+    only admissible with a candidate release SHA and the pre-mutation hashes
+    sealed while the governed runtime lock was held.  Existing WAL/SHM
+    sidecars are archived before the verified online-backup image is installed
+    so SQLite cannot overlay the restored snapshot.
+
+    SQLite online backups can have a different physical main-file encoding
+    than their source.  The source physical hashes and the authoritative
+    logical snapshot therefore remain in the result; the installed image is
+    proved by its sealed backup hash and logical snapshot hash.
+    """
+
+    if not isinstance(expected_source_sha, str) or not _GIT_SHA.fullmatch(
+        expected_source_sha
+    ):
+        raise RecoveryValidationError("restore source release SHA is invalid")
+    state = _resolve(state_root)
+    root = _resolve(backup_root)
+    target = _resolve(target_db)
+    if not state.is_dir():
+        raise RecoveryValidationError("restore state root must be a directory")
+    if target.name != DB_NAME or not target.is_file():
+        raise RecoveryValidationError("restore target must be an existing shadow_real.sqlite")
+    if not _is_within(target, state) or target == state:
+        raise RecoveryValidationError("restore target must be contained by state root")
+    if _is_within(root, state) or _is_within(state, root):
+        raise RecoveryValidationError(
+            "backup root must be separate from and outside the state root"
+        )
+    verified = validate_backup(bundle, backup_root=root)
+    if verified.get("source_release_sha") != expected_source_sha.lower():
+        raise RecoveryValidationError("restore backup is bound to a different release")
+    bundle_path = _resolve(bundle)
+    manifest = _load_json(bundle_path / MANIFEST_NAME)
+    expected = expected_before or {}
+    for field in ("db_sha256", "wal_sha256", "shm_sha256", "logical_snapshot_sha256"):
+        value = expected.get(field)
+        if value is not None and not _SHA256.fullmatch(str(value)):
+            raise RecoveryValidationError(f"expected pre-restore {field} is invalid")
+    if expected.get("db_sha256") is not None and manifest.get(
+        "source_live_main_file_sha256"
+    ) != expected["db_sha256"]:
+        raise RecoveryValidationError("restore backup does not bind the pre-mutation main file")
+    if expected.get("logical_snapshot_sha256") is not None and manifest.get(
+        "source_logical_snapshot_sha256"
+    ) != expected["logical_snapshot_sha256"]:
+        raise RecoveryValidationError(
+            "restore backup does not bind the pre-mutation logical snapshot"
+        )
+
+    bundle_hash = str(verified["manifest_sha256"])
+    attempt = attempt_id or bundle_hash
+    if not isinstance(attempt, str) or not re.fullmatch(r"[0-9a-f]{64}", attempt):
+        raise RecoveryValidationError("restore attempt identity is invalid")
+    archive = (
+        _resolve(archive_root)
+        if archive_root is not None
+        else state / "receipts" / "state-preparation" / "recovery"
+    )
+    if not _is_within(archive, state) or archive == state:
+        raise RecoveryValidationError("restore sidecar archive must be inside StateRoot")
+    _assert_no_reparse_components(archive)
+    archive.mkdir(parents=True, exist_ok=True)
+    _assert_no_reparse_components(archive)
+
+    sidecars: dict[str, Any] = {}
+    for suffix in ("-wal", "-shm"):
+        sidecars[suffix] = _restore_archive_sidecar(
+            target.with_name(target.name + suffix),
+            archive / f"restore-{attempt}{suffix}",
+            label=f"SQLite {suffix} sidecar",
+        )
+
+    source_db = bundle_path / DB_NAME
+    _assert_no_reparse_components(source_db)
+    temporary = target.with_name(f".{target.name}.restore-{attempt}.tmp")
+    _assert_no_reparse_components(temporary)
+    if temporary.exists():
+        raise RecoveryValidationError("restore temporary image already exists")
+    try:
+        with source_db.open("rb") as source_handle, temporary.open("xb") as target_handle:
+            shutil.copyfileobj(source_handle, target_handle, length=1024 * 1024)
+            target_handle.flush()
+            os.fsync(target_handle.fileno())
+        _assert_no_reparse_components(target)
+        _assert_no_reparse_components(temporary)
+        if _sha256(temporary)[1] != verified["backup_db_sha256"]:
+            raise RecoveryValidationError("restore temporary image hash changed")
+        try:
+            os.replace(temporary, target)
+        except PermissionError:
+            # A read-only SQLite handle can remain open briefly on Windows
+            # after a failed inventory probe.  Replacing the directory entry
+            # is the preferred atomic path; in this narrow governed recovery
+            # window fall back to a verified full-file copy rather than
+            # deleting the live database and losing the sealed source.
+            shutil.copyfile(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    if not target.is_file() or _sha256(target)[1] != verified["backup_db_sha256"]:
+        raise RecoveryValidationError("restored database hash was not proven")
+    restored_logical = _logical_snapshot_sha256(target, immutable=True)
+    if restored_logical != verified["backup_logical_snapshot_sha256"]:
+        raise RecoveryValidationError("restored database logical snapshot was not proven")
+    metadata = _db_metadata(target, read_only=True, immutable=True)
+    if metadata["quick_check"] != "ok":
+        raise RecoveryValidationError("restored database quick_check failed")
+    return {
+        **verified,
+        "status": "RESTORED",
+        "target_db": str(target),
+        "target_db_sha256": _sha256(target)[1],
+        "target_logical_snapshot_sha256": restored_logical,
+        "pre_restore_db_sha256": manifest["source_live_main_file_sha256"],
+        "pre_restore_logical_snapshot_sha256": manifest[
+            "source_logical_snapshot_sha256"
+        ],
+        "sidecars": sidecars,
+        "write_performed": True,
+        "automatic_overwrite": True,
+        "exact_logical_snapshot": True,
+        "restore_attempt": attempt,
     }
 
 

@@ -387,6 +387,9 @@ def _auxiliary_task(runtime: Path, state: Path, *, candidate_sha: str = "a" * 40
         f'"{token}"'
         for token in (
             "-I",
+            "-B",
+            "-X",
+            f"pycache_prefix={state / 'capture-bytecode' / candidate_sha}",
             "-u",
             str(runtime / "scripts" / "run_daily_intraday_capture.py"),
             "--candidate-sha",
@@ -670,14 +673,13 @@ def test_scheduler_doctor_blocks_nonoperational_ready_auxiliary(
 @pytest.mark.parametrize(
     "arguments_mutator",
     [
-        lambda args: args.replace('"-I" "-u"', '"-u" "-I"', 1),
-        lambda args: args.replace('"-I" "-u"', '"-I"', 1),
-        lambda args: args.replace('"-I" "-u"', '"-I" "-u" "-u"', 1),
-        lambda args: args.replace(
-            '"-I" "-u"', '"-I" "-u" "python.exe"', 1
-        ),
+        lambda args: args.replace('"-I" "-B"', '"-B" "-I"', 1),
+        lambda args: args.replace('"-I" "-B"', '"-I"', 1),
+        lambda args: args.replace('"-X" "pycache_prefix=', '"-X" "-X" "pycache_prefix=', 1),
+        lambda args: args.replace('"-u"', '"-u" "python.exe"', 1),
+        lambda args: args.replace('"pycache_prefix=', '"pycache_prefix=C:\\hostile\\', 1),
     ],
-    ids=["reordered", "missing", "duplicate", "interpreter-shadow"],
+    ids=["reordered", "missing", "duplicate", "interpreter-shadow", "wrong-pycache-root"],
 )
 def test_scheduler_doctor_rejects_auxiliary_prefix_variants(
     tmp_path: Path, monkeypatch, arguments_mutator
@@ -1242,6 +1244,9 @@ def test_activation_history_accepts_one_exact_clean_runtime_receipt(
     receipt_root = state / "receipts" / "runtime-activation"
     receipt_root.mkdir(parents=True)
     (receipt_root / f"runtime-activation-{activation_id}.json").write_text(
+        "{}", encoding="utf-8"
+    )
+    (receipt_root / f"runtime-activation-{activation_id}.prepared.json").write_text(
         "{}", encoding="utf-8"
     )
     import scripts.runtime_activation_contract as activation_contract

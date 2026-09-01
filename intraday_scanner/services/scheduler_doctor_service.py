@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shlex
+import stat
 import subprocess  # nosec B404
 from datetime import date, datetime
 from pathlib import Path
@@ -20,7 +21,7 @@ AUXILIARY_TASK_NAME = "Dawnstrike Delayed SIP Capture"
 AUXILIARY_SIDECAR_CONTRACT = "dawnstrike.account_capture_trial_sidecar.v1"
 AUXILIARY_DECLARATION_FILE = Path("config") / "state_preparation_contract.json"
 AUXILIARY_CAPTURE_RUNNER = Path("scripts") / "run_daily_intraday_capture.py"
-AUXILIARY_PYTHON_PREFIX = ("-I", "-u")
+AUXILIARY_PYTHON_PREFIX = ("-I", "-B", "-X")
 AUXILIARY_INTERPRETER = Path(
     r"C:\Users\MattFields\AppData\Local\Programs\Python\Python313\python.exe"
 )
@@ -30,6 +31,8 @@ AUXILIARY_INTERPRETER_SIGNER_SUBJECT = (
     "CN=Python Software Foundation, O=Python Software Foundation, L=Beaverton, S=Oregon, C=US"
 )
 AUXILIARY_INTERPRETER_SIGNER_THUMBPRINT = "9BA3C2E210C7E8296C5056515BFC0B0BBA78AC48"
+APPROVED_GIT_PATH = Path(r"C:\Program Files\Git\cmd\git.exe")
+APPROVED_GIT_SHA256 = "37c5725818d602e951ba2563b870d62763322956b73373da4c33a0b566a80bc9"
 AUXILIARY_REQUIRED_OPTIONS = frozenset(
     {
         "--candidate-sha",
@@ -817,14 +820,15 @@ def _runtime_git_tree(runtime: Path) -> str | None:
 
 def _runtime_git_origin_sha(runtime: Path) -> str | None:
     try:
+        git_path, _ = _approved_git()
         completed = subprocess.run(  # nosec B603, B607
-            ["git", "-C", str(runtime), "remote", "get-url", "origin"],
+            [str(git_path), "-C", str(runtime), "remote", "get-url", "origin"],
             capture_output=True,
             check=True,
             text=True,
             timeout=SCHEDULER_QUERY_TIMEOUT_SECONDS,
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, RuntimeError, subprocess.SubprocessError):
         return None
     origin = completed.stdout.strip()
     if not origin:
@@ -853,6 +857,7 @@ def _runtime_git_snapshot(runtime: Path) -> dict[str, str] | None:
         "candidate_tree": candidate_tree,
         "runtime_origin_sha256": runtime_origin_sha256,
         "origin_main_sha": origin_main_sha,
+        "git_executable_sha256": APPROVED_GIT_SHA256,
     }
 
 
@@ -873,9 +878,10 @@ def _runtime_git_clean(runtime: Path) -> bool:
     """Match the release checkout cleanliness contract without exposing paths."""
 
     try:
+        git_path, _ = _approved_git()
         status = subprocess.run(  # nosec B603, B607
             [
-                "git",
+                str(git_path),
                 "-C",
                 str(runtime),
                 "status",
@@ -892,7 +898,7 @@ def _runtime_git_clean(runtime: Path) -> bool:
             return False
         ignored = subprocess.run(  # nosec B603, B607
             [
-                "git",
+                str(git_path),
                 "-C",
                 str(runtime),
                 "ls-files",
@@ -906,7 +912,7 @@ def _runtime_git_clean(runtime: Path) -> bool:
             text=False,
             timeout=SCHEDULER_QUERY_TIMEOUT_SECONDS,
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, RuntimeError, subprocess.SubprocessError):
         return False
     for name in ignored.stdout.decode("utf-8", errors="replace").split("\0"):
         suffix = Path(name).suffix.lower()
@@ -930,17 +936,41 @@ def _runtime_git_clean(runtime: Path) -> bool:
 
 def _runtime_git_value(runtime: Path, revision: str) -> str | None:
     try:
+        git_path, _ = _approved_git()
         completed = subprocess.run(  # nosec B603, B607
-            ["git", "-C", str(runtime), "rev-parse", revision],
+            [str(git_path), "-C", str(runtime), "rev-parse", revision],
             capture_output=True,
             check=True,
             text=True,
             timeout=SCHEDULER_QUERY_TIMEOUT_SECONDS,
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, RuntimeError, subprocess.SubprocessError):
         return None
     value = completed.stdout.strip().lower()
     return value if len(value) == 40 and all(char in "0123456789abcdef" for char in value) else None
+
+
+def _approved_git() -> tuple[Path, str]:
+    path = APPROVED_GIT_PATH
+    try:
+        cursor = path
+        while True:
+            details = cursor.lstat()
+            if getattr(details, "st_file_attributes", 0) & getattr(
+                stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0
+            ):
+                raise OSError("reparse point")
+            if cursor.parent == cursor:
+                break
+            cursor = cursor.parent
+        if not path.is_file():
+            raise OSError("not a regular file")
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise RuntimeError("approved Git executable is unavailable") from exc
+    if digest != APPROVED_GIT_SHA256:
+        raise RuntimeError("approved Git executable hash changed")
+    return path, digest
 
 
 def _action_option(tokens: list[str], option: str) -> str | None:
@@ -1107,16 +1137,21 @@ def _validate_auxiliary_action(
         tokens = [token.strip('"') for token in shlex.split(arguments, posix=False)]
     except ValueError:
         tokens = []
-    prefix_matches = len(tokens) >= 3 and tuple(tokens[:2]) == AUXILIARY_PYTHON_PREFIX
-    runner = tokens[2] if prefix_matches else None
+    prefix_matches = (
+        len(tokens) >= 7
+        and tuple(tokens[:3]) == AUXILIARY_PYTHON_PREFIX
+        and tokens[3].startswith("pycache_prefix=")
+        and tokens[4] == "-u"
+    )
+    runner = tokens[5] if prefix_matches else None
     prefix_matches = prefix_matches and not any(
-        token in AUXILIARY_PYTHON_PREFIX for token in tokens[3:]
+        token in (*AUXILIARY_PYTHON_PREFIX, "-u") for token in tokens[6:]
     )
     option_values: dict[str, str] = {}
     duplicate_options: set[str] = set()
     unknown_options: set[str] = set()
     unexpected_arguments = False
-    option_index = 3 if prefix_matches else len(tokens)
+    option_index = 6 if prefix_matches else len(tokens)
     while option_index < len(tokens):
         option = tokens[option_index]
         if not option.startswith("--"):
@@ -1233,6 +1268,13 @@ def _validate_auxiliary_action(
         runner_matches = False
         env_file_matches = False
     candidate_sha_matches = candidate == contract["candidate_sha"]
+    bytecode_prefix_matches = (
+        candidate_format_valid
+        and len(tokens) >= 4
+        and tokens[3]
+        == "pycache_prefix=" + str((state / "capture-bytecode" / str(candidate)).resolve())
+    )
+    prefix_matches = prefix_matches and bytecode_prefix_matches
     input_hashes_match = all(
         option_values.get(option) == contract.get(contract_key)
         for option, contract_key in (
@@ -1579,11 +1621,17 @@ def _load_exact_activation_completion(runtime: Path, state: Path) -> datetime | 
     except OSError:
         return None
     for path in paths:
+        name_match = re.fullmatch(r"runtime-activation-([0-9a-f]{24})\.json", path.name)
+        if name_match is None:
+            # Prepared, failure, compensation, and other governed sidecars are
+            # not activation-completion receipts and must not poison exact
+            # COMPLETE-history supersession.
+            continue
         try:
             _assert_no_reparse_components(path)
             payload = load_receipt(path)
-            activation_id = str(payload.get("activation_id") or "")
-            if path.name != f"runtime-activation-{activation_id}.json":
+            activation_id = name_match.group(1)
+            if str(payload.get("activation_id") or "") != activation_id:
                 return None
             if (
                 payload.get("status") != "COMPLETE"

@@ -83,9 +83,24 @@ The independent SOL JSON must have exactly these fields:
   "high_findings": 0,
   "completed_at_utc": "<RFC3339 UTC ending Z>",
   "research_only": true,
-  "broker_execution_enabled": false
+  "broker_execution_enabled": false,
+  "report_sha256": "<64 lowercase hex SHA-256>",
+  "codex_share_url": "https://chatgpt.com/share/<immutable-id>"
 }
 ```
+
+Activation requires a live GitHub authority check in addition to the local
+self-hash. It reads the exact commit's comments from repository ID `1275588712`
+and accepts exactly one comment whose commit is the candidate SHA/tree, whose
+author association is `OWNER` and actor ID is `274126974`, and whose immutable
+created and updated timestamps are equal. The comment URL and ID must be
+canonical, and its body must be the exact canonical JSON binding the candidate
+SHA/tree, `gpt-5.6-sol`, `ZERO_CRITICAL_HIGH`, zero critical/high counts, the
+report SHA-256, immutable Codex share URL, `research_only: true`,
+`broker_execution_enabled: false`, and
+`authorization: "OWNER_RELEASE_AUTHORIZATION"`. Requests use no proxy and do
+not follow redirects. This proves owner authorization of an independently
+reviewed report; it does not prove cryptographic Sol identity.
 
 Seal each captured object atomically. Sealing supplies tamper evidence; it does
 not turn an unverified assertion into CI or audit proof.

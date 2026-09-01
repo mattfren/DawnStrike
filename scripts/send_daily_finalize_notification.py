@@ -14,17 +14,49 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from intraday_scanner.network_safety import open_allowlisted_url
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
+from scripts.public_artifact_inventory import assert_contained_no_reparse
+
+
+def _reject_duplicate_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate daily finalize result field: {key}")
+        result[key] = value
+    return result
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--result-file", required=True)
     parser.add_argument("--db-path", required=True)
+    parser.add_argument("--expected-build-attempt-id", required=True)
     parser.add_argument("--deployment-url", default="")
     args = parser.parse_args()
-    payload = json.loads(Path(args.result_file).read_text(encoding="utf-8"))
+    db_path = Path(os.path.abspath(args.db_path))
+    state_root = db_path.parent
+    result_path = Path(os.path.abspath(args.result_file))
+    result_path.relative_to(state_root)
+    assert_contained_no_reparse(state_root, result_path)
+    before = result_path.stat()
+    raw = result_path.read_text(encoding="utf-8")
+    after = result_path.stat()
+    if before.st_size != after.st_size or before.st_mtime_ns != after.st_mtime_ns:
+        raise ValueError("daily finalize result changed while it was read")
+    payload = json.loads(raw, object_pairs_hook=_reject_duplicate_pairs)
     if not isinstance(payload, dict):
         raise ValueError("daily finalize result must be an object")
+    expected_attempt = args.expected_build_attempt_id.strip().lower()
+    if (
+        len(expected_attempt) != 32
+        or any(character not in "0123456789abcdef" for character in expected_attempt)
+        or payload.get("build_attempt_id") != expected_attempt
+    ):
+        raise ValueError("daily finalize result is not bound to this build attempt")
+    if payload.get("status") != "COMPLETE":
+        raise ValueError("daily finalize result is not COMPLETE")
+    if payload.get("broker_execution_enabled") is not False:
+        raise ValueError("daily finalize result does not preserve the no-broker boundary")
     deployment_url = args.deployment_url or str(payload.get("deployment_url") or "")
     message = _message(payload, deployment_url)
     event_key = (

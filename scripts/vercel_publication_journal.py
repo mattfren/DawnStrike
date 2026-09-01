@@ -41,6 +41,7 @@ KEYS = {
     "candidate_build_sha",
     "candidate_build_manifest_sha256",
     "candidate_release_manifest_sha256",
+    "candidate_public_artifact_root_sha256",
     "candidate_manifest_sha256",
     "candidate_package_manifest_sha256",
     "prior_aliases",
@@ -79,6 +80,17 @@ COMPENSATION_KEYS = {
     "broker_execution_enabled",
     "recorded_at_utc",
     "receipt_self_sha256",
+}
+COMPENSATED_RESULT_KEYS = {
+    "schema_version",
+    "status",
+    "market_date",
+    "candidate_source_sha",
+    "candidate_source_tree",
+    "candidate_preview_deployment_id",
+    "compensation_sha256",
+    "research_only",
+    "broker_execution_enabled",
 }
 LOCK_KEYS = {
     "schema_version",
@@ -147,10 +159,67 @@ def _result_authorization(value: Any, expected_market_date: str) -> None:
         raise ValueError("production result authorization identities diverge")
     if value.get("expected_market_date") != expected_market_date:
         raise ValueError("production result expected market date mismatch")
+    report = value.get("account_session_report")
+    if not isinstance(report, dict):
+        raise ValueError("production result account-session report is missing")
+    _hash(value.get("account_session_report_sha256"), "account_session_report_sha256")
+    if hashlib.sha256(canonical_json(report)).hexdigest() != value[
+        "account_session_report_sha256"
+    ]:
+        raise ValueError("production result account-session report hash mismatch")
+    expected_identity = {
+        "account_id": "alphaops_v5_simulated",
+        "version_bucket": "v5",
+        "cohort": "official_forward_paper",
+        "strategy_id": "alphaops_v5",
+        "strategy_version": "dawnstrike-alphaops-v5.0.0",
+    }
+    expected_count = report.get("expected_session_count")
+    series = report.get("series")
+    if (
+        report.get("schema_version") != "dawnstrike.account_session_report.v1"
+        or report.get("status") != "COMPLETE"
+        or report.get("market_date") != expected_market_date
+        or report.get("code_sha") != value.get("source_sha")
+        or report.get("research_only") is not True
+        or report.get("broker_execution_enabled") is not False
+        or report.get("unsafe_ledger_count") != 0
+        or type(expected_count) is not int
+        or expected_count < 1
+        or report.get("ledger_row_count") != expected_count
+        or report.get("complete_count") != expected_count
+        or report.get("missing_count") != 0
+        or report.get("partial_count") != 0
+        or report.get("quarantined_count") != 0
+        or any(report.get(field) != expected for field, expected in expected_identity.items())
+        or not isinstance(series, list)
+        or len(series) != 1
+        or not isinstance(series[0], dict)
+        or any(
+            series[0].get(field) != expected
+            for field, expected in expected_identity.items()
+        )
+        or series[0].get("status") != "COMPLETE"
+        or series[0].get("market_date") != expected_market_date
+        or series[0].get("code_sha") != value.get("source_sha")
+        or series[0].get("expected_session_count") != expected_count
+        or series[0].get("ledger_row_count") != expected_count
+        or series[0].get("complete_count") != expected_count
+        or series[0].get("research_only") is not True
+        or series[0].get("broker_execution_enabled") is not False
+    ):
+        raise ValueError("production result account-session report is not exact official truth")
+    for field in (
+        "input_hash_sha256",
+        "expected_calendar_hash_sha256",
+        "source_hashes_sha256",
+    ):
+        _hash(report.get(field), f"account_session_report.{field}")
 
 
 def _artifact_proofs(
-    result: dict[str, Any], *, preview_url: str, aliases: list[str], build_sha: str
+    result: dict[str, Any], *, preview_url: str, aliases: list[str], build_sha: str,
+    public_artifact_root_sha256: str,
 ) -> None:
     keys = {"endpoint", "build_sha", "asset_count", "total_bytes", "file_hashes_sha256"}
 
@@ -172,6 +241,8 @@ def _artifact_proofs(
         )
 
     expected_digest = check(result.get("preview_artifact_proof"), preview_url)
+    if expected_digest[3] != public_artifact_root_sha256:
+        raise ValueError("governed artifact proof does not match authorized artifact root")
     production = result.get("production_artifact_proofs")
     if not isinstance(production, list) or len(production) != len(aliases):
         raise ValueError("production governed artifact proofs are incomplete")
@@ -299,6 +370,7 @@ def validate(
     *,
     state_root: Path | None = None,
     journal_path: Path | None = None,
+    runtime_root: Path | None = None,
 ) -> dict[str, Any]:
     try:
         value = json.loads(raw.decode("utf-8"), object_pairs_hook=_pairs)
@@ -328,6 +400,7 @@ def validate(
         "candidate_build_sha",
         "candidate_build_manifest_sha256",
         "candidate_release_manifest_sha256",
+        "candidate_public_artifact_root_sha256",
         "candidate_manifest_sha256",
         "candidate_package_manifest_sha256",
         "toolchain_identity_sha256",
@@ -421,8 +494,29 @@ def validate(
                 "promoted_deployment_url"
             ].startswith("https://"):
                 raise ValueError("promoted deployment URL is invalid")
-        if value["result_payload"] is not None or value["production_result_sha256"] != EMPTY_SHA256:
-            raise ValueError("COMPENSATED journal carries a success result")
+        result = value["result_payload"]
+        if not isinstance(result, dict) or set(result) != COMPENSATED_RESULT_KEYS:
+            raise ValueError("COMPENSATED journal result tombstone is invalid")
+        if value["production_result_sha256"] == EMPTY_SHA256 or (
+            hashlib.sha256(canonical_json(result)).hexdigest()
+            != value["production_result_sha256"]
+        ):
+            raise ValueError("COMPENSATED journal result tombstone hash mismatch")
+        expected_tombstone = {
+            "schema_version": "dawnstrike.daily_deployment_compensated.v1",
+            "status": "COMPENSATED",
+            "market_date": value["candidate_market_date"],
+            "candidate_source_sha": value["candidate_source_sha"],
+            "candidate_source_tree": value["candidate_source_tree"],
+            "candidate_preview_deployment_id": value[
+                "candidate_preview_deployment_id"
+            ],
+            "compensation_sha256": value["compensation_sha256"],
+            "research_only": True,
+            "broker_execution_enabled": False,
+        }
+        if result != expected_tombstone:
+            raise ValueError("COMPENSATED journal result tombstone identity mismatch")
     else:
         if (
             not isinstance(value["promoted_deployment_id"], str)
@@ -472,10 +566,14 @@ def validate(
             "authorized_release_manifest_sha256": value[
                 "candidate_release_manifest_sha256"
             ],
+            "public_artifact_root_sha256": value[
+                "candidate_public_artifact_root_sha256"
+            ],
             "toolchain_identity_sha256": value["toolchain_identity_sha256"],
             "allow_degraded": False,
             "promoted": True,
             "live_trading_enabled": False,
+            "broker_execution_enabled": False,
             "research_only": True,
             "status": "PRODUCTION_VERIFIED",
         }
@@ -497,6 +595,7 @@ def validate(
             result.get("authorized_release_manifest_sha256"),
             "authorized_release_manifest_sha256",
         )
+        _hash(result.get("public_artifact_root_sha256"), "public_artifact_root_sha256")
         _hash(result.get("toolchain_identity_sha256"), "toolchain_identity_sha256")
         for field in (
             "expected_market_date",
@@ -513,6 +612,7 @@ def validate(
             preview_url=value["candidate_preview_url"],
             aliases=value["production_aliases"],
             build_sha=value["candidate_build_sha"],
+            public_artifact_root_sha256=value["candidate_public_artifact_root_sha256"],
         )
     if value["research_only"] is not True or value["broker_execution_enabled"] is not False:
         raise ValueError("journal safety boundary is invalid")
@@ -523,9 +623,9 @@ def validate(
         raise ValueError("journal self hash mismatch")
     if raw != canonical_json(value):
         raise ValueError("journal raw bytes are not canonical JSON")
-    if phase == "COMPLETE":
+    if phase in {"COMPLETE", "COMPENSATED"}:
         if state_root is None:
-            raise ValueError("COMPLETE journal verification requires StateRoot")
+            raise ValueError("terminal journal verification requires StateRoot")
         result_path = state_root / Path(value["result_relative_path"])
         _contained(result_path, state_root)
         result_raw = _read_regular(result_path)
@@ -533,6 +633,12 @@ def validate(
             raise ValueError("production result raw hash mismatch")
         if result_raw != canonical_json(value["result_payload"]):
             raise ValueError("production result raw bytes are not canonical JSON")
+        if runtime_root is not None:
+            runtime_result_path = runtime_root / "build" / "daily-deployment-result.json"
+            _contained(runtime_result_path, runtime_root)
+            runtime_raw = _read_regular(runtime_result_path)
+            if runtime_raw != result_raw:
+                raise ValueError("runtime and durable result raw bytes diverge")
     if phase == "COMPENSATED":
         if state_root is None or journal_path is None:
             raise ValueError("COMPENSATED journal verification requires StateRoot and journal path")
@@ -947,7 +1053,13 @@ def release_lock(
         released.unlink()
 
 
-def seal(source: Path, target: Path, *, state_root: Path | None = None) -> dict[str, Any]:
+def seal(
+    source: Path,
+    target: Path,
+    *,
+    state_root: Path | None = None,
+    runtime_root: Path | None = None,
+) -> dict[str, Any]:
     value = json.loads(_read_regular(source).decode("utf-8"), object_pairs_hook=_pairs)
     input_keys = set(value) if isinstance(value, dict) else None
     if input_keys not in (
@@ -957,7 +1069,12 @@ def seal(source: Path, target: Path, *, state_root: Path | None = None) -> dict[
         raise ValueError("journal input keys are not exact")
     value["journal_self_sha256"] = hashlib.sha256(canonical_json(value)).hexdigest()
     raw = canonical_json(value)
-    validate(raw, state_root=state_root, journal_path=target)
+    validate(
+        raw,
+        state_root=state_root,
+        journal_path=target,
+        runtime_root=runtime_root,
+    )
     _atomic_write(target, raw)
     return {"payload": value, "raw_file_sha256": hashlib.sha256(raw).hexdigest()}
 
@@ -968,6 +1085,7 @@ def transition(
     previous: Path,
     *,
     state_root: Path | None = None,
+    runtime_root: Path | None = None,
 ) -> dict[str, Any]:
     value = json.loads(_read_regular(source).decode("utf-8"), object_pairs_hook=_pairs)
     input_keys = set(value) if isinstance(value, dict) else None
@@ -977,7 +1095,12 @@ def transition(
     ):
         raise ValueError("journal transition keys are not exact")
     prior_raw = _read_regular(previous)
-    prior = validate(prior_raw, state_root=state_root, journal_path=previous)
+    prior = validate(
+        prior_raw,
+        state_root=state_root,
+        journal_path=previous,
+        runtime_root=runtime_root,
+    )
     if value["prior_journal_file_sha256"] != hashlib.sha256(prior_raw).hexdigest():
         raise ValueError("journal prior raw hash mismatch")
     if value["operation"] != prior["operation"]:
@@ -1022,7 +1145,12 @@ def transition(
         ):
             if key in prior_result and next_result.get(key) != prior_result.get(key):
                 raise ValueError(f"journal authorization identity changed: {key}")
-    return seal(source, target, state_root=state_root)
+    return seal(
+        source,
+        target,
+        state_root=state_root,
+        runtime_root=runtime_root,
+    )
 
 
 def main() -> int:
@@ -1031,15 +1159,18 @@ def main() -> int:
     verify = subs.add_parser("verify")
     verify.add_argument("path", type=Path)
     verify.add_argument("--state-root", required=True, type=Path)
+    verify.add_argument("--runtime-root", required=True, type=Path)
     seal_parser = subs.add_parser("seal")
     seal_parser.add_argument("input", type=Path)
     seal_parser.add_argument("output", type=Path)
     seal_parser.add_argument("--state-root", required=True, type=Path)
+    seal_parser.add_argument("--runtime-root", required=True, type=Path)
     transition_parser = subs.add_parser("transition")
     transition_parser.add_argument("input", type=Path)
     transition_parser.add_argument("output", type=Path)
     transition_parser.add_argument("--previous", required=True, type=Path)
     transition_parser.add_argument("--state-root", required=True, type=Path)
+    transition_parser.add_argument("--runtime-root", required=True, type=Path)
     compensation_parser = subs.add_parser("verify-compensation")
     compensation_parser.add_argument("path", type=Path)
     compensation_parser.add_argument("--state-root", required=True, type=Path)
@@ -1063,7 +1194,12 @@ def main() -> int:
         _contained(args.path, args.state_root)
         raw = _read_regular(args.path)
         result = {
-            "payload": validate(raw, state_root=args.state_root, journal_path=args.path),
+            "payload": validate(
+                raw,
+                state_root=args.state_root,
+                journal_path=args.path,
+                runtime_root=args.runtime_root,
+            ),
             "raw_file_sha256": hashlib.sha256(raw).hexdigest(),
         }
     elif args.command == "verify-compensation":
@@ -1097,12 +1233,23 @@ def main() -> int:
     elif args.command == "seal":
         _contained(args.input, args.state_root)
         _contained(args.output, args.state_root)
-        result = seal(args.input, args.output, state_root=args.state_root)
+        result = seal(
+            args.input,
+            args.output,
+            state_root=args.state_root,
+            runtime_root=args.runtime_root,
+        )
     else:
         _contained(args.input, args.state_root)
         _contained(args.output, args.state_root)
         _contained(args.previous, args.state_root)
-        result = transition(args.input, args.output, args.previous, state_root=args.state_root)
+        result = transition(
+            args.input,
+            args.output,
+            args.previous,
+            state_root=args.state_root,
+            runtime_root=args.runtime_root,
+        )
     print(json.dumps(result, separators=(",", ":")))
     return 0
 

@@ -94,6 +94,18 @@ $requestedMarketDate = if ([string]::IsNullOrWhiteSpace($MarketDate)) {
     }
 } else { $MarketDate.Trim() }
 $logRoot = Join-Path $state "logs"
+$releaseSha = Resolve-DawnstrikeReleaseSha -RuntimeRoot $runtime -LogRoot $logRoot
+if ($PublicationMode -eq "Production") {
+    # Converge any uniquely sealed interrupted provider operation before the
+    # calendar, build, database, or current authorization can short-circuit
+    # this scheduled run. RecoveryOnly cannot stage or promote fresh bytes.
+    & (Join-Path $runtime "scripts\publish_vercel_public.ps1") `
+        -ProjectRoot $runtime `
+        -ProjectId $VercelProjectId `
+        -StateRoot $state `
+        -ExpectedMarketDate $requestedMarketDate `
+        -RecoveryOnly
+}
 $boundary = Resolve-DawnstrikeFinalizeMarketBoundary `
     -Mode $PublicationMode `
     -RequestedDate $requestedMarketDate `
@@ -101,13 +113,11 @@ $boundary = Resolve-DawnstrikeFinalizeMarketBoundary `
     -LogRoot $logRoot `
     -UseClockOverride:(-not [string]::IsNullOrWhiteSpace($TestNowUtc))
 $MarketDate = [string]$boundary.expected_market_date
-$releaseSha = Resolve-DawnstrikeReleaseSha -RuntimeRoot $runtime -LogRoot (Join-Path $state "logs")
 $dbPath = Join-Path $state "shadow_real.sqlite"
 $paperOpsRoot = Join-Path $state "v2_paper_ops_live"
 $outputPath = Join-Path $runtime "build\public"
 $resultPath = Join-Path $state "outputs\daily_finalize\$MarketDate\daily-finalize-result.json"
 $deploymentResult = Join-Path $runtime "build\daily-deployment-result.json"
-$logRoot = Join-Path $state "logs"
 
 if (-not (Test-Path -LiteralPath $dbPath -PathType Leaf)) {
     throw "Dawnstrike durable state database not found: $dbPath"
@@ -238,29 +248,31 @@ try {
         }
     }
 
+    $buildAttemptId = [guid]::NewGuid().ToString("N").ToLowerInvariant()
     $build = Invoke-DawnstrikeNativeProcess `
         -FilePath "py.exe" `
-        -ArgumentList @("scripts\build_public.py", "--db-path", $dbPath, "--state-root", $state, "--paper-ops-root", $paperOpsRoot, "--out-dir", $outputPath, "--result-out", $resultPath, "--date", $MarketDate, "--retry-limit", "$RetryLimit", "--retry-delay-seconds", "$RetryDelaySeconds") `
+        -ArgumentList @("scripts\build_public.py", "--db-path", $dbPath, "--state-root", $state, "--paper-ops-root", $paperOpsRoot, "--out-dir", $outputPath, "--result-out", $resultPath, "--build-attempt-id", $buildAttemptId, "--date", $MarketDate, "--retry-limit", "$RetryLimit", "--retry-delay-seconds", "$RetryDelaySeconds") `
         -LogRoot $logRoot `
         -LogName "daily_finalize_build-$MarketDate"
     $buildExit = $build.exit_code
 
-    if (Test-Path -LiteralPath $resultPath -PathType Leaf) {
-        $notification = Invoke-DawnstrikeNativeProcess `
-            -FilePath "py.exe" `
-            -ArgumentList @("scripts\send_daily_finalize_notification.py", "--result-file", $resultPath, "--db-path", $dbPath) `
-            -LogRoot $logRoot `
-            -LogName "daily_finalize_notification-$MarketDate"
-        if ($notification.exit_code -ne 0) {
-            Write-Warning "Daily finalize notification could not be recorded or sent."
-        }
-    }
     if ($buildExit -ne 0) {
         Write-Output (
             "Daily finalize remained degraded or failed; production was not " +
             "updated. Exit code: $buildExit"
         )
         exit $buildExit
+    }
+    if (-not (Test-Path -LiteralPath $resultPath -PathType Leaf)) {
+        throw "Daily finalize build succeeded without its attempt-bound result receipt."
+    }
+    $notification = Invoke-DawnstrikeNativeProcess `
+        -FilePath "py.exe" `
+        -ArgumentList @("scripts\send_daily_finalize_notification.py", "--result-file", $resultPath, "--db-path", $dbPath, "--expected-build-attempt-id", $buildAttemptId) `
+        -LogRoot $logRoot `
+        -LogName "daily_finalize_notification-$MarketDate"
+    if ($notification.exit_code -ne 0) {
+        throw "Daily finalize result receipt did not match this build attempt."
     }
     if ($PublicationMode -eq "LocalOnly") {
         exit 0
@@ -326,7 +338,7 @@ try {
     }
     $postDeploymentNotification = Invoke-DawnstrikeNativeProcess `
         -FilePath "py.exe" `
-        -ArgumentList @("scripts\send_daily_finalize_notification.py", "--result-file", $resultPath, "--db-path", $dbPath, "--deployment-url", $ProductionUrl) `
+        -ArgumentList @("scripts\send_daily_finalize_notification.py", "--result-file", $resultPath, "--db-path", $dbPath, "--expected-build-attempt-id", $buildAttemptId, "--deployment-url", $ProductionUrl) `
         -LogRoot $logRoot `
         -LogName "daily_finalize_post_deployment_notification-$MarketDate"
     if ($postDeploymentNotification.exit_code -ne 0) {

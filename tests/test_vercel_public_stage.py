@@ -45,7 +45,9 @@ def test_stage_builder_declares_dependency_free_python_stage() -> None:
     assert "dependencies = []" in script
     assert "api/public/**" in script
     assert '$functionPublic = Join-Path $stage "api\\public"' in script
-    assert 'Copy-Item -Path (Join-Path $publicSource "*") -Destination $functionPublic' in script
+    assert 'Copy-Item -Path (Join-Path $stagePublic "*") -Destination $functionPublic' in script
+    assert script.count('Copy-Item -Path (Join-Path $publicSource "*")') == 1
+    assert "Static and function public artifact snapshots diverged." in script
     assert "performance-snapshot.json" not in script
     assert "performance-snapshot-manifest.json" not in script
     assert "Assert-VercelPublicArtifactInventory" in script

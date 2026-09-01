@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from intraday_scanner.storage.migrations import CURRENT_SCHEMA_VERSION, run_migrations
+from scripts import runtime_activation_contract as activation_contract
 from scripts.runtime_activation_contract import (
     ACTIVATION_SCHEMA,
     CI_SCHEMA,
@@ -66,6 +67,8 @@ def _sol_payload(*, completed: datetime | None = None) -> dict[str, object]:
         "completed_at_utc": (completed or _now()).isoformat().replace("+00:00", "Z"),
         "research_only": True,
         "broker_execution_enabled": False,
+        "report_sha256": "e" * 64,
+        "codex_share_url": "https://chatgpt.com/share/test-owner-report",
     }
 
 
@@ -99,6 +102,69 @@ def _install_local_origin_fixture_seam(lock_script: Path) -> None:
         "}\n"
     )
     lock_script.write_text(text[:start] + fixture + text[end:], encoding="utf-8")
+
+
+def _install_local_github_ci_fixture_seam(contract_script: Path) -> None:
+    """Use deterministic GitHub authority responses in a copied candidate only."""
+
+    text = contract_script.read_text(encoding="utf-8")
+    start = text.index("def _github_api_object(")
+    end = text.index("\ndef validate_live_github_ci", start)
+    original = text[start:end].replace(
+        "def _github_api_object(", "def _github_api_object_live(", 1
+    )
+    fixture = r'''
+
+def _github_api_object(path: str) -> tuple[Any, str]:
+    if os.environ.get("DAWNSTRIKE_TEST_GITHUB_CI_FIXTURE") != "1":
+        return _github_api_object_live(path)
+    candidate_sha = os.environ["DAWNSTRIKE_TEST_GITHUB_CI_CANDIDATE_SHA"]
+    candidate_tree = os.environ["DAWNSTRIKE_TEST_GITHUB_CI_CANDIDATE_TREE"]
+    completed_at = os.environ["DAWNSTRIKE_TEST_GITHUB_CI_COMPLETED_AT"]
+    owner_body = os.environ.get("DAWNSTRIKE_TEST_GITHUB_OWNER_COMMENT_BODY", "")
+    if path == "/repos/mattfren/DawnStrike/actions/runs/12345":
+        return ({
+            "id": 12345,
+            "workflow_id": _GITHUB_WORKFLOW_ID,
+            "path": ".github/workflows/ci.yml",
+            "event": "push",
+            "run_attempt": 1,
+            "head_branch": "main",
+            "head_sha": candidate_sha,
+            "status": "completed",
+            "conclusion": "success",
+            "updated_at": completed_at,
+            "repository": {"id": _GITHUB_REPOSITORY_ID},
+            "head_repository": {"id": _GITHUB_REPOSITORY_ID},
+            "actor": {"id": _GITHUB_RELEASE_ACTOR_ID},
+            "triggering_actor": {"id": _GITHUB_RELEASE_ACTOR_ID},
+        }, "1" * 64)
+    if path == "/repos/mattfren/DawnStrike/actions/runs/12345/jobs?per_page=100":
+        return ({
+            "total_count": 19,
+            "jobs": [
+                {"name": name, "status": "completed", "conclusion": "success", "run_attempt": 1}
+                for name in sorted(_CI_JOB_NAMES)
+            ],
+        }, "2" * 64)
+    if path == f"/repos/mattfren/DawnStrike/git/commits/{candidate_sha}":
+        return ({"sha": candidate_sha, "tree": {"sha": candidate_tree}}, "3" * 64)
+    if path == f"/repos/mattfren/DawnStrike/commits/{candidate_sha}/comments?per_page=100":
+        comment_id = 987654321
+        return ([{
+            "id": comment_id,
+            "url": f"https://api.github.com/repos/mattfren/DawnStrike/comments/{comment_id}",
+            "html_url": f"https://github.com/mattfren/DawnStrike/commit/{candidate_sha}#commitcomment-{comment_id}",
+            "commit_id": candidate_sha,
+            "body": owner_body,
+            "user": {"id": _GITHUB_RELEASE_ACTOR_ID},
+            "author_association": "OWNER",
+            "created_at": completed_at,
+            "updated_at": completed_at,
+        }], "4" * 64)
+    return _github_api_object_live(path)
+'''
+    contract_script.write_text(text[:start] + original + fixture + text[end:], encoding="utf-8")
 
 
 def _self_seal_unsafe(payload: dict[str, object]) -> dict[str, object]:
@@ -535,6 +601,196 @@ def test_exact_ci_and_sol_evidence_pair_passes(tmp_path: Path) -> None:
     assert result["broker_execution_enabled"] is False
 
 
+def test_activation_requires_live_pinned_github_ci_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    completed = _now()
+    ci_payload = _ci_payload(completed=completed)
+    ci_payload["run_url"] = "https://github.com/mattfren/DawnStrike/actions/runs/12345"
+    ci = tmp_path / "ci.json"
+    sol = tmp_path / "sol.json"
+    _write_json(ci, seal_evidence(ci_payload))
+    _write_json(sol, seal_evidence(_sol_payload(completed=completed)))
+    jobs = [
+        {
+            "name": name,
+            "status": "completed",
+            "conclusion": "success",
+            "run_attempt": 1,
+        }
+        for name in sorted(activation_contract._CI_JOB_NAMES)
+    ]
+
+    def github(path: str):
+        if path.endswith("/jobs?per_page=100"):
+            return {"total_count": 19, "jobs": jobs}, "2" * 64
+        if "/git/commits/" in path:
+            return {"sha": CANDIDATE_SHA, "tree": {"sha": CANDIDATE_TREE}}, "3" * 64
+        return (
+            {
+                "id": 12345,
+                "workflow_id": activation_contract._GITHUB_WORKFLOW_ID,
+                "path": ".github/workflows/ci.yml",
+                "event": "push",
+                "run_attempt": 1,
+                "head_branch": "main",
+                "head_sha": CANDIDATE_SHA,
+                "status": "completed",
+                "conclusion": "success",
+                "updated_at": ci_payload["completed_at_utc"],
+                "repository": {"id": activation_contract._GITHUB_REPOSITORY_ID},
+                "head_repository": {"id": activation_contract._GITHUB_REPOSITORY_ID},
+                "actor": {"id": activation_contract._GITHUB_RELEASE_ACTOR_ID},
+                "triggering_actor": {
+                    "id": activation_contract._GITHUB_RELEASE_ACTOR_ID
+                },
+            },
+            "1" * 64,
+        )
+
+    monkeypatch.setattr(activation_contract, "_github_api_object", github)
+    result = validate_evidence_pair(
+        ci,
+        sol,
+        candidate_sha=CANDIDATE_SHA,
+        candidate_tree=CANDIDATE_TREE,
+        now=completed,
+        require_live_github_ci=True,
+    )
+    assert result["ci_github_authority_sha256"]
+    assert result["ci_evidence_sha256"] != result["ci_local_evidence_sha256"]
+
+    jobs[0]["name"] = "Unexpected job"
+    with pytest.raises(ActivationContractError, match="job names"):
+        validate_evidence_pair(
+            ci,
+            sol,
+            candidate_sha=CANDIDATE_SHA,
+            candidate_tree=CANDIDATE_TREE,
+            now=completed,
+            require_live_github_ci=True,
+        )
+
+
+def test_live_owner_commit_comment_authorizes_exact_sol_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sol = _sol_payload()
+    expected_body = activation_contract._owner_authorization_body(
+        sol, candidate_sha=CANDIDATE_SHA, candidate_tree=CANDIDATE_TREE
+    )
+    comment_id = 123456789
+
+    def github(path: str):
+        if path.endswith("/comments?per_page=100"):
+            return ([{
+                "id": comment_id,
+                "url": f"https://api.github.com/repos/mattfren/DawnStrike/comments/{comment_id}",
+                "html_url": f"https://github.com/mattfren/DawnStrike/commit/{CANDIDATE_SHA}#commitcomment-{comment_id}",
+                "commit_id": CANDIDATE_SHA,
+                "body": expected_body,
+                "user": {"id": activation_contract._GITHUB_RELEASE_ACTOR_ID},
+                "author_association": "OWNER",
+                "created_at": "2026-08-31T15:00:00Z",
+                "updated_at": "2026-08-31T15:00:00Z",
+            }], "4" * 64)
+        return (
+            {"sha": CANDIDATE_SHA, "tree": {"sha": CANDIDATE_TREE}},
+            "3" * 64,
+        )
+
+    monkeypatch.setattr(activation_contract, "_github_api_object", github)
+    result = activation_contract.validate_live_github_owner_authorization(
+        sol, candidate_sha=CANDIDATE_SHA, candidate_tree=CANDIDATE_TREE
+    )
+    assert result["comment_id"] == comment_id
+    assert result["github_owner_authorization_sha256"]
+
+    for mutation, message in (
+        (lambda c: c["user"].update(id=1), "actor"),
+        (lambda c: c.update(commit_id="f" * 40), "comment commit"),
+        (lambda c: c.update(body="{}"), "unique"),
+        (lambda c: c.update(created_at="2026-08-31T15:00:01Z"), "timestamps"),
+        (
+            lambda c: c.update(
+                html_url=(
+                    "https://github.com/evil/DawnStrike/commit/"
+                    + CANDIDATE_SHA
+                    + "#commitcomment-123456789"
+                )
+            ),
+            "URL",
+        ),
+    ):
+        comment = {
+            "id": comment_id,
+            "url": f"https://api.github.com/repos/mattfren/DawnStrike/comments/{comment_id}",
+            "html_url": f"https://github.com/mattfren/DawnStrike/commit/{CANDIDATE_SHA}#commitcomment-{comment_id}",
+            "commit_id": CANDIDATE_SHA,
+            "body": expected_body,
+            "user": {"id": activation_contract._GITHUB_RELEASE_ACTOR_ID},
+            "author_association": "OWNER",
+            "created_at": "2026-08-31T15:00:00Z",
+            "updated_at": "2026-08-31T15:00:00Z",
+        }
+        mutation(comment)
+
+        def hostile(path: str, *, value: dict[str, object] = comment):
+            if path.endswith("/comments?per_page=100"):
+                return [value], "4" * 64
+            return {"sha": CANDIDATE_SHA, "tree": {"sha": CANDIDATE_TREE}}, "3" * 64
+
+        monkeypatch.setattr(activation_contract, "_github_api_object", hostile)
+        with pytest.raises(ActivationContractError, match=message):
+            activation_contract.validate_live_github_owner_authorization(
+                sol, candidate_sha=CANDIDATE_SHA, candidate_tree=CANDIDATE_TREE
+            )
+
+
+def test_live_owner_authorization_rejects_fabricated_sol_and_redirect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sol = _sol_payload()
+    expected_body = activation_contract._owner_authorization_body(
+        sol, candidate_sha=CANDIDATE_SHA, candidate_tree=CANDIDATE_TREE
+    )
+    comment = {
+        "id": 123456789,
+        "url": "https://api.github.com/repos/mattfren/DawnStrike/comments/123456789",
+        "html_url": f"https://github.com/mattfren/DawnStrike/commit/{CANDIDATE_SHA}#commitcomment-123456789",
+        "commit_id": CANDIDATE_SHA,
+        "body": expected_body,
+        "user": {"id": activation_contract._GITHUB_RELEASE_ACTOR_ID},
+        "author_association": "OWNER",
+        "created_at": "2026-08-31T15:00:00Z",
+        "updated_at": "2026-08-31T15:00:00Z",
+    }
+
+    def github(path: str):
+        if path.endswith("/comments?per_page=100"):
+            return [comment], "4" * 64
+        return {"sha": CANDIDATE_SHA, "tree": {"sha": CANDIDATE_TREE}}, "3" * 64
+
+    monkeypatch.setattr(activation_contract, "_github_api_object", github)
+    fabricated = dict(sol, report_sha256="f" * 64)
+    with pytest.raises(ActivationContractError, match="unique"):
+        activation_contract.validate_live_github_owner_authorization(
+            fabricated, candidate_sha=CANDIDATE_SHA, candidate_tree=CANDIDATE_TREE
+        )
+
+    monkeypatch.setattr(
+        activation_contract,
+        "_github_api_object",
+        lambda path: (_ for _ in ()).throw(
+            ActivationContractError("GitHub authority endpoint redirected unexpectedly")
+        ),
+    )
+    with pytest.raises(ActivationContractError, match="redirected"):
+        activation_contract.validate_live_github_owner_authorization(
+            sol, candidate_sha=CANDIDATE_SHA, candidate_tree=CANDIDATE_TREE
+        )
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
@@ -839,6 +1095,274 @@ def test_rollback_compensation_failure_preserves_adoptable_locks() -> None:
     assert "$null -eq $activationLock -or $null -eq $dailyLock" in compensation_block
 
 
+def test_runtime_compensation_attempts_use_immutable_unique_evidence_paths() -> None:
+    activation = Path("scripts/activate_dawnstrike_runtime.ps1").read_text(
+        encoding="utf-8"
+    )
+    rollback = Path("scripts/rollback_dawnstrike_runtime.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        '$compensationAttemptKey = [string]$journalBefore.raw_file_sha256'
+        in activation
+    )
+    assert (
+        'runtime-activation-$activationId.compensated-$compensationAttemptKey.json'
+        in activation
+    )
+    assert (
+        'runtime-activation-$activationId.failed-$compensationAttemptKey.json'
+        in activation
+    )
+    assert (
+        'recovery-quarantine\\compensated-$activationId-$compensationAttemptKey'
+        in activation
+    )
+    assert (
+        'compensated-$activationId-$compensationAttemptKey-$preparedHash.prepared.json'
+        in activation
+    )
+    assert 'runtime-activation-$activationId.compensated.json' not in activation
+
+    assert (
+        '$compensationAttemptKey = [string]$journalBefore.raw_file_sha256'
+        in rollback
+    )
+    assert (
+        'runtime-rollback-$activationId.compensated-$compensationAttemptKey.json'
+        in rollback
+    )
+    assert (
+        'runtime-rollback-$activationId.failed-$compensationAttemptKey.json'
+        in rollback
+    )
+    assert 'runtime-rollback-$activationId.compensated.json' not in rollback
+    assert (
+        '$failedAttemptKey = [string]$failedAttemptJournal.raw_file_sha256'
+        in rollback
+    )
+    assert '"failed-previous-runtime-$failedAttemptKey"' in rollback
+    assert 'Join-Path $rollbackRoot "failed-previous-runtime"' not in rollback
+
+
+def test_rebind_post_enable_compensation_uses_defined_receipt_path() -> None:
+    rebind = Path("scripts/rebind_intraday_capture_task.ps1").read_text(
+        encoding="utf-8"
+    )
+    recovery_start = rebind.index(
+        'elseif ([string]$preExistingJournal.payload.phase -eq "POST_ENABLE"'
+    )
+    recovery_end = rebind.index(
+        'Clear-DawnstrikeCompensatedJournalTombstone', recovery_start
+    )
+    recovery = rebind[recovery_start:recovery_end]
+    assert (
+        'capture-task-rebind-$([string]$preExistingJournal.raw_file_sha256).compensated.json'
+        in recovery
+    )
+    assert (
+        "-CompensationReceiptRelativePath $compensationReceiptRelativePath"
+        in recovery
+    )
+    assert "$compensationReceiptRelative " not in recovery
+    assert (
+        'capture-task-rebind-$([string]$journalBefore.raw_file_sha256).failed.json'
+        in rebind
+    )
+    assert 'capture-task-rebind-" + $CandidateSha + ".failed.json' not in rebind
+
+
+def test_rollback_compensated_recovery_binds_origin_before_lock_adoption() -> None:
+    rollback = Path("scripts/rollback_dawnstrike_runtime.ps1").read_text(
+        encoding="utf-8"
+    )
+    start = rollback.index(
+        'if ([string]$compensatedJournal.payload.phase -eq "COMPENSATED")'
+    )
+    end = rollback.index("return Invoke-DawnstrikeRuntimeRollback", start)
+    recovery = rollback[start:end]
+    origin_read = recovery.index("$compensationOrigin = Get-DawnstrikeGitValue")
+    origin_hash = recovery.index(
+        "Get-DawnstrikeSha256Text $compensationOrigin", origin_read
+    )
+    identity = recovery.index(
+        "$compensationOriginIdentity = Convert-DawnstrikeCanonicalOriginIdentity",
+        origin_hash,
+    )
+    adoption = recovery.index("Adopt-DawnstrikeGovernedRuntimeLockWithJournal")
+    clearing = recovery.index("Clear-DawnstrikeCompensatedJournalTombstone")
+    assert origin_read < origin_hash < identity < adoption < clearing
+    assert recovery.count("-OriginIdentity $compensationOriginIdentity") == 2
+    assert "Convert-DawnstrikeCanonicalOriginIdentity $origin" not in recovery
+
+
+def test_compensated_consumers_bind_exact_predecessor_and_restored_task() -> None:
+    activation = Path("scripts/activate_dawnstrike_runtime.ps1").read_text(
+        encoding="utf-8"
+    )
+    rollback = Path("scripts/rollback_dawnstrike_runtime.ps1").read_text(
+        encoding="utf-8"
+    )
+    rebind = Path("scripts/rebind_intraday_capture_task.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    for script, journal_name in (
+        (activation, "$compensatedJournal"),
+        (rollback, "$compensatedJournal"),
+    ):
+        assert (
+            "$compensationPayload.prior_journal_file_sha256 -ne "
+            f"[string]{journal_name}.payload.prior_journal_file_sha256"
+        ) in script
+        assert (
+            "$compensatedTasks.task_action_contract_sha256 -ne "
+            "[string]$compensationPayload.task_action_contract_sha256"
+        ) in script
+        assert (
+            "$compensatedTasks.task_definition_contract_sha256 -ne "
+            "[string]$compensationPayload.task_definition_contract_sha256"
+        ) in script
+
+    assert (
+        "$compensationPayload.prior_journal_file_sha256 -ne "
+        "[string]$startJournal.payload.prior_journal_file_sha256"
+    ) in rebind
+    assert (
+        "$compensationPayload.task_action_contract_sha256 -ne "
+        "$restoredStart.action_contract_sha256"
+    ) in rebind
+    assert (
+        "$compensationPayload.task_definition_contract_sha256 -ne "
+        "$restoredStart.definition_contract_sha256"
+    ) in rebind
+
+
+def test_rollback_compensation_uses_powershell_51_relative_path_logic() -> None:
+    rollback = Path("scripts/rollback_dawnstrike_runtime.ps1").read_text(
+        encoding="utf-8"
+    )
+    assert "[System.IO.Path]::GetRelativePath" not in rollback
+    assert "$receiptFullPath.Substring($statePrefix.Length)" in rollback
+    assert "Rollback activation receipt is outside StateRoot." in rollback
+
+
+def test_hardening_journal_tracks_live_runtime_as_current_and_previous() -> None:
+    hardening = Path("scripts/harden_intraday_capture_task.ps1").read_text(
+        encoding="utf-8"
+    )
+    assert "CurrentSha = $CandidateSha" not in hardening
+    assert "CurrentTree = $CandidateTree" not in hardening
+    assert "-CurrentSha $CandidateSha -CurrentTree $CandidateTree" not in hardening
+    assert hardening.count("CurrentSha = $runtimeIdentity.head") == 2
+    assert hardening.count("CurrentTree = $runtimeIdentity.tree") == 2
+    assert (
+        hardening.count(
+            "-CurrentSha $runtimeIdentity.head -CurrentTree $runtimeIdentity.tree"
+        )
+        == 3
+    )
+
+
+def test_origin_advance_allows_only_exact_lock_bound_recovery() -> None:
+    lock = Path("scripts/runtime_activation_lock.ps1").read_text(encoding="utf-8")
+    activation = Path("scripts/activate_dawnstrike_runtime.ps1").read_text(
+        encoding="utf-8"
+    )
+    hardening = Path("scripts/harden_intraday_capture_task.ps1").read_text(
+        encoding="utf-8"
+    )
+    rebind = Path("scripts/rebind_intraday_capture_task.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    helper = lock.index("function Get-DawnstrikeAdvancedOriginRecoveryAdmission")
+    helper_end = lock.index("function Set-DawnstrikeRuntimeOperationJournalAdoption", helper)
+    helper_body = lock[helper:helper_end]
+    assert "Test-DawnstrikeRuntimeLockOwnerDead" in helper_body
+    assert "payload.lock_token" in helper_body
+    assert "payload.lock_file_sha256" in helper_body
+    assert "old_lock_file_sha256" in helper_body
+    assert "next_lock_file_sha256" in helper_body
+    assert "requires exactly one lock-bound operation journal" in helper_body
+
+    activation_gate = activation.index("if ($remoteMain -ne $ExpectedSha)")
+    activation_evidence = activation.index("$evidence = Invoke-DawnstrikeContractCli")
+    assert activation_gate < activation_evidence
+    assert "-Operation runtime_activation" in activation[
+        activation_gate:activation_evidence
+    ]
+    assert "merge-base" in activation[activation_gate:activation_evidence]
+
+    deferred = hardening.index("-RefreshOrigin -DeferOriginMainAdmission")
+    hardening_gate = hardening.index(
+        "if ($script:HardeningRemoteMain -cne $CandidateSha)", deferred
+    )
+    assert "-Operation capture_task_hardening" in hardening[
+        hardening_gate : hardening_gate + 1200
+    ]
+    assert "-AllowAdvancedOriginRecovery:" in hardening
+
+    rebind_gate = rebind.index("if ($remoteMain.ToLowerInvariant() -ne $CandidateSha)")
+    rebind_inputs = rebind.index("$inputs = Assert-DawnstrikeCaptureInput")
+    assert rebind_gate < rebind_inputs
+    assert "merge-base" in rebind[rebind_gate:rebind_inputs]
+    assert "-Operation capture_task_rebind" in rebind[rebind_gate:rebind_inputs]
+
+    for script in (activation, hardening, rebind):
+        assert "RECOVERED_SUPERSEDED_TRANSACTION" in script
+        assert "broker_execution_enabled = $false" in script
+
+
+def test_recovery_tools_use_pinned_signed_python_and_git() -> None:
+    lock = Path("scripts/runtime_activation_lock.ps1").read_text(encoding="utf-8")
+    activation = Path("scripts/activate_dawnstrike_runtime.ps1").read_text(
+        encoding="utf-8"
+    )
+    scripts = [
+        activation,
+        Path("scripts/rollback_dawnstrike_runtime.ps1").read_text(encoding="utf-8"),
+        Path("scripts/rebind_intraday_capture_task.ps1").read_text(encoding="utf-8"),
+        Path("scripts/harden_intraday_capture_task.ps1").read_text(encoding="utf-8"),
+        Path("scripts/prepare_dawnstrike_state.ps1").read_text(encoding="utf-8"),
+    ]
+
+    assert "$script:DawnstrikeApprovedGitPath=" in lock
+    assert "$script:DawnstrikeApprovedGitSha256=" in lock
+    assert "$script:DawnstrikeApprovedGitSubject=" in lock
+    assert "$script:DawnstrikeApprovedGitThumbprint=" in lock
+    assert "function Get-DawnstrikeApprovedGit" in lock
+    assert "Get-AuthenticodeSignature" in lock
+    assert "Approved Git executable hash changed" in lock
+    assert "Approved Git executable signer is invalid" in lock
+
+    for script in scripts:
+        assert "Get-Command py.exe" not in script
+        assert "Get-Command git.exe" not in script
+        assert "Get-DawnstrikeApprovedGit" in script
+        assert "Get-DawnstrikeApprovedLockInterpreter" in script
+
+    process_start = activation.index("function Invoke-DawnstrikeActivationProcess")
+    process_end = activation.index("function Get-DawnstrikeActivationNowUtc", process_start)
+    process = activation[process_start:process_end]
+    assert "$effectiveArguments = @('-I', '-B') + $effectiveArguments" in process
+    assert "-ArgumentList $effectiveArguments" in process
+
+
+def test_state_preparation_strictly_classifies_hash_bound_lock_archives() -> None:
+    script = Path("scripts/prepare_dawnstrike_state.ps1").read_text(encoding="utf-8")
+    assert "^recovered-stale-([0-9a-f]{64})\\.lock$" in script
+    assert (
+        "^dawnstrike-daily-(\\d{4}-\\d{2}-\\d{2})\\.lock\\.stale-dead-([0-9a-f]{64})$"
+        in script
+    )
+    assert "Get-DawnstrikeStrictRuntimeLock" in script
+    assert "Get-DawnstrikeLockSnapshot" in script
+    assert "Test-DawnstrikeLockOwnerActive" in script
+    assert "$locks += $lockItem" in script
+
+
 def test_activation_seals_init_before_first_stage_filesystem_mutation() -> None:
     activation = Path("scripts/activate_dawnstrike_runtime.ps1").read_text(
         encoding="utf-8"
@@ -990,6 +1514,54 @@ def test_complete_activation_retry_reconciles_only_exact_owned_locks() -> None:
     assert "Stop-Process -Id $PID -Force" in activation
 
 
+def test_installed_candidate_complete_retry_releases_stranded_lock_pair() -> None:
+    activation = Path("scripts/activate_dawnstrike_runtime.ps1").read_text(
+        encoding="utf-8"
+    )
+    installed = activation.index("if ($runtimeContract.head -eq $ExpectedSha)")
+    next_preflight = activation.index("$dbPath = Join-Path $state", installed)
+    installed_branch = activation[installed:next_preflight]
+
+    journal = installed_branch.index(
+        "$earlyJournal = Get-DawnstrikeStrictRuntimeOperationJournal"
+    )
+    complete = installed_branch.index(
+        '[string]$earlyJournal.payload.phase -ne "COMPLETE"', journal
+    )
+    foreign_guard = installed_branch.index(
+        "Existing COMPLETE activation has a foreign or multiple daily lock set",
+        complete,
+    )
+    adopt = installed_branch.index(
+        "$earlyLock = Adopt-DawnstrikeGovernedRuntimeLockWithJournal",
+        foreign_guard,
+    )
+    handshake = installed_branch.index(
+        "Confirm-DawnstrikeActivationDailyLockHandshake", adopt
+    )
+    daily_release = installed_branch.index(
+        "Exit-DawnstrikeDailyRunLock $earlyDaily", handshake
+    )
+    runtime_release = installed_branch.index(
+        "Exit-DawnstrikeGovernedRuntimeLock $earlyLock", daily_release
+    )
+    returned = installed_branch.index("return $receipt", runtime_release)
+    assert (
+        journal
+        < complete
+        < foreign_guard
+        < adopt
+        < handshake
+        < daily_release
+        < runtime_release
+        < returned
+    )
+    assert (
+        "Existing COMPLETE activation has a daily lock without its exact runtime lock"
+        in installed_branch
+    )
+
+
 def test_activation_nonterminal_failure_preserves_adoptable_lock_pair() -> None:
     activation = Path("scripts/activate_dawnstrike_runtime.ps1").read_text(
         encoding="utf-8"
@@ -1017,6 +1589,58 @@ def test_activation_nonterminal_failure_preserves_adoptable_lock_pair() -> None:
     assert "Nonterminal activation recovery lacks its adoptable lock pair" in activation
     assert "Nonterminal activation recovery lock pair was not preserved" in activation
     assert "if (-not $activationBodyStarted -and -not $preserveLocks" in activation
+
+    recovery_start = activation.index(
+        "$activationLock = Adopt-DawnstrikeGovernedRuntimeLockWithJournal"
+    )
+    recovery_end = activation.index(
+        "# Any strict recovery failure must retain the adopted runtime lock",
+        recovery_start,
+    )
+    recovery_region = activation[recovery_start:recovery_end]
+    assert "finally { Exit-DawnstrikeGovernedRuntimeLock $activationLock }" not in activation
+    assert "Any strict recovery failure must retain the adopted runtime lock" in activation
+    assert "Recovered COMPLETE activation could not reacquire its exact daily lock" in activation
+    assert "Confirm-DawnstrikeActivationDailyLockHandshake" in recovery_region
+
+    restore_failure = activation.rindex(
+        "Runtime activation failed and automatic restore could not be completed;"
+    )
+    fail_closed = activation.rindex(
+        "Set-DawnstrikeTasksFailClosedDisabled $runtime $state", 0, restore_failure
+    )
+    auxiliary_fail_closed = activation.index(
+        "Disable-DawnstrikeAuxiliaryCaptureTask $runtime $state",
+        fail_closed,
+        restore_failure,
+    )
+    preserve_after_success = activation.index(
+        "$preserveLocks = $true", auxiliary_fail_closed, restore_failure
+    )
+    assert fail_closed < auxiliary_fail_closed < preserve_after_success < restore_failure
+
+
+def test_production_entrypoint_fault_injection_switches_are_environment_guarded() -> None:
+    activation = Path("scripts/activate_dawnstrike_runtime.ps1").read_text(encoding="utf-8")
+    rebind = Path("scripts/rebind_intraday_capture_task.ps1").read_text(encoding="utf-8")
+
+    activation_guard = (
+        '$InjectCrashBetweenRuntimeRenames -and $env:DAWNSTRIKE_TEST_LOCK_JOURNAL -ne "1"'
+    )
+    rebind_guard = (
+        '($InjectFailureAfterMutation -or $InjectCrashAfterEnable) -and\n'
+        '    $env:DAWNSTRIKE_TEST_LOCK_JOURNAL -ne "1"'
+    )
+    assert activation.count(activation_guard) == 2
+    assert activation.index(activation_guard) < activation.index(
+        "Invoke-DawnstrikeRuntimeActivation"
+    )
+    assert "Activation runtime-rename crash injection is test-only." in activation
+    assert rebind_guard in rebind
+    assert rebind.index(rebind_guard) < rebind.index(
+        '. (Join-Path $PSScriptRoot "activate_dawnstrike_runtime.ps1")'
+    )
+    assert "Capture-task rebind failure and crash injection are test-only." in rebind
 
 
 def test_activation_init_cleanup_quarantines_completed_scheduler_backup() -> None:
@@ -1236,8 +1860,7 @@ def test_disposable_activation_and_rollback_preserve_exact_runtime_and_state(
     for name in (
         "activate_dawnstrike_runtime.ps1",
         "runtime_activation_lock.ps1",
-            "runtime_activation_lock_contract.py",
-            "runtime_operation_journal.py",
+        "runtime_activation_lock_contract.py",
         "runtime_operation_journal.py",
         "capture_task_safety.ps1",
         "rollback_dawnstrike_runtime.ps1",
@@ -1248,6 +1871,7 @@ def test_disposable_activation_and_rollback_preserve_exact_runtime_and_state(
     ):
         shutil.copy2(source / "scripts" / name, candidate / "scripts" / name)
     _install_local_origin_fixture_seam(candidate / "scripts" / "runtime_activation_lock.ps1")
+    _install_local_github_ci_fixture_seam(candidate / "scripts" / "runtime_activation_contract.py")
     shutil.copytree(
         source / "intraday_scanner",
         candidate / "intraday_scanner",
@@ -1289,11 +1913,15 @@ def test_disposable_activation_and_rollback_preserve_exact_runtime_and_state(
     evidence_root = state / "evidence"
     evidence_root.mkdir()
     ci_payload = _ci_payload()
+    ci_payload["run_url"] = "https://github.com/mattfren/DawnStrike/actions/runs/12345"
     ci_payload["candidate_sha"] = candidate_sha
     ci_payload["candidate_tree"] = candidate_tree
     sol_payload = _sol_payload()
     sol_payload["candidate_sha"] = candidate_sha
     sol_payload["candidate_tree"] = candidate_tree
+    owner_comment_body = activation_contract._owner_authorization_body(
+        sol_payload, candidate_sha=candidate_sha, candidate_tree=candidate_tree
+    )
     ci = evidence_root / "ci.json"
     sol = evidence_root / "sol.json"
     _write_json(ci, seal_evidence(ci_payload))
@@ -1315,7 +1943,12 @@ def test_disposable_activation_and_rollback_preserve_exact_runtime_and_state(
     }
     command = rf"""
 . '{activation_script}'
-$env:DAWNSTRIKE_TEST_ACTIVATION_CLOCK = '1'
+    $env:DAWNSTRIKE_TEST_ACTIVATION_CLOCK = '1'
+    $env:DAWNSTRIKE_TEST_GITHUB_CI_FIXTURE = '1'
+    $env:DAWNSTRIKE_TEST_GITHUB_CI_CANDIDATE_SHA = '{candidate_sha}'
+    $env:DAWNSTRIKE_TEST_GITHUB_CI_CANDIDATE_TREE = '{candidate_tree}'
+        $env:DAWNSTRIKE_TEST_GITHUB_CI_COMPLETED_AT = '{ci_payload["completed_at_utc"]}'
+        $env:DAWNSTRIKE_TEST_GITHUB_OWNER_COMMENT_BODY = '{owner_comment_body}'
 $global:MockRuntime = '{values["runtime"]}'
 $global:MockState = '{values["state"]}'
 $global:MockTaskStates = @{{}}

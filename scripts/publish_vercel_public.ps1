@@ -40,6 +40,24 @@ if ($RecoveryOnly -and ($AllowDegraded -or $PrepublicationAuthorizationId -or $D
 if (($Promote -or $RecoveryOnly) -and [string]::IsNullOrWhiteSpace($StateRoot)) {
     throw "Production publication and recovery require an explicit durable StateRoot."
 }
+$governedProjectId = "prj_5pef3EZF1u5YadebEz3dFjnkWOXy"
+$governedProjectName = "dawnstrike-command-center-x3"
+$governedProviderScope = "mattfrens-projects"
+$governedProductionAlias = "https://dawnstrike-command-center-x3.vercel.app"
+$governedAdditionalAliases = @(
+    "https://dawnstrike-command-center-x3-mattfrens-projects.vercel.app",
+    "https://dawnstrike-command-center-x3-mattfren-mattfrens-projects.vercel.app"
+)
+if ($Promote -or $RecoveryOnly) {
+    if ($ProjectId -cne $governedProjectId -or
+        $ProjectName -cne $governedProjectName -or
+        $ProviderScope -cne $governedProviderScope -or
+        $ProductionAlias -cne $governedProductionAlias -or
+        (ConvertTo-Json @($AdditionalProductionAliases) -Compress) -cne
+            (ConvertTo-Json @($governedAdditionalAliases) -Compress)) {
+        throw "Production publication target differs from the governed Vercel target tuple."
+    }
+}
 
 # Recovery is allowed to mutate provider aliases before a fresh daily build
 # exists, so its implementation must first prove that the currently mounted
@@ -278,7 +296,7 @@ function Get-VercelPublicationToolchain {
     }
     $verified = Invoke-DawnstrikeJobProcess `
         -FilePath ([string]$approvedPython.path) `
-        -ArgumentList @("-I", "-B", $toolchainHelper, "verify") `
+        -ArgumentList @("-I", "-B", "-S", $toolchainHelper, "verify") `
         -WorkingDirectory $resolvedRoot `
         -Label "Vercel exact toolchain verification" `
         -TimeoutSeconds 120 `
@@ -345,7 +363,14 @@ function Assert-VercelPublicationSourceStable {
 
 Assert-VercelContainedPathNoReparse -Root $resolvedRoot -Target $stage -Label "Vercel stage root"
 Assert-VercelContainedPathNoReparse -Root $resolvedRoot -Target $publicArtifactRoot -Label "Public artifact root"
-$runtimeResultPath = Join-Path $resolvedRoot "build\daily-deployment-result.json"
+$runtimeResultPath = Join-Path $resolvedRoot $(
+    if ($Promote -or $RecoveryOnly) {
+        "build\daily-deployment-result.json"
+    }
+    else {
+        "build\daily-preview-deployment-result.json"
+    }
+)
 $rollbackResultPath = Join-Path $resolvedRoot "build\daily-deployment-rollback-result.json"
 $resolvedStateRoot = if ([string]::IsNullOrWhiteSpace($StateRoot)) {
     $resolvedRoot
@@ -377,7 +402,13 @@ $publicationLockPath = Join-Path $journalHistoryRoot "vercel-publication-operati
 $publicationLockOwner = [guid]::NewGuid().ToString("N")
 $publicationLockAcquired = $false
 $journalHelper = Join-Path $resolvedRoot "scripts\vercel_publication_journal.py"
-$resultRelativePath = "outputs/daily_finalize/vercel-publication/$journalMarketKey/daily-deployment-result.json"
+$resultNamespace = if ($Promote -or $RecoveryOnly) {
+    "vercel-publication"
+}
+else {
+    "vercel-preview"
+}
+$resultRelativePath = "outputs/daily_finalize/$resultNamespace/$journalMarketKey/daily-deployment-result.json"
 $resultPath = Join-Path $resolvedStateRoot ($resultRelativePath -replace '/', '\')
 $vercel = @("--scope", $ProviderScope)
 $vercelAuth = @()
@@ -712,8 +743,23 @@ function Assert-VercelAliasRestored {
     $restoredRelease = Invoke-VercelJson `
         -Arguments @("curl", "$AliasUrl/release-manifest.json?rollback_verify=$CacheBuster") `
         -Label "Rollback release manifest proof for $AliasUrl"
-    $buildHash = Get-Sha256Hex (ConvertTo-VercelCanonicalJson $restoredBuild)
-    $releaseHash = Get-Sha256Hex (ConvertTo-VercelCanonicalJson $restoredRelease)
+    Assert-PublicationState `
+        -Health $proof.health `
+        -Readiness $proof.readiness `
+        -BuildManifest $restoredBuild `
+        -ReleaseManifest $restoredRelease `
+        -ExpectedSourceSha ([string]$PriorAlias.source_sha) `
+        -ExpectedMarketDate ([string]$restoredBuild.market_date) `
+        -Label "Rollback alias $AliasUrl"
+    if ([string]$proof.source_sha -cne [string]$restoredBuild.source_sha) {
+        throw "Rollback source manifest/build source diverged for $AliasUrl."
+    }
+    $buildHash = Get-VercelRemoteFileSha256 `
+        -BaseUrl $AliasUrl -RelativePath 'build-manifest.json' `
+        -Label "Rollback alias $AliasUrl"
+    $releaseHash = Get-VercelRemoteFileSha256 `
+        -BaseUrl $AliasUrl -RelativePath 'release-manifest.json' `
+        -Label "Rollback alias $AliasUrl"
     if ($buildHash -cne [string]$PriorAlias.build_manifest_sha256 -or
         $releaseHash -cne [string]$PriorAlias.release_manifest_sha256) {
         throw "Rollback build/release manifest bytes changed for $AliasUrl."
@@ -759,12 +805,15 @@ function Get-VercelAliasEndpointProof {
         source_sha = $null
         source_tree = $null
         source_manifest_sha256 = $null
+        health = $null
+        readiness = $null
     }
     try {
         $health = Invoke-VercelJson `
             -Arguments @("curl", "$AliasUrl/api/health?rollback_verify=$CacheBuster") `
             -Label "Alias health proof for $AliasUrl"
         if ($null -ne $health) {
+            $proof.health = $health
             $proof.health_available = $true
             $proof.health_status = Get-OptionalJsonProperty -InputObject $health -Name "status"
         }
@@ -775,6 +824,7 @@ function Get-VercelAliasEndpointProof {
             -Arguments @("curl", "$AliasUrl/api/readiness?rollback_verify=$CacheBuster") `
             -Label "Alias readiness proof for $AliasUrl"
         if ($null -ne $readiness) {
+            $proof.readiness = $readiness
             $proof.readiness_available = $true
             $proof.readiness_status = Get-OptionalJsonProperty -InputObject $readiness -Name "status"
             $proof.readiness_http_status = Get-OptionalJsonProperty -InputObject $readiness -Name "http_status"
@@ -926,7 +976,13 @@ function Invoke-VercelJournalTool {
         [Parameter(Mandatory = $true)][string]$Label
     )
     $python = Get-DawnstrikeApprovedLockInterpreter
-    $output = & $python.path -I -B $journalHelper @Arguments 2>$null
+    $effectiveArguments = @($Arguments)
+    if ($effectiveArguments.Count -gt 0 -and
+        [string]$effectiveArguments[0] -in @("verify", "seal", "transition") -and
+        "--runtime-root" -notin $effectiveArguments) {
+        $effectiveArguments += @("--runtime-root", $resolvedRoot)
+    }
+    $output = & $python.path -I -B -S $journalHelper @effectiveArguments 2>$null
     if ($LASTEXITCODE -ne 0) { throw "$Label failed." }
     try { return (($output -join "`n") | ConvertFrom-Json) }
     catch { throw "$Label returned invalid journal JSON." }
@@ -1311,6 +1367,9 @@ function Test-VercelPromotionSeam {
 }
 
 function Assert-GovernedPublicationAuthorization {
+    param(
+        [string]$ArtifactRoot = (Join-Path $resolvedRoot "build\public")
+    )
     if ([string]::IsNullOrWhiteSpace($resolvedExpectedMarketDate)) {
         throw "ExpectedMarketDate is required for scheduled publication."
     }
@@ -1318,8 +1377,21 @@ function Assert-GovernedPublicationAuthorization {
         throw "Immutable prepublication authorization identity is required."
     }
     $boundaryMode = if ($Promote) { "Production" } else { "Preview" }
+    $boundaryScript = Join-Path $resolvedRoot "scripts\publication_boundary.py"
+    $prepublicationScript = Join-Path $resolvedRoot "scripts\verify_daily_prepublication.py"
+    $pythonRoot = Split-Path -Parent ([string]$approvedPython.path)
+    $tzdataRoot = Join-Path $pythonRoot "Lib\site-packages\tzdata\zoneinfo"
+    $authorizationEnvironment = @{
+        PYTHONHOME = ""; PYTHONPATH = ""; PYTHONSTARTUP = "";
+        PYTHONDONTWRITEBYTECODE = "1"; PYTHONTZPATH = $tzdataRoot;
+        VERCEL_TOKEN = ""; VERCEL_ORG_ID = ""; VERCEL_PROJECT_ID = "";
+        VERCEL_TEAM_ID = ""; VERCEL_OIDC_TOKEN = ""; TURBO_TOKEN = "";
+        HTTP_PROXY = ""; HTTPS_PROXY = ""; ALL_PROXY = ""; NO_PROXY = "";
+        SSL_CERT_FILE = ""; SSL_CERT_DIR = ""; REQUESTS_CA_BUNDLE = "";
+        CURL_CA_BUNDLE = ""; NODE_EXTRA_CA_CERTS = "";
+    }
     $boundaryArguments = @(
-        "scripts\publication_boundary.py", "validate",
+        $boundaryScript, "validate",
         "--market-date", $resolvedExpectedMarketDate,
         "--publication-mode", $boundaryMode
     )
@@ -1330,25 +1402,32 @@ function Assert-GovernedPublicationAuthorization {
         $boundaryArguments += @("--now-utc", $TestNowUtc)
     }
     $boundary = Invoke-DawnstrikeNativeProcess `
-        -FilePath "py.exe" `
+        -FilePath ([string]$approvedPython.path) `
         -ArgumentList $boundaryArguments `
         -LogRoot (Join-Path $resolvedStateRoot "logs") `
-        -LogName "vercel_publication_market_boundary"
+        -LogName "vercel_publication_market_boundary" `
+        -WorkingDirectory $resolvedRoot `
+        -EnvironmentOverrides $authorizationEnvironment `
+        -NoSite
     if ($boundary.exit_code -ne 0) {
         throw "Vercel publication market boundary rejected ExpectedMarketDate."
     }
     $database = Join-Path $resolvedStateRoot "shadow_real.sqlite"
-    $artifactRoot = Join-Path $resolvedRoot "build\public"
+    Assert-VercelContainedPathNoReparse -Root $resolvedRoot -Target $ArtifactRoot `
+        -Label "Authorized public artifact root"
     $verify = Invoke-DawnstrikeNativeProcess `
-        -FilePath "py.exe" `
+        -FilePath ([string]$approvedPython.path) `
         -ArgumentList @(
-            "scripts\verify_daily_prepublication.py", "--db-path", $database,
-            "--artifact-root", $artifactRoot, "--market-date", $resolvedExpectedMarketDate,
+            $prepublicationScript, "--db-path", $database,
+            "--artifact-root", $ArtifactRoot, "--market-date", $resolvedExpectedMarketDate,
             "--expected-market-date", $resolvedExpectedMarketDate,
             "--release-sha", $expectedSourceSha, "--runtime-root", $resolvedRoot
         ) `
         -LogRoot (Join-Path $resolvedStateRoot "logs") `
-        -LogName "vercel_publication_authorization"
+        -LogName "vercel_publication_authorization" `
+        -WorkingDirectory $resolvedRoot `
+        -EnvironmentOverrides $authorizationEnvironment `
+        -NoSite
     if ($verify.exit_code -ne 0) {
         throw "Vercel publication requires a passing governed prepublication authorization."
     }
@@ -1359,6 +1438,32 @@ function Assert-GovernedPublicationAuthorization {
         [string]$payload.authorization_id -cne $PrepublicationAuthorizationId -or
         [string]$payload.daily_ledger_authorization_id -cne $PrepublicationAuthorizationId) {
         throw "Vercel publication authorization identity is not immutable or does not match the daily ledger."
+    }
+    foreach ($field in @(
+        'build_manifest_sha256', 'release_manifest_raw_sha256',
+        'public_artifact_root_sha256'
+    )) {
+        if ([string]$payload.artifact_identity.$field -cnotmatch '^[0-9a-f]{64}$') {
+            throw "Vercel publication authorization omitted exact artifact identity: $field"
+        }
+    }
+    return $payload.artifact_identity
+}
+
+function Assert-VercelAuthorizedArtifactIdentity {
+    param(
+        [Parameter(Mandatory = $true)][object]$Expected,
+        [Parameter(Mandatory = $true)][object]$Observed,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    foreach ($field in @(
+        'build_sha', 'build_id', 'publication_set_sha256',
+        'release_manifest_sha256', 'build_manifest_sha256',
+        'release_manifest_raw_sha256', 'public_artifact_root_sha256'
+    )) {
+        if ([string]$Expected.$field -cne [string]$Observed.$field) {
+            throw "$Label authorization-to-artifact identity mismatch: $field"
+        }
     }
 }
 
@@ -1498,6 +1603,61 @@ function Assert-VercelPublicFileHashSet {
     }
 }
 
+function Assert-VercelAccountSessionReport {
+    param(
+        [Parameter(Mandatory = $true)][object]$Report,
+        [Parameter(Mandatory = $true)][string]$MarketDate,
+        [Parameter(Mandatory = $true)][string]$SourceSha,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    $expected = Get-OptionalJsonProperty -InputObject $Report -Name 'expected_session_count'
+    if ([string]$Report.schema_version -cne 'dawnstrike.account_session_report.v1' -or
+        [string]$Report.status -cne 'COMPLETE' -or
+        [string]$Report.market_date -cne $MarketDate -or
+        [string]$Report.code_sha -cne $SourceSha -or
+        [string]$Report.account_id -cne 'alphaops_v5_simulated' -or
+        [string]$Report.version_bucket -cne 'v5' -or
+        [string]$Report.cohort -cne 'official_forward_paper' -or
+        [string]$Report.strategy_id -cne 'alphaops_v5' -or
+        [string]$Report.strategy_version -cne 'dawnstrike-alphaops-v5.0.0' -or
+        $Report.research_only -ne $true -or
+        $Report.broker_execution_enabled -ne $false -or
+        $Report.unsafe_ledger_count -ne 0 -or
+        -not (($expected -is [int]) -or ($expected -is [long])) -or
+        [int64]$expected -lt 1 -or
+        $Report.ledger_row_count -ne $expected -or
+        $Report.complete_count -ne $expected -or
+        $Report.missing_count -ne 0 -or
+        $Report.partial_count -ne 0 -or
+        $Report.quarantined_count -ne 0) {
+        throw "$Label account-session report is not exact COMPLETE safe coverage."
+    }
+    foreach ($field in @(
+        'input_hash_sha256', 'expected_calendar_hash_sha256', 'source_hashes_sha256'
+    )) {
+        Assert-LowerHex64 -Value (Get-OptionalJsonProperty -InputObject $Report -Name $field) `
+            -Field "account_session_report.$field" -Label $Label
+    }
+    $series = @($Report.series)
+    if ($series.Count -ne 1 -or
+        [string]$series[0].status -cne 'COMPLETE' -or
+        [string]$series[0].market_date -cne $MarketDate -or
+        [string]$series[0].code_sha -cne $SourceSha -or
+        [string]$series[0].account_id -cne 'alphaops_v5_simulated' -or
+        [string]$series[0].version_bucket -cne 'v5' -or
+        [string]$series[0].cohort -cne 'official_forward_paper' -or
+        [string]$series[0].strategy_id -cne 'alphaops_v5' -or
+        [string]$series[0].strategy_version -cne 'dawnstrike-alphaops-v5.0.0' -or
+        $series[0].expected_session_count -ne $expected -or
+        $series[0].ledger_row_count -ne $expected -or
+        $series[0].complete_count -ne $expected -or
+        $series[0].research_only -ne $true -or
+        $series[0].broker_execution_enabled -ne $false) {
+        throw "$Label account-session series is ambiguous or incomplete."
+    }
+    return Get-Sha256Hex (ConvertTo-VercelCanonicalJson $Report)
+}
+
 function Assert-PublicationState {
     param(
         [object]$Health,
@@ -1505,7 +1665,8 @@ function Assert-PublicationState {
     [object]$BuildManifest,
     [string]$ExpectedSourceSha,
     [object]$ReleaseManifest,
-    [string]$Label
+    [string]$Label,
+    [string]$ExpectedMarketDate = $resolvedExpectedMarketDate
 )
     if ([string]$BuildManifest.schema_version -cne 'dawnstrike.public_build.v1' -or
         $BuildManifest.source_clean -ne $true -or
@@ -1521,8 +1682,8 @@ function Assert-PublicationState {
     if ($BuildManifest.market_date -notmatch '^\d{4}-\d{2}-\d{2}$') {
         throw "$Label build market date is invalid."
     }
-    if ($resolvedExpectedMarketDate -and
-        [string]$BuildManifest.market_date -cne $resolvedExpectedMarketDate) {
+    if ($ExpectedMarketDate -and
+        [string]$BuildManifest.market_date -cne $ExpectedMarketDate) {
         throw "$Label build market date does not match ExpectedMarketDate."
     }
     foreach ($field in @(
@@ -1578,6 +1739,14 @@ function Assert-PublicationState {
     if ($Readiness.publication_set_sha256 -ne $BuildManifest.publication_set_sha256) {
         throw "$Label readiness publication-set hash does not match the build manifest."
     }
+    $accountSessionReport = Get-OptionalJsonProperty `
+        -InputObject $Readiness -Name 'account_session_report'
+    if ($null -eq $accountSessionReport) {
+        throw "$Label readiness omitted the governed account-session report."
+    }
+    $null = Assert-VercelAccountSessionReport `
+        -Report $accountSessionReport -MarketDate ([string]$BuildManifest.market_date) `
+        -SourceSha ([string]$BuildManifest.source_sha) -Label $Label
 
     $ready = $Readiness.status -eq "ready" -and [int]$Readiness.http_status -eq 200
     $approvedDegraded = (
@@ -1601,6 +1770,54 @@ function Assert-PublicationState {
             [string]$ReleaseManifest.release_manifest_sha256) {
             throw "$Label release-manifest self hash does not match the build manifest."
         }
+        $unsignedRelease = [ordered]@{}
+        foreach ($property in @($ReleaseManifest.PSObject.Properties | Sort-Object Name)) {
+            if ([string]$property.Name -cne 'release_manifest_sha256') {
+                $unsignedRelease[[string]$property.Name] = $property.Value
+            }
+        }
+        if ((Get-Sha256Hex (ConvertTo-VercelCanonicalJson $unsignedRelease)) -cne
+            [string]$ReleaseManifest.release_manifest_sha256) {
+            throw "$Label release-manifest self hash is not independently valid."
+        }
+        if ([string]$ReleaseManifest.deployment_boundary -cne
+            'configured_runtime_and_durable_state' -or
+            [string]$ReleaseManifest.deployment_boundary_sha256 -cne
+            (Get-Sha256Hex "$resolvedRoot`n$resolvedStateRoot") -or
+            [string]$ReleaseManifest.scheduler_version -cne 'dawnstrike-scheduler-v6' -or
+            [string]$ReleaseManifest.data_watermark -cne [string]$BuildManifest.market_date -or
+            $ReleaseManifest.research_only -ne $true -or
+            $ReleaseManifest.broker_execution_enabled -ne $false) {
+            throw "$Label release manifest governed semantics are invalid."
+        }
+        $expectedStrategies = ConvertTo-VercelCanonicalJson ([ordered]@{
+            alphaops_v5 = 'dawnstrike-alphaops-v5.0.0'
+            alphaops_v6_shadow = 'dawnstrike-alphaops-v6-shadow'
+            paperops = 'immutable-strategy-semantics-manifest'
+        })
+        if ((ConvertTo-VercelCanonicalJson $ReleaseManifest.strategy_versions) -cne
+            $expectedStrategies) {
+            throw "$Label release manifest strategy versions are invalid."
+        }
+        $releaseHashes = Get-OptionalJsonProperty -InputObject $ReleaseManifest -Name 'artifact_hashes'
+        $buildHashes = Get-OptionalJsonProperty -InputObject $BuildManifest -Name 'file_hashes'
+        $expectedReleaseNames = @(
+            @($buildHashes.PSObject.Properties | ForEach-Object { [string]$_.Name }) |
+                Where-Object { $_ -cne 'release-manifest.json' } | Sort-Object
+        )
+        $observedReleaseNames = @(
+            @($releaseHashes.PSObject.Properties | ForEach-Object { [string]$_.Name }) |
+                Sort-Object
+        )
+        if ((ConvertTo-VercelCanonicalJson $expectedReleaseNames) -cne
+            (ConvertTo-VercelCanonicalJson $observedReleaseNames)) {
+            throw "$Label release manifest artifact-hash inventory is invalid."
+        }
+        foreach ($name in $expectedReleaseNames) {
+            if ([string]$releaseHashes.$name -cne [string]$buildHashes.$name) {
+                throw "$Label release/build artifact hash diverges: $name"
+            }
+        }
     }
     $embeddedReadiness = Get-OptionalJsonProperty -InputObject $BuildManifest -Name "readiness"
     if ($null -eq $embeddedReadiness -or $embeddedReadiness.research_only -ne $true -or
@@ -1609,6 +1826,10 @@ function Assert-PublicationState {
         [int]$embeddedReadiness.http_status -ne [int]$Readiness.http_status -or
         [string]$embeddedReadiness.market_date -cne [string]$Readiness.market_date) {
         throw "$Label embedded build readiness does not match the live readiness contract."
+    }
+    if ((ConvertTo-VercelCanonicalJson $embeddedReadiness.account_session_report) -cne
+        (ConvertTo-VercelCanonicalJson $accountSessionReport)) {
+        throw "$Label embedded/live account-session evidence diverges."
     }
 }
 
@@ -1712,6 +1933,7 @@ function New-VercelPublicationJournalPayload {
         [Parameter(Mandatory = $true)][string]$PackageManifestSha256,
         [Parameter(Mandatory = $true)][string]$CandidateBuildManifestSha256,
         [Parameter(Mandatory = $true)][string]$CandidateReleaseManifestSha256,
+        [Parameter(Mandatory = $true)][string]$CandidatePublicArtifactRootSha256,
         [string]$CandidateManifestSha256 = "",
         [Parameter(Mandatory = $true)][object[]]$PriorAliases,
         [AllowNull()][object]$PromotedDeployment,
@@ -1745,6 +1967,7 @@ function New-VercelPublicationJournalPayload {
         candidate_build_sha = [string]$PreviewManifest.build_sha
         candidate_build_manifest_sha256 = $CandidateBuildManifestSha256
         candidate_release_manifest_sha256 = $CandidateReleaseManifestSha256
+        candidate_public_artifact_root_sha256 = $CandidatePublicArtifactRootSha256
         candidate_manifest_sha256 = if ($CandidateManifestSha256) { $CandidateManifestSha256 } else {
             Get-Sha256Hex (Get-VercelSourceManifestCanonicalJson -Path (Join-Path $stage "vercel-source-manifest.json"))
         }
@@ -1946,10 +2169,11 @@ function Invoke-VercelPublicationCompensation {
         -PackageManifestSha256 ([string]$Journal.candidate_package_manifest_sha256) `
         -CandidateBuildManifestSha256 ([string]$Journal.candidate_build_manifest_sha256) `
         -CandidateReleaseManifestSha256 ([string]$Journal.candidate_release_manifest_sha256) `
+        -CandidatePublicArtifactRootSha256 ([string]$Journal.candidate_public_artifact_root_sha256) `
         -CandidateManifestSha256 ([string]$Journal.candidate_manifest_sha256) `
         -PriorAliases @($Journal.prior_aliases) `
         -PromotedDeployment (if ($Journal.promoted_deployment_id) { [pscustomobject]@{ id = $Journal.promoted_deployment_id; url = $Journal.promoted_deployment_url } } else { $null }) `
-        -ResultPayload $null `
+        -ResultPayload $invalidatedResult `
         -ExpectedPublicationMarketDate ([string]$Journal.expected_market_date) `
         -PrepublicationAuthorization ([string]$Journal.prepublication_authorization_id) `
         -DailyLedgerAuthorization ([string]$Journal.daily_ledger_authorization_id) `
@@ -2059,6 +2283,9 @@ function New-VercelRecoveredResultPayload {
         vercel_package_manifest_sha256 = [string]$Journal.candidate_package_manifest_sha256
         authorized_build_manifest_sha256 = [string]$Journal.candidate_build_manifest_sha256
         authorized_release_manifest_sha256 = [string]$Journal.candidate_release_manifest_sha256
+        public_artifact_root_sha256 = [string]$Journal.candidate_public_artifact_root_sha256
+        account_session_report = $Readiness.account_session_report
+        account_session_report_sha256 = Get-Sha256Hex (ConvertTo-VercelCanonicalJson $Readiness.account_session_report)
         toolchain_identity_sha256 = [string]$Journal.toolchain_identity_sha256
         build_id = [string]$Manifest.build_id
         build_sha = [string]$Manifest.build_sha
@@ -2084,6 +2311,7 @@ function New-VercelRecoveredResultPayload {
         promoted_deployment_id = [string]$Live.id
         production_deployment_id = [string]$Live.id
         live_trading_enabled = $false
+        broker_execution_enabled = $false
         research_only = $true
         status = "PRODUCTION_VERIFIED"
     }
@@ -2320,6 +2548,16 @@ function Assert-VercelLocalAuthorizedManifestBytes {
     }
 }
 try {
+if (-not ($Promote -or $RecoveryOnly)) {
+    if (-not $ExpectedMarketDate) {
+        throw "Preview publication requires an exact ExpectedMarketDate for serialization."
+    }
+    Acquire-VercelPublicationLock `
+        -CandidateSourceSha $expectedSourceSha `
+        -CandidateSourceTree $expectedSourceTree `
+        -CandidateMarketDate $ExpectedMarketDate
+    Assert-VercelPublicationToolchainStable
+}
 if ($Promote -or $RecoveryOnly) {
     if (-not $ExpectedMarketDate) {
         throw "Production publication requires an exact ExpectedMarketDate for the operation lock."
@@ -2407,6 +2645,7 @@ if ($null -ne $existingJournal) {
                 -PackageManifestSha256 ([string]$existingJournal.candidate_package_manifest_sha256) `
                 -CandidateBuildManifestSha256 ([string]$existingJournal.candidate_build_manifest_sha256) `
                 -CandidateReleaseManifestSha256 ([string]$existingJournal.candidate_release_manifest_sha256) `
+                -CandidatePublicArtifactRootSha256 ([string]$existingJournal.candidate_public_artifact_root_sha256) `
                 -CandidateManifestSha256 ([string]$existingJournal.candidate_manifest_sha256) `
                 -PriorAliases @($existingJournal.prior_aliases) `
                 -PromotedDeployment $live `
@@ -2473,6 +2712,15 @@ if ($null -ne $existingJournal) {
     $candidateManifestSha256 = [string]$existingJournal.candidate_manifest_sha256
     $candidateBuildManifestSha256 = [string]$existingJournal.candidate_build_manifest_sha256
     $candidateReleaseManifestSha256 = [string]$existingJournal.candidate_release_manifest_sha256
+    $authorizedArtifactIdentity = [pscustomobject]@{
+        build_sha = [string]$existingJournal.candidate_build_sha
+        build_id = [string]$existingJournal.candidate_build_id
+        publication_set_sha256 = [string]$previewManifest.publication_set_sha256
+        release_manifest_sha256 = [string]$previewReleaseManifest.release_manifest_sha256
+        build_manifest_sha256 = [string]$existingJournal.candidate_build_manifest_sha256
+        release_manifest_raw_sha256 = [string]$existingJournal.candidate_release_manifest_sha256
+        public_artifact_root_sha256 = [string]$existingJournal.candidate_public_artifact_root_sha256
+    }
     $journalPriorAliases = @($existingJournal.prior_aliases)
     $journalCandidate = [pscustomobject]@{ id = $deploymentId; url = $previewUrl }
     $priorProduction = [pscustomobject]@{
@@ -2487,7 +2735,7 @@ if ($RecoveryOnly) {
 if ($Promote -or $PrepublicationAuthorizationId) {
     # Every path that can still initiate a provider mutation rechecks the live
     # current-session boundary, including a retry of a sealed PRE_MUTATION.
-    Assert-GovernedPublicationAuthorization
+    $authorizedArtifactIdentity = Assert-GovernedPublicationAuthorization
 }
 if (-not $recoveryRetry) {
  Assert-VercelPublicationToolchainStable
@@ -2508,6 +2756,12 @@ if (-not $recoveryRetry) {
     -Path (Join-Path $stage "public\build-manifest.json")
  $candidateReleaseManifestSha256 = Get-VercelFileSha256 `
     -Path (Join-Path $stage "public\release-manifest.json")
+ $stagedArtifactIdentity = Assert-GovernedPublicationAuthorization `
+    -ArtifactRoot (Join-Path $stage "public")
+ Assert-VercelAuthorizedArtifactIdentity `
+    -Expected $authorizedArtifactIdentity `
+    -Observed $stagedArtifactIdentity `
+    -Label "Staged public artifact"
 Assert-VercelGitSourceStable `
     -Root $resolvedRoot `
     -ExpectedSourceSha $expectedSourceSha `
@@ -2558,6 +2812,12 @@ try {
         -StageRoot $stage `
         -ExpectedBuildManifestSha256 $candidateBuildManifestSha256 `
         -ExpectedReleaseManifestSha256 $candidateReleaseManifestSha256
+    $predeployArtifactIdentity = Assert-GovernedPublicationAuthorization `
+        -ArtifactRoot (Join-Path $stage "public")
+    Assert-VercelAuthorizedArtifactIdentity `
+        -Expected $authorizedArtifactIdentity `
+        -Observed $predeployArtifactIdentity `
+        -Label "Predeploy public artifact"
     Assert-VercelContainedPathNoReparse -Root $resolvedRoot -Target $stage -Label "Vercel stage root"
     Assert-VercelPublicationToolchainStable
     $deploymentResponse = Invoke-VercelJson `
@@ -2668,10 +2928,28 @@ if ($Promote) {
             $priorProductionAliases[[string]$alias].release_manifest = Invoke-VercelJson `
                 -Arguments @("curl", "$snapshotBaseUrl/release-manifest.json?rollback_verify=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())") `
                 -Label "Prior production release manifest for $alias"
+            Assert-PublicationState `
+                -Health $endpointProof.health `
+                -Readiness $endpointProof.readiness `
+                -BuildManifest $priorProductionAliases[[string]$alias].build_manifest `
+                -ReleaseManifest $priorProductionAliases[[string]$alias].release_manifest `
+                -ExpectedSourceSha ([string]$endpointProof.source_sha) `
+                -ExpectedMarketDate ([string]$priorProductionAliases[[string]$alias].build_manifest.market_date) `
+                -Label "Prior production alias $alias"
+            if ([string]$endpointProof.source_sha -cne
+                [string]$priorProductionAliases[[string]$alias].build_manifest.source_sha) {
+                throw "Prior production source manifest/build source diverged for $alias."
+            }
+            $priorBuildRawSha = Get-VercelRemoteFileSha256 `
+                -BaseUrl $snapshotBaseUrl -RelativePath 'build-manifest.json' `
+                -Label "Prior production alias $alias"
+            $priorReleaseRawSha = Get-VercelRemoteFileSha256 `
+                -BaseUrl $snapshotBaseUrl -RelativePath 'release-manifest.json' `
+                -Label "Prior production alias $alias"
             $priorProductionAliases[[string]$alias] | Add-Member -NotePropertyName build_manifest_sha256 `
-                -NotePropertyValue (Get-Sha256Hex (ConvertTo-VercelCanonicalJson $priorProductionAliases[[string]$alias].build_manifest))
+                -NotePropertyValue $priorBuildRawSha
             $priorProductionAliases[[string]$alias] | Add-Member -NotePropertyName release_manifest_sha256 `
-                -NotePropertyValue (Get-Sha256Hex (ConvertTo-VercelCanonicalJson $priorProductionAliases[[string]$alias].release_manifest))
+                -NotePropertyValue $priorReleaseRawSha
             $priorProductionAliases[[string]$alias] | Add-Member -NotePropertyName artifact_proof `
                 -NotePropertyValue (Get-VercelGovernedAssetProof -BaseUrl $snapshotBaseUrl `
                     -BuildManifest $priorProductionAliases[[string]$alias].build_manifest `
@@ -2702,13 +2980,26 @@ if ($Promote) {
         }
     })
     $journalCandidate = [pscustomobject]@{ id = [string]$deploymentId; url = [string]$previewUrl }
-    $priorPrimaryRecord = $priorProductionAliases[[string]$ProductionAlias]
-    Assert-ProductionDateLineage `
-        -CurrentBuildManifest $priorPrimaryRecord.build_manifest `
-        -CandidateBuildManifest $previewManifest `
-        -CurrentReleaseManifest $priorPrimaryRecord.release_manifest `
-        -CandidateReleaseManifest $previewReleaseManifest
-    Assert-GovernedPublicationAuthorization
+    foreach ($alias in $allProductionAliases) {
+        $priorRecord = $priorProductionAliases[[string]$alias]
+        Assert-ProductionDateLineage `
+            -CurrentBuildManifest $priorRecord.build_manifest `
+            -CandidateBuildManifest $previewManifest `
+            -CurrentReleaseManifest $priorRecord.release_manifest `
+            -CandidateReleaseManifest $previewReleaseManifest
+        if ([string]$priorRecord.build_manifest.market_date -ceq
+            [string]$previewManifest.market_date -and
+            [string]$priorRecord.artifact_proof.file_hashes_sha256 -cne
+            [string]$previewArtifactProof.file_hashes_sha256) {
+            throw "Same-day full artifact identity conflicts with prior alias $alias."
+        }
+    }
+    $premutationArtifactIdentity = Assert-GovernedPublicationAuthorization `
+        -ArtifactRoot (Join-Path $stage "public")
+    Assert-VercelAuthorizedArtifactIdentity `
+        -Expected $authorizedArtifactIdentity `
+        -Observed $premutationArtifactIdentity `
+        -Label "Premutation public artifact"
     # All prior bytes came from immutable deployment URLs.  Re-inspect every
     # mutable alias immediately before sealing PRE_MUTATION; drift restarts the
     # operation without changing provider state.
@@ -2720,6 +3011,7 @@ if ($Promote) {
         -PackageManifestSha256 $packageManifestSha256 `
         -CandidateBuildManifestSha256 $candidateBuildManifestSha256 `
         -CandidateReleaseManifestSha256 $candidateReleaseManifestSha256 `
+        -CandidatePublicArtifactRootSha256 ([string]$authorizedArtifactIdentity.public_artifact_root_sha256) `
         -CandidateManifestSha256 $candidateManifestSha256 `
         -PriorAliases $journalPriorAliases `
         -ExpectedPublicationMarketDate $resolvedExpectedMarketDate `
@@ -2752,7 +3044,12 @@ try {
             -StageRoot $stage `
             -ExpectedBuildManifestSha256 $candidateBuildManifestSha256 `
             -ExpectedReleaseManifestSha256 $candidateReleaseManifestSha256
-        Assert-GovernedPublicationAuthorization
+        $prepromotionArtifactIdentity = Assert-GovernedPublicationAuthorization `
+            -ArtifactRoot (Join-Path $stage "public")
+        Assert-VercelAuthorizedArtifactIdentity `
+            -Expected $authorizedArtifactIdentity `
+            -Observed $prepromotionArtifactIdentity `
+            -Label "Prepromotion public artifact"
         Assert-VercelPriorAliasSnapshotsCurrent
         # Mark the external state as potentially mutated before starting the
         # command. A timeout can occur after Vercel accepted the promotion, so
@@ -2994,6 +3291,9 @@ try {
         vercel_package_manifest_sha256 = $packageManifestSha256
         authorized_build_manifest_sha256 = $candidateBuildManifestSha256
         authorized_release_manifest_sha256 = $candidateReleaseManifestSha256
+        public_artifact_root_sha256 = [string]$authorizedArtifactIdentity.public_artifact_root_sha256
+        account_session_report = $previewReadiness.account_session_report
+        account_session_report_sha256 = Get-Sha256Hex (ConvertTo-VercelCanonicalJson $previewReadiness.account_session_report)
         toolchain_identity_sha256 = $toolchainIdentitySha256
         build_id = $previewManifest.build_id
         build_sha = $previewManifest.build_sha
@@ -3019,6 +3319,7 @@ try {
         promoted_deployment_id = Get-OptionalJsonProperty -InputObject $promotedDeployment -Name "id"
         production_deployment_id = Get-OptionalJsonProperty -InputObject $production -Name "id"
         live_trading_enabled = $false
+        broker_execution_enabled = $false
         research_only = $true
         status = if ($Promote) { "PRODUCTION_VERIFIED" } else { "PREVIEW_VERIFIED" }
     }
@@ -3031,6 +3332,7 @@ try {
             -PackageManifestSha256 $packageManifestSha256 `
             -CandidateBuildManifestSha256 $candidateBuildManifestSha256 `
             -CandidateReleaseManifestSha256 $candidateReleaseManifestSha256 `
+            -CandidatePublicArtifactRootSha256 ([string]$authorizedArtifactIdentity.public_artifact_root_sha256) `
             -CandidateManifestSha256 $candidateManifestSha256 `
             -PriorAliases $journalPriorAliases `
             -PromotedDeployment ([pscustomobject]@{ id = [string]$promotedDeploymentId; url = [string]$promotedUrl }) `
@@ -3057,6 +3359,7 @@ try {
             -PackageManifestSha256 $packageManifestSha256 `
             -CandidateBuildManifestSha256 $candidateBuildManifestSha256 `
             -CandidateReleaseManifestSha256 $candidateReleaseManifestSha256 `
+            -CandidatePublicArtifactRootSha256 ([string]$authorizedArtifactIdentity.public_artifact_root_sha256) `
             -CandidateManifestSha256 $candidateManifestSha256 `
             -PriorAliases $journalPriorAliases `
             -PromotedDeployment ([pscustomobject]@{ id = [string]$promotedDeploymentId; url = [string]$promotedUrl }) `

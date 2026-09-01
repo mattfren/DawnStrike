@@ -94,6 +94,94 @@ def _install_local_origin_fixture_seam(lock_script: Path) -> None:
     lock_script.write_text(text[:start] + fixture + text[end:], encoding="utf-8")
 
 
+def _install_local_state_preparation_origin_fixture_seam(
+    preparation_script: Path, origin: Path
+) -> None:
+    """Permit only this copied candidate's exact disposable origin."""
+
+    text = preparation_script.read_text(encoding="utf-8")
+    # Keep the seam anchored to the current production guard.  The copied
+    # fixture remains exact-origin-bound; the production script has no bypass.
+    marker = "        $governedOrigin = $origin -match "
+    start = text.index(marker)
+    end = text.index("        $null = Invoke-StatePreparationBootstrapGit", start)
+    block = text[start:end]
+    if "if (-not $governedOrigin)" not in block:
+        raise AssertionError("state preparation origin guard seam is ambiguous")
+    origin_literal = str(origin).replace("'", "''")
+    replacement = (
+        f"        $governedOrigin = [string]::Equals($origin, '{origin_literal}', "
+        "[System.StringComparison]::OrdinalIgnoreCase)\n"
+        "        if (-not $governedOrigin) {\n"
+        "            throw \"State-preparation bootstrap origin is not the governed repository.\"\n"
+        "        }\n"
+    )
+    preparation_script.write_text(text[:start] + replacement + text[end:], encoding="utf-8")
+
+
+def _install_local_github_ci_fixture_seam(contract_script: Path) -> None:
+    """Use deterministic GitHub authority responses in a copied candidate only."""
+
+    text = contract_script.read_text(encoding="utf-8")
+    start = text.index("def _github_api_object(")
+    end = text.index("\ndef validate_live_github_ci", start)
+    original = text[start:end].replace(
+        "def _github_api_object(", "def _github_api_object_live(", 1
+    )
+    fixture = r'''
+
+def _github_api_object(path: str) -> tuple[Any, str]:
+    if os.environ.get("DAWNSTRIKE_TEST_GITHUB_CI_FIXTURE") != "1":
+        return _github_api_object_live(path)
+    candidate_sha = os.environ["DAWNSTRIKE_TEST_GITHUB_CI_CANDIDATE_SHA"]
+    candidate_tree = os.environ["DAWNSTRIKE_TEST_GITHUB_CI_CANDIDATE_TREE"]
+    completed_at = os.environ["DAWNSTRIKE_TEST_GITHUB_CI_COMPLETED_AT"]
+    owner_body = os.environ.get("DAWNSTRIKE_TEST_GITHUB_OWNER_COMMENT_BODY", "")
+    if path == "/repos/mattfren/DawnStrike/actions/runs/12345":
+        return ({
+            "id": 12345,
+            "workflow_id": _GITHUB_WORKFLOW_ID,
+            "path": ".github/workflows/ci.yml",
+            "event": "push",
+            "run_attempt": 1,
+            "head_branch": "main",
+            "head_sha": candidate_sha,
+            "status": "completed",
+            "conclusion": "success",
+            "updated_at": completed_at,
+            "repository": {"id": _GITHUB_REPOSITORY_ID},
+            "head_repository": {"id": _GITHUB_REPOSITORY_ID},
+            "actor": {"id": _GITHUB_RELEASE_ACTOR_ID},
+            "triggering_actor": {"id": _GITHUB_RELEASE_ACTOR_ID},
+        }, "1" * 64)
+    if path == "/repos/mattfren/DawnStrike/actions/runs/12345/jobs?per_page=100":
+        return ({
+            "total_count": 19,
+            "jobs": [
+                {"name": name, "status": "completed", "conclusion": "success", "run_attempt": 1}
+                for name in sorted(_CI_JOB_NAMES)
+            ],
+        }, "2" * 64)
+    if path == f"/repos/mattfren/DawnStrike/git/commits/{candidate_sha}":
+        return ({"sha": candidate_sha, "tree": {"sha": candidate_tree}}, "3" * 64)
+    if path == f"/repos/mattfren/DawnStrike/commits/{candidate_sha}/comments?per_page=100":
+        comment_id = 987654321
+        return ([{
+            "id": comment_id,
+            "url": f"https://api.github.com/repos/mattfren/DawnStrike/comments/{comment_id}",
+            "html_url": f"https://github.com/mattfren/DawnStrike/commit/{candidate_sha}#commitcomment-{comment_id}",
+            "commit_id": candidate_sha,
+            "body": owner_body,
+            "user": {"id": _GITHUB_RELEASE_ACTOR_ID},
+            "author_association": "OWNER",
+            "created_at": completed_at,
+            "updated_at": completed_at,
+        }], "4" * 64)
+    return _github_api_object_live(path)
+'''
+    contract_script.write_text(text[:start] + original + fixture + text[end:], encoding="utf-8")
+
+
 def _install_capture_task_origin_fixture_seam(rebind_script: Path) -> None:
     """Bind the disposable rebind to the strict receipt's canonical origin."""
 
@@ -976,6 +1064,162 @@ try {{
     }
 
 
+def _run_lock_harness(tmp_path: Path, body: str) -> dict[str, object]:
+    source = Path.cwd()
+    stage_q = str(source / "scripts" / "invoke_dawnstrike_stage.ps1").replace("'", "''")
+    state_q = str(tmp_path / "state").replace("'", "''")
+    command = f"""
+. '{stage_q}'
+$state = '{state_q}'
+New-Item -ItemType Directory -Path $state -Force | Out-Null
+try {{
+{body}
+}} finally {{ if (Test-Path -LiteralPath $state) {{ Remove-Item -LiteralPath $state -Recurse -Force }} }}
+"""
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=source,
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
+def test_daily_lock_recovers_exact_dead_prior_date_before_new_date(tmp_path: Path) -> None:
+    payload = _run_lock_harness(
+        tmp_path,
+        r"""
+    $locks = Join-Path $state 'locks'
+    New-Item -ItemType Directory -Path $locks -Force | Out-Null
+    $oldPath = Join-Path $locks 'dawnstrike-daily-2026-08-31.lock'
+    $dead = [ordered]@{
+        schema_version = 'dawnstrike.daily_run_lock.v3'; market_date = '2026-08-31'; owner = 'normal_stage'
+        acquired_at = '2026-08-31T12:00:00Z'; process_id = 2147483646
+        process_started_at_utc = '2026-08-31T12:00:00Z'; lock_token = 'dead-prior-date'
+        research_only = $true; broker_execution_enabled = $false
+    } | ConvertTo-Json -Depth 3
+    [IO.File]::WriteAllText($oldPath, $dead, [Text.UTF8Encoding]::new($false))
+    $old = Get-DawnstrikeLockSnapshot -Path $oldPath -Label 'old daily lock'
+    $current = Enter-DawnstrikeDailyRunLock -StateRoot $state -MarketDate '2026-09-01' -Owner 'normal_stage'
+    if (-not $current.acquired) { throw ('current date lock was blocked: ' + $current.reason) }
+    $archive = "$oldPath.stale-dead-$($old.bytes_sha256)"
+    if (Test-Path -LiteralPath $oldPath) { throw 'old daily lock was not archived' }
+    $archived = Get-DawnstrikeLockSnapshot -Path $archive -Label 'old daily lock archive'
+    if ($archived.bytes_sha256 -ne $old.bytes_sha256) { throw 'archive hash changed' }
+    Exit-DawnstrikeDailyRunLock $current
+    [pscustomobject]@{ acquired = $current.acquired; archive_hash = $archived.bytes_sha256; source_absent = -not (Test-Path -LiteralPath $oldPath) } | ConvertTo-Json -Compress
+""",
+    )
+    assert payload["acquired"] is True
+    assert payload["source_absent"] is True
+    assert len(str(payload["archive_hash"])) == 64
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
+def test_daily_lock_live_prior_date_blocks_new_date(tmp_path: Path) -> None:
+    payload = _run_lock_harness(
+        tmp_path,
+        r"""
+    $old = Enter-DawnstrikeDailyRunLock -StateRoot $state -MarketDate '2026-08-31' -Owner 'normal_stage'
+    if (-not $old.acquired) { throw 'old date lock was not acquired' }
+    $current = Enter-DawnstrikeDailyRunLock -StateRoot $state -MarketDate '2026-09-01' -Owner 'normal_stage'
+    if ($current.acquired) { throw 'new date acquired over a live prior-date owner' }
+    Exit-DawnstrikeDailyRunLock $old
+    [pscustomobject]@{ acquired = $current.acquired; reason = $current.reason } | ConvertTo-Json -Compress
+""",
+    )
+    assert payload == {"acquired": False, "reason": "active_foreign_daily_lock"}
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
+def test_daily_lock_foreign_hash_race_fails_closed(tmp_path: Path) -> None:
+    payload = _run_lock_harness(
+        tmp_path,
+        r"""
+    $locks = Join-Path $state 'locks'
+    New-Item -ItemType Directory -Path $locks -Force | Out-Null
+    $oldPath = Join-Path $locks 'dawnstrike-daily-2026-08-31.lock'
+    $dead = [ordered]@{
+        schema_version = 'dawnstrike.daily_run_lock.v3'; market_date = '2026-08-31'; owner = 'normal_stage'
+        acquired_at = '2026-08-31T12:00:00Z'; process_id = 2147483646
+        process_started_at_utc = '2026-08-31T12:00:00Z'; lock_token = 'dead-before-race'
+        research_only = $true; broker_execution_enabled = $false
+    } | ConvertTo-Json -Depth 3
+    [IO.File]::WriteAllText($oldPath, $dead, [Text.UTF8Encoding]::new($false))
+    function Test-DawnstrikeLockOwnerActive {
+        param([string]$LockPath)
+        $changed = Get-Content -LiteralPath $LockPath -Raw | ConvertFrom-Json
+        $changed.lock_token = 'changed-during-owner-check'
+        [IO.File]::WriteAllText($LockPath, ($changed | ConvertTo-Json -Depth 3), [Text.UTF8Encoding]::new($false))
+        return $false
+    }
+    $message = ''
+    try { $null = Enter-DawnstrikeDailyRunLock -StateRoot $state -MarketDate '2026-09-01' -Owner 'normal_stage'; throw 'race was accepted' } catch { $message = $_.Exception.Message }
+    [pscustomobject]@{ blocked = $message -match 'changed while its owner identity was checked'; source_present = Test-Path -LiteralPath $oldPath } | ConvertTo-Json -Compress
+""",
+    )
+    assert payload == {"blocked": True, "source_present": True}
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
+def test_daily_lock_foreign_archive_collision_fails_closed(tmp_path: Path) -> None:
+    payload = _run_lock_harness(
+        tmp_path,
+        r"""
+    $locks = Join-Path $state 'locks'
+    New-Item -ItemType Directory -Path $locks -Force | Out-Null
+    $oldPath = Join-Path $locks 'dawnstrike-daily-2026-08-31.lock'
+    $dead = [ordered]@{
+        schema_version = 'dawnstrike.daily_run_lock.v3'; market_date = '2026-08-31'; owner = 'normal_stage'
+        acquired_at = '2026-08-31T12:00:00Z'; process_id = 2147483646
+        process_started_at_utc = '2026-08-31T12:00:00Z'; lock_token = 'dead-with-collision'
+        research_only = $true; broker_execution_enabled = $false
+    } | ConvertTo-Json -Depth 3
+    [IO.File]::WriteAllText($oldPath, $dead, [Text.UTF8Encoding]::new($false))
+    $old = Get-DawnstrikeLockSnapshot -Path $oldPath -Label 'old daily lock'
+    $archive = "$oldPath.stale-dead-$($old.bytes_sha256)"
+    [IO.File]::WriteAllText($archive, 'hostile-collision', [Text.UTF8Encoding]::new($false))
+    $message = ''
+    try { $null = Enter-DawnstrikeDailyRunLock -StateRoot $state -MarketDate '2026-09-01' -Owner 'normal_stage'; throw 'archive collision was accepted' } catch { $message = $_.Exception.Message }
+    [pscustomobject]@{ blocked = $message -match 'archive already exists'; source_present = Test-Path -LiteralPath $oldPath } | ConvertTo-Json -Compress
+""",
+    )
+    assert payload == {"blocked": True, "source_present": True}
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
+def test_daily_lock_release_failure_is_not_swallowed(tmp_path: Path) -> None:
+    payload = _run_lock_harness(
+        tmp_path,
+        r"""
+    $lock = Enter-DawnstrikeDailyRunLock -StateRoot $state -MarketDate '2026-09-01' -Owner 'normal_stage'
+    if (-not $lock.acquired) { throw 'daily lock was not acquired' }
+    $changed = Get-Content -LiteralPath $lock.lock_path -Raw | ConvertFrom-Json
+    $changed.lock_token = 'hostile-owner-change'
+    [IO.File]::WriteAllText($lock.lock_path, ($changed | ConvertTo-Json -Depth 3), [Text.UTF8Encoding]::new($false))
+    $message = ''
+    try { Exit-DawnstrikeDailyRunLock $lock; throw 'release failure was swallowed' } catch { $message = $_.Exception.Message }
+    [pscustomobject]@{ blocked = $message -match 'ownership changed'; lock_preserved = Test-Path -LiteralPath $lock.lock_path } | ConvertTo-Json -Compress
+""",
+    )
+    assert payload == {"blocked": True, "lock_preserved": True}
+
+
+def test_runtime_release_occurs_only_after_daily_release() -> None:
+    activation = Path("scripts/activate_dawnstrike_runtime.ps1").read_text(encoding="utf-8")
+    rollback = Path("scripts/rollback_dawnstrike_runtime.ps1").read_text(encoding="utf-8")
+    assert """if ($null -ne $dailyLock) {
+                    Exit-DawnstrikeDailyRunLock -Lock $dailyLock
+                    $dailyLock = $null
+                }""" in activation
+    assert """if ($null -ne $dailyLock) { Exit-DawnstrikeDailyRunLock -Lock $dailyLock }
+            Exit-DawnstrikeGovernedRuntimeLock $activationLock""" in rollback
+
+
 def test_state_receipt_candidate_and_broker_tamper_fail_closed(tmp_path: Path) -> None:
     receipt, _db, _state, _proof, _backup = _prepare(tmp_path)
     with pytest.raises(StatePreparationError, match="candidate SHA"):
@@ -1021,6 +1265,8 @@ def test_capture_rebind_journal_has_guarded_process_kill_seams() -> None:
         "-Phase POST_ENABLE",
         "-Phase COMPLETE",
         "Existing COMPLETE capture-task receipt has no durable operation journal.",
+        '"fetch", "--no-tags", "--prune", "origin"',
+        '"Capture rebind origin/main refresh"',
     ):
         assert marker in script
     assert script.count("-Phase PRE_ENABLE") >= 1
@@ -1055,8 +1301,7 @@ def test_powershell_sidecar_activation_and_rollback_keep_auxiliary_disabled(
     for name in (
         "activate_dawnstrike_runtime.ps1",
         "runtime_activation_lock.ps1",
-            "runtime_activation_lock_contract.py",
-            "runtime_operation_journal.py",
+        "runtime_activation_lock_contract.py",
         "runtime_operation_journal.py",
         "capture_task_safety.ps1",
         "rollback_dawnstrike_runtime.ps1",
@@ -1074,7 +1319,18 @@ def test_powershell_sidecar_activation_and_rollback_keep_auxiliary_disabled(
         "run_daily_intraday_capture.py",
     ):
         shutil.copy2(source / "scripts" / name, candidate / "scripts" / name)
+    # The repository checkout can be temporarily mixed-newline while patches
+    # are under review, but the disposable Git candidate and its later
+    # autocrlf checkout must expose identical immutable runner bytes to the
+    # pre-swap hardening receipt.  Normalize only this copied fixture file.
+    candidate_runner = candidate / "scripts" / "run_daily_intraday_capture.py"
+    runner_text = candidate_runner.read_text(encoding="utf-8").replace("\r\n", "\n")
+    candidate_runner.write_bytes(runner_text.replace("\n", "\r\n").encode("utf-8"))
     _install_local_origin_fixture_seam(candidate / "scripts" / "runtime_activation_lock.ps1")
+    _install_local_state_preparation_origin_fixture_seam(
+        candidate / "scripts" / "prepare_dawnstrike_state.ps1", remote
+    )
+    _install_local_github_ci_fixture_seam(candidate / "scripts" / "runtime_activation_contract.py")
     _install_capture_task_origin_fixture_seam(
         candidate / "scripts" / "rebind_intraday_capture_task.ps1"
     )
@@ -1142,7 +1398,7 @@ def test_powershell_sidecar_activation_and_rollback_keep_auxiliary_disabled(
         "conclusion": "SUCCESS",
         "status": "COMPLETED",
         "head_branch": "main",
-        "run_url": "https://github.com/example/dawnstrike/actions/runs/12345",
+        "run_url": "https://github.com/mattfren/DawnStrike/actions/runs/12345",
         "checks_total": 19,
         "checks_succeeded": 19,
         "completed_at_utc": completed,
@@ -1160,6 +1416,8 @@ def test_powershell_sidecar_activation_and_rollback_keep_auxiliary_disabled(
         "completed_at_utc": completed,
         "research_only": True,
         "broker_execution_enabled": False,
+        "report_sha256": "e" * 64,
+        "codex_share_url": "https://chatgpt.com/share/test-owner-report",
     }
     _write_json(evidence / "ci.json", seal_evidence(ci))
     _write_json(evidence / "sol.json", seal_evidence(sol))
@@ -1208,6 +1466,12 @@ def test_powershell_sidecar_activation_and_rollback_keep_auxiliary_disabled(
     def file_sha(path: Path) -> str:
         return hashlib.sha256(path.read_bytes()).hexdigest()
 
+    def windows_checkout_sha(path: Path) -> str:
+        """Hash the CRLF bytes produced by the fixture's autocrlf checkout."""
+
+        normalized = path.read_text(encoding="utf-8").replace("\r\n", "\n")
+        return hashlib.sha256(normalized.replace("\n", "\r\n").encode("utf-8")).hexdigest()
+
     def quote(path: Path) -> str:
         return str(path).replace("'", "''")
 
@@ -1231,7 +1495,25 @@ def test_powershell_sidecar_activation_and_rollback_keep_auxiliary_disabled(
     symbols_sha = file_sha(symbols_manifest)
     entitlement_sha = file_sha(entitlement_receipt)
     source_config_sha = file_sha(source_config)
-    runner_sha = file_sha(candidate / "scripts" / "run_daily_intraday_capture.py")
+    runner_sha = windows_checkout_sha(candidate / "scripts" / "run_daily_intraday_capture.py")
+    previous_runner_sha = file_sha(runtime / "scripts" / "run_daily_intraday_capture.py")
+    owner_comment_body = json.dumps(
+        {
+            "authorization": "OWNER_RELEASE_AUTHORIZATION",
+            "auditor_model": "gpt-5.6-sol",
+            "broker_execution_enabled": False,
+            "candidate_sha": candidate_sha,
+            "candidate_tree": candidate_tree,
+            "codex_share_url": "https://chatgpt.com/share/test-owner-report",
+            "critical_findings": 0,
+            "high_findings": 0,
+            "report_sha256": "e" * 64,
+            "research_only": True,
+            "verdict": "ZERO_CRITICAL_HIGH",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     interpreter_declaration = json.loads(
         (candidate / "config" / "state_preparation_contract.json").read_text(encoding="utf-8")
     )
@@ -1241,6 +1523,11 @@ def test_powershell_sidecar_activation_and_rollback_keep_auxiliary_disabled(
     command = rf"""
     . '{activation_q}'
     $env:DAWNSTRIKE_TEST_ACTIVATION_CLOCK = '1'
+    $env:DAWNSTRIKE_TEST_GITHUB_CI_FIXTURE = '1'
+    $env:DAWNSTRIKE_TEST_GITHUB_CI_CANDIDATE_SHA = '{candidate_sha}'
+        $env:DAWNSTRIKE_TEST_GITHUB_CI_CANDIDATE_TREE = '{candidate_tree}'
+        $env:DAWNSTRIKE_TEST_GITHUB_CI_COMPLETED_AT = '{completed}'
+        $env:DAWNSTRIKE_TEST_GITHUB_OWNER_COMMENT_BODY = '{owner_comment_body}'
     $global:MockRuntime = '{runtime_q}'
 $global:MockState = '{state_q}'
     $global:MockAuxState = 'Disabled'
@@ -1426,7 +1713,7 @@ $preparedPayload = [ordered]@{{
   interpreter_version = '{interpreter_declaration["capture_interpreter_version"]}'
   interpreter_signer_subject = '{interpreter_declaration["capture_interpreter_signer_subject"]}'
   interpreter_signer_thumbprint = '{interpreter_declaration["capture_interpreter_signer_thumbprint"]}'
-  runner_before_sha256 = '{runner_sha}'
+  runner_before_sha256 = '{previous_runner_sha}'
   runner_target_sha256 = '{runner_sha}'
   old_last_task_result = 2147942402
   old_last_run_time = '2026-08-31T15:20:00.0000000Z'
@@ -1501,7 +1788,7 @@ $hardeningPayload = [ordered]@{{
   interpreter_signer_subject = '{interpreter_declaration["capture_interpreter_signer_subject"]}'
   interpreter_signer_thumbprint = '{interpreter_declaration["capture_interpreter_signer_thumbprint"]}'
   runner_path = '{runtime_runner_q}'
-  runner_before_sha256 = '{runner_sha}'
+  runner_before_sha256 = '{previous_runner_sha}'
   runner_sha256 = '{runner_sha}'
   action_bindings = [ordered]@{{
     candidate_sha = '{candidate_sha}'
@@ -1536,8 +1823,9 @@ $activationAuxState = $global:MockAuxState
             $rebindFailureCaught = $false
             $rebindFailureMessage = ''
             try {{ & $rebindScript -RuntimeRoot '{runtime_q}' -StateRoot '{state_q}' -CandidateSha '{candidate_sha}' -SymbolsManifest '{symbols_q}' -SymbolsManifestSha256 '{symbols_sha}' -EntitlementReceipt '{entitlement_q}' -EntitlementReceiptSha256 '{entitlement_sha}' -SourceConfig '{source_config_q}' -SourceConfigSha256 '{source_config_sha}' -RunAsCredential $global:TestCredential -Enable -InjectFailureAfterMutation -ProcessTimeoutSeconds 120 | Out-Null }} catch {{ $rebindFailureCaught = $true; $rebindFailureMessage = $_.Exception.Message }}
-            $rebindFailurePath = Join-Path '{state_q}' ('receipts\capture-task\capture-task-rebind-' + '{candidate_sha}' + '.failed.json')
-            if (-not (Test-Path -LiteralPath $rebindFailurePath -PathType Leaf)) {{ throw ('Injected rebind did not seal failure evidence: ' + $rebindFailureMessage) }}
+            $rebindFailureFiles = @(Get-ChildItem -LiteralPath (Join-Path '{state_q}' 'receipts\capture-task') -Filter 'capture-task-rebind-*.failed.json' -File)
+            if ($rebindFailureFiles.Count -ne 1) {{ throw ('Injected rebind did not seal exactly one failure record: ' + $rebindFailureMessage) }}
+            $rebindFailurePath = [string]$rebindFailureFiles[0].FullName
         $rebindFailure = Get-Content -LiteralPath $rebindFailurePath -Raw | ConvertFrom-Json
         $rebound = & $rebindScript -RuntimeRoot '{runtime_q}' -StateRoot '{state_q}' -CandidateSha '{candidate_sha}' -SymbolsManifest '{symbols_q}' -SymbolsManifestSha256 '{symbols_sha}' -EntitlementReceipt '{entitlement_q}' -EntitlementReceiptSha256 '{entitlement_sha}' -SourceConfig '{source_config_q}' -SourceConfigSha256 '{source_config_sha}' -RunAsCredential $global:TestCredential -Enable -ProcessTimeoutSeconds 120
     $rebindReceiptPath = Join-Path '{state_q}' ('receipts\capture-task\capture-task-rebind-' + '{candidate_sha}' + '.json')
@@ -1560,6 +1848,7 @@ $rolledBack = Invoke-DawnstrikeRuntimeRollback -ActivationReceipt $receiptPath -
     environment["PSModulePath"] = os.pathsep.join(
         [str(windows_modules), environment.get("PSModulePath", "")]
     )
+    environment["DAWNSTRIKE_TEST_LOCK_JOURNAL"] = "1"
     result = subprocess.run(
         ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
         cwd=source,

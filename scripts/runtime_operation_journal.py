@@ -17,7 +17,7 @@ SCHEMA = "dawnstrike.runtime_operation_journal.v1"
 COMPENSATED_SCHEMA = "dawnstrike.runtime_operation_journal.v2"
 OPERATIONS = {
     "runtime_activation", "capture_task_rebind", "runtime_rollback",
-    "capture_task_hardening",
+    "capture_task_hardening", "state_preparation",
 }
 PHASES = {
     # PRE_QUIESCE is a durable intent written before the first scheduler
@@ -31,6 +31,10 @@ PHASES = {
     "capture_task_hardening": (
         "INIT", "PRE_TASK_UPDATE", "POST_TASK_UPDATE", "COMPLETE", "COMPENSATED"
     ),
+    # State preparation has its own database receipt but shares the same
+    # crash-safe global lock/adoption envelope. PREPARE is sealed after the
+    # task baseline/proof is durable and before the Python database operation.
+    "state_preparation": ("INIT", "PREPARE", "COMPLETE", "COMPENSATED"),
 }
 KEYS = {
     "schema_version", "operation", "phase", "sequence", "candidate_sha",
@@ -160,6 +164,17 @@ def validate(raw: bytes) -> dict[str, Any]:
             or stage == empty
         ):
             raise ValueError("PRE_QUIESCE journal artifact proof is invalid")
+    elif operation == "state_preparation" and value["phase"] == "PREPARE":
+        # The database receipt and backup are produced by the Python worker
+        # after this intent is sealed.  A durable task baseline may already be
+        # bound in prepared_receipt_sha256; either sentinel is valid here, but
+        # a partial hash cannot be admitted.
+        if complete_receipt != empty or stage != empty:
+            raise ValueError("state-preparation PREPARE artifact proof is invalid")
+        if prepared_receipt != empty and not HEX64.fullmatch(prepared_receipt):
+            raise ValueError("state-preparation PREPARE baseline proof is invalid")
+        if backup != empty and not HEX64.fullmatch(backup):
+            raise ValueError("state-preparation PREPARE backup proof is invalid")
     elif value["phase"] == "COMPENSATED":
         # Compensation is legal from any recoverable task-operation phase,
         # including INIT when the failure occurred before PREPARED existed.
@@ -400,7 +415,7 @@ def _validate_compensation(raw: bytes) -> dict[str, Any]:
         raise ValueError("compensation receipt schema is invalid")
     if value["status"] != "COMPENSATED" or value["operation"] not in {
         "capture_task_rebind", "capture_task_hardening",
-        "runtime_activation", "runtime_rollback",
+        "runtime_activation", "runtime_rollback", "state_preparation",
     }:
         raise ValueError("compensation receipt status or operation is invalid")
     for key in ("candidate_sha", "candidate_tree"):
@@ -417,7 +432,10 @@ def _validate_compensation(raw: bytes) -> dict[str, Any]:
         value["prior_receipt_sha256"] == hashlib.sha256(b"").hexdigest()
     ):
         raise ValueError("compensation prior receipt sentinel is inconsistent")
-    if value["task_state"] not in {"Disabled", "Ready"}:
+    allowed_task_states = {"Disabled", "Ready"}
+    if value["operation"] == "state_preparation":
+        allowed_task_states.add("ABSENT")
+    if value["task_state"] not in allowed_task_states:
         raise ValueError("compensation task state is invalid")
     if (
         not isinstance(value["failure_type"], str)
@@ -447,7 +465,13 @@ def _validate_compensation_reference(value: dict[str, Any], state_root: Path) ->
         raise ValueError("compensation prior receipt changed or is missing")
 
 
-def seal_compensation(source: Path, target: Path, state_root: Path | None = None) -> dict[str, Any]:
+def seal_compensation(
+    source: Path,
+    target: Path,
+    state_root: Path | None = None,
+    *,
+    reuse_existing: bool = False,
+) -> dict[str, Any]:
     value = json.loads(_read_regular(source).decode("utf-8"), object_pairs_hook=_pairs)
     if set(value) != COMPENSATION_KEYS - {"receipt_self_sha256"}:
         raise ValueError("compensation input keys are not exact")
@@ -457,6 +481,27 @@ def seal_compensation(source: Path, target: Path, state_root: Path | None = None
     if state_root is not None:
         _validate_compensation_reference(value, state_root)
     target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists() and reuse_existing:
+        # A worker can die after the immutable compensation receipt is sealed
+        # but before the journal transition.  Retrying must converge on the
+        # exact same bytes for the same prior-journal binding; accepting a
+        # merely valid receipt (or replacing a foreign one) would launder the
+        # failed attempt.  Return the existing proof only after byte-for-byte
+        # equality with the newly derived payload and a second strict parse.
+        try:
+            existing_raw = _read_regular(target)
+            existing = _validate_compensation(existing_raw)
+            if state_root is not None:
+                _validate_compensation_reference(existing, state_root)
+        except (OSError, ValueError) as exc:
+            raise ValueError(
+                "compensation receipt already exists and is not exact reusable evidence"
+            ) from exc
+        if existing_raw != raw:
+            raise ValueError(
+                "compensation receipt already exists; immutable evidence cannot be replaced"
+            )
+        return {"payload": existing, "raw_file_sha256": hashlib.sha256(existing_raw).hexdigest()}
     if target.exists():
         raise ValueError(
             "compensation receipt already exists; immutable evidence cannot be replaced"
@@ -503,6 +548,11 @@ def main() -> int:
     compensation.add_argument("--input", required=True, type=Path)
     compensation.add_argument("--output", required=True, type=Path)
     compensation.add_argument("--state-root", required=True, type=Path)
+    compensation.add_argument(
+        "--reuse-existing",
+        action="store_true",
+        help="reuse an existing receipt only when its sealed bytes exactly match the input",
+    )
     verify_compensation = sub.add_parser("verify-compensation")
     verify_compensation.add_argument("--receipt", required=True, type=Path)
     verify_compensation.add_argument("--state-root", required=True, type=Path)
@@ -520,7 +570,12 @@ def main() -> int:
     elif args.command == "seal-compensation":
         _contained(args.input, args.state_root)
         _contained(args.output, args.state_root)
-        result = seal_compensation(args.input, args.output, args.state_root)
+        result = seal_compensation(
+            args.input,
+            args.output,
+            args.state_root,
+            reuse_existing=args.reuse_existing,
+        )
     elif args.command == "seal":
         _contained(args.input, args.state_root)
         _contained(args.output, args.state_root)

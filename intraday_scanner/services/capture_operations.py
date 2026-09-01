@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import shutil
+import stat
 import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -22,6 +25,8 @@ from intraday_scanner.market_calendar import canonical_regular_session_id, marke
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GIT_OID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _MODES = {"forward_observed", "retrospective_research"}
+_APPROVED_WINDOWS_GIT = Path(r"C:\Program Files\Git\cmd\git.exe")
+_APPROVED_WINDOWS_GIT_SHA256 = "37c5725818d602e951ba2563b870d62763322956b73373da4c33a0b566a80bc9"
 
 
 class CapturePlanError(ValueError):
@@ -134,7 +139,7 @@ class CapturePlan:
             if _under(path, repo):
                 raise CapturePlanError(f"{label} must not be under the repository")
 
-        current_sha, current_tree_sha = _git_identity(repo)
+        current_sha, current_tree_sha, git_executable_sha256 = _git_identity(repo)
         if current_sha != self.candidate_sha:
             raise CapturePlanError(
                 f"candidate SHA mismatch: expected {self.candidate_sha}, running {current_sha}"
@@ -185,6 +190,7 @@ class CapturePlan:
             "candidate_sha": self.candidate_sha,
             "candidate_tree_sha": current_tree_sha,
             "candidate_worktree_clean": True,
+            "git_executable_sha256": git_executable_sha256,
             "symbols": symbols,
             "symbols_manifest_sha256": self.symbols_manifest_sha256,
             "market_date": session_identity["market_date"],
@@ -356,24 +362,50 @@ def _under_windows_path(path: Path, parent: str) -> bool:
         return False
 
 
-def _git_identity(repo: Path) -> tuple[str, str]:
+def _approved_git_executable() -> tuple[Path, str]:
+    if os.name != "nt":
+        discovered = shutil.which("git")
+        if not discovered:
+            raise CapturePlanError("approved Git executable is unavailable")
+        path = Path(discovered).resolve(strict=True)
+        return path, _sha256_file(path)
+    path = _APPROVED_WINDOWS_GIT
     try:
+        cursor = path
+        while True:
+            details = cursor.lstat()
+            if getattr(details, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                raise CapturePlanError("approved Git executable path contains a reparse point")
+            if cursor.parent == cursor:
+                break
+            cursor = cursor.parent
+        digest = _sha256_file(path)
+    except OSError as exc:
+        raise CapturePlanError("approved Git executable is unavailable") from exc
+    if digest != _APPROVED_WINDOWS_GIT_SHA256:
+        raise CapturePlanError("approved Git executable hash changed")
+    return path, digest
+
+
+def _git_identity(repo: Path) -> tuple[str, str, str]:
+    try:
+        git_path, git_sha256 = _approved_git_executable()
         head = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+            [str(git_path), "rev-parse", "HEAD"],
             cwd=repo,
             check=True,
             capture_output=True,
             text=True,
         ).stdout.strip()
         tree = subprocess.run(
-            ["git", "rev-parse", "HEAD^{tree}"],
+            [str(git_path), "rev-parse", "HEAD^{tree}"],
             cwd=repo,
             check=True,
             capture_output=True,
             text=True,
         ).stdout.strip()
         dirty = subprocess.run(
-            ["git", "status", "--porcelain", "--untracked-files=all"],
+            [str(git_path), "status", "--porcelain", "--untracked-files=all"],
             cwd=repo,
             check=True,
             capture_output=True,
@@ -383,7 +415,7 @@ def _git_identity(repo: Path) -> tuple[str, str]:
             raise CapturePlanError("candidate repository worktree is not clean")
         if not _GIT_OID.fullmatch(head) or not _GIT_OID.fullmatch(tree):
             raise CapturePlanError("candidate repository identity is invalid")
-        return head, tree
+        return head, tree, git_sha256
     except (OSError, subprocess.CalledProcessError) as exc:
         raise CapturePlanError("candidate repository SHA is unavailable") from exc
 

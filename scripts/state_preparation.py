@@ -4,14 +4,16 @@ The one-percent account/capture/trial stores are an additive sidecar over the
 legacy schema marker (30).  This command is deliberately separate from normal
 scheduled work: it takes an online backup *before* applying the idempotent
 initialization, proves the resulting inventory twice, and seals a receipt that
-can be consumed by runtime activation.  It never restores or overwrites the
-live database automatically.
+    can be consumed by runtime activation.  If a governed retry finds the
+    sealed pre-mutation marker after a worker crash, it restores only that
+    exact marker-bound snapshot; arbitrary restore requests remain rejected.
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
 import json
 import os
 import re
@@ -47,6 +49,7 @@ STATE_PREPARATION_SCHEMA = "dawnstrike.state_preparation_receipt.v1"
 TASK_PROOF_SCHEMA = "dawnstrike.state_preparation_task_proof.v1"
 STATE_SIDECAR_CONTRACT = "dawnstrike.account_capture_trial_sidecar.v1"
 STATE_SIDECAR_VERSION = 1
+PREPARATION_PENDING_SCHEMA = "dawnstrike.state_preparation_pending.v1"
 DB_NAME = "shadow_real.sqlite"
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -536,13 +539,23 @@ def _validate_preparation_lock(path: str | Path, state_root: Path) -> Path:
         payload = _strict_json(lock.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise StatePreparationError("state preparation lock is invalid") from exc
-    if (
-        not isinstance(payload, dict)
-        or payload.get("schema_version") != "dawnstrike.runtime_activation_lock.v1"
-        or not re.fullmatch(r"[0-9a-f]{32}", str(payload.get("lock_token") or ""))
-        or payload.get("research_only") is not True
-        or payload.get("broker_execution_enabled") is not False
-    ):
+    legacy_valid = (
+        isinstance(payload, dict)
+        and payload.get("schema_version") == "dawnstrike.runtime_activation_lock.v1"
+        and re.fullmatch(r"[0-9a-f]{32}", str(payload.get("lock_token") or ""))
+        and payload.get("research_only") is True
+        and payload.get("broker_execution_enabled") is False
+    )
+    governed_valid = (
+        isinstance(payload, dict)
+        and payload.get("schema_version") == "dawnstrike.runtime_activation_lock.v2"
+        and payload.get("operation") == "state_preparation"
+        and re.fullmatch(r"[0-9a-f]{40}", str(payload.get("candidate_sha") or ""))
+        and re.fullmatch(r"[0-9a-f]{40}", str(payload.get("candidate_tree") or ""))
+        and payload.get("research_only") is True
+        and payload.get("broker_execution_enabled") is False
+    )
+    if not legacy_valid and not governed_valid:
         raise StatePreparationError("state preparation lock is invalid")
     return lock
 
@@ -772,8 +785,8 @@ def inventory(connection: sqlite3.Connection) -> dict[str, Any]:
     for name, expected_type, expected_notnull, expected_default, expected_pk in (
         PAPER_LEDGER_COLUMN_CONTRACT
     ):
-        actual = paper_info.get(name)
-        if actual != (
+        paper_actual = paper_info.get(name)
+        if paper_actual != (
             expected_type,
             expected_notnull,
             expected_default,
@@ -1161,6 +1174,164 @@ def validate_receipt(
     return dict(payload)
 
 
+_PENDING_KEYS = frozenset(
+    {
+        "schema_version",
+        "status",
+        "candidate_sha",
+        "candidate_tree",
+        "before_db_sha256",
+        "before_wal_sha256",
+        "before_shm_sha256",
+        "before_logical_snapshot_sha256",
+        "backup_id",
+        "backup_bundle_path",
+        "backup_db_sha256",
+        "backup_logical_snapshot_sha256",
+        "backup_manifest_sha256",
+        "backup_manifest_file_sha256",
+        "expected_after_inventory_sha256",
+        "expected_after_logical_snapshot_sha256",
+        "task_proof_sha256",
+        "prepared_at_utc",
+        "research_only",
+        "broker_execution_enabled",
+        "pending_sha256",
+    }
+)
+
+
+def _load_pending(path: Path, *, candidate_sha: str, candidate_tree: str) -> dict[str, Any]:
+    """Load and authenticate the immutable pre-mutation state marker."""
+
+    source = _assert_no_reparse_components(path)
+    if not source.is_file() or _is_reparse_point(source):
+        raise StatePreparationError("state-preparation pending marker is missing or unsafe")
+    try:
+        payload = _strict_json(source.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise StatePreparationError("state-preparation pending marker is invalid JSON") from exc
+    if not isinstance(payload, dict) or set(payload) != _PENDING_KEYS:
+        raise StatePreparationError("state-preparation pending marker fields are not exact")
+    _reject_sensitive_keys(payload)
+    if payload.get("pending_sha256") != self_hash(payload, "pending_sha256"):
+        raise StatePreparationError("state-preparation pending marker self-hash mismatch")
+    if (
+        payload.get("schema_version") != PREPARATION_PENDING_SCHEMA
+        or payload.get("status") != "PREPARED"
+        or payload.get("candidate_sha") != candidate_sha
+        or payload.get("candidate_tree") != candidate_tree
+        or payload.get("research_only") is not True
+        or payload.get("broker_execution_enabled") is not False
+    ):
+        raise StatePreparationError("state-preparation pending marker identity is invalid")
+    for field in (
+        "before_db_sha256",
+        "before_wal_sha256",
+        "before_shm_sha256",
+        "before_logical_snapshot_sha256",
+        "backup_db_sha256",
+        "backup_logical_snapshot_sha256",
+        "backup_manifest_sha256",
+        "backup_manifest_file_sha256",
+        "expected_after_inventory_sha256",
+        "expected_after_logical_snapshot_sha256",
+        "task_proof_sha256",
+        "pending_sha256",
+    ):
+        if not _SHA256.fullmatch(str(payload.get(field) or "")):
+            raise StatePreparationError(f"state-preparation pending {field} is invalid")
+    backup_id = payload.get("backup_id")
+    if not isinstance(backup_id, str) or not re.fullmatch(
+        r"state-preparation-[0-9a-f]{16}-[0-9a-f]{16}", backup_id
+    ):
+        raise StatePreparationError("state-preparation pending backup identity is invalid")
+    bundle_path = payload.get("backup_bundle_path")
+    if not isinstance(bundle_path, str) or not Path(bundle_path).is_absolute():
+        raise StatePreparationError("state-preparation pending backup path is invalid")
+    bundle = _assert_no_reparse_components(bundle_path)
+    if bundle.name != backup_id or not bundle.is_dir():
+        raise StatePreparationError("state-preparation pending backup path is invalid")
+    timestamp = payload.get("prepared_at_utc")
+    if not isinstance(timestamp, str) or not timestamp.endswith("Z"):
+        raise StatePreparationError("state-preparation pending timestamp is invalid")
+    try:
+        datetime.fromisoformat(timestamp[:-1] + "+00:00")
+    except ValueError as exc:
+        raise StatePreparationError("state-preparation pending timestamp is invalid") from exc
+    return dict(payload)
+
+
+def _derive_expected_after_snapshot(
+    backup_bundle: Path, state_root: Path
+) -> dict[str, str]:
+    """Derive the intended post-migration identity from the sealed backup.
+
+    This disposable copy is prepared before the live database is touched.  A
+    retry can therefore distinguish a committed worker result from partial or
+    tampered bytes instead of re-baselining whatever a crash left behind.
+    """
+
+    source = _assert_no_reparse_components(backup_bundle / DB_NAME)
+    _assert_no_reparse_components(state_root)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".state-preparation-expected-", suffix=".sqlite", dir=state_root
+    )
+    os.close(descriptor)
+    temporary = _assert_no_reparse_components(Path(temporary_name))
+    try:
+        with source.open("rb") as source_handle, temporary.open("wb") as target_handle:
+            while True:
+                chunk = source_handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                target_handle.write(chunk)
+            target_handle.flush()
+            os.fsync(target_handle.fileno())
+        with closing(_connect_rw(temporary)) as connection:
+            run_migrations(connection)
+            connection.commit()
+            first = inventory(connection)
+            run_migrations(connection)
+            connection.commit()
+            second = inventory(connection)
+            if first["inventory_contract_sha256"] != second["inventory_contract_sha256"]:
+                raise StatePreparationError("expected state-preparation snapshot is not idempotent")
+        after_logical = _logical_snapshot_for_path(temporary)
+        return {
+            "inventory_sha256": second["inventory_contract_sha256"],
+            "logical_snapshot_sha256": after_logical,
+        }
+    finally:
+        temporary.unlink(missing_ok=True)
+        temporary.with_name(temporary.name + "-wal").unlink(missing_ok=True)
+        temporary.with_name(temporary.name + "-shm").unlink(missing_ok=True)
+
+
+def _seal_or_reuse_pending(path: Path, payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Publish one immutable pending marker, or prove the exact existing one."""
+
+    candidate = dict(payload)
+    candidate["pending_sha256"] = self_hash(candidate, "pending_sha256")
+    if path.exists() or path.is_symlink():
+        current = _load_pending(
+            path,
+            candidate_sha=str(candidate["candidate_sha"]),
+            candidate_tree=str(candidate["candidate_tree"]),
+        )
+        if canonical_json(current) != canonical_json(candidate):
+            raise StatePreparationError(
+                "state-preparation pending marker is bound to a different attempt"
+            )
+        return current
+    _atomic_json(path, candidate)
+    return _load_pending(
+        path,
+        candidate_sha=str(candidate["candidate_sha"]),
+        candidate_tree=str(candidate["candidate_tree"]),
+    )
+
+
 def _atomic_json(path: Path, payload: Mapping[str, Any], *, refuse_existing: bool = True) -> None:
     _assert_no_reparse_components(path.parent)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1249,6 +1420,8 @@ def prepare_state(
     if state not in db.parents:
         raise StatePreparationError("state database must be contained by state root")
     backup = _safe_backup_root(backup_root, state)
+    if task_proof is None:
+        raise StatePreparationError("state-preparation task proof is required")
     inspect_task_proof(
         task_proof,
         candidate_sha=candidate_sha,
@@ -1260,19 +1433,15 @@ def prepare_state(
     # Runtime invokes this file by absolute path (rather than as a package), so
     # the sibling fallback is required for the real PowerShell entry point.
     try:
-        from scripts.state_disaster_recovery import (
-            create_backup,
-            restore_verify,
-            validate_backup,
-        )
+        recovery_module = importlib.import_module("scripts.state_disaster_recovery")
     except ModuleNotFoundError as exc:
         if exc.name != "scripts":
             raise
-        from state_disaster_recovery import (
-            create_backup,
-            restore_verify,
-            validate_backup,
-        )
+        recovery_module = importlib.import_module("state_disaster_recovery")
+    create_backup = recovery_module.create_backup
+    restore_exact = recovery_module.restore_exact
+    restore_verify = recovery_module.restore_verify
+    validate_backup = recovery_module.validate_backup
     target_receipt = (
         _assert_no_reparse_components(receipt_path)
         if receipt_path is not None
@@ -1343,45 +1512,167 @@ def prepare_state(
     if active_locks:
         raise StatePreparationError("state preparation requires no active locks")
 
-    before = _hashes(db)
-    before["logical_snapshot_sha256"] = _logical_snapshot_for_path(db)
-    backup_id = f"state-preparation-{candidate_sha[:16]}-{before['db_sha256'][:16]}"
-    try:
-        backup_result = create_backup(
-            db,
-            backup,
-            state_root=state,
-            retention=retention,
-            source_sha=candidate_sha,
-            backup_id=backup_id,
-            expected_db_sha256=before["db_sha256"],
-            expected_wal_sha256=before["wal_sha256"],
-            expected_shm_sha256=before["shm_sha256"],
-            expected_logical_snapshot_sha256=before["logical_snapshot_sha256"],
+    pending_path = _assert_no_reparse_components(
+        state
+        / "receipts"
+        / "state-preparation"
+        / f"state-preparation-{candidate_sha}.pending.json"
+    )
+    pending: dict[str, Any] | None = None
+    backup_result: dict[str, Any] | None = None
+    backup_bundle: Path
+    if pending_path.exists() or pending_path.is_symlink():
+        # A child can die after the online backup is sealed and after SQLite
+        # commits, but before it writes the COMPLETE receipt.  Reuse only the
+        # immutable marker and its exact bundle; never derive a new baseline
+        # from whatever database bytes the crash left behind.
+        pending = _load_pending(
+            pending_path, candidate_sha=candidate_sha, candidate_tree=candidate_tree
         )
-        backup_bundle = _assert_no_reparse_components(backup / backup_result["backup_id"])
-        for backup_file in (DB_NAME, "manifest.json", "receipt.json"):
-            _assert_no_reparse_components(backup_bundle / backup_file)
-        if backup_result["backup_logical_snapshot_sha256"] != before[
-            "logical_snapshot_sha256"
-        ]:
+        backup_bundle = _assert_no_reparse_components(
+            pending["backup_bundle_path"]
+        ).resolve()
+        if backup_bundle.parent != backup:
             raise StatePreparationError(
-                "online backup is not bound to the proven pre-preparation snapshot"
+                "state-preparation pending backup is outside the supplied backup root"
             )
-        after_backup = _hashes(db)
-        after_backup["logical_snapshot_sha256"] = _logical_snapshot_for_path(db)
-        if after_backup != before:
-            raise StatePreparationError("state database/WAL changed while creating the online backup")
-    except Exception as exc:
-        _seal_failure_evidence(
-            state, candidate_sha, candidate_tree, before,
-            locals().get("backup_result"), exc,
-        )
-        if isinstance(exc, StatePreparationError):
-            raise
-        raise StatePreparationError(
-            "state preparation backup failed; recovery evidence was retained"
-        ) from exc
+        backup_result = validate_backup(backup_bundle, backup_root=backup)
+        if (
+            backup_result["backup_id"] != pending["backup_id"]
+            or backup_result["manifest_sha256"] != pending["backup_manifest_sha256"]
+            or backup_result["backup_db_sha256"] != pending["backup_db_sha256"]
+            or backup_result["backup_logical_snapshot_sha256"]
+            != pending["backup_logical_snapshot_sha256"]
+            or _sha256_file(backup_bundle / "manifest.json")
+            != pending["backup_manifest_file_sha256"]
+        ):
+            raise StatePreparationError(
+                "state-preparation pending marker does not bind its backup bundle"
+            )
+        before = {
+            field: str(pending[f"before_{field}"])
+            for field in ("db_sha256", "wal_sha256", "shm_sha256", "logical_snapshot_sha256")
+        }
+        if (
+            backup_result.get("source_live_main_file_sha256") != before["db_sha256"]
+            or backup_result.get("source_logical_snapshot_sha256")
+            != before["logical_snapshot_sha256"]
+        ):
+            raise StatePreparationError(
+                "state-preparation pending marker does not bind its pre-mutation snapshot"
+            )
+        expected_after = {
+            "inventory_sha256": str(pending["expected_after_inventory_sha256"]),
+            "logical_snapshot_sha256": str(
+                pending["expected_after_logical_snapshot_sha256"]
+            ),
+        }
+        try:
+            with closing(sqlite3.connect(db)) as connection:
+                live_inventory = inventory(connection)
+            live_logical = _logical_snapshot_for_path(db)
+            committed_worker_result = (
+                live_inventory["inventory_contract_sha256"]
+                == expected_after["inventory_sha256"]
+                and live_logical == expected_after["logical_snapshot_sha256"]
+            )
+        except (OSError, sqlite3.Error, StatePreparationError, ValueError):
+            committed_worker_result = False
+        if not committed_worker_result:
+            # The pending bundle is the only admissible recovery source.  This
+            # restores the original logical snapshot and retires any WAL/SHM
+            # overlay before the normal idempotent migration retry.
+            restore_exact(
+                backup_bundle,
+                db,
+                backup_root=backup,
+                state_root=state,
+                expected_source_sha=candidate_sha,
+                expected_before=before,
+                attempt_id=str(pending["pending_sha256"]),
+            )
+    else:
+        before = _hashes(db)
+        before["logical_snapshot_sha256"] = _logical_snapshot_for_path(db)
+        backup_id = f"state-preparation-{candidate_sha[:16]}-{before['db_sha256'][:16]}"
+        try:
+            backup_result = create_backup(
+                db,
+                backup,
+                state_root=state,
+                retention=retention,
+                source_sha=candidate_sha,
+                backup_id=backup_id,
+                expected_db_sha256=before["db_sha256"],
+                expected_wal_sha256=before["wal_sha256"],
+                expected_shm_sha256=before["shm_sha256"],
+                expected_logical_snapshot_sha256=before["logical_snapshot_sha256"],
+            )
+            backup_bundle = _assert_no_reparse_components(backup / backup_result["backup_id"])
+            for backup_file in (DB_NAME, "manifest.json", "receipt.json"):
+                _assert_no_reparse_components(backup_bundle / backup_file)
+            if backup_result["backup_logical_snapshot_sha256"] != before[
+                "logical_snapshot_sha256"
+            ]:
+                raise StatePreparationError(
+                    "online backup is not bound to the proven pre-preparation snapshot"
+                )
+            after_backup = _hashes(db)
+            after_backup["logical_snapshot_sha256"] = _logical_snapshot_for_path(db)
+            if after_backup != before:
+                raise StatePreparationError(
+                    "state database/WAL changed while creating the online backup"
+                )
+            expected_after = _derive_expected_after_snapshot(backup_bundle, state)
+            pending = _seal_or_reuse_pending(
+                pending_path,
+                {
+                    "schema_version": PREPARATION_PENDING_SCHEMA,
+                    "status": "PREPARED",
+                    "candidate_sha": candidate_sha,
+                    "candidate_tree": candidate_tree,
+                    "before_db_sha256": before["db_sha256"],
+                    "before_wal_sha256": before["wal_sha256"],
+                    "before_shm_sha256": before["shm_sha256"],
+                    "before_logical_snapshot_sha256": before["logical_snapshot_sha256"],
+                    "backup_id": str(backup_result["backup_id"]),
+                    "backup_bundle_path": str(backup_bundle.resolve()),
+                    "backup_db_sha256": str(backup_result["backup_db_sha256"]),
+                    "backup_logical_snapshot_sha256": str(
+                        backup_result["backup_logical_snapshot_sha256"]
+                    ),
+                    "backup_manifest_sha256": str(backup_result["manifest_sha256"]),
+                    "backup_manifest_file_sha256": _sha256_file(
+                        backup_bundle / "manifest.json"
+                    ),
+                    "expected_after_inventory_sha256": expected_after[
+                        "inventory_sha256"
+                    ],
+                    "expected_after_logical_snapshot_sha256": expected_after[
+                        "logical_snapshot_sha256"
+                    ],
+                    "task_proof_sha256": proof_hash,
+                    "prepared_at_utc": datetime.now(UTC)
+                    .isoformat(timespec="microseconds")
+                    .replace("+00:00", "Z"),
+                    "research_only": True,
+                    "broker_execution_enabled": False,
+                },
+            )
+        except Exception as exc:
+            _seal_failure_evidence(
+                state,
+                candidate_sha,
+                candidate_tree,
+                before,
+                locals().get("backup_result"),
+                exc,
+            )
+            if isinstance(exc, StatePreparationError):
+                raise
+            raise StatePreparationError(
+                "state preparation backup failed; recovery evidence was retained"
+            ) from exc
 
     prepared_at = datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
     try:
@@ -1404,6 +1695,14 @@ def prepare_state(
             final = inventory(connection)
         if final["inventory_contract_sha256"] != second_hash:
             raise StatePreparationError("live inventory changed after preparation")
+        if final["inventory_contract_sha256"] != expected_after["inventory_sha256"]:
+            raise StatePreparationError(
+                "live inventory does not match the sealed pending migration result"
+            )
+        if after["logical_snapshot_sha256"] != expected_after["logical_snapshot_sha256"]:
+            raise StatePreparationError(
+                "live logical snapshot does not match the sealed pending migration result"
+            )
         # Verify the backup non-mutating before sealing COMPLETE.  This is
         # recovery evidence, not an automatic overwrite of the live database.
         verified_backup = restore_verify(
@@ -1460,11 +1759,32 @@ def prepare_state(
         _atomic_json(target_receipt, validated)
         return validated
     except Exception as exc:
-        # The bundle has already been sealed and verified.  Preserve explicit
-        # recovery evidence; never guess whether an operator wants overwrite.
+        # The bundle and pending marker are sealed before mutation.  Restore
+        # the exact logical pre-state immediately when possible; if a worker
+        # was killed this same path runs on the next governed retry.  Either
+        # way retain the failure marker so recovery never silently re-baselines
+        # the database from post-migration bytes.
+        restore_error: BaseException | None = None
+        if backup_result is not None and pending is not None:
+            try:
+                restore_exact(
+                    backup_bundle,
+                    db,
+                    backup_root=backup,
+                    state_root=state,
+                    expected_source_sha=candidate_sha,
+                    expected_before=before,
+                    attempt_id=str(pending["pending_sha256"]),
+                )
+            except BaseException as recovery_exc:
+                restore_error = recovery_exc
         _seal_failure_evidence(
             state, candidate_sha, candidate_tree, before, backup_result, exc
         )
+        if restore_error is not None:
+            raise StatePreparationError(
+                "state preparation failed and exact pre-state restore could not be proven; recovery evidence was retained"
+            ) from restore_error
         if isinstance(exc, StatePreparationError):
             raise
         raise StatePreparationError(

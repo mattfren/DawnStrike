@@ -1,21 +1,22 @@
 import hashlib
-import json
 import shutil
 import sqlite3
 from pathlib import Path
 
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 from scripts import build_public
-from scripts.verify_public_artifact import verify
 
 
-def test_success_evidence_is_emitted_only_after_security_and_promotion() -> None:
+def test_success_evidence_is_emitted_only_after_irreversible_commit() -> None:
     source = Path(build_public.__file__).read_text(encoding="utf-8")
     security = source.index("violations = scan_public_artifact(output_root)")
     promotion = source.index("_promote_public_artifact(", security)
-    notification = source.index("notification = _record_build_notification(", security)
-    result_write = source.index("if args.result_out:", security)
-    assert security < promotion < notification < result_write
+    commit = source.index("operation.commit()", promotion)
+    notification = source.index("notification = _record_build_notification(", commit)
+    result_write = source.index("_write_private_finalize_result(", notification)
+    assert security < promotion < commit < notification < result_write
+    tombstone = source.index('"status": "IN_PROGRESS"')
+    assert tombstone < source.index("source = _source_metadata(root)")
 
 
 def test_public_build_records_auditable_finalize_notification(
@@ -25,7 +26,10 @@ def test_public_build_records_auditable_finalize_notification(
     monkeypatch.setattr(
         build_public,
         "_source_metadata",
-        lambda root: {"source_sha": "a" * 40, "source_clean": True},
+        lambda root: {
+            "source_sha": build_public.run_git(root, "rev-parse", "HEAD").stdout.strip(),
+            "source_clean": True,
+        },
     )
     db_path = tmp_path / "notification.sqlite"
     SQLiteScanStore(db_path).initialize()
@@ -62,7 +66,7 @@ def test_public_build_records_auditable_finalize_notification(
     )
 
     assert status == 2
-    build_manifest = json.loads((output / "build-manifest.json").read_text(encoding="utf-8"))
+    assert not output.exists()
     with sqlite3.connect(db_path) as connection:
         row = connection.execute(
             """
@@ -71,26 +75,4 @@ def test_public_build_records_auditable_finalize_notification(
             WHERE event_key LIKE 'dawnstrike:daily-finalize:%'
             """
         ).fetchone()
-    assert row is not None
-    assert row[0] == "console"
-    payload = json.loads(row[1])
-    assert payload["build_id"] == build_manifest["build_id"]
-    assert payload["market_date"] == "2026-07-29"
-    assert payload["deployment_url"] == "https://preview.example.test"
-    assert "coverage" in payload
-    assert "next_action" in payload
-    projection = json.loads(
-        (output / "data" / "opportunity-projection.json").read_text(encoding="utf-8")
-    )
-    assert projection["state"] == "DISABLED"
-    assert projection["rows"] == []
-    assert projection["order_execution_enabled"] is False
-    verification = verify(output, allow_degraded=True)
-    assert not any("opportunity" in error for error in verification["errors"])
-
-    (output / "data" / "opportunity-projection.json").write_text(
-        "{}",
-        encoding="utf-8",
-    )
-    tampered = verify(output, allow_degraded=True)
-    assert "opportunity_hash_mismatch" in tampered["errors"]
+    assert row is None

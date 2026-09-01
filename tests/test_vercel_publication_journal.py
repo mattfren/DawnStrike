@@ -12,6 +12,48 @@ import pytest
 from scripts import vercel_publication_journal as journal
 
 
+def _account_session_report(market_date: str, source_sha: str) -> dict:
+    identity = {
+        "account_id": "alphaops_v5_simulated",
+        "version_bucket": "v5",
+        "cohort": "official_forward_paper",
+        "strategy_id": "alphaops_v5",
+        "strategy_version": "dawnstrike-alphaops-v5.0.0",
+    }
+    return {
+        "schema_version": "dawnstrike.account_session_report.v1",
+        "status": "COMPLETE",
+        "market_date": market_date,
+        "code_sha": source_sha,
+        **identity,
+        "expected_session_count": 1,
+        "ledger_row_count": 1,
+        "complete_count": 1,
+        "missing_count": 0,
+        "partial_count": 0,
+        "quarantined_count": 0,
+        "unsafe_ledger_count": 0,
+        "input_hash_sha256": "2" * 64,
+        "expected_calendar_hash_sha256": "3" * 64,
+        "source_hashes_sha256": "4" * 64,
+        "research_only": True,
+        "broker_execution_enabled": False,
+        "series": [
+            {
+                "status": "COMPLETE",
+                "market_date": market_date,
+                "code_sha": source_sha,
+                **identity,
+                "expected_session_count": 1,
+                "ledger_row_count": 1,
+                "complete_count": 1,
+                "research_only": True,
+                "broker_execution_enabled": False,
+            }
+        ],
+    }
+
+
 def _competing_stale_adopter(
     lock_path: str, state_root: str, owner: str, start: object, release: object, results: object
 ) -> None:
@@ -53,6 +95,7 @@ def _pre_payload() -> dict:
         "candidate_build_sha": "c" * 64,
         "candidate_build_manifest_sha256": "8" * 64,
         "candidate_release_manifest_sha256": "a" * 64,
+        "candidate_public_artifact_root_sha256": "1" * 64,
         "candidate_manifest_sha256": "d" * 64,
         "candidate_package_manifest_sha256": "e" * 64,
         "prior_aliases": [
@@ -147,7 +190,11 @@ def test_transitions_are_adjacent_and_atomic(tmp_path: Path) -> None:
         "expected_market_date": "2026-08-31",
         "prepublication_authorization_id": authorization,
         "daily_ledger_authorization_id": authorization,
+        "account_session_report": _account_session_report("2026-08-31", "a" * 40),
     }
+    result["account_session_report_sha256"] = hashlib.sha256(
+        journal.canonical_json(result["account_session_report"])
+    ).hexdigest()
     post = dict(pre_payload)
     post.update(
         {
@@ -216,6 +263,9 @@ def _complete_payload() -> dict:
             "promoted_deployment_url": "https://promoted.example.vercel.app",
         }
     )
+    account_session_report = _account_session_report(
+        payload["candidate_market_date"], payload["candidate_source_sha"]
+    )
     payload["result_payload"] = {
         "schema_version": "dawnstrike.daily_deployment.v1",
         "preview_url": payload["candidate_preview_url"],
@@ -237,11 +287,19 @@ def _complete_payload() -> dict:
         "authorized_release_manifest_sha256": payload[
             "candidate_release_manifest_sha256"
         ],
+        "public_artifact_root_sha256": payload[
+            "candidate_public_artifact_root_sha256"
+        ],
+        "account_session_report": account_session_report,
+        "account_session_report_sha256": hashlib.sha256(
+            journal.canonical_json(account_session_report)
+        ).hexdigest(),
         "toolchain_identity_sha256": payload["toolchain_identity_sha256"],
         "build_manifest_sha256": "8" * 64,
         "allow_degraded": False,
         "promoted": True,
         "live_trading_enabled": False,
+        "broker_execution_enabled": False,
         "research_only": True,
         "status": "PRODUCTION_VERIFIED",
         "preview_artifact_proof": {
@@ -483,7 +541,10 @@ def test_publisher_uses_dated_state_history_and_byte_exact_runtime_result_copy()
         encoding="utf-8"
     )
     assert '$journalRoot = Join-Path $journalHistoryRoot $journalMarketKey' in script
-    assert 'vercel-publication/$journalMarketKey/daily-deployment-result.json' in script
+    assert (
+        'outputs/daily_finalize/$resultNamespace/$journalMarketKey/'
+        'daily-deployment-result.json'
+    ) in script
     assert "Assert-VercelPriorJournalHistoryTerminal" in script
     assert "prior_date_interrupted_rollover" in script
     assert "Prior-date terminal compensation verification" in script
@@ -1009,6 +1070,21 @@ def test_compensated_terminal_dereferences_and_binds_receipt(tmp_path: Path) -> 
     compensation_path = root / "outputs" / "compensation.json"
     compensation_path.parent.mkdir()
     compensation_path.write_bytes(journal.canonical_json(compensation))
+    compensation_hash = hashlib.sha256(compensation_path.read_bytes()).hexdigest()
+    tombstone = {
+        "schema_version": "dawnstrike.daily_deployment_compensated.v1",
+        "status": "COMPENSATED",
+        "market_date": prior["candidate_market_date"],
+        "candidate_source_sha": prior["candidate_source_sha"],
+        "candidate_source_tree": prior["candidate_source_tree"],
+        "candidate_preview_deployment_id": prior["candidate_preview_deployment_id"],
+        "compensation_sha256": compensation_hash,
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+    result_path = root / prior["result_relative_path"]
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    result_path.write_bytes(journal.canonical_json(tombstone))
     terminal = dict(prior)
     terminal.update(
         {
@@ -1016,7 +1092,11 @@ def test_compensated_terminal_dereferences_and_binds_receipt(tmp_path: Path) -> 
             "phase": "COMPENSATED",
             "sequence": 3,
             "compensation_relative_path": "outputs/compensation.json",
-            "compensation_sha256": hashlib.sha256(compensation_path.read_bytes()).hexdigest(),
+            "compensation_sha256": compensation_hash,
+            "result_payload": tombstone,
+            "production_result_sha256": hashlib.sha256(
+                journal.canonical_json(tombstone)
+            ).hexdigest(),
             "prior_journal_file_sha256": hashlib.sha256(prior_path.read_bytes()).hexdigest(),
         }
     )
@@ -1027,6 +1107,10 @@ def test_compensated_terminal_dereferences_and_binds_receipt(tmp_path: Path) -> 
         prior_path.read_bytes(), state_root=root, journal_path=prior_path
     )
     assert validated["phase"] == "COMPENSATED"
+    result_path.write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="result raw hash"):
+        journal.validate(prior_path.read_bytes(), state_root=root, journal_path=prior_path)
+    result_path.write_bytes(journal.canonical_json(tombstone))
 
     for field, hostile, message in (
         ("observed_deployment_id", "wrong-deployment", "observed deployment mismatch"),

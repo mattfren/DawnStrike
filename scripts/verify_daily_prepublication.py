@@ -9,8 +9,10 @@ Post-publication identity remains the responsibility of
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -26,7 +28,12 @@ from intraday_scanner.services.daily_run_service import (
 )
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 from scripts.publication_boundary import prepublication_authorization_id
-from scripts.verify_public_artifact import verify as verify_public_artifact
+from scripts.verify_public_artifact import (
+    public_artifact_identity,
+)
+from scripts.verify_public_artifact import (
+    verify as verify_public_artifact,
+)
 
 PREPUBLICATION_STAGES = (
     *REQUIRED_UPSTREAM_STAGES,
@@ -95,6 +102,9 @@ def verify(
         status = str((statuses.get(stage) or {}).get("status") or "")
         if status not in PREPUBLICATION_SUCCESS_STATUSES[stage]:
             errors.append(f"stage_not_acceptable:{stage}:{status or 'missing'}")
+    publication_stage = statuses.get("publication") or {}
+    if str(publication_stage.get("status") or "") != "COMPLETE":
+        errors.append("stage_not_acceptable:publication:missing_or_incomplete")
 
     root = Path(artifact_root).resolve()
     artifact = verify_public_artifact(root, expected_source_sha=normalized_sha)
@@ -110,6 +120,7 @@ def verify(
     if readiness.get("broker_execution_enabled") is not False:
         errors.append("broker_execution_must_be_disabled")
     build_manifest = _read_object(root / "build-manifest.json")
+    release_manifest = _read_object(root / "release-manifest.json")
     if build_manifest.get("market_date") != normalized_date:
         errors.append("build_market_date_mismatch")
     if build_manifest.get("source_sha") != normalized_sha:
@@ -120,12 +131,60 @@ def verify(
         errors.append("build_live_trading_enabled")
     if build_manifest.get("broker_execution_enabled") is not False:
         errors.append("build_broker_execution_must_be_disabled")
+    if runtime_root is not None:
+        expected_boundary = hashlib.sha256(
+            f"{Path(runtime_root).resolve()}\n{Path(db_path).resolve().parent}".encode()
+        ).hexdigest()
+        if release_manifest.get("deployment_boundary_sha256") != expected_boundary:
+            errors.append("release_deployment_boundary_hash_mismatch")
+    observed_schema = _read_schema_version(Path(db_path))
+    if (
+        observed_schema is None
+        or release_manifest.get("database_schema_version") != observed_schema
+    ):
+        errors.append("release_database_schema_version_mismatch")
+
+    performance_manifest = _read_object(root / "data" / "performance.json.manifest.json")
+    calendar_manifest = _read_object(root / "data" / "calendar.json.manifest.json")
+    publication_set = _read_object(root / "data" / "publication-set.json")
+    canonical_stage = statuses.get("canonical_performance") or {}
+    calendar_stage = statuses.get("calendar_build") or {}
+    readiness_stage = statuses.get("readiness") or {}
+    if canonical_stage.get("output_hash_sha256") != performance_manifest.get(
+        "input_hash_sha256"
+    ):
+        errors.append("ledger_canonical_performance_hash_mismatch")
+    if calendar_stage.get("output_hash_sha256") != calendar_manifest.get(
+        "payload_sha256"
+    ):
+        errors.append("ledger_calendar_payload_hash_mismatch")
+    publication_root = publication_set.get("publication_set_sha256")
+    if publication_stage.get("output_hash_sha256") != publication_root:
+        errors.append("ledger_publication_set_hash_mismatch")
+    if readiness_stage.get("input_hash_sha256") != publication_root or readiness_stage.get(
+        "output_hash_sha256"
+    ) != publication_root:
+        errors.append("ledger_readiness_publication_set_hash_mismatch")
+    if readiness.get("publication_set_sha256") != publication_root:
+        errors.append("readiness_publication_set_hash_mismatch")
+
+    exact_artifact_identity: dict[str, Any]
+    try:
+        exact_artifact_identity = public_artifact_identity(root)
+    except (OSError, RuntimeError) as exc:
+        exact_artifact_identity = {
+            "build_manifest_sha256": None,
+            "release_manifest_raw_sha256": None,
+            "public_artifact_root_sha256": None,
+        }
+        errors.append(f"prepublication_artifact_identity_unavailable:{type(exc).__name__}")
 
     artifact_identity = {
         "build_sha": build_manifest.get("build_sha"),
         "build_id": build_manifest.get("build_id"),
         "publication_set_sha256": build_manifest.get("publication_set_sha256"),
         "release_manifest_sha256": build_manifest.get("release_manifest_sha256"),
+        **exact_artifact_identity,
     }
     authorization_id = prepublication_authorization_id(
         expected_market_date=expected,
@@ -150,6 +209,8 @@ def verify(
         "daily_ledger_authorization_id": authorization_id,
         "required_stages": list(PREPUBLICATION_STAGES),
         "publication_stage_excluded": True,
+        "local_publication_stage_required": True,
+        "artifact_identity": artifact_identity,
         "errors": list(dict.fromkeys(errors)),
         "artifact": artifact,
         "research_only": readiness.get("research_only"),
@@ -170,6 +231,20 @@ def _git_head(root: Path) -> str:
         return run_git(root, "rev-parse", "HEAD").stdout.strip().lower()
     except (OSError, subprocess.CalledProcessError):
         return ""
+
+
+def _read_schema_version(path: Path) -> int | None:
+    try:
+        connection = sqlite3.connect(f"file:{path.resolve().as_posix()}?mode=ro", uri=True)
+        try:
+            row = connection.execute(
+                "SELECT version FROM schema_version ORDER BY version DESC LIMIT 1"
+            ).fetchone()
+        finally:
+            connection.close()
+    except sqlite3.Error:
+        return None
+    return int(row[0]) if row else None
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -205,9 +205,16 @@ def public_account_session_report(report: dict[str, Any] | None) -> dict[str, An
         "geometric_mean_daily_return_pct",
         "expected_calendar_hash_sha256",
         "source_hashes_sha256",
+        "ledger_lineage_sha256",
+        "current_session_lineage_sha256",
+        "expected_current_session_lineage_sha256",
+        "current_session_lineage_match",
         "input_hash_sha256",
         "series_count",
         "version_bucket",
+        "cohort",
+        "strategy_id",
+        "strategy_version",
         "by_version",
         "research_only",
         "broker_execution_enabled",
@@ -338,8 +345,44 @@ def _series_report(
             if row.get("source_hash_sha256")
         }
     )
+    release_sha = str(code_sha or "")
+    lineage_enforced = len(release_sha) == 40 and all(
+        character in "0123456789abcdef" for character in release_sha
+    )
+    actual_lineages = [str(row.get("lineage_sha256") or "") for row in relevant]
+    current_rows = [row for row in relevant if str(row.get("market_date") or "") == market_date]
+    current_actual_lineages = [str(row.get("lineage_sha256") or "") for row in current_rows]
+    expected_current_lineages = [
+        _hash(
+            {
+                "account_id": account_id,
+                "session_id": str(row.get("expected_session_id") or ""),
+                "market_date": str(row.get("market_date") or ""),
+                "calendar_source_hash_sha256": str(
+                    expected_ids[str(row.get("expected_session_id") or "")].get(
+                        "calendar_source_hash_sha256"
+                    )
+                    or ""
+                ),
+                "release_sha": release_sha,
+                "research_only": True,
+                "broker_execution_enabled": False,
+            }
+        )
+        for row in current_rows
+        if str(row.get("expected_session_id") or "") in expected_ids
+    ] if lineage_enforced else []
+    current_session_lineage_match = (
+        bool(current_actual_lineages)
+        and current_actual_lineages == expected_current_lineages
+        if lineage_enforced
+        else None
+    )
+    if lineage_enforced and not current_session_lineage_match and status == "COMPLETE":
+        status = "WAITING_FOR_AUTHENTICATED_FILL_TRUTH"
     input_payload = {
         "expected": expected,
+        "release_sha": str(code_sha or "unknown"),
         "ledger": [
             {
                 key: row.get(key)
@@ -349,6 +392,7 @@ def _series_report(
                     "status",
                     "input_hash_sha256",
                     "source_hash_sha256",
+                    "lineage_sha256",
                 )
             }
             for row in relevant
@@ -383,6 +427,14 @@ def _series_report(
         "geometric_mean_daily_return_pct": geometric,
         "expected_calendar_hash_sha256": _hash(expected),
         "source_hashes_sha256": _hash(source_hashes),
+        "ledger_lineage_sha256": _hash(actual_lineages) if actual_lineages else None,
+        "current_session_lineage_sha256": (
+            _hash(current_actual_lineages) if lineage_enforced else None
+        ),
+        "expected_current_session_lineage_sha256": (
+            _hash(expected_current_lineages) if lineage_enforced else None
+        ),
+        "current_session_lineage_match": current_session_lineage_match,
         "input_hash_sha256": _hash(input_payload),
         "code_sha": str(code_sha or "unknown"),
         "experiment_id": experiment_id,
@@ -419,6 +471,10 @@ def _empty_report(status: str) -> dict[str, Any]:
         "geometric_mean_daily_return_pct": None,
         "expected_calendar_hash_sha256": None,
         "source_hashes_sha256": None,
+        "ledger_lineage_sha256": None,
+        "current_session_lineage_sha256": None,
+        "expected_current_session_lineage_sha256": None,
+        "current_session_lineage_match": False,
         "input_hash_sha256": _hash({"status": status}),
         "series": [],
         "by_version": {},

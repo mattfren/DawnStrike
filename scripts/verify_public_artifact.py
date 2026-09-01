@@ -53,6 +53,50 @@ V6_TOP_LEVEL_KEYS = frozenset(
     }
 )
 REQUIRED_FILES = tuple(sorted(_public_inventory.PUBLIC_ARTIFACT_FILES))
+ARTIFACT_ROOT_FILES = tuple(name for name in REQUIRED_FILES if name != "build-manifest.json")
+RELEASE_MANIFEST_KEYS = frozenset(
+    {
+        "schema_version", "source_sha", "build_sha", "v6_learning_sha256",
+        "deployment_boundary", "deployment_boundary_sha256",
+        "database_schema_version", "data_watermark", "strategy_versions",
+        "scheduler_version", "artifact_hashes", "created_at", "research_only",
+        "broker_execution_enabled", "release_manifest_sha256",
+    }
+)
+EXPECTED_STRATEGY_VERSIONS = {
+    "alphaops_v5": "dawnstrike-alphaops-v5.0.0",
+    "alphaops_v6_shadow": "dawnstrike-alphaops-v6-shadow",
+    "paperops": "immutable-strategy-semantics-manifest",
+}
+OFFICIAL_ACCOUNT_SESSION_IDENTITY = {
+    "account_id": "alphaops_v5_simulated",
+    "version_bucket": "v5",
+    "cohort": "official_forward_paper",
+    "strategy_id": "alphaops_v5",
+    "strategy_version": "dawnstrike-alphaops-v5.0.0",
+}
+BUILD_MANIFEST_KEYS = frozenset(
+    {
+        "schema_version",
+        "source_sha",
+        "source_clean",
+        "build_id",
+        "build_sha",
+        "data_hash_sha256",
+        "publication_set_sha256",
+        "opportunity_projection_sha256",
+        "v6_learning_sha256",
+        "release_manifest_sha256",
+        "market_date",
+        "generated_at",
+        "status",
+        "readiness",
+        "file_hashes",
+        "research_only",
+        "live_trading_enabled",
+        "broker_execution_enabled",
+    }
+)
 FORBIDDEN_FILE_PARTS = (".sqlite", ".db", "telegram", "scanner", "ui.py")
 ABSOLUTE_PATH_PATTERN = re.compile(
     r"(?:[A-Za-z]:(?:\\|\\\\)(?:Users|r)(?:\\|\\\\)|/(?:Users|home|var|opt)/)",
@@ -185,6 +229,57 @@ def verify(
             != scenarios_manifest.get("payload_sha256")
         ):
             errors.append("publication_set_scenario_hash_mismatch")
+        if publication_set_path.is_file() and publication_set.get(
+            "scenario_manifest_sha256"
+        ) != hashlib.sha256(scenarios_manifest_path.read_bytes()).hexdigest():
+            errors.append("publication_set_scenario_manifest_hash_mismatch")
+
+    readiness_lineage = {}
+    try:
+        candidate_readiness = json.loads((root / "readiness.json").read_bytes())
+        if isinstance(candidate_readiness, dict):
+            readiness_lineage = candidate_readiness
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        pass
+    account_session_report = readiness_lineage.get("account_session_report")
+    account_session_report = (
+        account_session_report if isinstance(account_session_report, dict) else {}
+    )
+    expected_publication_set_hash = _publication_set_sha256(
+        manifest,
+        calendar_manifest,
+        scenarios_manifest if scenarios_manifest else None,
+        account_session_report,
+    )
+    if publication_set.get("publication_set_sha256") != expected_publication_set_hash:
+        errors.append("publication_set_formula_mismatch")
+    if publication_set.get("market_date") != manifest.get("market_date"):
+        errors.append("publication_set_market_date_mismatch")
+    if publication_set.get("canonical_input_hash_sha256") != manifest.get(
+        "input_hash_sha256"
+    ):
+        errors.append("publication_set_canonical_hash_mismatch")
+    if publication_set.get("performance_manifest_id") != manifest.get("manifest_id"):
+        errors.append("publication_set_performance_manifest_id_mismatch")
+    if publication_set.get("calendar_manifest_id") != calendar_manifest.get("manifest_id"):
+        errors.append("publication_set_calendar_manifest_id_mismatch")
+    if publication_set.get("research_only") is not True:
+        errors.append("publication_set_research_only_missing")
+    if publication_set.get("live_trading_enabled") is not False:
+        errors.append("publication_set_live_trading_enabled")
+    for field in (
+        "status",
+        "input_hash_sha256",
+        "expected_calendar_hash_sha256",
+        "code_sha",
+        "ledger_lineage_sha256",
+        "current_session_lineage_sha256",
+        "expected_current_session_lineage_sha256",
+        "current_session_lineage_match",
+        *OFFICIAL_ACCOUNT_SESSION_IDENTITY,
+    ):
+        if publication_set.get(f"account_session_{field}") != account_session_report.get(field):
+            errors.append(f"publication_set_account_session_{field}_mismatch")
     if opportunity_path.is_file():
         opportunity_bytes = opportunity_path.read_bytes()
         opportunity = json.loads(opportunity_bytes)
@@ -250,6 +345,16 @@ def verify(
                 errors.extend(_v6_contract_failures(parsed_v6))
     if build_manifest_path.is_file():
         build_manifest = json.loads(build_manifest_path.read_text(encoding="utf-8"))
+        if set(build_manifest) != BUILD_MANIFEST_KEYS:
+            errors.append("build_manifest_keys_invalid")
+        if build_manifest.get("schema_version") != "dawnstrike.public_build.v1":
+            errors.append("build_manifest_schema_invalid")
+        if build_manifest.get("research_only") is not True:
+            errors.append("build_manifest_research_only_invalid")
+        if build_manifest.get("live_trading_enabled") is not False:
+            errors.append("build_manifest_live_trading_enabled_invalid")
+        if build_manifest.get("broker_execution_enabled") is not False:
+            errors.append("build_manifest_broker_execution_enabled_invalid")
         if not build_manifest.get("source_sha"):
             errors.append("source_sha_missing")
         if expected_source_sha and build_manifest.get("source_sha") != expected_source_sha:
@@ -303,12 +408,50 @@ def verify(
             release_manifest = {}
             errors.append("release_manifest_unreadable")
         if isinstance(release_manifest, dict):
+            if set(release_manifest) != RELEASE_MANIFEST_KEYS:
+                errors.append("release_manifest_keys_invalid")
+            if release_manifest.get("schema_version") != "dawnstrike.release_manifest.v1":
+                errors.append("release_manifest_schema_invalid")
+            if release_manifest.get("source_sha") != build_manifest.get("source_sha"):
+                errors.append("release_source_sha_mismatch")
             if release_manifest.get("build_sha") != build_manifest.get("build_sha"):
                 errors.append("release_build_sha_mismatch")
             if release_manifest.get("v6_learning_sha256") != v6_hash:
                 errors.append("release_v6_learning_hash_mismatch")
             if not is_lower_hex64(release_manifest.get("v6_learning_sha256")):
                 errors.append("release_v6_learning_sha256_invalid")
+            if release_manifest.get("deployment_boundary") != (
+                "configured_runtime_and_durable_state"
+            ) or not is_lower_hex64(release_manifest.get("deployment_boundary_sha256")):
+                errors.append("release_deployment_boundary_invalid")
+            schema_version = release_manifest.get("database_schema_version")
+            if isinstance(schema_version, bool) or not isinstance(schema_version, int) or (
+                schema_version < 1
+            ):
+                errors.append("release_database_schema_version_invalid")
+            if release_manifest.get("data_watermark") != build_manifest.get("market_date"):
+                errors.append("release_data_watermark_mismatch")
+            if release_manifest.get("strategy_versions") != EXPECTED_STRATEGY_VERSIONS:
+                errors.append("release_strategy_versions_invalid")
+            if release_manifest.get("scheduler_version") != "dawnstrike-scheduler-v6":
+                errors.append("release_scheduler_version_invalid")
+            if release_manifest.get("research_only") is not True:
+                errors.append("release_research_only_missing")
+            if release_manifest.get("broker_execution_enabled") is not False:
+                errors.append("release_broker_execution_enabled")
+            release_unsigned = dict(release_manifest)
+            recorded_release_self_hash = release_unsigned.pop(
+                "release_manifest_sha256", None
+            )
+            expected_release_self_hash = hashlib.sha256(
+                json.dumps(
+                    release_unsigned, sort_keys=True, separators=(",", ":")
+                ).encode()
+            ).hexdigest()
+            if recorded_release_self_hash != expected_release_self_hash:
+                errors.append("release_manifest_self_hash_mismatch")
+            if build_manifest.get("release_manifest_sha256") != recorded_release_self_hash:
+                errors.append("build_release_manifest_hash_mismatch")
         recorded_hashes = build_manifest.get("file_hashes")
         if not isinstance(recorded_hashes, dict):
             errors.append("file_hashes_missing")
@@ -326,6 +469,19 @@ def verify(
                     errors.append(f"file_hash_path_missing:{name}")
                 elif hashlib.sha256(path.read_bytes()).hexdigest() != expected_hash:
                     errors.append(f"file_hash_mismatch:{name}")
+            release_hashes = release_manifest.get("artifact_hashes")
+            expected_release_names = set(REQUIRED_FILES) - {
+                "build-manifest.json",
+                "release-manifest.json",
+            }
+            if not isinstance(release_hashes, dict):
+                errors.append("release_artifact_hashes_missing")
+            elif set(release_hashes) != expected_release_names:
+                errors.append("release_artifact_hash_inventory_mismatch")
+            else:
+                for name in sorted(expected_release_names):
+                    if release_hashes.get(name) != recorded_hashes.get(name):
+                        errors.append(f"release_artifact_hash_mismatch:{name}")
 
     readiness_path = root / "readiness.json"
     readiness: dict[str, object] = {}
@@ -359,6 +515,21 @@ def verify(
                 errors.append("readiness_research_only_missing")
             if readiness.get("broker_execution_enabled") is not False:
                 errors.append("readiness_broker_execution_enabled")
+        errors.extend(
+            _account_session_report_failures(
+                readiness.get("account_session_report"),
+                market_date=str(build_manifest.get("market_date") or ""),
+                source_sha=str(build_manifest.get("source_sha") or ""),
+            )
+        )
+        errors.extend(
+            _account_session_reconciliation_failures(
+                readiness.get("account_session_reconciliation"),
+                report=readiness.get("account_session_report"),
+                market_date=str(build_manifest.get("market_date") or ""),
+                source_sha=str(build_manifest.get("source_sha") or ""),
+            )
+        )
 
     try:
         _public_inventory.assert_exact_public_inventory(root)
@@ -390,7 +561,86 @@ def verify(
             else "complete_or_no_trade"
         ),
     }
+    try:
+        result.update(public_artifact_identity(root))
+    except (OSError, _public_inventory.PublicArtifactInventoryError) as exc:
+        errors.append(f"public_artifact_identity_unavailable:{exc}")
+        result["status"] = "FAIL"
     return result
+
+
+def public_artifact_identity(root: Path) -> dict[str, str]:
+    """Return the non-circular exact identity of every public artifact byte."""
+
+    root = Path(root)
+    _public_inventory.assert_exact_public_inventory(root)
+    artifact_hashes = {
+        name: hashlib.sha256((root / name).read_bytes()).hexdigest()
+        for name in ARTIFACT_ROOT_FILES
+    }
+    artifact_root = hashlib.sha256(
+        json.dumps(
+            artifact_hashes, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        "build_manifest_sha256": hashlib.sha256(
+            (root / "build-manifest.json").read_bytes()
+        ).hexdigest(),
+        "release_manifest_raw_sha256": artifact_hashes["release-manifest.json"],
+        "public_artifact_root_sha256": artifact_root,
+    }
+
+
+def _publication_set_sha256(
+    performance_manifest: dict[str, object],
+    calendar_manifest: dict[str, object],
+    scenario_manifest: dict[str, object] | None,
+    account_session_report: dict[str, object] | None,
+) -> str:
+    """Independently recompute the producer's exact publication-set formula."""
+
+    payload: dict[str, object] = {
+        "market_date": performance_manifest.get("market_date"),
+        "canonical_input_hash_sha256": performance_manifest.get("input_hash_sha256"),
+        "performance_payload_sha256": performance_manifest.get("payload_sha256"),
+        "calendar_payload_sha256": calendar_manifest.get("payload_sha256"),
+        "performance_manifest_id": performance_manifest.get("manifest_id"),
+        "calendar_manifest_id": calendar_manifest.get("manifest_id"),
+    }
+    if scenario_manifest is not None:
+        payload["scenario_payload_sha256"] = scenario_manifest.get("payload_sha256")
+        payload["scenario_schema_version"] = scenario_manifest.get("schema_version")
+    report = account_session_report if isinstance(account_session_report, dict) else {}
+    payload.update(
+        {
+            "account_session_status": report.get("status"),
+            "account_session_input_hash_sha256": report.get("input_hash_sha256"),
+            "account_session_expected_calendar_hash_sha256": report.get(
+                "expected_calendar_hash_sha256"
+            ),
+            "account_session_code_sha": report.get("code_sha"),
+            **{
+                f"account_session_{field}": report.get(field)
+                for field in OFFICIAL_ACCOUNT_SESSION_IDENTITY
+            },
+            "account_session_ledger_lineage_sha256": report.get(
+                "ledger_lineage_sha256"
+            ),
+            "account_session_current_session_lineage_sha256": report.get(
+                "current_session_lineage_sha256"
+            ),
+            "account_session_expected_current_session_lineage_sha256": report.get(
+                "expected_current_session_lineage_sha256"
+            ),
+            "account_session_current_session_lineage_match": report.get(
+                "current_session_lineage_match"
+            ),
+        }
+    )
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def _build_sha(
@@ -475,6 +725,118 @@ def _v6_contract_failures(payload: dict[str, object]) -> list[str]:
         }:
             failures.append("v6_performance_status_invalid")
     return failures
+
+
+def _account_session_report_failures(
+    value: object, *, market_date: str, source_sha: str
+) -> list[str]:
+    if not isinstance(value, dict):
+        return ["account_session_report_missing"]
+    failures: list[str] = []
+    expected = value.get("expected_session_count")
+    if (
+        value.get("schema_version") != "dawnstrike.account_session_report.v1"
+        or value.get("status") != "COMPLETE"
+        or value.get("market_date") != market_date
+        or value.get("code_sha") != source_sha
+        or value.get("research_only") is not True
+        or value.get("broker_execution_enabled") is not False
+        or value.get("unsafe_ledger_count") != 0
+        or any(
+            value.get(field) != expected
+            for field, expected in OFFICIAL_ACCOUNT_SESSION_IDENTITY.items()
+        )
+    ):
+        failures.append("account_session_report_identity_or_status_invalid")
+    if (
+        isinstance(expected, bool)
+        or not isinstance(expected, int)
+        or expected < 1
+        or value.get("ledger_row_count") != expected
+        or value.get("complete_count") != expected
+        or value.get("missing_count") != 0
+        or value.get("partial_count") != 0
+        or value.get("quarantined_count") != 0
+    ):
+        failures.append("account_session_report_coverage_incomplete")
+    series = value.get("series")
+    if not isinstance(series, list) or len(series) != 1 or not isinstance(series[0], dict):
+        failures.append("account_session_report_series_ambiguous")
+    else:
+        item = series[0]
+        if (
+            item.get("status") != "COMPLETE"
+            or item.get("market_date") != market_date
+            or item.get("code_sha") != source_sha
+            or item.get("expected_session_count") != expected
+            or item.get("ledger_row_count") != expected
+            or item.get("complete_count") != expected
+            or item.get("research_only") is not True
+            or item.get("broker_execution_enabled") is not False
+            or any(
+                item.get(field) != expected
+                for field, expected in OFFICIAL_ACCOUNT_SESSION_IDENTITY.items()
+            )
+        ):
+            failures.append("account_session_report_series_invalid")
+    for field in (
+        "input_hash_sha256",
+        "expected_calendar_hash_sha256",
+        "source_hashes_sha256",
+        "ledger_lineage_sha256",
+        "current_session_lineage_sha256",
+        "expected_current_session_lineage_sha256",
+    ):
+        if not is_lower_hex64(value.get(field)):
+            failures.append(f"account_session_report_{field}_invalid")
+    if (
+        value.get("current_session_lineage_match") is not True
+        or value.get("current_session_lineage_sha256")
+        != value.get("expected_current_session_lineage_sha256")
+    ):
+        failures.append("account_session_report_lineage_invalid")
+    if isinstance(series, list) and len(series) == 1 and isinstance(series[0], dict):
+        item = series[0]
+        if (
+            item.get("current_session_lineage_match") is not True
+            or item.get("ledger_lineage_sha256") != value.get("ledger_lineage_sha256")
+            or item.get("current_session_lineage_sha256")
+            != value.get("current_session_lineage_sha256")
+            or item.get("expected_current_session_lineage_sha256")
+            != value.get("expected_current_session_lineage_sha256")
+        ):
+            failures.append("account_session_report_series_lineage_invalid")
+    return failures
+
+
+def _account_session_reconciliation_failures(
+    value: object,
+    *,
+    report: object,
+    market_date: str,
+    source_sha: str,
+) -> list[str]:
+    if not isinstance(value, dict):
+        return ["account_session_reconciliation_missing"]
+    report_value = report if isinstance(report, dict) else {}
+    lineage = value.get("ledger_lineage_sha256")
+    lineage_list_hash = hashlib.sha256(
+        json.dumps([lineage], sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    if (
+        value.get("schema_version") != "dawnstrike.daily_account_reconciliation.v1"
+        or value.get("status") != "COMPLETE"
+        or value.get("market_date") != market_date
+        or value.get("release_sha") != source_sha
+        or value.get("account_id") != OFFICIAL_ACCOUNT_SESSION_IDENTITY["account_id"]
+        or value.get("account_status") not in {"AUTHENTICATED_NO_TRADE", "TRADE"}
+        or value.get("research_only") is not True
+        or value.get("broker_execution_enabled") is not False
+        or not is_lower_hex64(lineage)
+        or lineage_list_hash != report_value.get("current_session_lineage_sha256")
+    ):
+        return ["account_session_reconciliation_invalid"]
+    return []
 
 
 def _v6_safety_flag_failures(value: object, path: str = "v6") -> list[str]:

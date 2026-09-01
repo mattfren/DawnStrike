@@ -18,6 +18,30 @@ from intraday_scanner.errors import StorageError
 from intraday_scanner.services.capture_operations import CapturePlan, CapturePlanError, plan_as_dict
 from intraday_scanner.storage.intraday_evidence_store import IntradayEvidenceStore
 
+_APPROVED_PYTHON = Path(
+    r"C:\Users\MattFields\AppData\Local\Programs\Python\Python313\python.exe"
+)
+_APPROVED_PYTHON_SHA256 = "ef8f51028ac5329641985112f8efb1c2d4c47c86b8011ddf7e6fae21e2b4e5a1"
+
+
+def _approved_child_python() -> Path:
+    executable = Path(sys.executable).resolve(strict=True)
+    if os.name != "nt":
+        return executable
+    if str(executable).casefold() != str(_APPROVED_PYTHON).casefold():
+        raise RuntimeError("capture operation is not running under the approved Python interpreter")
+    digest = hashlib.sha256(executable.read_bytes()).hexdigest()
+    if digest != _APPROVED_PYTHON_SHA256:
+        raise RuntimeError("approved capture-operation Python interpreter hash changed")
+    return executable
+
+
+def _isolated_child_environment() -> dict[str, str]:
+    blocked = {"PYTHONHOME", "PYTHONPATH", "PYTHONSTARTUP"}
+    env = {key: value for key, value in os.environ.items() if key.upper() not in blocked}
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    return env
+
 
 def main() -> int:
     args = _parser().parse_args()
@@ -74,8 +98,12 @@ def main() -> int:
         + "\n",
         encoding="utf-8",
     )
+    child_python = _approved_child_python()
     command = [
-        sys.executable,
+        str(child_python),
+        "-I",
+        "-B",
+        "-u",
         str(Path(__file__).with_name("capture_intraday_evidence.py")),
         "--provider",
         prepared["provider"],
@@ -111,7 +139,7 @@ def main() -> int:
         "--include-quotes",
         "--include-corporate-actions",
     ]
-    env = os.environ.copy()
+    env = _isolated_child_environment()
     env["ALPACA_DATA_FEED"] = "sip"
     env["DAWNSTRIKE_INTRADAY_MAX_PAGES"] = str(plan.max_pages)
     env["INTRADAY_REQUEST_RETRIES"] = str(plan.retries)

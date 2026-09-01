@@ -226,6 +226,57 @@ def test_trade_row_reports_compound_only_for_complete_window(tmp_path):
     assert report["geometric_mean_daily_return_pct"] is not None
 
 
+def test_release_lineage_binds_current_session_without_rewriting_history(tmp_path):
+    path = tmp_path / "report.sqlite"
+    account_id = "paper-total"
+    historical = _session("2026-08-27")
+    current = _session("2026-08-28")
+    _seed_expected(path, [historical, current])
+    account = _account(account_id)
+    service = CanonicalAccountLedger(path, account_id=account_id)
+
+    def lineage(day: str, release_sha: str) -> str:
+        return hashlib.sha256(
+            canonical_json(
+                {
+                    "account_id": account_id,
+                    "session_id": f"XNYS:{day}:regular",
+                    "market_date": day,
+                    "calendar_source_hash_sha256": "calendar-hash",
+                    "release_sha": release_sha,
+                    "research_only": True,
+                    "broker_execution_enabled": False,
+                }
+            ).encode("utf-8")
+        ).hexdigest()
+
+    service.build_and_persist(
+        account=account,
+        expected_sessions=[historical],
+        no_trade_receipts=[_no_trade_receipt(path, "nt-27", "2026-08-27")],
+        lineage_sha256=lineage("2026-08-27", "a" * 40),
+    )
+    service.build_and_persist(
+        account=account,
+        expected_sessions=[current],
+        no_trade_receipts=[_no_trade_receipt(path, "nt-28", "2026-08-28")],
+        lineage_sha256=lineage("2026-08-28", "b" * 40),
+    )
+
+    report = build_account_session_report(
+        path,
+        market_date="2026-08-28",
+        account_id=account_id,
+        code_sha="b" * 40,
+    )
+    assert report["status"] == "COMPLETE"
+    assert report["complete_count"] == 2
+    assert report["current_session_lineage_match"] is True
+    assert report["current_session_lineage_sha256"] == (
+        report["expected_current_session_lineage_sha256"]
+    )
+
+
 def test_partial_fill_truth_blocks_compound_metric(tmp_path):
     path = tmp_path / "report.sqlite"
     session = _session("2026-08-28")
@@ -271,6 +322,15 @@ def test_v5_and_v6_are_not_combined(tmp_path):
     public = public_account_session_report(report)
     assert public and public["research_only"] is True
     assert "raw" not in str(public).lower()
+    selected = build_account_session_report(
+        path, market_date="2026-08-28", account_id="v5"
+    )
+    assert selected["status"] == "COMPLETE"
+    assert selected["account_id"] == "v5"
+    assert selected["version_bucket"] == "v5"
+    assert selected["cohort"] == "official_forward_paper"
+    assert selected["strategy_id"] == "official-v5"
+    assert len(selected["series"]) == 1
 
 
 def test_missing_return_cannot_leave_report_marked_complete(tmp_path: Path) -> None:

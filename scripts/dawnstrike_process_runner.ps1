@@ -8,6 +8,9 @@ Set-StrictMode -Version Latest
 if (-not ("Dawnstrike.Native.JobProcessRunner" -as [type])) {
     . (Join-Path $PSScriptRoot "dawnstrike_job_process.ps1")
 }
+if (-not (Get-Command Get-DawnstrikeApprovedLockInterpreter -ErrorAction SilentlyContinue)) {
+    . (Join-Path $PSScriptRoot "runtime_activation_lock.ps1")
+}
 
 function Invoke-DawnstrikeNativeProcess {
     [CmdletBinding()]
@@ -17,7 +20,10 @@ function Invoke-DawnstrikeNativeProcess {
         [Parameter(Mandatory = $true)][string]$LogRoot,
         [Parameter(Mandatory = $true)][string]$LogName,
         [Parameter()][ValidateRange(0, 86400)][int]$TimeoutSeconds = 0,
-        [Parameter()][ValidateRange(1, 60)][int]$OutputDrainTimeoutSeconds = 5
+        [Parameter()][ValidateRange(1, 60)][int]$OutputDrainTimeoutSeconds = 5,
+        [Parameter()][string]$WorkingDirectory = (Get-Location).Path,
+        [Parameter()][hashtable]$EnvironmentOverrides = @{},
+        [Parameter()][switch]$NoSite
     )
 
     $startedAt = (Get-Date).ToUniversalTime()
@@ -43,6 +49,11 @@ function Invoke-DawnstrikeNativeProcess {
     $timedOut = $false
     $activeJobMembersAfterCleanup = $null
     $previousErrorActionPreference = $ErrorActionPreference
+    $effectiveArguments = @($ArgumentList)
+    $effectiveEnvironmentOverrides = @{}
+    $resolved = $null
+    $resolvedExecutableSha256 = $null
+    $pythonIsolated = $false
 
     try {
         # Windows PowerShell promotes native stderr records to PowerShell error
@@ -51,7 +62,44 @@ function Invoke-DawnstrikeNativeProcess {
         # is falsely recorded as a process-start failure with exit code 127.
         # Resolve the executable while errors still terminate, then allow the
         # native process to complete and trust its real exit code.
-        $resolved = (Get-Command $FilePath -ErrorAction Stop).Path
+        $requestedLeaf = [System.IO.Path]::GetFileName($FilePath).ToLowerInvariant()
+        if ($requestedLeaf -in @("py.exe", "python.exe")) {
+            $approved = Get-DawnstrikeApprovedLockInterpreter
+            $resolved = [string]$approved.path
+            $resolvedExecutableSha256 = [string]$approved.sha256
+            if ($effectiveArguments.Count -gt 0 -and $effectiveArguments[0] -eq "-3.13") {
+                $effectiveArguments = @($effectiveArguments | Select-Object -Skip 1)
+            }
+            if ($effectiveArguments.Count -lt 2 -or
+                $effectiveArguments[0] -ne "-I" -or $effectiveArguments[1] -ne "-B") {
+                $effectiveArguments = @("-I", "-B") + $effectiveArguments
+            }
+            if ($NoSite -and ($effectiveArguments.Count -lt 3 -or
+                $effectiveArguments[2] -ne "-S")) {
+                $effectiveArguments = @($effectiveArguments[0..1]) + @("-S") +
+                    @($effectiveArguments | Select-Object -Skip 2)
+            }
+            $effectiveEnvironmentOverrides = @{
+                PYTHONHOME = $null
+                PYTHONPATH = $null
+                PYTHONSTARTUP = $null
+                PYTHONDONTWRITEBYTECODE = "1"
+            }
+            $pythonIsolated = $true
+        }
+        elseif ($requestedLeaf -in @("git", "git.exe")) {
+            $approved = Get-DawnstrikeApprovedGit
+            $resolved = [string]$approved.path
+            $resolvedExecutableSha256 = [string]$approved.sha256
+        }
+        else {
+            $resolved = (Get-Command $FilePath -ErrorAction Stop).Path
+            Assert-DawnstrikeSharedLockNoReparse $resolved "Governed native executable"
+            $resolvedExecutableSha256 = Get-DawnstrikeRuntimeLockHash $resolved
+        }
+        foreach ($key in $EnvironmentOverrides.Keys) {
+            $effectiveEnvironmentOverrides[[string]$key] = $EnvironmentOverrides[$key]
+        }
         $ErrorActionPreference = "Continue"
         # Native runner owns the complete process tree and enforces the
         # deadline.  Do not use PowerShell redirection/pipelines here: those
@@ -60,11 +108,12 @@ function Invoke-DawnstrikeNativeProcess {
         # the Job Object result now supplies the authoritative native code.
         $result = Invoke-DawnstrikeJobProcess `
             -FilePath $resolved `
-            -ArgumentList $ArgumentList `
-            -WorkingDirectory (Get-Location).Path `
+            -ArgumentList $effectiveArguments `
+            -WorkingDirectory $WorkingDirectory `
             -Label $LogName `
             -TimeoutSeconds $TimeoutSeconds `
-            -OutputDrainTimeoutSeconds $OutputDrainTimeoutSeconds
+            -OutputDrainTimeoutSeconds $OutputDrainTimeoutSeconds `
+            -EnvironmentOverrides $effectiveEnvironmentOverrides
         $exitCode = [int]$result.ExitCode
         $activeJobMembersAfterCleanup = [int]$result.ActiveJobMembersAfterCleanup
         [System.IO.File]::WriteAllText($stdoutPath, [string]$result.Stdout, [System.Text.UTF8Encoding]::new($false))
@@ -101,7 +150,10 @@ function Invoke-DawnstrikeNativeProcess {
     $receipt = [ordered]@{
         schema_version = "dawnstrike.native_process_receipt.v1"
         process_name = [IO.Path]::GetFileName($FilePath)
-        argument_count = @($ArgumentList).Count
+        argument_count = @($effectiveArguments).Count
+        resolved_executable_path = $resolved
+        resolved_executable_sha256 = $resolvedExecutableSha256
+        python_isolated = $pythonIsolated
         started_at = $startedAt.ToString("o")
         completed_at = $completedAt.ToString("o")
         duration_ms = [math]::Round(($completedAt - $startedAt).TotalMilliseconds)

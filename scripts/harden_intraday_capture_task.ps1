@@ -16,6 +16,7 @@ param(
 $ErrorActionPreference = "Stop"
 $script:HardeningTaskName = "Dawnstrike Delayed SIP Capture"
 . (Join-Path $PSScriptRoot "capture_task_safety.ps1")
+. (Join-Path $PSScriptRoot "runtime_activation_lock.ps1")
 $hardeningRuntimeRoot = $RuntimeRoot
 $hardeningStateRoot = $StateRoot
 $hardeningCandidateSha = $CandidateSha
@@ -123,7 +124,7 @@ function Assert-HardeningInterpreterIdentity {
     if ($sha -ne [string]$Declaration.capture_interpreter_sha256) { throw "Capture interpreter hash does not match the declaration." }
     $signature = Get-AuthenticodeSignature -LiteralPath $path -ErrorAction Stop
     if ([string]$signature.Status -ne "Valid" -or $null -eq $signature.SignerCertificate -or [string]$signature.SignerCertificate.Subject -ne [string]$Declaration.capture_interpreter_signer_subject -or [string]$signature.SignerCertificate.Thumbprint -ne [string]$Declaration.capture_interpreter_signer_thumbprint) { throw "Capture interpreter Authenticode identity is not approved." }
-    $version = @(& $path -I -c "import sys; print('.'.join(map(str, sys.version_info[:3])))" 2>$null)
+    $version = @(& $path -I -B -c "import sys; print('.'.join(map(str, sys.version_info[:3])))" 2>$null)
     if ($LASTEXITCODE -ne 0 -or $version.Count -ne 1 -or [string]$version[0] -ne [string]$Declaration.capture_interpreter_version) { throw "Capture interpreter version does not match the declaration." }
     return [pscustomobject]@{ path = $path; sha256 = $sha; version = [string]$Declaration.capture_interpreter_version; signer_subject = [string]$Declaration.capture_interpreter_signer_subject; signer_thumbprint = [string]$Declaration.capture_interpreter_signer_thumbprint }
 }
@@ -158,12 +159,14 @@ function Assert-HardeningCandidateIdentity {
     param(
         [Parameter(Mandatory = $true)][string]$ExpectedSha,
         [Parameter(Mandatory = $true)][string]$ExpectedTree,
-        [switch]$RefreshOrigin
+        [switch]$RefreshOrigin,
+        [switch]$DeferOriginMainAdmission,
+        [switch]$AllowAdvancedOriginRecovery
     )
     $repoRoot = Split-Path -Parent $PSScriptRoot
     $gitDir = Join-Path $repoRoot ".git"
     if (-not (Test-Path -LiteralPath $gitDir -PathType Container)) { throw "Hardening requires a self-contained candidate checkout." }
-    $git = @(Get-Command git.exe -CommandType Application -ErrorAction Stop)[0].Source
+    $git = (Get-DawnstrikeApprovedGit).path
     if ($RefreshOrigin) {
         & $git -C $repoRoot fetch --quiet --prune origin "+refs/heads/main:refs/remotes/origin/main" 2>$null
         if ($LASTEXITCODE -ne 0) { throw "Candidate origin/main refresh failed." }
@@ -176,7 +179,13 @@ function Assert-HardeningCandidateIdentity {
     }
     if ((Read-Git @("rev-parse", "HEAD")) -cne $ExpectedSha) { throw "Candidate HEAD is not the requested SHA." }
     if ((Read-Git @("rev-parse", "HEAD^{tree}")) -cne $ExpectedTree) { throw "Candidate tree is not the requested tree." }
-    if ((Read-Git @("rev-parse", "refs/remotes/origin/main")) -cne $ExpectedSha) { throw "Candidate is not the exact clean origin/main SHA." }
+    $script:HardeningRemoteMain = (Read-Git @("rev-parse", "refs/remotes/origin/main"))
+    if ($script:HardeningRemoteMain -cne $ExpectedSha) {
+        if (-not $DeferOriginMainAdmission -and -not $AllowAdvancedOriginRecovery) {
+            throw "Candidate is not current origin/main and no recovery admission was supplied."
+        }
+        $null = Read-Git @("merge-base", "--is-ancestor", $ExpectedSha, "refs/remotes/origin/main")
+    }
     $script:HardeningOriginUrl = (Read-Git @("remote", "get-url", "origin"))
     if (
         [string]::IsNullOrWhiteSpace($script:HardeningOriginUrl) -or
@@ -490,7 +499,7 @@ function Set-HardeningTaskDefinition {
 function Get-HardeningRuntimeIdentity {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string]$Root)
-    $git = @(Get-Command git.exe -CommandType Application -ErrorAction Stop)[0].Source
+    $git = (Get-DawnstrikeApprovedGit).path
     $read = { param([string[]]$Arguments) $value = & $git -C $Root @Arguments 2>$null; if ($LASTEXITCODE -ne 0) { throw "Live runtime identity command failed." }; return ([string]($value -join "")).Trim() }
     if (-not (Test-Path -LiteralPath (Join-Path $Root ".git") -PathType Container)) { throw "Live RuntimeRoot must be a self-contained Git checkout." }
     $head = & $read @("rev-parse", "HEAD")
@@ -502,7 +511,92 @@ function Get-HardeningRuntimeIdentity {
     $runnerWorktreeBlob = & $read @("hash-object", "--", "scripts/run_daily_intraday_capture.py")
     $runnerHeadBlob = & $read @("rev-parse", ("HEAD:scripts/run_daily_intraday_capture.py"))
     if ($runnerWorktreeBlob -notmatch '^[0-9a-fA-F]{40}$' -or $runnerHeadBlob -notmatch '^[0-9a-fA-F]{40}$' -or $runnerWorktreeBlob -ne $runnerHeadBlob) { throw "Live RuntimeRoot runner bytes do not match the exact HEAD blob." }
-    return [pscustomobject]@{ head = $head; tree = $tree; origin = $origin; origin_sha256 = Get-HardeningSha256Text $origin; runner_blob = $runnerHeadBlob; runner_sha256 = Get-HardeningSha256File $runner }
+    return [pscustomobject]@{ root = $Root; head = $head; tree = $tree; origin = $origin; origin_sha256 = Get-HardeningSha256Text $origin; runner_blob = $runnerHeadBlob; runner_sha256 = Get-HardeningSha256File $runner }
+}
+
+function Assert-HardeningCompleteTerminal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][object]$Journal,
+        [Parameter(Mandatory = $true)][string]$ReceiptPath,
+        [Parameter(Mandatory = $true)][string]$CandidateSha,
+        [Parameter(Mandatory = $true)][string]$CandidateTree,
+        [Parameter(Mandatory = $true)][object]$RuntimeIdentity,
+        [Parameter(Mandatory = $true)][string]$ContractScript,
+        [Parameter(Mandatory = $true)][object]$InterpreterIdentity
+    )
+    if ([string]$Journal.payload.phase -ne "COMPLETE") {
+        throw "Hardening terminal helper requires a COMPLETE journal."
+    }
+    if (-not (Test-Path -LiteralPath $ReceiptPath -PathType Leaf)) {
+        throw "Complete hardening journal has no exact complete receipt."
+    }
+    $receiptHash = Get-HardeningSha256File $ReceiptPath
+    if ([string]$Journal.payload.complete_receipt_sha256 -notmatch '^[0-9a-f]{64}$' -or
+        [string]$Journal.payload.complete_receipt_sha256 -ne $receiptHash) {
+        throw "Complete hardening journal is not bound to the exact receipt bytes."
+    }
+    $verification = & $InterpreterIdentity.path -I -B $ContractScript verify-hardening `
+        --receipt $ReceiptPath --candidate-sha $CandidateSha --candidate-tree $CandidateTree 2>$null
+    if ($LASTEXITCODE -ne 0) { throw "Complete hardening receipt failed strict terminal validation." }
+    try { $payload = (($verification -join "") | ConvertFrom-Json) }
+    catch { throw "Complete hardening receipt returned invalid JSON." }
+    $liveRuntime = Get-HardeningRuntimeIdentity -Root $RuntimeIdentity.root
+    if (
+        $liveRuntime.head -cne [string]$Journal.payload.current_sha -or
+        $liveRuntime.tree -cne [string]$Journal.payload.current_tree -or
+        $liveRuntime.head -cne [string]$Journal.payload.previous_sha -or
+        $liveRuntime.tree -cne [string]$Journal.payload.previous_tree -or
+        $liveRuntime.origin -cne [string]$RuntimeIdentity.origin -or
+        $liveRuntime.origin_sha256 -cne [string]$RuntimeIdentity.origin_sha256 -or
+        $liveRuntime.runner_blob -cne [string]$RuntimeIdentity.runner_blob
+    ) { throw "Complete hardening terminal runtime identity changed." }
+    if ((Convert-DawnstrikeCanonicalOriginIdentity $liveRuntime.origin) -ne [string]$Journal.payload.origin_identity) {
+        throw "Complete hardening terminal origin is not journal-bound."
+    }
+    $liveTask = Get-HardeningTaskRecord -AllowDisabled
+    if (
+        $payload.status -ne "COMPLETE" -or $payload.final_state -ne "Disabled" -or
+        $liveTask.state -ne "Disabled" -or
+        $payload.xml_after_sha256 -ne [string]$liveTask.xml_sha256 -or
+        $payload.origin_url -ne [string]$liveRuntime.origin -or
+        $payload.origin_url_sha256 -ne [string]$liveRuntime.origin_sha256
+    ) { throw "Complete hardening terminal task or runtime identity is not exact." }
+    return [pscustomobject]@{ payload = $payload; runtime = $liveRuntime; task = $liveTask }
+}
+
+function Assert-HardeningCompensationReceiptExact {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][object]$Journal,
+        [Parameter(Mandatory = $true)][string]$CandidateSha,
+        [Parameter(Mandatory = $true)][string]$CandidateTree,
+        [Parameter(Mandatory = $true)][object]$Task,
+        [Parameter(Mandatory = $true)][string]$ContractScript,
+        [Parameter(Mandatory = $true)][object]$InterpreterIdentity,
+        [Parameter(Mandatory = $true)][string]$StateRoot
+    )
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Hardening compensation receipt is missing."
+    }
+    $verification = & $InterpreterIdentity.path -I -B -S (Join-Path $PSScriptRoot "runtime_operation_journal.py") verify-compensation `
+        --receipt $Path --state-root $StateRoot 2>$null
+    if ($LASTEXITCODE -ne 0) { throw "Hardening compensation receipt failed strict validation." }
+    try { $payload = (($verification -join "") | ConvertFrom-Json).payload }
+    catch { throw "Hardening compensation receipt returned invalid JSON." }
+    if (
+        [string]$payload.operation -ne "capture_task_hardening" -or
+        [string]$payload.candidate_sha -ne $CandidateSha -or
+        [string]$payload.candidate_tree -ne $CandidateTree -or
+        [string]$payload.prior_journal_file_sha256 -ne [string]$Journal.raw_file_sha256 -or
+        [string]$payload.task_contract_sha256 -ne [string]$Journal.payload.task_contract_sha256 -or
+        [string]$payload.task_state -ne [string]$Task.state -or
+        [string]$payload.task_xml_sha256 -ne [string]$Task.xml_sha256 -or
+        [string]$payload.task_action_contract_sha256 -ne [string]$Task.action_contract_sha256 -or
+        [string]$payload.task_definition_contract_sha256 -ne [string]$Task.definition_contract_sha256
+    ) { throw "Hardening compensation receipt is not bound to the exact restored task/journal." }
+    return [pscustomobject]@{ payload = $payload; hash = Get-HardeningSha256File $Path }
 }
 
 function Set-HardeningDirectCaptureAction {
@@ -703,7 +797,8 @@ if ($TaskName -ne $script:HardeningTaskName) {
 if ([string]::IsNullOrWhiteSpace($CandidateSha) -or [string]::IsNullOrWhiteSpace($CandidateTree)) {
     throw "CandidateSha and CandidateTree are required to bind the hardening receipt."
 }
-Assert-HardeningCandidateIdentity -ExpectedSha $CandidateSha -ExpectedTree $CandidateTree -RefreshOrigin
+Assert-HardeningCandidateIdentity -ExpectedSha $CandidateSha -ExpectedTree $CandidateTree `
+    -RefreshOrigin -DeferOriginMainAdmission
 $hardeningCandidateRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot "runtime_activation_lock.ps1")
 $lockInterpreter = Get-DawnstrikeApprovedLockInterpreter
@@ -729,6 +824,16 @@ if (-not (Test-Path -LiteralPath $contractScript -PathType Leaf)) { throw "Harde
 . (Join-Path $PSScriptRoot "runtime_activation_lock.ps1")
 $lockOrigin = Convert-DawnstrikeCanonicalOriginIdentity $script:HardeningOriginUrl
 $lockInterpreter = Get-DawnstrikeApprovedLockInterpreter
+$advancedOriginRecovery = $null
+if ($script:HardeningRemoteMain -cne $CandidateSha) {
+    $advancedOriginRecovery = Get-DawnstrikeAdvancedOriginRecoveryAdmission `
+        -StateRoot $StateRoot -Operation capture_task_hardening -CandidateSha $CandidateSha `
+        -CandidateTree $CandidateTree -OriginIdentity $lockOrigin `
+        -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
+    if ($null -eq $advancedOriginRecovery) {
+        throw "Hardening candidate is not current origin/main and has no exact active recovery journal."
+    }
+}
 
 $preparedPath = Join-Path $StateRoot ("receipts\capture-task\capture-task-hardening-" + $CandidateSha + ".prepared.json")
 $operationJournalPath = Join-Path $StateRoot ("receipts\runtime-operation\capture-task-hardening-" + $CandidateSha + ".json")
@@ -737,9 +842,17 @@ $journalPreparedRelativePath = "receipts/capture-task/capture-task-hardening-$Ca
 $journalCompleteRelativePath = "receipts/capture-task/capture-task-hardening-$CandidateSha.json"
 $compensationReceiptPath = Join-Path $StateRoot ("receipts\capture-task\capture-task-hardening-" + $CandidateSha + ".compensated.json")
 $compensationReceiptRelativePath = "receipts/capture-task/capture-task-hardening-$CandidateSha.compensated.json"
+$candidateReceiptPath = Join-Path $StateRoot ("receipts\capture-task\capture-task-hardening-" + $CandidateSha + ".json")
+if (-not [string]::IsNullOrWhiteSpace($ReceiptPath) -and
+    [System.IO.Path]::GetFullPath($ReceiptPath) -cne [System.IO.Path]::GetFullPath($candidateReceiptPath)) {
+    throw "Hardening receipt path must be the exact candidate-bound path."
+}
+$ReceiptPath = $candidateReceiptPath
 $journalTaskContractSha256 = Get-HardeningSha256File $contractScript
 $emptyArtifactSha = Get-HardeningSha256Text ""
 $preserveLocks = $false
+$hardeningLock = $null
+$terminalCompleteWithoutLock = $false
 if (Test-Path -LiteralPath $lockPath -PathType Leaf) {
     if (-not (Test-Path -LiteralPath $operationJournalPath -PathType Leaf)) {
         throw "Existing hardening lock has no deterministic operation journal."
@@ -749,6 +862,11 @@ if (Test-Path -LiteralPath $lockPath -PathType Leaf) {
         $hardeningLock = Adopt-DawnstrikeGovernedRuntimeLockWithJournal -StateRoot $StateRoot `
             -JournalPath $operationJournalPath -CandidateSha $CandidateSha -CandidateTree $CandidateTree `
             -OriginIdentity $lockOrigin -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
+    }
+    elseif ($existingOperationJournal.payload.phase -eq "COMPLETE") {
+        # COMPLETE admission is receipt/journal bound and does not require the
+        # PREPARED sidecar.  This remains true if an older attempt left a
+        # stale PREPARED file behind.
     }
     elseif (Test-Path -LiteralPath $preparedPath -PathType Leaf) {
         $preparedOutput = & $interpreterIdentity.path -I -B $contractScript verify-prepared --prepared $preparedPath 2>$null
@@ -775,14 +893,22 @@ if (Test-Path -LiteralPath $lockPath -PathType Leaf) {
     }
 }
 else {
+    $existingNoLockJournal = $null
+    if (Test-Path -LiteralPath $operationJournalPath -PathType Leaf) {
+        $existingNoLockJournal = Get-DawnstrikeStrictRuntimeOperationJournal $operationJournalPath $lockInterpreter.path $lockInterpreter.sha256
+    }
+    if ($null -ne $existingNoLockJournal -and [string]$existingNoLockJournal.payload.phase -eq "COMPLETE") {
+        $terminalCompleteWithoutLock = $true
+    }
+    if (-not $terminalCompleteWithoutLock) {
     $enterArgs = @{
         StateRoot = $StateRoot
         JournalPath = $operationJournalPath
         Operation = "capture_task_hardening"
         CandidateSha = $CandidateSha
         CandidateTree = $CandidateTree
-        CurrentSha = $CandidateSha
-        CurrentTree = $CandidateTree
+        CurrentSha = $runtimeIdentity.head
+        CurrentTree = $runtimeIdentity.tree
         PreviousSha = $runtimeIdentity.head
         PreviousTree = $runtimeIdentity.tree
         OriginIdentity = $lockOrigin
@@ -796,6 +922,7 @@ else {
         $enterArgs.TestCrashPoint = $TestCrashPoint
     }
     $hardeningLock = Enter-DawnstrikeGovernedRuntimeLockWithJournal @enterArgs
+    }
 }
 $terminalEnterArgs = @{
     StateRoot = $StateRoot
@@ -803,8 +930,8 @@ $terminalEnterArgs = @{
     Operation = "capture_task_hardening"
     CandidateSha = $CandidateSha
     CandidateTree = $CandidateTree
-    CurrentSha = $CandidateSha
-    CurrentTree = $CandidateTree
+    CurrentSha = $runtimeIdentity.head
+    CurrentTree = $runtimeIdentity.tree
     PreviousSha = $runtimeIdentity.head
     PreviousTree = $runtimeIdentity.tree
     OriginIdentity = $lockOrigin
@@ -815,18 +942,26 @@ $terminalEnterArgs = @{
     PythonSha256 = $lockInterpreter.sha256
 }
 $startJournal = Get-DawnstrikeStrictRuntimeOperationJournal $operationJournalPath $lockInterpreter.path $lockInterpreter.sha256
-if ($startJournal.payload.phase -eq "COMPENSATED") {
+    if ($startJournal.payload.phase -eq "COMPENSATED") {
     $compensationReceiptRelativePath = [string]$startJournal.payload.compensation_receipt_relative_path
     if ($compensationReceiptRelativePath -eq "NONE") { throw "Compensated hardening journal has no receipt path." }
     $compensationReceiptPath = Join-Path $StateRoot ($compensationReceiptRelativePath.Replace('/', '\'))
-    $compensationCheck = & $lockInterpreter.path -I -B (Join-Path $PSScriptRoot "runtime_operation_journal.py") verify-compensation `
+    $compensationCheck = & $lockInterpreter.path -I -B -S (Join-Path $PSScriptRoot "runtime_operation_journal.py") verify-compensation `
         --receipt $compensationReceiptPath --state-root $StateRoot 2>$null
     if ($LASTEXITCODE -ne 0) { throw "Compensation receipt failed strict validation." }
     $compensationPayload = (($compensationCheck -join "") | ConvertFrom-Json).payload
     $restoredStart = Get-HardeningTaskRecord -AllowDisabled
+    $compensatedRuntime = Get-HardeningRuntimeIdentity -Root $runtimeRootResolved
     if ($compensationPayload.operation -ne "capture_task_hardening" -or
         $compensationPayload.candidate_sha -ne $CandidateSha -or $compensationPayload.candidate_tree -ne $CandidateTree -or
         $compensationPayload.task_contract_sha256 -ne $journalTaskContractSha256 -or
+        $compensatedRuntime.head -ne [string]$startJournal.payload.current_sha -or
+        $compensatedRuntime.tree -ne [string]$startJournal.payload.current_tree -or
+        $compensatedRuntime.head -ne [string]$startJournal.payload.previous_sha -or
+        $compensatedRuntime.tree -ne [string]$startJournal.payload.previous_tree -or
+        $compensatedRuntime.origin -ne $runtimeIdentity.origin -or
+        $compensatedRuntime.origin_sha256 -ne $runtimeIdentity.origin_sha256 -or
+        $compensatedRuntime.runner_blob -ne $runtimeIdentity.runner_blob -or
         $compensationPayload.task_action_contract_sha256 -ne $restoredStart.action_contract_sha256 -or
         $compensationPayload.task_definition_contract_sha256 -ne $restoredStart.definition_contract_sha256 -or
         $compensationPayload.prior_journal_file_sha256 -ne $startJournal.payload.prior_journal_file_sha256 -or
@@ -842,12 +977,36 @@ if ($startJournal.payload.phase -eq "COMPENSATED") {
     Clear-DawnstrikeCompensatedJournalTombstone -StateRoot $StateRoot -JournalPath $operationJournalPath `
         -Operation capture_task_hardening -CandidateSha $CandidateSha -CandidateTree $CandidateTree `
         -OriginIdentity $lockOrigin -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
-    $hardeningLock = Enter-DawnstrikeGovernedRuntimeLockWithJournal @terminalEnterArgs
+    if ($null -ne $advancedOriginRecovery) {
+        Write-Output (ConvertTo-Json ([ordered]@{
+            schema_version = "dawnstrike.capture_task_hardening_recovery.v1"
+            status = "RECOVERED_SUPERSEDED_TRANSACTION"
+            candidate_sha = $CandidateSha
+            candidate_tree = $CandidateTree
+            current_origin_main_sha = $script:HardeningRemoteMain
+            research_only = $true
+            broker_execution_enabled = $false
+        }) -Compress)
+        return
+    }
+        $hardeningLock = Enter-DawnstrikeGovernedRuntimeLockWithJournal @terminalEnterArgs
+}
+if ($terminalCompleteWithoutLock) {
+    $terminalBoundary = Assert-HardeningCompleteTerminal `
+        -Journal $startJournal -ReceiptPath $ReceiptPath -CandidateSha $CandidateSha `
+        -CandidateTree $CandidateTree -RuntimeIdentity $runtimeIdentity `
+        -ContractScript $contractScript -InterpreterIdentity $interpreterIdentity
+    if (Test-Path -LiteralPath $preparedPath -PathType Leaf) {
+        Remove-Item -LiteralPath $preparedPath -Force -ErrorAction SilentlyContinue
+    }
+    Write-Output ([System.IO.File]::ReadAllText($ReceiptPath, [System.Text.UTF8Encoding]::new($false)).Trim())
+    return
 }
 try {
     # The task and its scheduler history are re-read only after the shared
     # activation lock is held; no stale pre-lock observation may be replaced.
-    Assert-HardeningCandidateIdentity -ExpectedSha $CandidateSha -ExpectedTree $CandidateTree
+    Assert-HardeningCandidateIdentity -ExpectedSha $CandidateSha -ExpectedTree $CandidateTree `
+        -AllowAdvancedOriginRecovery:($null -ne $advancedOriginRecovery)
     $runtimeIdentityLocked = Get-HardeningRuntimeIdentity -Root $runtimeRootResolved
     if ($runtimeIdentityLocked.head -cne $runtimeIdentity.head -or
         $runtimeIdentityLocked.tree -cne $runtimeIdentity.tree -or
@@ -858,6 +1017,18 @@ try {
     $runtimeIdentity = $runtimeIdentityLocked
     $journal = Get-DawnstrikeStrictRuntimeOperationJournal $operationJournalPath $lockInterpreter.path $lockInterpreter.sha256
     $journalPhase = [string]$journal.payload.phase
+    if ($journalPhase -eq "COMPLETE") {
+        $terminalBoundary = Assert-HardeningCompleteTerminal `
+            -Journal $journal -ReceiptPath (Join-Path $StateRoot ([string]$journal.payload.complete_receipt_relative_path).Replace('/', '\')) `
+            -CandidateSha $CandidateSha -CandidateTree $CandidateTree `
+            -RuntimeIdentity $runtimeIdentity -ContractScript $contractScript `
+            -InterpreterIdentity $interpreterIdentity
+        if (Test-Path -LiteralPath $preparedPath -PathType Leaf) {
+            Remove-Item -LiteralPath $preparedPath -Force -ErrorAction SilentlyContinue
+        }
+        Write-Output ([System.IO.File]::ReadAllText((Join-Path $StateRoot ([string]$journal.payload.complete_receipt_relative_path).Replace('/', '\')), [System.Text.UTF8Encoding]::new($false)).Trim())
+        return
+    }
     $before = Get-HardeningTaskRecord
     $beforeInfo = Get-HardeningTaskInfo -TaskPath $before.task_path
     $receiptOldResult = $beforeInfo.last_task_result
@@ -1108,7 +1279,7 @@ $statePrefix = $stateRootFull + '\'
         $journal = Set-DawnstrikeRuntimeOperationJournalPhase -StateRoot $StateRoot -JournalPath $operationJournalPath `
             -Lock $hardeningLock -Operation capture_task_hardening -Phase PRE_TASK_UPDATE `
             -CandidateSha $CandidateSha -CandidateTree $CandidateTree `
-            -CurrentSha $CandidateSha -CurrentTree $CandidateTree `
+            -CurrentSha $runtimeIdentity.head -CurrentTree $runtimeIdentity.tree `
             -PreviousSha $runtimeIdentity.head -PreviousTree $runtimeIdentity.tree `
             -OriginIdentity $lockOrigin -PreparedReceiptRelativePath $journalPreparedRelativePath `
             -PreparedReceiptSha256 $preparedRecordSha -CompleteReceiptRelativePath $journalCompleteRelativePath `
@@ -1158,7 +1329,7 @@ $statePrefix = $stateRootFull + '\'
         $journal = Set-DawnstrikeRuntimeOperationJournalPhase -StateRoot $StateRoot -JournalPath $operationJournalPath `
             -Lock $hardeningLock -Operation capture_task_hardening -Phase POST_TASK_UPDATE `
             -CandidateSha $CandidateSha -CandidateTree $CandidateTree `
-            -CurrentSha $CandidateSha -CurrentTree $CandidateTree `
+            -CurrentSha $runtimeIdentity.head -CurrentTree $runtimeIdentity.tree `
             -PreviousSha $runtimeIdentity.head -PreviousTree $runtimeIdentity.tree `
             -OriginIdentity $lockOrigin -PreparedReceiptRelativePath $journalPreparedRelativePath `
             -PreparedReceiptSha256 $preparedRecordSha -CompleteReceiptRelativePath $journalCompleteRelativePath `
@@ -1285,7 +1456,7 @@ $statePrefix = $stateRootFull + '\'
         $journal = Set-DawnstrikeRuntimeOperationJournalPhase -StateRoot $StateRoot -JournalPath $operationJournalPath `
             -Lock $hardeningLock -Operation capture_task_hardening -Phase COMPLETE `
             -CandidateSha $CandidateSha -CandidateTree $CandidateTree `
-            -CurrentSha $CandidateSha -CurrentTree $CandidateTree `
+            -CurrentSha $runtimeIdentity.head -CurrentTree $runtimeIdentity.tree `
             -PreviousSha $runtimeIdentity.head -PreviousTree $runtimeIdentity.tree `
             -OriginIdentity $lockOrigin -PreparedReceiptRelativePath $journalPreparedRelativePath `
             -PreparedReceiptSha256 $preparedRecordSha -CompleteReceiptRelativePath $journalCompleteRelativePath `
@@ -1320,20 +1491,10 @@ catch {
     }
     if ($journalPhase -eq "COMPLETE") {
         try {
-            if (-not (Test-Path -LiteralPath $ReceiptPath -PathType Leaf)) {
-                throw "Complete hardening journal has no exact complete receipt."
-            }
-            $terminalVerification = & $interpreterIdentity.path -I -B $contractScript verify-hardening `
-                --receipt $ReceiptPath --candidate-sha $CandidateSha --candidate-tree $CandidateTree 2>$null
-            if ($LASTEXITCODE -ne 0) { throw "Complete hardening receipt failed terminal validation." }
-            $terminalPayload = (($terminalVerification -join "") | ConvertFrom-Json)
-            $terminalTask = Get-HardeningTaskRecord -AllowDisabled
-            if ($terminalPayload.status -ne "COMPLETE" -or $terminalPayload.final_state -ne "Disabled" -or
-                $terminalPayload.xml_after_sha256 -ne $terminalTask.xml_sha256 -or
-                $terminalTask.state -ne "Disabled" -or
-                $terminalJournal.payload.complete_receipt_sha256 -ne (Get-HardeningSha256File $ReceiptPath)) {
-                throw "Complete hardening terminal task or receipt identity is not exact."
-            }
+            $terminalBoundary = Assert-HardeningCompleteTerminal `
+                -Journal $terminalJournal -ReceiptPath $ReceiptPath -CandidateSha $CandidateSha `
+                -CandidateTree $CandidateTree -RuntimeIdentity $runtimeIdentity `
+                -ContractScript $contractScript -InterpreterIdentity $interpreterIdentity
             # PREPARED is recovery evidence, not part of the committed task
             # state.  A failed best-effort cleanup is safe to retry and must
             # not turn the committed operation into compensation.
@@ -1377,44 +1538,65 @@ catch {
         $empty = Get-HardeningSha256Text ""
         $compensationReceiptRelativePath = "receipts/capture-task/capture-task-hardening-$([string]$journalBefore.raw_file_sha256).compensated.json"
         $compensationReceiptPath = Join-Path $StateRoot ($compensationReceiptRelativePath.Replace('/', '\'))
-        $priorReceiptRelative = "NONE"
-        $priorReceiptHash = $empty
-        if (Test-Path -LiteralPath $ReceiptPath -PathType Leaf) {
-            $priorReceiptHash = Get-HardeningSha256File $ReceiptPath
-            $priorReceiptRelative = "receipts/capture-task/archive/partial-hardening-$priorReceiptHash.json"
-            $priorReceiptArchiveRoot = Join-Path $StateRoot "receipts\capture-task\archive"
-            New-Item -ItemType Directory -Path $priorReceiptArchiveRoot -Force | Out-Null
-            $priorReceiptArchive = Join-Path $StateRoot ($priorReceiptRelative.Replace('/', '\'))
-            if (Test-Path -LiteralPath $priorReceiptArchive) { throw "Partial hardening receipt archive already exists." }
-            [IO.File]::Move($ReceiptPath, $priorReceiptArchive)
-            if ((Test-Path -LiteralPath $ReceiptPath) -or (Get-HardeningSha256File $priorReceiptArchive) -ne $priorReceiptHash) { throw "Partial hardening receipt archive was not proven." }
+        $compensationHash = $null
+        if (Test-Path -LiteralPath $compensationReceiptPath -PathType Leaf) {
+            # A child can die after the immutable compensation receipt is
+            # sealed but before the journal transition.  Reuse only a receipt
+            # whose prior-journal hash and restored-task fields are exact;
+            # seal-compensation must never be asked to overwrite it.
+            if (Test-Path -LiteralPath $ReceiptPath -PathType Leaf) {
+                throw "Existing hardening compensation receipt conflicts with a live partial receipt."
+            }
+            $existingCompensation = Assert-HardeningCompensationReceiptExact `
+                -Path $compensationReceiptPath -Journal $journalBefore -CandidateSha $CandidateSha `
+                -CandidateTree $CandidateTree -Task $restored -ContractScript $contractScript `
+                -InterpreterIdentity $interpreterIdentity -StateRoot $StateRoot
+            $compensationHash = [string]$existingCompensation.hash
         }
-        $compensationPayload = [ordered]@{
-            schema_version = "dawnstrike.runtime_compensation_receipt.v1"
-            status = "COMPENSATED"
-            operation = "capture_task_hardening"
-            candidate_sha = $CandidateSha
-            candidate_tree = $CandidateTree
-            prior_journal_file_sha256 = [string]$journalBefore.raw_file_sha256
-            task_contract_sha256 = $journalTaskContractSha256
-            task_state = [string]$restored.state
-            task_xml_sha256 = [string]$restored.xml_sha256
-            task_action_contract_sha256 = [string]$restored.action_contract_sha256
-            task_definition_contract_sha256 = [string]$restored.definition_contract_sha256
-            prior_receipt_relative_path = $priorReceiptRelative
-            prior_receipt_sha256 = $priorReceiptHash
-            failure_type = $failure.Exception.GetType().Name
-            research_only = $true
-            broker_execution_enabled = $false
+        else {
+            $priorReceiptRelative = "NONE"
+            $priorReceiptHash = $empty
+            if (Test-Path -LiteralPath $ReceiptPath -PathType Leaf) {
+                $priorReceiptHash = Get-HardeningSha256File $ReceiptPath
+                $priorReceiptRelative = "receipts/capture-task/archive/partial-hardening-$priorReceiptHash.json"
+                $priorReceiptArchiveRoot = Join-Path $StateRoot "receipts\capture-task\archive"
+                Assert-HardeningNoReparseComponents $priorReceiptArchiveRoot "Partial hardening receipt archive root"
+                New-Item -ItemType Directory -Path $priorReceiptArchiveRoot -Force | Out-Null
+                $priorReceiptArchive = Join-Path $StateRoot ($priorReceiptRelative.Replace('/', '\'))
+                Assert-HardeningNoReparseComponents $priorReceiptArchive "Partial hardening receipt archive"
+                if (Test-Path -LiteralPath $priorReceiptArchive) { throw "Partial hardening receipt archive already exists." }
+                Assert-HardeningNoReparseComponents $ReceiptPath "Partial hardening receipt"
+                Assert-HardeningNoReparseComponents $priorReceiptArchive "Partial hardening receipt archive"
+                [IO.File]::Move($ReceiptPath, $priorReceiptArchive)
+                if ((Test-Path -LiteralPath $ReceiptPath) -or (Get-HardeningSha256File $priorReceiptArchive) -ne $priorReceiptHash) { throw "Partial hardening receipt archive was not proven." }
+            }
+            $compensationPayload = [ordered]@{
+                schema_version = "dawnstrike.runtime_compensation_receipt.v1"
+                status = "COMPENSATED"
+                operation = "capture_task_hardening"
+                candidate_sha = $CandidateSha
+                candidate_tree = $CandidateTree
+                prior_journal_file_sha256 = [string]$journalBefore.raw_file_sha256
+                task_contract_sha256 = $journalTaskContractSha256
+                task_state = [string]$restored.state
+                task_xml_sha256 = [string]$restored.xml_sha256
+                task_action_contract_sha256 = [string]$restored.action_contract_sha256
+                task_definition_contract_sha256 = [string]$restored.definition_contract_sha256
+                prior_receipt_relative_path = $priorReceiptRelative
+                prior_receipt_sha256 = $priorReceiptHash
+                failure_type = $failure.Exception.GetType().Name
+                research_only = $true
+                broker_execution_enabled = $false
+            }
+            $compensationInput = "$compensationReceiptPath.$([Guid]::NewGuid().ToString('N')).input.json"
+            try {
+                [IO.File]::WriteAllText($compensationInput, (ConvertTo-Json $compensationPayload -Depth 8 -Compress), [Text.UTF8Encoding]::new($false))
+                & $lockInterpreter.path -I -B -S (Join-Path $PSScriptRoot "runtime_operation_journal.py") seal-compensation `
+                    --input $compensationInput --output $compensationReceiptPath --state-root $StateRoot --reuse-existing 2>$null | Out-Null
+                if ($LASTEXITCODE -ne 0) { throw "Compensation receipt strict sealing failed." }
+            } finally { if (Test-Path -LiteralPath $compensationInput) { Remove-Item -LiteralPath $compensationInput -Force } }
+            $compensationHash = Get-HardeningSha256File $compensationReceiptPath
         }
-        $compensationInput = "$compensationReceiptPath.$([Guid]::NewGuid().ToString('N')).input.json"
-        try {
-            [IO.File]::WriteAllText($compensationInput, (ConvertTo-Json $compensationPayload -Depth 8 -Compress), [Text.UTF8Encoding]::new($false))
-            & $lockInterpreter.path -I -B (Join-Path $PSScriptRoot "runtime_operation_journal.py") seal-compensation `
-                --input $compensationInput --output $compensationReceiptPath --state-root $StateRoot 2>$null | Out-Null
-            if ($LASTEXITCODE -ne 0) { throw "Compensation receipt strict sealing failed." }
-        } finally { if (Test-Path -LiteralPath $compensationInput) { Remove-Item -LiteralPath $compensationInput -Force } }
-        $compensationHash = Get-HardeningSha256File $compensationReceiptPath
         $journal = Set-DawnstrikeRuntimeOperationJournalPhase -StateRoot $StateRoot -JournalPath $operationJournalPath `
             -Lock $hardeningLock -Operation capture_task_hardening -Phase COMPENSATED `
             -CandidateSha ([string]$journalBefore.payload.candidate_sha) -CandidateTree ([string]$journalBefore.payload.candidate_tree) `
