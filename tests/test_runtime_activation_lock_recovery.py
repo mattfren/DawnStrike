@@ -377,6 +377,9 @@ try{{$null=Set-DawnstrikeRuntimeOperationJournalPhase @badLock -Phase PRE_SWAP `
  -PreparedReceiptSha256 ('1'*64) -CompleteReceiptSha256 $empty `
  -BackupContractSha256 ('2'*64) `
  -RuntimeStageContractSha256 ('3'*64)}}catch{{$mismatch=$true}}
+$null=Set-DawnstrikeRuntimeOperationJournalPhase @common -Phase PRE_QUIESCE `
+ -PreparedReceiptSha256 $empty -CompleteReceiptSha256 $empty `
+ -BackupContractSha256 ('2'*64) -RuntimeStageContractSha256 ('3'*64)
 $null=Set-DawnstrikeRuntimeOperationJournalPhase @common -Phase PRE_SWAP `
  -PreparedReceiptSha256 ('1'*64) -CompleteReceiptSha256 $empty `
  -BackupContractSha256 ('2'*64) -RuntimeStageContractSha256 ('3'*64)
@@ -660,6 +663,18 @@ $lock=Enter-DawnstrikeGovernedRuntimeLockWithJournal -StateRoot '{state_q}' `
     original_pid = initial["init_owner_process_id"]
     recovery = acquire + rf"""
 $empty=Get-DawnstrikeSharedLockSha256Text ''
+$null=Set-DawnstrikeRuntimeOperationJournalPhase -StateRoot '{state_q}' `
+ -JournalPath '{journal_q}' -Lock $lock -Operation runtime_activation -Phase PRE_QUIESCE `
+ -CandidateSha ('a'*40) -CandidateTree ('b'*40) `
+ -CurrentSha ('e'*40) -CurrentTree ('f'*40) `
+ -PreviousSha ('e'*40) -PreviousTree ('f'*40) `
+ -OriginIdentity 'github.com/mattfren/dawnstrike' `
+ -PreparedReceiptRelativePath 'receipts/runtime-activation/prepared.json' `
+ -PreparedReceiptSha256 $empty `
+ -CompleteReceiptRelativePath 'receipts/runtime-activation/complete.json' `
+ -CompleteReceiptSha256 $empty -BackupContractSha256 ('2'*64) `
+ -TaskContractSha256 ('5'*64) -RuntimeStageContractSha256 ('3'*64) `
+ -PythonPath $approved.path -PythonSha256 $approved.sha256
 $null=Set-DawnstrikeRuntimeOperationJournalPhase -StateRoot '{state_q}' `
  -JournalPath '{journal_q}' -Lock $lock -Operation runtime_activation -Phase PRE_SWAP `
  -CandidateSha ('a'*40) -CandidateTree ('b'*40) `

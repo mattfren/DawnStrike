@@ -19,7 +19,10 @@ OPERATIONS = {
     "capture_task_hardening",
 }
 PHASES = {
-    "runtime_activation": ("INIT", "PRE_SWAP", "POST_SWAP", "COMPLETE"),
+    # PRE_QUIESCE is a durable intent written before the first scheduler
+    # mutation.  It lets activation recovery distinguish an interrupted
+    # quiescence operation from an unstarted activation.
+    "runtime_activation": ("INIT", "PRE_QUIESCE", "PRE_SWAP", "POST_SWAP", "COMPLETE"),
     "capture_task_rebind": ("INIT", "PRE_ENABLE", "POST_ENABLE", "COMPLETE"),
     "runtime_rollback": ("INIT", "PRE_SWAP", "POST_SWAP", "COMPLETE"),
     "capture_task_hardening": (
@@ -105,7 +108,9 @@ def validate(raw: bytes) -> dict[str, Any]:
     current_pair = (value["current_sha"], value["current_tree"])
     if operation == "runtime_activation":
         expected_current = (
-            previous_pair if value["phase"] in {"INIT", "PRE_SWAP"} else candidate_pair
+            previous_pair
+            if value["phase"] in {"INIT", "PRE_QUIESCE", "PRE_SWAP"}
+            else candidate_pair
         )
     elif operation == "runtime_rollback":
         expected_current = (
@@ -127,6 +132,17 @@ def validate(raw: bytes) -> dict[str, Any]:
     if value["phase"] == "INIT":
         if any(item != empty for item in (prepared_receipt, complete_receipt, backup, stage)):
             raise ValueError("INIT journal carries non-sentinel artifact hashes")
+    elif value["phase"] == "PRE_QUIESCE":
+        # The task backup and stage identity are sealed before scheduler
+        # disablement.  The state/activation PREPARED receipt is intentionally
+        # absent until quiescence and the locked state snapshot are complete.
+        if (
+            prepared_receipt != empty
+            or complete_receipt != empty
+            or backup == empty
+            or stage == empty
+        ):
+            raise ValueError("PRE_QUIESCE journal artifact proof is invalid")
     else:
         if prepared_receipt == empty or backup == empty:
             raise ValueError("mutation phase lacks prepared receipt or backup proof")
@@ -298,7 +314,7 @@ def transition(source: Path, target: Path, previous: Path | None) -> dict[str, A
         previous_pair = (candidate["previous_sha"], candidate["previous_tree"])
         current_pair = (candidate["current_sha"], candidate["current_tree"])
         if operation == "runtime_activation":
-            expected = previous_pair if phase == "PRE_SWAP" else candidate_pair
+            expected = previous_pair if phase in {"PRE_QUIESCE", "PRE_SWAP"} else candidate_pair
         elif operation == "runtime_rollback":
             expected = candidate_pair if phase == "PRE_SWAP" else previous_pair
         elif operation == "capture_task_rebind":

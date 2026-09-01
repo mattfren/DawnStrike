@@ -13,7 +13,9 @@ EMPTY = hashlib.sha256(b"").hexdigest()
 
 def _payload(operation: str = "runtime_activation", phase: str = "INIT") -> dict:
     phases = {
-        "runtime_activation": ("INIT", "PRE_SWAP", "POST_SWAP", "COMPLETE"),
+        "runtime_activation": (
+            "INIT", "PRE_QUIESCE", "PRE_SWAP", "POST_SWAP", "COMPLETE"
+        ),
         "capture_task_rebind": ("INIT", "PRE_ENABLE", "POST_ENABLE", "COMPLETE"),
         "runtime_rollback": ("INIT", "PRE_SWAP", "POST_SWAP", "COMPLETE"),
         "capture_task_hardening": ("INIT", "PRE_TASK_UPDATE", "POST_TASK_UPDATE", "COMPLETE"),
@@ -27,7 +29,7 @@ def _payload(operation: str = "runtime_activation", phase: str = "INIT") -> dict
         "candidate_tree": "b" * 40,
         "current_sha": (
             "e" * 40
-            if operation == "runtime_activation" and phase in {"INIT", "PRE_SWAP"}
+            if operation == "runtime_activation" and phase in {"INIT", "PRE_QUIESCE", "PRE_SWAP"}
             else "e" * 40
             if operation == "capture_task_hardening"
             else "a" * 40
@@ -36,7 +38,7 @@ def _payload(operation: str = "runtime_activation", phase: str = "INIT") -> dict
         ),
         "current_tree": (
             "f" * 40
-            if operation == "runtime_activation" and phase in {"INIT", "PRE_SWAP"}
+            if operation == "runtime_activation" and phase in {"INIT", "PRE_QUIESCE", "PRE_SWAP"}
             else "f" * 40
             if operation == "capture_task_hardening"
             else "b" * 40
@@ -52,7 +54,7 @@ def _payload(operation: str = "runtime_activation", phase: str = "INIT") -> dict
         "lock_file_sha256": "3" * 64,
         "prior_journal_file_sha256": EMPTY,
         "prepared_receipt_relative_path": "receipts/runtime-activation/prepared.json",
-        "prepared_receipt_sha256": EMPTY if phase == "INIT" else "9" * 64,
+        "prepared_receipt_sha256": EMPTY if phase in {"INIT", "PRE_QUIESCE"} else "9" * 64,
         "complete_receipt_relative_path": "receipts/runtime-activation/complete.json",
         "complete_receipt_sha256": "8" * 64 if phase == "COMPLETE" else EMPTY,
         "backup_contract_sha256": EMPTY if phase == "INIT" else "4" * 64,
@@ -163,8 +165,12 @@ def test_transition_requires_adjacent_phase_and_exact_prior_raw_hash(tmp_path: P
     journal = tmp_path / "journal.json"
     source.write_text(json.dumps(_payload()), encoding="utf-8")
     initial = transition(source, journal, None)
+    quiesce_payload = _payload(phase="PRE_QUIESCE")
+    quiesce_payload["prior_journal_file_sha256"] = initial["raw_file_sha256"]
+    source.write_text(json.dumps(quiesce_payload), encoding="utf-8")
+    quiesced = transition(source, journal, journal)
     next_payload = _payload(phase="PRE_SWAP")
-    next_payload["prior_journal_file_sha256"] = initial["raw_file_sha256"]
+    next_payload["prior_journal_file_sha256"] = quiesced["raw_file_sha256"]
     source.write_text(json.dumps(next_payload), encoding="utf-8")
     prepared = transition(source, journal, journal)
     assert prepared["payload"]["phase"] == "PRE_SWAP"
@@ -211,8 +217,14 @@ def test_runtime_transition_allows_exact_pre_to_post_identity_change(
     initial_payload = _payload(operation, "INIT")
     source.write_text(json.dumps(initial_payload), encoding="utf-8")
     initial = transition(source, journal, None)
+    prior = initial
+    if operation == "runtime_activation":
+        quiesce_payload = _payload(operation, "PRE_QUIESCE")
+        quiesce_payload["prior_journal_file_sha256"] = prior["raw_file_sha256"]
+        source.write_text(json.dumps(quiesce_payload), encoding="utf-8")
+        prior = transition(source, journal, journal)
     pre_payload = _payload(operation, "PRE_SWAP")
-    pre_payload["prior_journal_file_sha256"] = initial["raw_file_sha256"]
+    pre_payload["prior_journal_file_sha256"] = prior["raw_file_sha256"]
     source.write_text(json.dumps(pre_payload), encoding="utf-8")
     prepared = transition(source, journal, journal)
     post_payload = _payload(operation, "POST_SWAP")
