@@ -949,7 +949,7 @@ if (-not [System.IO.Path]::GetFullPath($ReceiptPath).StartsWith($receiptRoot, [S
     throw "Hardening receipt must be inside the governed capture-task receipt root."
 }
 $stateRootPrefix = ([System.IO.Path]::GetFullPath($StateRoot)).TrimEnd('\') + '\'
-$receiptRelativePath = ([System.IO.Path]::GetFullPath($ReceiptPath).Substring($stateRootPrefix.Length) -replace '\','/')
+$receiptRelativePath = ([System.IO.Path]::GetFullPath($ReceiptPath).Substring($stateRootPrefix.Length) -replace '\\','/')
     $preparedRecordSha = Write-HardeningPreparedRecord `
     -Path $preparedPath `
     -Before $before `

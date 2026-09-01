@@ -698,6 +698,16 @@ function Invoke-DawnstrikeRuntimeRollback {
             $payload.auxiliary_capture_action_contract_sha256 = [string]$activation.auxiliary_capture_action_contract_sha256
             $payload.auxiliary_capture_backup_name = [string]$activation.auxiliary_capture_backup_name
             $payload.auxiliary_capture_backup_manifest_sha256 = [string]$activation.auxiliary_capture_backup_manifest_sha256
+            $payload.capture_hardening_receipt_relative_path = [string]$activation.capture_hardening_receipt_relative_path
+            $payload.capture_hardening_receipt_raw_sha256 = [string]$activation.capture_hardening_receipt_raw_sha256
+            $payload.capture_hardening_receipt_sha256 = [string]$activation.capture_hardening_receipt_sha256
+            $payload.capture_hardening_xml_sha256 = [string]$activation.capture_hardening_xml_sha256
+            $payload.capture_hardening_action_sha256 = [string]$activation.capture_hardening_action_sha256
+            $payload.capture_hardening_principal_sha256 = [string]$activation.capture_hardening_principal_sha256
+            $payload.capture_hardening_trigger_sha256 = [string]$activation.capture_hardening_trigger_sha256
+            $payload.capture_hardening_settings_sha256 = [string]$activation.capture_hardening_settings_sha256
+            $payload.capture_hardening_runner_before_sha256 = [string]$activation.capture_hardening_runner_before_sha256
+            $payload.capture_hardening_runner_target_sha256 = [string]$activation.capture_hardening_runner_target_sha256
         }
         $input = Join-Path $rollbackReceiptRoot ".$activationId.input.json"
         Write-DawnstrikeActivationJson $payload $input
