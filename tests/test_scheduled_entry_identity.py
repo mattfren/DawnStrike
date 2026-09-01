@@ -5,7 +5,6 @@ import pytest
 import intraday_scanner.services.scheduler_doctor_service as scheduler
 import scripts.dawnstrike_python_bootstrap as bootstrap
 
-
 ROOT = Path(__file__).resolve().parents[1]
 RUNNERS = (
     "run_alphaops_morning.ps1",
@@ -38,19 +37,19 @@ def test_registration_and_rollback_entries_are_pinned_and_sha_bound() -> None:
         assert "-ExpectedSha" in text
         assert "$ExpectedSha" in text
 
-    rollback = (ROOT / "scripts" / "restore_dawnstrike_tasks.ps1").read_text(
-        encoding="utf-8"
-    )
+    rollback = (ROOT / "scripts" / "restore_dawnstrike_tasks.ps1").read_text(encoding="utf-8")
     assert "[string]$ExpectedSha" in rollback
     assert "Assert-DawnstrikeProcessSourceBoundToHead" in rollback
     assert "Set-DawnstrikeCanonicalTaskExpectedSha" in rollback
-    assert "Assert-DawnstrikeCanonicalTaskSemantics -RuntimeRoot $runtime -StateRoot $state -ExpectedSha $ExpectedSha" in rollback
+    assert (
+        "Assert-DawnstrikeCanonicalTaskSemantics -RuntimeRoot $runtime "
+        "-StateRoot $state -ExpectedSha $ExpectedSha"
+        in rollback
+    )
 
 
 def test_process_runner_rejects_identity_substitution_and_git_execution_hooks() -> None:
-    text = (ROOT / "scripts" / "dawnstrike_process_runner.ps1").read_text(
-        encoding="utf-8"
-    )
+    text = (ROOT / "scripts" / "dawnstrike_process_runner.ps1").read_text(encoding="utf-8")
     for marker in (
         "does not match the externally activated SHA",
         "contains hidden Git index entries",
@@ -60,13 +59,15 @@ def test_process_runner_rejects_identity_substitution_and_git_execution_hooks() 
         "EntryScript",
     ):
         assert marker in text
-    assert "Assert-DawnstrikeProcessSourceBoundToHead -ReleaseRoot $runtimePath -ExpectedSha $ExpectedSha" in text
+    assert (
+        "Assert-DawnstrikeProcessSourceBoundToHead -ReleaseRoot $runtimePath "
+        "-ExpectedSha $ExpectedSha"
+        in text
+    )
 
 
 def test_bootstrap_rejects_replace_refs_filters_and_dependency_reparse_points() -> None:
-    text = (ROOT / "scripts" / "dawnstrike_python_bootstrap.py").read_text(
-        encoding="utf-8"
-    )
+    text = (ROOT / "scripts" / "dawnstrike_python_bootstrap.py").read_text(encoding="utf-8")
     assert '"GIT_NO_REPLACE_OBJECTS": "1"' in text
     assert '"replace", "-l"' in text
     assert "contains a Git execution/filter configuration" in text

@@ -237,7 +237,9 @@ def _append_governed_dependencies() -> None:
         # pinned interpreter boundary.
         for child in dependency.iterdir():
             if _is_reparse(child) or child.name.lower() in {"sitecustomize.py", "usercustomize.py"}:
-                raise RuntimeError("interpreter dependency directory contains an unsafe startup link")
+                raise RuntimeError(
+                    "interpreter dependency directory contains an unsafe startup link"
+                )
         text = str(dependency)
         if text not in sys.path:
             sys.path.append(text)
