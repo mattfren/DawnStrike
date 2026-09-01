@@ -966,6 +966,27 @@ def test_state_receipt_rejects_backup_bundle_outside_supplied_root(tmp_path: Pat
         )
 
 
+def test_capture_rebind_journal_has_guarded_process_kill_seams() -> None:
+    script = Path("scripts/rebind_intraday_capture_task.ps1").read_text(encoding="utf-8")
+    for marker in (
+        'DAWNSTRIKE_TEST_REBIND_CRASH_POINT -eq "after_init"',
+        'DAWNSTRIKE_TEST_REBIND_CRASH_POINT -eq "after_set"',
+        'DAWNSTRIKE_TEST_REBIND_CRASH_POINT -eq "after_post_enable"',
+        'DAWNSTRIKE_TEST_REBIND_CRASH_POINT -eq "after_complete"',
+        'DAWNSTRIKE_TEST_LOCK_JOURNAL -ne "1"',
+        "Enter-DawnstrikeGovernedRuntimeLockWithJournal",
+        "Adopt-DawnstrikeGovernedRuntimeLockWithJournal",
+        "-Phase PRE_ENABLE",
+        "-Phase POST_ENABLE",
+        "-Phase COMPLETE",
+        "Existing COMPLETE capture-task receipt has no durable operation journal.",
+    ):
+        assert marker in script
+    assert script.count("-Phase PRE_ENABLE") >= 1
+    assert script.count("-Phase POST_ENABLE") >= 1
+    assert script.count("-Phase COMPLETE") >= 2
+
+
 @pytest.mark.parametrize("initial_aux_state", ["Disabled", "Ready"])
 @pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
 def test_powershell_sidecar_activation_and_rollback_keep_auxiliary_disabled(
