@@ -927,6 +927,7 @@ $journalPreparedRelativePath = "receipts/capture-task/capture-task-rebind-$Candi
 $journalCompleteRelativePath = "receipts/capture-task/capture-task-rebind-$CandidateSha.json"
 $journalTaskContractSha256 = Get-DawnstrikeSha256File $captureContract
 $journalEmptySha256 = Get-DawnstrikeSha256Text ""
+$preserveLocks = $false
 Assert-DawnstrikeNoReparseComponents $preparedPath "Capture-task prepared record"
 Assert-DawnstrikeNoReparseComponents $failurePath "Capture-task failure record"
 Assert-DawnstrikeNoReparseComponents $operationJournalPath "Capture-task operation journal"
@@ -1254,11 +1255,55 @@ try {
                     -CompleteReceiptSha256 $recoveryReceiptHash -BackupContractSha256 $recoveryPreparedHash `
                     -TaskContractSha256 $journalTaskContractSha256 -RuntimeStageContractSha256 $journalEmptySha256 `
                     -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
+                $journalPhase = "COMPLETE"
                 Remove-DawnstrikeCapturePrepared $preparedPath
                 [string]$sealed.Stdout | ConvertFrom-Json | ConvertTo-Json -Depth 8 -Compress
                 return
             }
             catch {
+                # A COMPLETE journal is an irreversible commit.  If receipt
+                # cleanup, output, or journal readback throws after that
+                # transition, reconcile the exact Ready task and receipt and
+                # never restore the original Disabled task.
+                $terminalJournal = $null
+                try {
+                    $terminalJournal = Get-DawnstrikeStrictRuntimeOperationJournal `
+                        $operationJournalPath $lockInterpreter.path $lockInterpreter.sha256
+                    $journalPhase = [string]$terminalJournal.payload.phase
+                }
+                catch {
+                    $preserveLocks = $true
+                    throw "Capture-task COMPLETE recovery journal phase could not be reconciled; operator recovery is required."
+                }
+                if ($journalPhase -eq "COMPLETE") {
+                    try {
+                        if (-not (Test-Path -LiteralPath $receiptFull -PathType Leaf)) {
+                            throw "Complete capture-task journal has no exact complete receipt."
+                        }
+                        $terminalVerification = Invoke-DawnstrikeActivationProcess $python @(
+                            $captureContract, "verify-receipt", "--receipt", $receiptFull,
+                            "--candidate-sha", $CandidateSha, "--candidate-tree", $runtimeContract.tree
+                        ) $PSScriptRoot "Complete capture-task terminal reconciliation" $ProcessTimeoutSeconds
+                        $terminalPayload = [string]$terminalVerification.Stdout | ConvertFrom-Json
+                        $terminalTask = Get-DawnstrikeAuxiliaryCaptureTask $runtime $state
+                        if ($terminalTask.state -ne "Ready" -or
+                            [string]$terminalTask.xml_sha256 -ne [string]$terminalPayload.xml_after_sha256 -or
+                            [string]$terminalTask.action_contract_sha256 -ne [string]$terminalPayload.action_after_sha256 -or
+                            [string]$terminalTask.definition_contract_sha256 -ne [string]$terminalPayload.definition_after_sha256 -or
+                            [string]$terminalJournal.payload.complete_receipt_sha256 -ne (Get-DawnstrikeSha256File $receiptFull)) {
+                            throw "Complete capture-task terminal task or receipt identity is not exact."
+                        }
+                        if (Test-Path -LiteralPath $preparedPath -PathType Leaf) {
+                            try { Remove-DawnstrikeCapturePrepared $preparedPath } catch { }
+                        }
+                        Write-Output ([System.IO.File]::ReadAllText($receiptFull, [System.Text.UTF8Encoding]::new($false)).Trim())
+                        return
+                    }
+                    catch {
+                        $preserveLocks = $true
+                        throw "Complete capture-task evidence could not be reconciled; operator recovery is required."
+                    }
+                }
                 try {
                     $null = Restore-DawnstrikeAuxiliaryCaptureTask `
                         -Expected $original -RuntimeRoot $runtime -StateRoot $state `
@@ -1278,7 +1323,7 @@ try {
             }
             finally {
                 if (Test-Path -LiteralPath $recoveryInput -PathType Leaf) {
-                    Remove-Item -LiteralPath $recoveryInput -Force
+                    Remove-Item -LiteralPath $recoveryInput -Force -ErrorAction SilentlyContinue
                 }
             }
         }
@@ -1508,6 +1553,48 @@ try {
     }
     catch {
         $failure = $_
+        # A COMPLETE journal is an irreversible commit.  A post-transition
+        # cleanup or output fault must reconcile the exact Ready task and
+        # receipt, never compensate back to Disabled.
+        $terminalJournal = $null
+        try {
+            $terminalJournal = Get-DawnstrikeStrictRuntimeOperationJournal `
+                $operationJournalPath $lockInterpreter.path $lockInterpreter.sha256
+            $journalPhase = [string]$terminalJournal.payload.phase
+        }
+        catch {
+            $preserveLocks = $true
+            throw "Capture-task rebind journal phase could not be reconciled; operator recovery is required."
+        }
+        if ($journalPhase -eq "COMPLETE") {
+            try {
+                if (-not (Test-Path -LiteralPath $receiptFull -PathType Leaf)) {
+                    throw "Complete capture-task journal has no exact complete receipt."
+                }
+                $terminalVerification = Invoke-DawnstrikeActivationProcess $python @(
+                    $captureContract, "verify-receipt", "--receipt", $receiptFull,
+                    "--candidate-sha", $CandidateSha, "--candidate-tree", $runtimeContract.tree
+                ) $PSScriptRoot "Complete capture-task terminal reconciliation" $ProcessTimeoutSeconds
+                $terminalPayload = [string]$terminalVerification.Stdout | ConvertFrom-Json
+                $terminalTask = Get-DawnstrikeAuxiliaryCaptureTask $runtime $state
+                if ($terminalTask.state -ne "Ready" -or
+                    [string]$terminalTask.xml_sha256 -ne [string]$terminalPayload.xml_after_sha256 -or
+                    [string]$terminalTask.action_contract_sha256 -ne [string]$terminalPayload.action_after_sha256 -or
+                    [string]$terminalTask.definition_contract_sha256 -ne [string]$terminalPayload.definition_after_sha256 -or
+                    [string]$terminalJournal.payload.complete_receipt_sha256 -ne (Get-DawnstrikeSha256File $receiptFull)) {
+                    throw "Complete capture-task terminal task or receipt identity is not exact."
+                }
+                if (Test-Path -LiteralPath $preparedPath -PathType Leaf) {
+                    try { Remove-DawnstrikeCapturePrepared $preparedPath } catch { }
+                }
+                Write-Output ([System.IO.File]::ReadAllText($receiptFull, [System.Text.UTF8Encoding]::new($false)).Trim())
+                return
+            }
+            catch {
+                $preserveLocks = $true
+                throw "Complete capture-task evidence could not be reconciled; operator recovery is required."
+            }
+        }
         try {
             $null = Restore-DawnstrikeAuxiliaryCaptureTask -Expected $original -RuntimeRoot $runtime -StateRoot $state -RunAsCredential $RunAsCredential
             $restored = Get-DawnstrikeAuxiliaryCaptureTask $runtime $state
@@ -1603,11 +1690,14 @@ try {
     }
     finally {
         if ($inputReceipt -and (Test-Path -LiteralPath $inputReceipt -PathType Leaf)) {
-            Remove-Item -LiteralPath $inputReceipt -Force
+            Remove-Item -LiteralPath $inputReceipt -Force -ErrorAction SilentlyContinue
         }
     }
 }
 finally {
+    if ($preserveLocks) {
+        throw "Capture-task terminal evidence requires governed recovery; lock retained."
+    }
     if ($rebindLock -and $rebindLock.acquired -and $journalPhase -notin @("COMPLETE", "COMPENSATED")) {
         throw "Capture-task rebind lock and nonterminal journal are retained for governed recovery."
     }

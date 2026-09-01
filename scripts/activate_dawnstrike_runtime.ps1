@@ -3085,6 +3085,7 @@ function Invoke-DawnstrikeRuntimeActivation {
             # output fault).  Reconcile the phase while the owned lock is
             # still held; otherwise the outer staging cleanup could mistake a
             # PRE_QUIESCE transaction for INIT and strand its artifacts.
+            $journalReconciliationFailed = $false
             try {
                 $failureJournal = Get-DawnstrikeStrictRuntimeOperationJournal `
                     $operationJournal $lockInterpreter.path $lockInterpreter.sha256
@@ -3094,6 +3095,51 @@ function Invoke-DawnstrikeRuntimeActivation {
                 # An unproven journal phase is itself governed evidence. Keep
                 # both locks so an operator/next process can recover it.
                 $preserveLocks = $true
+                $journalReconciliationFailed = $true
+            }
+            if ($journalReconciliationFailed) {
+                throw "Runtime activation journal phase could not be reconciled; operator recovery is required."
+            }
+            # COMPLETE is an irreversible commit.  A receipt/output or
+            # staging-cleanup fault after that transition must reconcile the
+            # committed candidate, never run the nonterminal restore below.
+            if ($journalPhase -eq "COMPLETE") {
+                try {
+                    if (-not (Test-Path -LiteralPath $completeReceipt -PathType Leaf)) {
+                        throw "Complete activation journal has no exact complete receipt."
+                    }
+                    $terminalReceipt = Invoke-DawnstrikeContractCli `
+                        $pythonPath $runtime @("verify-receipt", "--receipt", $completeReceipt, "--expected-status", "COMPLETE") `
+                        "Complete activation terminal reconciliation" $ProcessTimeoutSeconds
+                    $terminalRuntime = Get-DawnstrikeGitContract $gitPath $runtime $ProcessTimeoutSeconds $ExpectedSha
+                    if ($terminalRuntime.tree -ne [string]$candidateContract.tree) {
+                        throw "Complete activation terminal runtime identity is not exact."
+                    }
+                    $terminalTasks = Get-DawnstrikeTaskContract $runtime $state
+                    if ($terminalTasks.task_contract_sha256 -ne [string]$taskLocked.task_contract_sha256) {
+                        throw "Complete activation terminal task identity is not exact."
+                    }
+                    $terminalAuxiliary = if ($stateDeclaration.required) {
+                        Get-DawnstrikeAuxiliaryCaptureTask $runtime $state
+                    }
+                    else { $auxiliaryBefore }
+                    if ($auxiliaryBefore.present) {
+                        if (-not $terminalAuxiliary.present -or $terminalAuxiliary.state -ne "Disabled" -or
+                            $terminalAuxiliary.xml_sha256 -ne $auxiliaryBefore.xml_sha256 -or
+                            $terminalAuxiliary.definition_contract_sha256 -ne $auxiliaryBefore.definition_contract_sha256 -or
+                            $terminalAuxiliary.action_contract_sha256 -ne $auxiliaryBefore.action_contract_sha256) {
+                            throw "Complete activation terminal auxiliary task identity is not exact."
+                        }
+                    }
+                    elseif ($terminalAuxiliary.present) {
+                        throw "Complete activation terminal auxiliary task appeared unexpectedly."
+                    }
+                    return $terminalReceipt
+                }
+                catch {
+                    $preserveLocks = $true
+                    throw "Complete activation evidence could not be reconciled; operator recovery is required."
+                }
             }
             if ($swapStarted -or $tasksDisabled) {
                 try {
