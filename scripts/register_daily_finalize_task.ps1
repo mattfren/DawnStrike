@@ -58,13 +58,14 @@ if ($existing) {
         Set-Content -LiteralPath (Join-Path $BackupRoot "$safeName.xml") -Encoding Unicode
 }
 
-$arguments = (
-    "-NoProfile -ExecutionPolicy Bypass -File `"$runner`" " +
-    "-RuntimeRoot `"$runtime`" " +
-        "-StateRoot `"$state`" -ExpectedSha `"$ExpectedSha`" " +
-    "-PublicationMode $PublicationMode " +
-    "-VercelProjectId `"$VercelProjectId`""
-)
+$manifest = New-DawnstrikeScheduledLaunchManifest `
+    -RuntimeRoot $runtime -StateRoot $state -ExpectedSha $ExpectedSha `
+    -TaskScript "run_daily_finalize.ps1"
+$command = Get-DawnstrikeScheduledLaunchCommand `
+    -Runner $runner -RuntimeRoot $runtime -StateRoot $state -ExpectedSha $ExpectedSha `
+    -ManifestPath $manifest.path -ManifestSha256 $manifest.sha256 `
+    -PublicationMode $PublicationMode -VercelProjectId $VercelProjectId
+$arguments = "-NoProfile -ExecutionPolicy Bypass -Command `"$command`""
 $action = New-ScheduledTaskAction `
     -Execute $powershellExecutable `
     -Argument $arguments `

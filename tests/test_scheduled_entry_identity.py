@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -23,6 +24,8 @@ def test_scheduled_runners_require_the_externally_activated_sha_and_bind_entry_b
         assert "[string]$ExpectedSha" in text
         assert "-ExpectedSha $ExpectedSha" in text
         assert "-EntryScript $PSCommandPath" in text
+        assert "LaunchManifestPath" in text
+        assert "LaunchManifestSha256" in text
 
 
 def test_registration_and_rollback_entries_are_pinned_and_sha_bound() -> None:
@@ -61,6 +64,44 @@ def test_process_runner_rejects_identity_substitution_and_git_execution_hooks() 
     ):
         assert marker in text
     assert "Assert-DawnstrikeProcessSourceBoundToHead -ReleaseRoot $runtimePath -ExpectedSha $ExpectedSha" in text
+    assert "Assert-DawnstrikePythonDependencyAclBoundary" in text
+    assert "Get-Acl -LiteralPath" in text
+
+
+def test_task_guard_holds_entry_and_helper_bytes_against_concurrent_swap(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    script = """
+    $ErrorActionPreference = 'Stop'
+    . '{runner}'
+    $m = New-DawnstrikeScheduledLaunchManifest -RuntimeRoot '{root}' -StateRoot '{state}' -ExpectedSha ('a' * 40) -TaskScript 'run_alphaops_morning.ps1'
+    $bound = Assert-DawnstrikeScheduledLaunchManifest -RuntimeRoot '{root}' -StateRoot '{state}' -ExpectedSha ('a' * 40) -TaskScript 'run_alphaops_morning.ps1' -ManifestPath $m.path -ManifestSha256 $m.sha256 -EntryScript '{entry}'
+    try {{
+        try {{ [IO.File]::WriteAllText('{entry}', 'hostile replacement'); 'SWAP_SUCCEEDED' }} catch {{ 'SWAP_BLOCKED' }}
+    }} finally {{ foreach ($lock in $bound.locks) {{ $lock.Dispose() }} }}
+    """.format(
+        runner=str(ROOT / "scripts" / "dawnstrike_process_runner.ps1").replace("'", "''"),
+        root=str(ROOT).replace("'", "''"),
+        state=str(state).replace("'", "''"),
+        entry=str(ROOT / "scripts" / "run_alphaops_morning.ps1").replace("'", "''"),
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-Command", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "SWAP_BLOCKED" in result.stdout
+
+
+def test_inline_task_action_is_guarded_and_not_mutable_file_execution() -> None:
+    text = (ROOT / "scripts" / "dawnstrike_process_runner.ps1").read_text(
+        encoding="utf-8"
+    )
+    assert "Get-DawnstrikeScheduledLaunchCommand" in text
+    assert "[IO.FileShare]::Read" in text
+    assert "-Command" in text
+    assert "-LaunchManifestSha256" in text
 
 
 def test_bootstrap_rejects_replace_refs_filters_and_dependency_reparse_points() -> None:

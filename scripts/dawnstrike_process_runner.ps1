@@ -135,6 +135,215 @@ function Assert-DawnstrikeProcessSourceBoundToHead {
     }
 }
 
+function Get-DawnstrikeScheduledLaunchFiles {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$TaskScript)
+
+    $common = @(
+        "scripts/$TaskScript",
+        "scripts/import_dawnstrike_environment.ps1",
+        "scripts/dawnstrike_process_runner.ps1",
+        "scripts/dawnstrike_job_process.ps1",
+        "scripts/runtime_activation_lock.ps1",
+        "scripts/invoke_dawnstrike_stage.ps1"
+    )
+    if ($TaskScript -in @("run_alphaops_morning.ps1", "run_alphaops_monitor.ps1")) {
+        $common += "scripts/alpha_cycle_artifact.ps1"
+    }
+    if ($TaskScript -eq "run_alphaops_monitor.ps1") {
+        $common += "scripts/monitor_schedule_helper.ps1"
+    }
+    return @($common | Select-Object -Unique)
+}
+
+function Get-DawnstrikeLaunchSha256Bytes {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][byte[]]$Bytes)
+
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString($sha.ComputeHash($Bytes))).Replace('-', '').ToLowerInvariant()
+    }
+    finally { $sha.Dispose() }
+}
+
+function New-DawnstrikeScheduledLaunchManifest {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot,
+        [Parameter(Mandatory = $true)][string]$StateRoot,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedSha,
+        [Parameter(Mandatory = $true)][string]$TaskScript
+    )
+
+    $runtime = [System.IO.Path]::GetFullPath($RuntimeRoot).TrimEnd('\')
+    $state = [System.IO.Path]::GetFullPath($StateRoot).TrimEnd('\')
+    $safeTask = $TaskScript -replace '[^A-Za-z0-9._-]', '_'
+    $root = Join-Path $state 'receipts\scheduler-launch'
+    New-Item -ItemType Directory -Path $root -Force | Out-Null
+    $path = Join-Path $root ($ExpectedSha.ToLowerInvariant() + '-' + $safeTask + '.json')
+    $entries = @()
+    foreach ($relative in @(Get-DawnstrikeScheduledLaunchFiles -TaskScript $TaskScript)) {
+        $full = Join-Path $runtime ($relative.Replace('/', '\'))
+        $item = Get-Item -LiteralPath $full -Force -ErrorAction Stop
+        if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Scheduled launch manifest entry is not a regular file: $relative"
+        }
+        $bytes = [IO.File]::ReadAllBytes($full)
+        $entries += [ordered]@{
+            path = $relative
+            sha256 = Get-DawnstrikeLaunchSha256Bytes $bytes
+            byte_count = $bytes.Length
+        }
+    }
+    $payload = [ordered]@{
+        schema_version = 'dawnstrike.scheduled_launch_manifest.v1'
+        release_sha = $ExpectedSha.ToLowerInvariant()
+        task_script = $TaskScript
+        runtime_root = $runtime
+        files = @($entries)
+        research_only = $true
+        broker_execution_enabled = $false
+    }
+    $json = $payload | ConvertTo-Json -Depth 8
+    [IO.File]::WriteAllText($path, $json, [Text.UTF8Encoding]::new($false))
+    return [pscustomobject]@{
+        path = $path
+        sha256 = Get-DawnstrikeLaunchSha256Bytes ([IO.File]::ReadAllBytes($path))
+        files = @($entries)
+    }
+}
+
+function Assert-DawnstrikeScheduledLaunchManifest {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot,
+        [Parameter(Mandatory = $true)][string]$StateRoot,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedSha,
+        [Parameter(Mandatory = $true)][string]$TaskScript,
+        [Parameter(Mandatory = $true)][string]$ManifestPath,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')][string]$ManifestSha256,
+        [string]$EntryScript = ''
+    )
+
+    $manifest = [System.IO.Path]::GetFullPath($ManifestPath)
+    $runtime = [System.IO.Path]::GetFullPath($RuntimeRoot).TrimEnd('\')
+    if (-not $manifest.StartsWith(([System.IO.Path]::GetFullPath($StateRoot).TrimEnd('\') + '\'), [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Scheduled launch manifest is outside the approved state root.'
+    }
+    $locks = @()
+    try {
+        $manifestStream = [IO.File]::Open($manifest, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        $locks += $manifestStream
+        $manifestBytes = [IO.MemoryStream]::new()
+        $manifestStream.CopyTo($manifestBytes)
+        $manifestRaw = $manifestBytes.ToArray()
+        if ((Get-DawnstrikeLaunchSha256Bytes $manifestRaw) -cne $ManifestSha256.ToLowerInvariant()) {
+            throw 'Scheduled launch manifest hash does not match the task action binding.'
+        }
+        $payload = [Text.Encoding]::UTF8.GetString($manifestRaw) | ConvertFrom-Json
+        if (
+            [string]$payload.schema_version -cne 'dawnstrike.scheduled_launch_manifest.v1' -or
+            [string]$payload.release_sha -cne $ExpectedSha.ToLowerInvariant() -or
+            [string]$payload.task_script -cne $TaskScript -or
+            $payload.research_only -ne $true -or
+            $payload.broker_execution_enabled -ne $false
+        ) { throw 'Scheduled launch manifest safety identity is invalid.' }
+        $expected = @{}
+        foreach ($entry in @($payload.files)) {
+            $relative = [string]$entry.path
+            if ($relative -notmatch '^scripts/[A-Za-z0-9._/-]+$' -or $expected.ContainsKey($relative)) {
+                throw 'Scheduled launch manifest contains an invalid or duplicate path.'
+            }
+            $full = Join-Path $runtime ($relative.Replace('/', '\'))
+            $stream = [IO.File]::Open($full, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+            $locks += $stream
+            $stream.Position = 0
+            $buffer = [IO.MemoryStream]::new()
+            $stream.CopyTo($buffer)
+            $hash = Get-DawnstrikeLaunchSha256Bytes $buffer.ToArray()
+            if ($hash -cne ([string]$entry.sha256).ToLowerInvariant()) {
+                throw "Scheduled launch entry bytes do not match the manifest: $relative"
+            }
+            $expected[$relative] = $true
+        }
+        $required = @(Get-DawnstrikeScheduledLaunchFiles -TaskScript $TaskScript)
+        if ((@($expected.Keys | Sort-Object) -join "`n") -cne (@($required | Sort-Object) -join "`n")) {
+            throw 'Scheduled launch manifest does not cover the complete trusted helper set.'
+        }
+        if ($EntryScript) {
+            $entryPath = [IO.Path]::GetFullPath($EntryScript)
+            $rootPrefix = $runtime.TrimEnd('\') + '\'
+            if (-not $entryPath.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                throw 'Scheduled entry script is outside the approved runtime root.'
+            }
+            $entryRelative = $entryPath.Substring($rootPrefix.Length).Replace('\', '/')
+            if (-not $expected.ContainsKey($entryRelative)) { throw 'Scheduled entry script is absent from the launch manifest.' }
+        }
+        return [pscustomobject]@{ manifest = $payload; locks = $locks }
+    }
+    catch {
+        foreach ($lock in $locks) { $lock.Dispose() }
+        throw
+    }
+}
+
+function Assert-DawnstrikePythonDependencyAclBoundary {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$InterpreterPath)
+
+    $interpreter = [IO.Path]::GetFullPath($InterpreterPath)
+    $prefix = [IO.Directory]::GetParent($interpreter).FullName
+    $targets = @($interpreter, $prefix, (Join-Path $prefix 'Lib'), (Join-Path $prefix 'Lib\site-packages'))
+    foreach ($target in $targets) {
+        $item = Get-Item -LiteralPath $target -Force -ErrorAction Stop
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Python dependency boundary contains a reparse point: $target"
+        }
+        $acl = Get-Acl -LiteralPath $target -ErrorAction Stop
+        foreach ($rule in @($acl.Access)) {
+            if (
+                $rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+                [string]$rule.IdentityReference -match '(?i)(^|\\)(Everyone|Users|Authenticated Users)$' -and
+                ($rule.FileSystemRights -band (
+                    [Security.AccessControl.FileSystemRights]::Write -bor
+                    [Security.AccessControl.FileSystemRights]::Modify -bor
+                    [Security.AccessControl.FileSystemRights]::Delete -bor
+                    [Security.AccessControl.FileSystemRights]::FullControl
+                )) -ne 0
+            ) {
+                throw "Python dependency boundary is writable by a non-admin principal: $target"
+            }
+        }
+    }
+}
+
+function Get-DawnstrikeScheduledLaunchCommand {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Runner,
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot,
+        [Parameter(Mandatory = $true)][string]$StateRoot,
+        [Parameter(Mandatory = $true)][string]$ExpectedSha,
+        [Parameter(Mandatory = $true)][string]$ManifestPath,
+        [Parameter(Mandatory = $true)][string]$ManifestSha256,
+        [string]$PublicationMode = '',
+        [string]$VercelProjectId = ''
+    )
+
+    function Quote-Launch([string]$Value) { return "'" + $Value.Replace("'", "''") + "'" }
+    $entry = Quote-Launch $Runner
+    $runtime = Quote-Launch $RuntimeRoot
+    $state = Quote-Launch $StateRoot
+    $manifest = Quote-Launch $ManifestPath
+    $runnerName = Quote-Launch ([IO.Path]::GetFileName($Runner))
+    $command = "`$ErrorActionPreference='Stop'; `$m=$(Quote-Launch $ManifestPath); `$expected=$(Quote-Launch $ManifestSha256.ToLowerInvariant()); `$s=[IO.File]::Open(`$m,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read); try { `$b=[IO.MemoryStream]::new(); `$s.CopyTo(`$b); `$x=[Security.Cryptography.SHA256]::Create(); try { `$actual=([BitConverter]::ToString(`$x.ComputeHash(`$b.ToArray()))).Replace('-','').ToLowerInvariant() } finally { `$x.Dispose() }; if (`$actual -cne `$expected) { throw 'Scheduled launch manifest hash mismatch.' }; `$j=[Text.Encoding]::UTF8.GetString(`$b.ToArray()) | ConvertFrom-Json; if ([string]`$j.schema_version -cne 'dawnstrike.scheduled_launch_manifest.v1' -or [string]`$j.release_sha -cne $(Quote-Launch $ExpectedSha.ToLowerInvariant()) -or [string]`$j.task_script -cne `$runnerName -or `$j.research_only -ne `$true -or `$j.broker_execution_enabled -ne `$false) { throw 'Scheduled launch manifest identity is invalid.' }; `$locks=@(`$s); foreach(`$f in @(`$j.files)) { `$p=Join-Path $(Quote-Launch $RuntimeRoot) ([string]`$f.path -replace '/', '\\'); `$h=[IO.File]::Open(`$p,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read); `$locks += `$h; `$v=[IO.MemoryStream]::new(); `$h.CopyTo(`$v); `$y=[Security.Cryptography.SHA256]::Create(); try { `$fh=([BitConverter]::ToString(`$y.ComputeHash(`$v.ToArray()))).Replace('-','').ToLowerInvariant() } finally { `$y.Dispose() }; if (`$fh -cne ([string]`$f.sha256).ToLowerInvariant()) { throw ('Scheduled launch bytes mismatch: ' + [string]`$f.path) } }; & $(Quote-Launch $Runner) -RuntimeRoot $(Quote-Launch $RuntimeRoot) -StateRoot $(Quote-Launch $StateRoot) -ExpectedSha $(Quote-Launch $ExpectedSha.ToLowerInvariant()) -LaunchManifestPath `$m -LaunchManifestSha256 `$expected"
+    if ($PublicationMode) { $command += " -PublicationMode $(Quote-Launch $PublicationMode)" }
+    if ($VercelProjectId) { $command += " -VercelProjectId $(Quote-Launch $VercelProjectId)" }
+    $command += ' } finally { foreach($h in $locks){$h.Dispose()} }'
+    return $command
+}
+
 function Get-DawnstrikeProcessBootstrapPreloader {
     [CmdletBinding()]
     param()
@@ -278,6 +487,7 @@ function Invoke-DawnstrikeNativeProcess {
             $approved = Get-DawnstrikeApprovedLockInterpreter
             $resolved = [string]$approved.path
             $resolvedExecutableSha256 = [string]$approved.sha256
+            Assert-DawnstrikePythonDependencyAclBoundary -InterpreterPath $resolved
             $sourceIdentity = Assert-DawnstrikeProcessSourceBoundToHead `
                 (Join-Path $PSScriptRoot "..") `
                 -ExpectedSha ([string]$script:DawnstrikeExpectedReleaseSha)

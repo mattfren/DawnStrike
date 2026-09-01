@@ -2,6 +2,8 @@
 param(
     [string]$RuntimeRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")),
     [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedSha,
+    [Parameter(Mandatory = $true)][string]$LaunchManifestPath,
+    [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')][string]$LaunchManifestSha256,
     [string]$StateRoot = "C:\r\dawnstrike-state",
     [string]$MarketDate = (Get-Date).ToString("yyyy-MM-dd"),
     [string]$Notify = "telegram",
@@ -17,8 +19,9 @@ $runtime = (Resolve-Path $RuntimeRoot).Path
 New-Item -ItemType Directory -Path $StateRoot -Force | Out-Null
 $state = (Resolve-Path $StateRoot).Path
 $paperOpsRoot = if ($PaperOpsRoot) { [System.IO.Path]::GetFullPath($PaperOpsRoot) } else { Join-Path $state "v2_paper_ops_live" }
-. (Join-Path $PSScriptRoot "import_dawnstrike_environment.ps1")
 . (Join-Path $PSScriptRoot "dawnstrike_process_runner.ps1")
+$script:DawnstrikeLaunchLocks = (Assert-DawnstrikeScheduledLaunchManifest -RuntimeRoot $runtime -StateRoot $StateRoot -ExpectedSha $ExpectedSha -TaskScript (Split-Path $PSCommandPath -Leaf) -ManifestPath $LaunchManifestPath -ManifestSha256 $LaunchManifestSha256 -EntryScript $PSCommandPath).locks
+. (Join-Path $PSScriptRoot "import_dawnstrike_environment.ps1")
 . (Join-Path $PSScriptRoot "invoke_dawnstrike_stage.ps1")
 . (Join-Path $PSScriptRoot "alpha_cycle_artifact.ps1")
 Import-DawnstrikeEnvironment -StateRoot $state

@@ -33,8 +33,12 @@ if (-not (Test-Path -LiteralPath $sourceConfigValidator -PathType Leaf)) {
     throw "Durable source configuration validator is missing: $sourceConfigValidator"
 }
 $sourceConfigReceipt = Join-Path $state "receipts\source-config-validation.json"
-& py.exe $sourceConfigValidator --config $sourceConfigPath --runtime-root $runtime --receipt $sourceConfigReceipt | Out-Null
-if ($LASTEXITCODE -ne 0) {
+$sourceConfigValidation = Invoke-DawnstrikeNativeProcess `
+    -FilePath "py.exe" `
+    -ArgumentList @($sourceConfigValidator, "--config", $sourceConfigPath, "--runtime-root", $runtime, "--receipt", $sourceConfigReceipt) `
+    -LogRoot (Join-Path $state "logs") `
+    -LogName "source-config-validation"
+if ($sourceConfigValidation.exit_code -ne 0) {
     throw "Durable AlphaOps source configuration failed semantic validation: $sourceConfigPath"
 }
 if ($ReuseExistingPrincipal -and $null -ne $RunAsCredential) {
@@ -192,10 +196,13 @@ foreach ($definition in $taskDefinitions) {
     $taskName = [string]$definition.Name
     $existing = $taskPreflight[$taskName].existing
     $runner = [string]$taskPreflight[$taskName].runner
-    $arguments = (
-        "-NoProfile -ExecutionPolicy Bypass -File `"$runner`" " +
-        "-RuntimeRoot `"$runtime`" -StateRoot `"$state`" -ExpectedSha `"$ExpectedSha`""
-    )
+    $manifest = New-DawnstrikeScheduledLaunchManifest `
+        -RuntimeRoot $runtime -StateRoot $state -ExpectedSha $ExpectedSha `
+        -TaskScript ([string]$definition.Script)
+    $command = Get-DawnstrikeScheduledLaunchCommand `
+        -Runner $runner -RuntimeRoot $runtime -StateRoot $state -ExpectedSha $ExpectedSha `
+        -ManifestPath $manifest.path -ManifestSha256 $manifest.sha256
+    $arguments = "-NoProfile -ExecutionPolicy Bypass -Command `"$command`""
     $action = New-ScheduledTaskAction `
         -Execute $powershellExecutable `
         -Argument $arguments `

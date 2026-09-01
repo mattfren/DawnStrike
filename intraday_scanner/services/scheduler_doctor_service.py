@@ -363,7 +363,13 @@ def _task_check(
         state_root=state_root,
         expected_sha=expected_sha,
     )
-    action_arguments_match = arguments == expected_arguments
+    action_arguments_match = arguments == expected_arguments or _scheduled_guard_action_matches(
+        arguments,
+        expected_runner=expected_runner,
+        runtime_root=runtime_root,
+        state_root=state_root,
+        expected_sha=expected_sha,
+    )
     action_count = task.get("action_count")
     action_count_matches = type(action_count) is int and action_count == 1
     trigger_count = task.get("trigger_count")
@@ -1467,6 +1473,40 @@ def _expected_action_arguments(
     if task_name == CANONICAL_TASK_NAME:
         arguments += f' -PublicationMode Production -VercelProjectId "{EXPECTED_VERCEL_PROJECT_ID}"'
     return arguments
+
+
+def _scheduled_guard_action_matches(
+    arguments: str,
+    *,
+    expected_runner: Path,
+    runtime_root: Path,
+    state_root: Path,
+    expected_sha: str,
+) -> bool:
+    """Recognize the immutable inline task guard without executing its text."""
+
+    normalized = arguments.casefold()
+    required = (
+        "-command",
+        "scheduled launch manifest",
+        str(expected_runner).casefold(),
+        str(runtime_root).casefold(),
+        str(state_root).casefold(),
+        expected_sha.casefold(),
+        "-launchmanifestpath",
+        "-launchmanifestsha256",
+        "[io.file]::open",
+        "[io.fileshare]::read",
+        "sha256",
+    )
+    if any(marker not in normalized for marker in required):
+        return False
+    # A guarded action must never retain a mutable -File entry point. The
+    # inline command owns the byte lock and invokes the entry only afterwards.
+    if " -file " in normalized:
+        return False
+    manifest_prefix = str(state_root).casefold().rstrip("\\/") + "\\receipts\\scheduler-launch\\"
+    return manifest_prefix in normalized
 
 
 def _optional_int_matches(value: Any, expected: int | None) -> bool:
