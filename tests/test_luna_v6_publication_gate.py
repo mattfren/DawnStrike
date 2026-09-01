@@ -13,6 +13,7 @@ from scripts.verify_daily_finalize_receipt import (
     _is_structurally_pre_v6_receipt,
 )
 from scripts.verify_daily_finalize_receipt import verify as verify_finalize_receipt
+from scripts.verify_daily_prepublication import _select_local_publication_stage
 from scripts.verify_daily_prepublication import verify as verify_prepublication
 from scripts.verify_public_artifact import _build_sha as verifier_build_sha
 from scripts.verify_public_artifact import verify as verify_artifact
@@ -189,3 +190,64 @@ def test_prepublication_gate_is_fail_closed_and_excludes_publication_stage(tmp_p
     assert result["publication_stage_excluded"] is True
     assert "publication" not in result["required_stages"]
     assert any(error.startswith("daily_run_unreadable:") for error in result["errors"])
+
+
+def test_prepublication_selects_hash_bound_local_publication_over_newer_external_row() -> None:
+    run_id = "daily-test"
+    publication_hash = "a" * 64
+    rows = [
+        {
+            "run_id": run_id,
+            "stage_name": "publication",
+            "attempt_no": 2,
+            "status": "COMPLETE",
+            "output_hash_sha256": publication_hash,
+            "payload": {
+                "schema_version": "dawnstrike.daily_deployment.v1",
+                "publication_set_sha256": publication_hash,
+            },
+        },
+        {
+            "run_id": run_id,
+            "stage_name": "publication",
+            "attempt_no": 1,
+            "status": "COMPLETE",
+            "output_hash_sha256": publication_hash,
+            "payload": {
+                "schema_version": "dawnstrike.publication_set.v2",
+                "publication_set_sha256": publication_hash,
+            },
+        },
+    ]
+
+    selected = _select_local_publication_stage(
+        rows,
+        run_id=run_id,
+        publication_set_sha256=publication_hash,
+    )
+
+    assert selected is not None
+    assert selected["attempt_no"] == 1
+
+
+def test_prepublication_rejects_malformed_local_publication_attempt() -> None:
+    publication_hash = "a" * 64
+    selected = _select_local_publication_stage(
+        [
+            {
+                "run_id": "daily-test",
+                "stage_name": "publication",
+                "attempt_no": "not-an-integer",
+                "status": "COMPLETE",
+                "output_hash_sha256": publication_hash,
+                "payload": {
+                    "schema_version": "dawnstrike.publication_set.v2",
+                    "publication_set_sha256": publication_hash,
+                },
+            }
+        ],
+        run_id="daily-test",
+        publication_set_sha256=publication_hash,
+    )
+
+    assert selected is None

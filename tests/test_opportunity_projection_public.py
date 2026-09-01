@@ -122,11 +122,18 @@ def test_public_build_and_verifier_bind_projection_payload_and_manifest() -> Non
     build = Path("scripts/build_public.py").read_text(encoding="utf-8")
     verifier = Path("scripts/verify_public_artifact.py").read_text(encoding="utf-8")
 
-    assert "load_latest_opportunity_projection(db_path)" in build
+    assert "load_latest_opportunity_projection(" in build
+    assert "expected_market_date=market_date" in build
     assert "write_public_opportunity_projection" in build
     assert 'output_root / "data"' in build
-    assert '"data/opportunity-projection.json"' in verifier
-    assert '"data/opportunity-projection.json.manifest.json"' in verifier
+    assert '"opportunity-projection.json"' in verifier
+    assert '"opportunity-projection.json.manifest.json"' in verifier
     assert "opportunity_hash_mismatch" in verifier
     assert "opportunity_row_limit_exceeded" in verifier
     assert "opportunity_execution_boundary_invalid" in verifier
+
+
+def test_streamlit_today_view_scopes_projection_to_current_market_date() -> None:
+    app = Path("app.py").read_text(encoding="utf-8")
+
+    assert "expected_market_date=date.today().isoformat()" in app

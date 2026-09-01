@@ -481,7 +481,7 @@ def test_hardening_script_is_explicit_and_preserves_capture_bindings() -> None:
         "Restore-HardeningExactTask",
         "Get-Credential",
         "broker_execution_enabled = $false",
-        '"-I", "-B", "-X"',
+            '"-I", "-B", "-S", "-X"',
         "pycache_prefix=",
         "if (-not $recoveringPrepared)",
         "Enter-DawnstrikeGovernedRuntimeLockWithJournal",

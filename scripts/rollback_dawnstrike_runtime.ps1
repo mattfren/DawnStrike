@@ -444,6 +444,9 @@ function Invoke-DawnstrikeRuntimeRollback {
     if ($contractGit.tree -ne [string]$receiptHint.candidate_tree) {
         throw "ContractRoot tree does not match the activation receipt candidate."
     }
+    $null = Assert-DawnstrikeHelpersBoundToHead `
+        -GitPath $gitPath -Root $contract -TimeoutSeconds $ProcessTimeoutSeconds
+    . (Join-Path $PSScriptRoot "capture_task_safety.ps1")
     . (Join-Path $PSScriptRoot "invoke_dawnstrike_stage.ps1")
 
     $activation = Invoke-DawnstrikeContractCli `
@@ -506,6 +509,33 @@ function Invoke-DawnstrikeRuntimeRollback {
         -CandidateTree $activation.candidate_tree `
         -Declaration $stateDeclaration `
         -TimeoutSeconds $ProcessTimeoutSeconds
+
+    # A runtime that merely happens to have the recorded previous SHA is not a
+    # reusable rollback target.  Require the activation receipt's explicit
+    # authorization disposition and re-prove the referenced prior COMPLETE
+    # activation/journal chain from durable state before any rollback lock or
+    # task mutation.  The activation transaction can still compensate its own
+    # failed swap, but a legacy/unapproved prior runtime stays quarantined.
+    if (
+        -not ($activation.PSObject.Properties.Name -contains "previous_runtime_rollback_authorized") -or
+        $activation.previous_runtime_rollback_authorized -ne $true -or
+        [string]$activation.previous_runtime_disposition -ne "AUTHORIZED_COMPLETE_CHAIN"
+    ) {
+        throw "Rollback denied: the prior runtime is quarantined and lacks an authorized COMPLETE activation chain."
+    }
+    $priorAuthorization = Get-DawnstrikePriorRuntimeAuthorization `
+        -StateRoot $state -CandidateRoot $contract `
+        -PreviousSha $previousSha -PreviousTree $previousTree `
+        -OriginIdentity $contractOriginIdentity `
+        -OriginSha256 ([string]$activation.runtime_origin_sha256) `
+        -PythonPath $pythonPath -TimeoutSeconds $ProcessTimeoutSeconds
+    if (
+        $priorAuthorization.authorized -ne $true -or
+        [string]$priorAuthorization.receipt_sha256 -cne [string]$activation.previous_runtime_authorization_receipt_sha256 -or
+        [string]$priorAuthorization.journal_sha256 -cne [string]$activation.previous_runtime_authorization_journal_sha256
+    ) {
+        throw "Rollback denied: prior runtime authorization receipt/journal chain is missing or changed."
+    }
 
     $existingRollbackReceipt = $null
     if (Test-Path -LiteralPath $rollbackReceipt -PathType Leaf) {
@@ -1202,7 +1232,11 @@ function Invoke-DawnstrikeRuntimeRollback {
             research_only = $true
             broker_execution_enabled = $false
         }
-        if ($stateDeclaration.required -and $activation.PSObject.Properties.Name -contains "auxiliary_capture_present") {
+    if ($stateDeclaration.required -and $activation.PSObject.Properties.Name -contains "auxiliary_capture_present") {
+            $payload.previous_runtime_rollback_authorized = [bool]$activation.previous_runtime_rollback_authorized
+            $payload.previous_runtime_disposition = [string]$activation.previous_runtime_disposition
+            $payload.previous_runtime_authorization_receipt_sha256 = [string]$activation.previous_runtime_authorization_receipt_sha256
+            $payload.previous_runtime_authorization_journal_sha256 = [string]$activation.previous_runtime_authorization_journal_sha256
             $payload.state_preparation_required = $true
             $payload.state_preparation_contract = [string]$activation.state_preparation_contract
             $payload.state_preparation_receipt_sha256 = [string]$activation.state_preparation_receipt_sha256

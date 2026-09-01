@@ -37,7 +37,6 @@ $script:DawnstrikeCanonicalTaskNames = @(
 )
 $script:DawnstrikeAuxiliaryCaptureTaskName = "Dawnstrike Delayed SIP Capture"
 $script:DawnstrikeStatePreparationContractFile = "config\state_preparation_contract.json"
-. (Join-Path $PSScriptRoot "capture_task_safety.ps1")
 
 function Get-DawnstrikeSha256Text {
     [CmdletBinding()]
@@ -213,6 +212,12 @@ function Assert-DawnstrikeSafeOrigin {
     }
 }
 
+function Get-DawnstrikeActivationBootstrapPreloader {
+    [CmdletBinding()]
+    param()
+    return "import hashlib,sys; p=sys.argv[1]; e=sys.argv[2]; b=open(p,'rb').read(); a=hashlib.sha256(b).hexdigest(); a==e or (_ for _ in ()).throw(RuntimeError('bootstrap hash mismatch')); r=sys.argv[3:]; sys.argv=[p,*r]; exec(compile(b,p,'exec'),{'__name__':'__main__','__file__':p})"
+}
+
 function Invoke-DawnstrikeActivationProcess {
     [CmdletBinding()]
     param(
@@ -232,6 +237,54 @@ function Invoke-DawnstrikeActivationProcess {
         )) {
         if ($effectiveArguments.Count -lt 2 -or $effectiveArguments[0] -ne '-I' -or $effectiveArguments[1] -ne '-B') {
             $effectiveArguments = @('-I', '-B') + $effectiveArguments
+        }
+        if ($effectiveArguments.Count -lt 3 -or $effectiveArguments[2] -ne '-S') {
+            $effectiveArguments = @($effectiveArguments[0..1]) + @('-S') + @($effectiveArguments | Select-Object -Skip 2)
+        }
+        # Every candidate Python script imports intraday_scanner.  With -S,
+        # Python intentionally skips site.py, so invoke it through the
+        # materialized release bootstrap which adds only the approved
+        # interpreter dependency directories and exact release root.
+        $scriptIndex = -1
+        for ($index = 0; $index -lt $effectiveArguments.Count; $index++) {
+            if ([string]$effectiveArguments[$index] -match '(?i)\.py$') {
+                $scriptIndex = $index
+                break
+            }
+        }
+        if ($scriptIndex -ge 0) {
+            $pythonScript = [System.IO.Path]::GetFullPath([string]$effectiveArguments[$scriptIndex])
+            if (-not $pythonScript.EndsWith("dawnstrike_python_bootstrap.py", [System.StringComparison]::OrdinalIgnoreCase)) {
+                $scriptsDirectory = Split-Path -Parent $pythonScript
+                $releaseRoot = [System.IO.Path]::GetFullPath((Join-Path $scriptsDirectory ".."))
+                $bootstrap = Join-Path $scriptsDirectory "dawnstrike_python_bootstrap.py"
+                Assert-DawnstrikeNoReparseComponents $pythonScript "Python release script"
+                Assert-DawnstrikeNoReparseComponents $releaseRoot "Python release root"
+                if (-not (Test-Path -LiteralPath $bootstrap -PathType Leaf)) {
+                    throw "Python release bootstrap is missing."
+                }
+                $bootstrapSha256 = Get-DawnstrikeSha256File $bootstrap
+                $releaseRootSha = Get-DawnstrikeGitValue `
+                    -GitPath (Get-DawnstrikeApprovedGit).path `
+                    -Root $releaseRoot `
+                    -Arguments @("rev-parse", "HEAD") `
+                    -Label "Python release HEAD binding" `
+                    -TimeoutSeconds $TimeoutSeconds
+                if ($releaseRootSha -notmatch '^[0-9a-f]{40}$') {
+                    throw "Python release HEAD is invalid."
+                }
+                $tail = if ($effectiveArguments.Count -gt ($scriptIndex + 1)) {
+                    @($effectiveArguments | Select-Object -Skip ($scriptIndex + 1))
+                } else { @() }
+                $effectiveArguments = @(
+                    '-I', '-B', '-S', '-c',
+                    (Get-DawnstrikeActivationBootstrapPreloader),
+                    $bootstrap, $bootstrapSha256,
+                    '--release-root', $releaseRoot, '--expected-sha', $releaseRootSha,
+                    '--script', $pythonScript,
+                    '--'
+                ) + $tail
+            }
         }
     }
     $result = Invoke-DawnstrikeJobProcess `
@@ -370,6 +423,25 @@ function Get-DawnstrikeGitContract {
     if ($status) {
         throw "Git checkout is not clean."
     }
+    # ``status`` and the normal diff machinery intentionally trust the index.
+    # An attacker can hide modified tracked bytes with assume-unchanged or
+    # skip-worktree, so those index bits are themselves a hard failure.  This
+    # check must happen before any release helper is trusted for mutation.
+    $indexEntries = Get-DawnstrikeGitValue $GitPath $Root @("ls-files", "-v", "-z") "Git index flag verification" $TimeoutSeconds
+    $hiddenIndexEntries = @(
+        ([string]$indexEntries).Split([char]0, [System.StringSplitOptions]::RemoveEmptyEntries) |
+            Where-Object {
+                # ``git ls-files -v`` uses lowercase ``h`` for
+                # assume-unchanged and uppercase ``S`` for skip-worktree;
+                # normal cached entries are uppercase ``H``.  Check both
+                # hidden-index spellings explicitly instead of relying on
+                # porcelain status, which intentionally trusts the index.
+                $_.Length -gt 2 -and $_.Substring(0, 1) -cmatch "[hSs]"
+            }
+    )
+    if ($hiddenIndexEntries.Count -gt 0) {
+        throw "Git checkout contains assume-unchanged or skip-worktree entries."
+    }
     $ignored = Get-DawnstrikeGitValue $GitPath $Root @("ls-files", "--others", "--ignored", "--exclude-standard", "-z") "Ignored runtime artifact verification" $TimeoutSeconds
     $forbiddenIgnored = @(
         ([string]$ignored).Split([char]0, [System.StringSplitOptions]::RemoveEmptyEntries) |
@@ -386,6 +458,220 @@ function Get-DawnstrikeGitContract {
         throw "Git checkout contains ignored executable or Python-startup artifacts."
     }
     return [pscustomobject]@{ head = $head; tree = $tree }
+}
+
+function Assert-DawnstrikeHelpersBoundToHead {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$GitPath,
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds
+    )
+
+    # These files are sourced or executed before/around the activation swap.
+    # Compare their worktree Git blobs with the exact HEAD blobs rather than
+    # trusting status (which is deliberately checked separately for hidden
+    # index flags above).  A missing helper is also a fail-closed result.
+    $helpers = @(
+        "scripts/activate_dawnstrike_runtime.ps1",
+        "scripts/rollback_dawnstrike_runtime.ps1",
+        "scripts/capture_task_safety.ps1",
+        "scripts/runtime_activation_lock.ps1",
+        "scripts/runtime_activation_lock_contract.py",
+        "scripts/runtime_operation_journal.py",
+        "scripts/dawnstrike_job_process.ps1",
+        "scripts/dawnstrike_process_runner.ps1",
+        "scripts/invoke_dawnstrike_stage.ps1",
+        "scripts/runtime_activation_contract.py",
+        "scripts/state_disaster_recovery.py",
+        "scripts/dawnstrike_python_bootstrap.py"
+    )
+    foreach ($relative in $helpers) {
+        $relative = $relative.Replace("\", "/")
+        $path = Join-Path $Root ($relative.Replace("/", "\"))
+        Assert-DawnstrikeNoReparseComponents $path "Release helper"
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "Release helper is missing: $relative"
+        }
+        $headBlob = Get-DawnstrikeGitValue $GitPath $Root @("rev-parse", ("HEAD:" + $relative)) "Release helper HEAD binding" $TimeoutSeconds
+        if ($headBlob -notmatch "^[0-9a-f]{40}$") {
+            throw "Release helper is not tracked by the exact HEAD: $relative"
+        }
+        $worktreeBlob = Get-DawnstrikeGitValue $GitPath $Root @("hash-object", ("--path=" + $relative), "--", $path) "Release helper worktree binding" $TimeoutSeconds
+        if ($worktreeBlob -cne $headBlob) {
+            throw "Release helper bytes do not match exact HEAD: $relative"
+        }
+    }
+}
+
+function Get-DawnstrikeTaskProperty {
+    [CmdletBinding()]
+    param(
+        [AllowNull()][object]$Object,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    if ($null -eq $Object) { return $null }
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) { return $null }
+    return $property.Value
+}
+
+function Get-DawnstrikeCanonicalTaskPolicy {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$TaskName,
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot,
+        [Parameter(Mandatory = $true)][string]$StateRoot
+    )
+
+    $runners = @{
+        "Dawnstrike AlphaOps Morning" = "run_alphaops_morning.ps1"
+        "Dawnstrike AlphaOps Monitor 5m" = "run_alphaops_monitor.ps1"
+        "Dawnstrike AlphaOps EOD Full Report" = "run_alphaops_eod.ps1"
+        "Dawnstrike AlphaOps V6 Weekly Training" = "run_alphaops_weekly_training.ps1"
+        "Dawnstrike 10of10 Daily Finalize" = "run_daily_finalize.ps1"
+    }
+    if (-not $runners.ContainsKey($TaskName)) {
+        throw "Unknown canonical Dawnstrike task: $TaskName"
+    }
+    $runtime = [System.IO.Path]::GetFullPath($RuntimeRoot).TrimEnd('\')
+    $state = [System.IO.Path]::GetFullPath($StateRoot).TrimEnd('\')
+    $runner = Join-Path $runtime ("scripts\" + [string]$runners[$TaskName])
+    $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$runner`" -RuntimeRoot `"$runtime`" -StateRoot `"$state`""
+    if ($TaskName -eq "Dawnstrike 10of10 Daily Finalize") {
+        $arguments += " -PublicationMode Production -VercelProjectId `"prj_5pef3EZF1u5YadebEz3dFjnkWOXy`""
+    }
+    $weekly = $TaskName -ne "Dawnstrike 10of10 Daily Finalize"
+    $days = if ($TaskName -eq "Dawnstrike AlphaOps V6 Weekly Training") { 2 } elseif ($weekly) { 62 } else { $null }
+    $start = switch ($TaskName) {
+        "Dawnstrike AlphaOps Morning" { "08:00"; break }
+        "Dawnstrike AlphaOps Monitor 5m" { "08:35"; break }
+        "Dawnstrike AlphaOps EOD Full Report" { "15:15"; break }
+        "Dawnstrike AlphaOps V6 Weekly Training" { "21:00"; break }
+        default { "17:30" }
+    }
+    $executionLimit = switch ($TaskName) {
+        "Dawnstrike AlphaOps Morning" { "PT1H"; break }
+        "Dawnstrike AlphaOps Monitor 5m" { "PT4M"; break }
+        "Dawnstrike AlphaOps EOD Full Report" { "PT2H"; break }
+        default { "PT3H" }
+    }
+    $restartCount = switch ($TaskName) {
+        "Dawnstrike AlphaOps V6 Weekly Training" { 4; break }
+        "Dawnstrike 10of10 Daily Finalize" { 2; break }
+        default { 3 }
+    }
+    $restartInterval = if ($TaskName -in @("Dawnstrike AlphaOps V6 Weekly Training", "Dawnstrike 10of10 Daily Finalize")) { "PT15M" } else { "PT5M" }
+    return [pscustomobject]@{
+        arguments = $arguments
+        runner = $runner
+        weekly = $weekly
+        days = $days
+        start = $start
+        execution_limit = $executionLimit
+        restart_count = $restartCount
+        restart_interval = $restartInterval
+        monitor = $TaskName -eq "Dawnstrike AlphaOps Monitor 5m"
+    }
+}
+
+function Assert-DawnstrikeCanonicalTaskSemantics {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot,
+        [Parameter(Mandatory = $true)][string]$StateRoot,
+        [switch]$AllowDisabled
+    )
+
+    $results = @()
+    foreach ($taskName in $script:DawnstrikeCanonicalTaskNames) {
+        $policy = Get-DawnstrikeCanonicalTaskPolicy $taskName $RuntimeRoot $StateRoot
+        $matches = @(Get-ScheduledTask -TaskName $taskName -ErrorAction Stop)
+        if ($matches.Count -ne 1) { throw "Canonical task semantic check requires exactly one task: $taskName" }
+        $task = $matches[0]
+        $taskPath = [string](Get-DawnstrikeTaskProperty $task "TaskPath")
+        if ([string]::IsNullOrWhiteSpace($taskPath)) {
+            throw "Canonical task path is missing: $taskName"
+        }
+        if ($taskPath -cne "\") { throw "Canonical task path drifted: $taskName" }
+        $state = [string](Get-DawnstrikeTaskProperty $task "State")
+        if ($state -eq "Ready") { }
+        elseif ($AllowDisabled -and $state -eq "Disabled") { }
+        else { throw "Canonical task state is not an approved boundary: $taskName state=$state" }
+
+        $actions = @((Get-DawnstrikeTaskProperty $task "Actions"))
+        if ($actions.Count -ne 1) { throw "Canonical task must have exactly one action: $taskName" }
+        $action = $actions[0]
+        if ([string](Get-DawnstrikeTaskProperty $action "Execute") -cne "powershell.exe") {
+            throw "Canonical task executable is not powershell.exe: $taskName"
+        }
+        if ([string](Get-DawnstrikeTaskProperty $action "Arguments") -cne [string]$policy.arguments) {
+            throw "Canonical task arguments are not the exact governed action: $taskName"
+        }
+        if ([string](Get-DawnstrikeTaskProperty $action "WorkingDirectory") -cne [string]$RuntimeRoot) {
+            throw "Canonical task working directory is not the exact runtime root: $taskName"
+        }
+
+        $triggers = @((Get-DawnstrikeTaskProperty $task "Triggers"))
+        if ($triggers.Count -ne 1) { throw "Canonical task must have exactly one trigger: $taskName" }
+        $trigger = $triggers[0]
+        $cimClass = Get-DawnstrikeTaskProperty $trigger "CimClass"
+        $triggerType = [string](Get-DawnstrikeTaskProperty $cimClass "CimClassName")
+        $expectedType = if ($policy.weekly) { "MSFT_TaskWeeklyTrigger" } else { "MSFT_TaskDailyTrigger" }
+        if ($triggerType -cne $expectedType) { throw "Canonical task trigger type drifted: $taskName" }
+        if ((Get-DawnstrikeTaskProperty $trigger "Enabled") -ne $true) { throw "Canonical task trigger is disabled: $taskName" }
+        try {
+            $boundary = [DateTimeOffset]::Parse(
+                [string](Get-DawnstrikeTaskProperty $trigger "StartBoundary"),
+                [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::RoundtripKind
+            )
+        }
+        catch { throw "Canonical task trigger start boundary is invalid: $taskName" }
+        if ($boundary.Hour -ne [int]$policy.start.Split(':')[0] -or $boundary.Minute -ne [int]$policy.start.Split(':')[1] -or $boundary.Second -ne 0) {
+            throw "Canonical task trigger start time drifted: $taskName"
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string](Get-DawnstrikeTaskProperty $trigger "EndBoundary")) -or -not [string]::IsNullOrWhiteSpace([string](Get-DawnstrikeTaskProperty $trigger "RandomDelay"))) {
+            throw "Canonical task trigger has an unexpected end boundary or random delay: $taskName"
+        }
+        if ($policy.weekly) {
+            if ([int](Get-DawnstrikeTaskProperty $trigger "DaysOfWeek") -ne [int]$policy.days -or [int](Get-DawnstrikeTaskProperty $trigger "WeeksInterval") -ne 1) {
+                throw "Canonical weekly task trigger calendar drifted: $taskName"
+            }
+            if ($null -ne (Get-DawnstrikeTaskProperty $trigger "DaysInterval")) { throw "Weekly task has a daily interval: $taskName" }
+        }
+        else {
+            if ([int](Get-DawnstrikeTaskProperty $trigger "DaysInterval") -ne 1) { throw "Canonical daily task interval drifted: $taskName" }
+            if ($null -ne (Get-DawnstrikeTaskProperty $trigger "DaysOfWeek")) { throw "Daily task has a weekly calendar: $taskName" }
+        }
+        $repetition = Get-DawnstrikeTaskProperty $trigger "Repetition"
+        if ($policy.monitor) {
+            if ($null -eq $repetition -or [string](Get-DawnstrikeTaskProperty $repetition "Interval") -cne "PT5M" -or [string](Get-DawnstrikeTaskProperty $repetition "Duration") -cne "PT6H35M" -or (Get-DawnstrikeTaskProperty $repetition "StopAtDurationEnd") -ne $true) {
+                throw "Canonical monitor repetition contract drifted."
+            }
+        }
+        elseif (
+            $null -eq $repetition -or
+            -not [string]::IsNullOrWhiteSpace([string](Get-DawnstrikeTaskProperty $repetition "Interval")) -or
+            -not [string]::IsNullOrWhiteSpace([string](Get-DawnstrikeTaskProperty $repetition "Duration")) -or
+            (Get-DawnstrikeTaskProperty $repetition "StopAtDurationEnd") -ne $false
+        ) { throw "Non-monitor task has an unexpected repetition: $taskName" }
+
+        $principal = Get-DawnstrikeTaskProperty $task "Principal"
+        $logonType = [string](Get-DawnstrikeTaskProperty $principal "LogonType")
+        if ($logonType -notin @("Password", "ServiceAccount") -or [string]::IsNullOrWhiteSpace([string](Get-DawnstrikeTaskProperty $principal "UserId")) -or [string](Get-DawnstrikeTaskProperty $principal "RunLevel") -cne "Limited") {
+            throw "Canonical task principal semantics drifted: $taskName"
+        }
+        $settings = Get-DawnstrikeTaskProperty $task "Settings"
+        $enabled = Get-DawnstrikeTaskProperty $settings "Enabled"
+        $expectedEnabled = $state -eq "Ready"
+        if ($enabled -ne $expectedEnabled -or (Get-DawnstrikeTaskProperty $settings "StartWhenAvailable") -ne $true -or (Get-DawnstrikeTaskProperty $settings "WakeToRun") -ne $true -or (Get-DawnstrikeTaskProperty $settings "StopIfGoingOnBatteries") -ne $false -or (Get-DawnstrikeTaskProperty $settings "DisallowStartIfOnBatteries") -ne $false -or [string](Get-DawnstrikeTaskProperty $settings "MultipleInstances") -cne "IgnoreNew" -or [string](Get-DawnstrikeTaskProperty $settings "ExecutionTimeLimit") -cne [string]$policy.execution_limit -or [int](Get-DawnstrikeTaskProperty $settings "RestartCount") -ne [int]$policy.restart_count -or [string](Get-DawnstrikeTaskProperty $settings "RestartInterval") -cne [string]$policy.restart_interval -or (Get-DawnstrikeTaskProperty $settings "Hidden") -ne $false -or (Get-DawnstrikeTaskProperty $settings "RunOnlyIfIdle") -ne $false -or (Get-DawnstrikeTaskProperty $settings "RunOnlyIfNetworkAvailable") -ne $false -or (Get-DawnstrikeTaskProperty $settings "UseUnifiedSchedulingEngine") -ne $true) {
+            throw "Canonical task settings semantics drifted: $taskName"
+        }
+        $results += [pscustomobject]@{ name = $taskName; state = $state; action = [string]$policy.arguments }
+    }
+    return $results
 }
 
 function Get-DawnstrikeTaskDefinitionText {
@@ -1592,6 +1878,85 @@ function Invoke-DawnstrikeContractCli {
     }
 }
 
+function Get-DawnstrikePriorRuntimeAuthorization {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$StateRoot,
+        [Parameter(Mandatory = $true)][string]$CandidateRoot,
+        [Parameter(Mandatory = $true)][string]$PreviousSha,
+        [Parameter(Mandatory = $true)][string]$PreviousTree,
+        [Parameter(Mandatory = $true)][string]$OriginIdentity,
+        [Parameter(Mandatory = $true)][string]$OriginSha256,
+        [Parameter(Mandatory = $true)][string]$PythonPath,
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds
+    )
+
+    $empty = Get-DawnstrikeSha256Text ""
+    $notAuthorized = [pscustomobject]@{
+        authorized = $false
+        disposition = "QUARANTINED_UNAUTHORIZED"
+        receipt_sha256 = $empty
+        journal_sha256 = $empty
+        receipt_path = ""
+        journal_path = ""
+    }
+    $receiptRoot = Join-Path $StateRoot "receipts\runtime-activation"
+    if (-not (Test-Path -LiteralPath $receiptRoot -PathType Container)) { return $notAuthorized }
+    Assert-DawnstrikeNoReparseComponents $receiptRoot "Prior activation receipt root"
+    $items = @(
+        Get-ChildItem -LiteralPath $receiptRoot -Filter "runtime-activation-*.json" -File -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notlike "*.prepared.json" } |
+            Sort-Object Name
+    )
+    foreach ($item in $items) {
+        try {
+            Assert-DawnstrikeNoReparseComponents $item.FullName "Prior activation receipt"
+            $prior = Invoke-DawnstrikeContractCli $PythonPath $CandidateRoot @(
+                "verify-receipt", "--receipt", $item.FullName, "--expected-status", "COMPLETE"
+            ) "Prior activation authorization receipt verification" $TimeoutSeconds
+            if (
+                [string]$prior.candidate_sha -ne $PreviousSha -or
+                [string]$prior.candidate_tree -ne $PreviousTree -or
+                [string]$prior.runtime_origin_sha256 -ne $OriginSha256
+            ) { continue }
+            $priorId = [string]$prior.activation_id
+            $journalPath = Join-Path $StateRoot "receipts\runtime-operation\runtime-activation-$priorId.json"
+            if (-not (Test-Path -LiteralPath $journalPath -PathType Leaf)) { continue }
+            Assert-DawnstrikeNoReparseComponents $journalPath "Prior activation authorization journal"
+            $journalInterpreter = Get-DawnstrikeApprovedLockInterpreter
+            $journal = Get-DawnstrikeStrictRuntimeOperationJournal `
+                $journalPath $journalInterpreter.path $journalInterpreter.sha256
+            $relative = ([System.IO.Path]::GetFullPath($item.FullName).Substring(([System.IO.Path]::GetFullPath($StateRoot)).TrimEnd('\').Length + 1) -replace '\\','/')
+            if (
+                [string]$journal.payload.operation -ne "runtime_activation" -or
+                [string]$journal.payload.phase -ne "COMPLETE" -or
+                [string]$journal.payload.candidate_sha -ne $PreviousSha -or
+                [string]$journal.payload.candidate_tree -ne $PreviousTree -or
+                [string]$journal.payload.current_sha -ne $PreviousSha -or
+                [string]$journal.payload.current_tree -ne $PreviousTree -or
+                [string]$journal.payload.origin_identity -ne $OriginIdentity -or
+                [string]$journal.payload.complete_receipt_relative_path -ne $relative -or
+                [string]$journal.payload.complete_receipt_sha256 -ne (Get-DawnstrikeSha256File $item.FullName)
+            ) { continue }
+            return [pscustomobject]@{
+                authorized = $true
+                disposition = "AUTHORIZED_COMPLETE_CHAIN"
+                receipt_sha256 = Get-DawnstrikeSha256File $item.FullName
+                journal_sha256 = Get-DawnstrikeSha256File $journalPath
+                receipt_path = $item.FullName
+                journal_path = $journalPath
+            }
+        }
+        catch {
+            # A malformed, foreign, or stale prior receipt is not an
+            # authorization. Continue scanning so one poisoned artifact cannot
+            # select a different runtime by accident.
+            continue
+        }
+    }
+    return $notAuthorized
+}
+
 function Get-DawnstrikeStatePreparationProof {
     [CmdletBinding()]
     param(
@@ -1600,6 +1965,7 @@ function Get-DawnstrikeStatePreparationProof {
         [Parameter(Mandatory = $true)][string]$BackupRoot,
         [Parameter(Mandatory = $true)][string]$CandidateSha,
         [Parameter(Mandatory = $true)][string]$CandidateTree,
+        [string]$GitPath = "",
         [Parameter(Mandatory = $true)][string]$PythonPath,
         [Parameter(Mandatory = $true)][int]$TimeoutSeconds
     )
@@ -1711,6 +2077,7 @@ function Assert-DawnstrikeCaptureHardeningAttestation {
         [Parameter(Mandatory = $true)][string]$CandidateSha,
         [Parameter(Mandatory = $true)][string]$CandidateTree,
         [Parameter(Mandatory = $true)][string]$PythonPath,
+        [Parameter(Mandatory = $true)][string]$GitPath,
         [Parameter(Mandatory = $true)][int]$TimeoutSeconds,
         [ValidateSet("PRE_SWAP", "POST_SWAP")][string]$Stage = "PRE_SWAP"
     )
@@ -1737,7 +2104,20 @@ function Assert-DawnstrikeCaptureHardeningAttestation {
     $settingsHash = Get-DawnstrikeAuxiliarySectionHash ([string]$Auxiliary.xml) "Settings"
     $actionHash = Get-DawnstrikeAuxiliarySectionHash ([string]$Auxiliary.xml) "Actions"
     if ([string]$receipt.xml_after_sha256 -ne [string]$Auxiliary.xml_sha256 -or [string]$receipt.principal_after_sha256 -ne $principalHash -or [string]$receipt.trigger_sha256 -ne $triggerHash -or [string]$receipt.settings_after_sha256 -ne $settingsHash -or [string]$receipt.action_after_sha256 -ne $actionHash) { throw "Activation hardening receipt does not match the current auxiliary task." }
-    $null = Assert-DawnstrikeCaptureTaskSafety -Xml ([string]$Auxiliary.xml) -RuntimeRoot $RuntimeRoot -StateRoot $StateRoot -ExpectedCandidateSha $CandidateSha -ExpectedInterpreterPath ([string]$receipt.interpreter_path) -ExpectedInterpreterSha256 ([string]$receipt.interpreter_sha256) -ExpectedInterpreterSignerThumbprint ([string]$receipt.interpreter_signer_thumbprint) -ExpectedEnabled "false" -RequirePasswordPrincipal -RequireRunner
+    $safetyArguments = @{
+        Xml = [string]$Auxiliary.xml
+        RuntimeRoot = $RuntimeRoot
+        StateRoot = $StateRoot
+        ExpectedCandidateSha = $CandidateSha
+        ExpectedInterpreterPath = [string]$receipt.interpreter_path
+        ExpectedInterpreterSha256 = [string]$receipt.interpreter_sha256
+        ExpectedInterpreterSignerThumbprint = [string]$receipt.interpreter_signer_thumbprint
+        ExpectedEnabled = "false"
+        RequirePasswordPrincipal = $true
+        RequireRunner = $true
+    }
+    if ($Stage -eq "PRE_SWAP") { $safetyArguments.AllowMissingBootstrap = $true }
+    $null = Assert-DawnstrikeCaptureTaskSafety @safetyArguments
     $receiptBindings = $receipt.action_bindings
     if ([string]$receipt.runner_path -ne [string]$receiptBindings.runner_path -or [string]$receipt.runner_sha256 -ne [string]$receiptBindings.runner_sha256 -or [string]$receiptBindings.candidate_sha -ne $CandidateSha) { throw "Activation hardening input bindings are not exact." }
     $taskDocument = [System.Xml.XmlDocument]::new()
@@ -1748,10 +2128,61 @@ function Assert-DawnstrikeCaptureHardeningAttestation {
     if ($argumentNode.Count -ne 1) { throw "Activation hardening action arguments are missing." }
     $tokens = @(Get-DawnstrikeCaptureQuotedTokens ([string]$argumentNode[0].InnerText))
     $actionValues = @{}
-    $prefixLength = if ($tokens[0] -eq "-3.13") { 2 } else { 5 }
-    for ($index = $prefixLength + 1; $index -lt ($tokens.Count - 1); $index += 2) { $actionValues[[string]$tokens[$index]] = [string]$tokens[$index + 1] }
     $expectedBytecodePrefix = [System.IO.Path]::GetFullPath((Join-Path $StateRoot ("capture-bytecode\" + $CandidateSha)))
-    if ($prefixLength -ne 5 -or $tokens[2] -ne "-X" -or $tokens[3] -ne ("pycache_prefix=" + $expectedBytecodePrefix) -or $tokens[4] -ne "-u") { throw "Activation hardening bytecode isolation prefix is not exact." }
+    $expectedBootstrap = [System.IO.Path]::GetFullPath((Join-Path $RuntimeRoot "scripts\dawnstrike_python_bootstrap.py"))
+    $expectedRunner = [System.IO.Path]::GetFullPath((Join-Path $RuntimeRoot "scripts\run_daily_intraday_capture.py"))
+    $candidateBootstrap = [System.IO.Path]::GetFullPath((Join-Path $CandidateRoot "scripts\dawnstrike_python_bootstrap.py"))
+    Assert-DawnstrikeNoReparseComponents $candidateBootstrap "Candidate hardening bootstrap"
+    if (-not (Test-Path -LiteralPath $candidateBootstrap -PathType Leaf)) {
+        throw "Candidate hardening bootstrap is missing."
+    }
+    if (-not [string]::IsNullOrWhiteSpace($GitPath)) {
+        $bootstrapRelative = "scripts/dawnstrike_python_bootstrap.py"
+        $headBootstrap = Get-DawnstrikeGitValue $GitPath $CandidateRoot @(
+            "rev-parse", ("{0}:{1}" -f $CandidateSha, $bootstrapRelative)
+        ) "Candidate hardening bootstrap HEAD binding" $TimeoutSeconds
+        $workingBootstrap = Get-DawnstrikeGitValue $GitPath $CandidateRoot @(
+            "hash-object", ("--path={0}" -f $bootstrapRelative), "--", $candidateBootstrap
+        ) "Candidate hardening bootstrap working-tree binding" $TimeoutSeconds
+        if ($headBootstrap -notmatch '^[0-9a-f]{40}$' -or $workingBootstrap -cne $headBootstrap) {
+            throw "Candidate hardening bootstrap does not match the exact candidate HEAD."
+        }
+    }
+    # The delayed-SIP action is a scheduled Python boundary.  It must use the
+    # exact isolated interpreter prefix and the materialized release bootstrap;
+    # accepting a legacy direct runner here would re-enable global .pth or
+    # editable-install resolution before the release root is selected.
+    if (
+        $tokens.Count -lt 19 -or
+        $tokens[0] -cne "-I" -or
+        $tokens[1] -cne "-B" -or
+        $tokens[2] -cne "-S" -or
+        $tokens[3] -cne "-X" -or
+        $tokens[4] -cne ("pycache_prefix=" + $expectedBytecodePrefix) -or
+        $tokens[5] -cne "-u" -or
+        $tokens[6] -cne "-c" -or
+        $tokens[7] -cne (Get-DawnstrikeCaptureBootstrapPreloader) -or
+        [System.IO.Path]::GetFullPath([string]$tokens[8]) -cne $expectedBootstrap -or
+        $tokens[9] -notmatch '^[0-9a-f]{64}$' -or
+        $tokens[9] -cne (Get-DawnstrikeSha256File $candidateBootstrap) -or
+        $tokens[10] -cne "--release-root" -or
+        [System.IO.Path]::GetFullPath([string]$tokens[11]) -cne [System.IO.Path]::GetFullPath($RuntimeRoot) -or
+        $tokens[12] -cne "--expected-sha" -or
+        $tokens[13] -cne $CandidateSha -or
+        $tokens[14] -cne "--script" -or
+        [System.IO.Path]::GetFullPath([string]$tokens[15]) -cne $expectedRunner -or
+        $tokens[16] -cne "--"
+    ) { throw "Activation hardening action bootstrap or isolation prefix is not exact." }
+    $optionStart = 17
+    if ($tokens[$tokens.Count - 1] -cne "--execute" -or (($tokens.Count - $optionStart - 1) % 2) -ne 0) {
+        throw "Activation hardening action option contract is malformed."
+    }
+    for ($index = $optionStart; $index -lt ($tokens.Count - 1); $index += 2) {
+        if (-not ([string]$tokens[$index]).StartsWith("--", [System.StringComparison]::Ordinal) -or [string]::IsNullOrWhiteSpace([string]$tokens[$index + 1])) {
+            throw "Activation hardening action option contract is malformed."
+        }
+        $actionValues[[string]$tokens[$index]] = [string]$tokens[$index + 1]
+    }
     foreach ($binding in @(
         @("--candidate-sha", "candidate_sha"), @("--symbols-manifest", "symbols_manifest_path"),
         @("--symbols-manifest-sha256", "symbols_manifest_sha256"), @("--entitlement-receipt", "entitlement_receipt_path"),
@@ -1771,6 +2202,16 @@ function Assert-DawnstrikeCaptureHardeningAttestation {
     }
     if ($Stage -eq "POST_SWAP" -and $runtimeRunnerSha -ne [string]$receipt.runner_sha256) {
         throw "Post-swap runtime runner does not match the attested candidate identity."
+    }
+    if ($Stage -eq "POST_SWAP") {
+        $liveBootstrap = [System.IO.Path]::GetFullPath((Join-Path $RuntimeRoot "scripts\dawnstrike_python_bootstrap.py"))
+        Assert-DawnstrikeNoReparseComponents $liveBootstrap "Post-swap hardening bootstrap"
+        if (-not (Test-Path -LiteralPath $liveBootstrap -PathType Leaf)) {
+            throw "Post-swap runtime hardening bootstrap is missing."
+        }
+        if ((Get-DawnstrikeSha256File $liveBootstrap) -ne (Get-DawnstrikeSha256File $candidateBootstrap)) {
+            throw "Post-swap runtime hardening bootstrap does not match the candidate."
+        }
     }
     return [pscustomobject]@{ path = $paths[0].FullName; payload = $receipt; raw_sha256 = Get-DawnstrikeSha256File $paths[0].FullName }
 }
@@ -2127,6 +2568,9 @@ function Invoke-DawnstrikeRuntimeActivation {
         -Label "Candidate origin/main refresh" `
         -TimeoutSeconds $ProcessTimeoutSeconds
     $candidateContract = Get-DawnstrikeGitContract $gitPath $candidate $ProcessTimeoutSeconds $ExpectedSha
+    $null = Assert-DawnstrikeHelpersBoundToHead `
+        -GitPath $gitPath -Root $candidate -TimeoutSeconds $ProcessTimeoutSeconds
+    . (Join-Path $PSScriptRoot "capture_task_safety.ps1")
     $stateDeclaration = Get-DawnstrikeStatePreparationDeclaration `
         -CandidateRoot $candidate `
         -GitPath $gitPath `
@@ -2200,6 +2644,11 @@ function Invoke-DawnstrikeRuntimeActivation {
     # Replace the candidate-only hash with the raw pre-swap runtime binding;
     # the PREPARED receipt and all later recovery proof now carry P's origin.
     $originHash = $previousRuntimeOriginSha256
+    $previousRuntimeAuthorization = Get-DawnstrikePriorRuntimeAuthorization `
+        -StateRoot $state -CandidateRoot $candidate `
+        -PreviousSha ([string]$runtimeContract.head) -PreviousTree ([string]$runtimeContract.tree) `
+        -OriginIdentity $previousRuntimeOriginIdentity -OriginSha256 $originHash `
+        -PythonPath $pythonPath -TimeoutSeconds $ProcessTimeoutSeconds
     if ($runtimeContract.head -eq $ExpectedSha) {
         $receiptRoot = Join-Path $state "receipts\runtime-activation"
         Assert-DawnstrikeNoReparseComponents $receiptRoot "Activation receipt root"
@@ -2246,6 +2695,7 @@ function Invoke-DawnstrikeRuntimeActivation {
                                 $existingHardening = Assert-DawnstrikeCaptureHardeningAttestation `
                                     -Auxiliary $existingAuxiliary -CandidateRoot $candidate -StateRoot $state `
                                     -RuntimeRoot $runtime -CandidateSha $ExpectedSha -CandidateTree $candidateContract.tree `
+                                    -GitPath $gitPath `
                                     -PythonPath $pythonPath -TimeoutSeconds $ProcessTimeoutSeconds -Stage POST_SWAP
                                 if ([string]$receipt.capture_hardening_receipt_raw_sha256 -ne [string]$existingHardening.raw_sha256 -or [string]$receipt.capture_hardening_receipt_sha256 -ne [string]$existingHardening.payload.receipt_sha256) {
                                     throw "Existing activation receipt does not match the hardening attestation chain."
@@ -2363,6 +2813,7 @@ function Invoke-DawnstrikeRuntimeActivation {
         -Declaration $stateDeclaration `
         -TimeoutSeconds $ProcessTimeoutSeconds
     $taskBefore = Get-DawnstrikeTaskContract $runtime $state
+    $null = Assert-DawnstrikeCanonicalTaskSemantics -RuntimeRoot $runtime -StateRoot $state
     # Inventory the auxiliary independently of the candidate declaration.  A
     # present task without an explicit sidecar contract is an ungoverned task,
     # never an implicit legacy-compatible absence.
@@ -2376,6 +2827,7 @@ function Invoke-DawnstrikeRuntimeActivation {
             -Auxiliary $auxiliaryBefore -CandidateRoot $candidate -StateRoot $state `
             -RuntimeRoot $runtime `
             -CandidateSha $ExpectedSha -CandidateTree $candidateContract.tree `
+            -GitPath $gitPath `
             -PythonPath $pythonPath -TimeoutSeconds $ProcessTimeoutSeconds
     }
 
@@ -2668,6 +3120,7 @@ function Invoke-DawnstrikeRuntimeActivation {
                     $existingHardening = Assert-DawnstrikeCaptureHardeningAttestation `
                         -Auxiliary $currentAuxiliary -CandidateRoot $candidate -StateRoot $state `
                         -RuntimeRoot $runtime -CandidateSha $ExpectedSha -CandidateTree $candidateContract.tree `
+                        -GitPath $gitPath `
                         -PythonPath $pythonPath -TimeoutSeconds $ProcessTimeoutSeconds -Stage POST_SWAP
                     if ([string]$existing.capture_hardening_receipt_raw_sha256 -ne [string]$existingHardening.raw_sha256 -or [string]$existing.capture_hardening_receipt_sha256 -ne [string]$existingHardening.payload.receipt_sha256) {
                         throw "Existing activation receipt does not match the hardening attestation chain."
@@ -2854,6 +3307,7 @@ function Invoke-DawnstrikeRuntimeActivation {
                 ) {
                     throw "PRE_QUIESCE recovery could not prove exact canonical disablement."
                 }
+                $null = Assert-DawnstrikeCanonicalTaskSemantics -RuntimeRoot $runtime -StateRoot $state -AllowDisabled
                 Enable-DawnstrikeCanonicalTasks
                 $restored = Get-DawnstrikeTaskContract $runtime $state
                 if (
@@ -2957,6 +3411,7 @@ function Invoke-DawnstrikeRuntimeActivation {
             } elseif ([string]$journal.payload.phase -ne "POST_SWAP") { throw "Activation journal phase is not recoverable." }
             $installed = Get-DawnstrikeGitContract $gitPath $runtime $ProcessTimeoutSeconds $ExpectedSha
             if ($installed.tree -ne [string]$candidateContract.tree -or -not (Test-Path -LiteralPath $rollbackCheckout -PathType Container) -or (Test-Path -LiteralPath $stage)) { throw "POST_SWAP recovery filesystem state is invalid." }
+            $null = Assert-DawnstrikeCanonicalTaskSemantics -RuntimeRoot $runtime -StateRoot $state -AllowDisabled
             Enable-DawnstrikeCanonicalTasks
             $taskAfter = Get-DawnstrikeTaskContract $runtime $state
             $payload=[ordered]@{}
@@ -3078,6 +3533,7 @@ function Invoke-DawnstrikeRuntimeActivation {
                 -NowUtc $activationNowUtc `
                 -TimeoutSeconds $ProcessTimeoutSeconds
             $taskLocked = Get-DawnstrikeTaskContract $runtime $state
+            $null = Assert-DawnstrikeCanonicalTaskSemantics -RuntimeRoot $runtime -StateRoot $state
             if ($taskLocked.task_contract_sha256 -ne $taskBefore.task_contract_sha256) {
                 throw "Task definitions changed during activation preflight."
             }
@@ -3112,6 +3568,7 @@ function Invoke-DawnstrikeRuntimeActivation {
             $tasksDisabled = $true
             Disable-DawnstrikeCanonicalTasks
             $taskDisabled = Get-DawnstrikeTaskContract $runtime $state -AllowDisabled
+            $null = Assert-DawnstrikeCanonicalTaskSemantics -RuntimeRoot $runtime -StateRoot $state -AllowDisabled
             if (
                 $taskDisabled.disabled_count -ne 5 -or
                 $taskDisabled.enabled_count -ne 0 -or
@@ -3139,6 +3596,7 @@ function Invoke-DawnstrikeRuntimeActivation {
                 $lockedHardeningAttestation = Assert-DawnstrikeCaptureHardeningAttestation `
                     -Auxiliary $auxiliaryLocked -CandidateRoot $candidate -StateRoot $state `
                     -RuntimeRoot $runtime -CandidateSha $ExpectedSha -CandidateTree $candidateContract.tree `
+                    -GitPath $gitPath `
                     -PythonPath $pythonPath -TimeoutSeconds $ProcessTimeoutSeconds
                 if ($lockedHardeningAttestation.raw_sha256 -ne $hardeningAttestation.raw_sha256 -or [string]$lockedHardeningAttestation.payload.receipt_sha256 -ne [string]$hardeningAttestation.payload.receipt_sha256) {
                     throw "Hardening attestation changed during the locked activation boundary."
@@ -3337,6 +3795,10 @@ function Invoke-DawnstrikeRuntimeActivation {
                 completed_at_utc = $null
                 research_only = $true
                 broker_execution_enabled = $false
+                previous_runtime_rollback_authorized = [bool]$previousRuntimeAuthorization.authorized
+                previous_runtime_disposition = [string]$previousRuntimeAuthorization.disposition
+                previous_runtime_authorization_receipt_sha256 = [string]$previousRuntimeAuthorization.receipt_sha256
+                previous_runtime_authorization_journal_sha256 = [string]$previousRuntimeAuthorization.journal_sha256
             }
             if ($stateDeclaration.required) {
                 $auxiliaryBackupManifest = Get-Content `
@@ -3522,6 +3984,7 @@ function Invoke-DawnstrikeRuntimeActivation {
                 -PythonPath $pythonPath `
                 -TimeoutSeconds $ProcessTimeoutSeconds `
                 -RequireRollbackCheckout
+            $null = Assert-DawnstrikeCanonicalTaskSemantics -RuntimeRoot $runtime -StateRoot $state -AllowDisabled
             Enable-DawnstrikeCanonicalTasks
             $taskAfter = Get-DawnstrikeTaskContract $runtime $state
             if ($taskAfter.task_contract_sha256 -ne $taskLocked.task_contract_sha256) {
@@ -3682,6 +4145,7 @@ function Invoke-DawnstrikeRuntimeActivation {
                                 -RunAsCredential $RunAsCredential
                             $auxiliaryDisabled = $false
                         }
+                        $null = Assert-DawnstrikeCanonicalTaskSemantics -RuntimeRoot $runtime -StateRoot $state -AllowDisabled
                         Enable-DawnstrikeCanonicalTasks
                         $restoredTasks = Get-DawnstrikeTaskContract $runtime $state
                         if ($restoredTasks.task_contract_sha256 -ne $taskLocked.task_contract_sha256) {

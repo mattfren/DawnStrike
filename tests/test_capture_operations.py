@@ -258,15 +258,24 @@ def test_capture_script_is_plan_only_without_execute() -> None:
     assert "Python313\\python.exe" in registration
     assert "ef8f51028ac5329641985112f8efb1c2d4c47c86b8011ddf7e6fae21e2b4e5a1" in registration
     assert (
-        '$pythonPrefix = @("-I", "-B", "-X", ("pycache_prefix=" + $bytecodePrefix), "-u")'
+        '$pythonPrefix = @("-I", "-B", "-S", "-X", ("pycache_prefix=" + $bytecodePrefix), "-u")'
         in registration
     )
+    assert '$bootstrapArgs = @(' in registration
+    assert '"-c", $bootstrapPreloader, $bootstrap, $bootstrapSha256' in registration
+    assert (
+        '"--release-root", $RuntimeRoot, "--expected-sha", $CandidateSha,'
+        in registration
+    )
+    assert '"--script", $runner, "--"' in registration
     assert "Get-AuthenticodeSignature" in registration
     execute_index = registration.index("$pythonVersion = @(& $Python -I -c")
     assert registration.index("Get-FileHash -LiteralPath $Python") < execute_index
     assert registration.index("Get-AuthenticodeSignature -LiteralPath $Python") < execute_index
     assert registration.index("SignerCertificate.Thumbprint") < execute_index
-    assert "$argumentTokens = @($pythonPrefix + $captureArgs)" in registration
+    assert "$captureActionArguments = @(" in registration
+    assert "$pythonPrefix + $bootstrapArgs + $captureArgs" in registration
+    assert "$argumentTokens = @($captureActionArguments)" in registration
     assert '-u "{0}"' not in registration
     assert "[switch]$InteractiveCurrentUser" in registration
     assert "New-ScheduledTaskPrincipal" in registration

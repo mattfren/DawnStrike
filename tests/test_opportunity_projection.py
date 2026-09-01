@@ -192,6 +192,57 @@ def test_latest_run_uses_read_only_store_replay_and_creates_no_sidecars(
     assert sorted(path.name for path in tmp_path.glob("opportunity.sqlite-*")) == before_sidecars
 
 
+def test_latest_run_scope_rejects_historical_row_for_requested_market_date(
+    tmp_path: Path,
+    qualifying_result: PipelineResult,
+) -> None:
+    database = tmp_path / "historical.sqlite"
+    store = OpportunityStore(database)
+    store.initialize()
+    store.append_run(qualifying_result, recorded_at=RECORDED_AT)
+
+    current = load_latest_opportunity_projection(
+        database,
+        enabled=True,
+        expected_market_date="2026-08-12",
+    )
+    matching = load_latest_opportunity_projection(
+        database,
+        enabled=True,
+        expected_market_date=qualifying_result.decision_at.date().isoformat(),
+    )
+
+    assert current.state is OpportunityProjectionState.DATA_UNAVAILABLE
+    assert current.reason_code is OpportunityProjectionReason.NO_PERSISTED_RUN
+    assert matching.state is OpportunityProjectionState.QUALIFYING
+    assert matching.source_run_id == qualifying_result.run_id
+
+
+def test_public_projection_manifest_binds_active_lineage(
+    tmp_path: Path,
+    qualifying_result: PipelineResult,
+) -> None:
+    projection = build_opportunity_projection(qualifying_result)
+    market_date = qualifying_result.decision_at.date().isoformat()
+    manifest = write_public_opportunity_projection(
+        tmp_path,
+        projection,
+        expected_market_date=market_date,
+    )
+    payload = json.loads((tmp_path / "opportunity-projection.json").read_text("utf-8"))
+
+    assert payload["market_date"] == market_date
+    assert manifest["market_date"] == market_date
+    assert manifest["source_run_id"] == qualifying_result.run_id
+    assert manifest["as_of"] == payload["as_of"]
+    with pytest.raises(ValueError, match="expected market date"):
+        write_public_opportunity_projection(
+            tmp_path / "mismatch",
+            projection,
+            expected_market_date="2026-08-12",
+        )
+
+
 def test_tampered_latest_run_fails_to_data_unavailable(
     tmp_path: Path,
     no_qualifying_result: PipelineResult,

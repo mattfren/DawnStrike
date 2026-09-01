@@ -12,6 +12,179 @@ if (-not (Get-Command Get-DawnstrikeApprovedLockInterpreter -ErrorAction Silentl
     . (Join-Path $PSScriptRoot "runtime_activation_lock.ps1")
 }
 
+function Assert-DawnstrikeProcessSourceBoundToHead {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$ReleaseRoot)
+
+    $root = [System.IO.Path]::GetFullPath($ReleaseRoot).TrimEnd('\')
+    $gitDirectory = Join-Path $root ".git"
+    if (-not (Test-Path -LiteralPath $gitDirectory -PathType Container)) {
+        throw "Scheduled Python release root is not a self-contained Git checkout."
+    }
+    $git = (Get-DawnstrikeApprovedGit).path
+    $gitArgs = @('-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false', '-C', $root)
+    $savedGitEnvironment = @{}
+    foreach ($entry in @(Get-ChildItem Env: | Where-Object { $_.Name -like 'GIT_*' })) {
+        $savedGitEnvironment[[string]$entry.Name] = [string]$entry.Value
+        Remove-Item -LiteralPath ("Env:" + [string]$entry.Name) -ErrorAction SilentlyContinue
+    }
+    try {
+        $env:GIT_CONFIG_NOSYSTEM = '1'
+        $env:GIT_CONFIG_GLOBAL = 'NUL'
+        $env:GIT_TERMINAL_PROMPT = '0'
+        $env:GIT_OPTIONAL_LOCKS = '0'
+        $top = ((& $git @gitArgs rev-parse --show-toplevel 2>$null) -join '').Trim()
+        if ($LASTEXITCODE -ne 0 -or [System.IO.Path]::GetFullPath($top).TrimEnd('\') -ine $root) {
+            throw "Scheduled Python release root is not the exact Git root."
+        }
+        $releaseHead = ((& $git @gitArgs rev-parse HEAD 2>$null) -join '').Trim().ToLowerInvariant()
+        if ($LASTEXITCODE -ne 0 -or $releaseHead -notmatch '^[0-9a-f]{40}$') {
+            throw "Scheduled Python release HEAD is invalid."
+        }
+        $status = ((& $git @gitArgs status --porcelain=v1 --untracked-files=all 2>$null) -join '')
+        if ($LASTEXITCODE -ne 0 -or $status) {
+            throw "Scheduled Python release checkout is not clean."
+        }
+        $flags = ((& $git @gitArgs ls-files -v -z 2>$null) -join '')
+        if ($LASTEXITCODE -ne 0 -or @($flags -split "`0" | Where-Object { $_ -and $_.Substring(0, 1) -cmatch '[hSs]' }).Count -gt 0) {
+            throw "Scheduled Python release contains hidden Git index entries."
+        }
+        $ignored = ((& $git @gitArgs ls-files --others --ignored --exclude-standard -z 2>$null) -join '')
+        if ($LASTEXITCODE -ne 0) { throw "Scheduled Python ignored-artifact inventory failed." }
+        $forbiddenIgnored = @(
+            $ignored -split "`0" | Where-Object {
+                if (-not $_) { return $false }
+                $name = [System.IO.Path]::GetFileName($_).ToLowerInvariant()
+                $extension = [System.IO.Path]::GetExtension($_).ToLowerInvariant()
+                $extension -in @(
+                    '.ps1', '.psm1', '.py', '.pyc', '.pyd', '.dll', '.exe',
+                    '.com', '.bat', '.cmd', '.sh', '.pth'
+                ) -or $name -in @('sitecustomize.py', 'usercustomize.py')
+            }
+        )
+        if ($forbiddenIgnored.Count -gt 0) {
+            throw "Scheduled Python release contains ignored executable or startup artifacts."
+        }
+        $null = & $git @gitArgs diff-index --quiet HEAD -- 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Scheduled Python release differs from exact HEAD."
+        }
+        foreach ($relative in @(
+            "scripts/dawnstrike_process_runner.ps1",
+            "scripts/dawnstrike_job_process.ps1",
+            "scripts/runtime_activation_lock.ps1",
+            "scripts/dawnstrike_python_bootstrap.py"
+        )) {
+            $relative = $relative.Replace('\', '/')
+            $path = Join-Path $root ($relative.Replace('/', '\'))
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                throw "Scheduled Python helper is missing: $relative"
+            }
+            $headBlob = ((& $git @gitArgs rev-parse ("HEAD:" + $relative) 2>$null) -join '').Trim().ToLowerInvariant()
+            if ($LASTEXITCODE -ne 0 -or $headBlob -notmatch '^[0-9a-f]{40}$') {
+                throw "Scheduled Python helper is not tracked by exact HEAD: $relative"
+            }
+            $worktree = ((& $git @gitArgs hash-object ("--path=" + $relative) -- $path 2>$null) -join '').Trim().ToLowerInvariant()
+            if ($LASTEXITCODE -ne 0 -or $worktree -cne $headBlob) {
+                throw "Scheduled Python helper bytes changed from exact HEAD: $relative"
+            }
+        }
+        return [pscustomobject]@{ root = $root; head = $releaseHead }
+    }
+    finally {
+        foreach ($entry in @(Get-ChildItem Env: | Where-Object { $_.Name -like 'GIT_*' })) {
+            Remove-Item -LiteralPath ("Env:" + [string]$entry.Name) -ErrorAction SilentlyContinue
+        }
+        foreach ($name in $savedGitEnvironment.Keys) { Set-Item -LiteralPath ("Env:" + $name) -Value $savedGitEnvironment[$name] }
+    }
+}
+
+function Get-DawnstrikeProcessBootstrapPreloader {
+    [CmdletBinding()]
+    param()
+    return "import hashlib,sys; p=sys.argv[1]; e=sys.argv[2]; b=open(p,'rb').read(); a=hashlib.sha256(b).hexdigest(); a==e or (_ for _ in ()).throw(RuntimeError('bootstrap hash mismatch')); r=sys.argv[3:]; sys.argv=[p,*r]; exec(compile(b,p,'exec'),{'__name__':'__main__','__file__':p})"
+}
+
+function ConvertTo-DawnstrikeIsolatedPythonArguments {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string[]]$ArgumentList,
+        [Parameter(Mandatory = $true)][string]$ReleaseRoot,
+        [Parameter(Mandatory = $true)][string]$ExpectedSha
+    )
+
+    $source = @($ArgumentList)
+    if ($source.Count -gt 0 -and [string]$source[0] -eq '-3.13') {
+        $source = @($source | Select-Object -Skip 1)
+    }
+    $interpreterOptions = @()
+    while ($source.Count -gt 0) {
+        $token = [string]$source[0]
+        if ($token -in @('-I', '-B', '-S')) {
+            $source = @($source | Select-Object -Skip 1)
+            continue
+        }
+        if ($token -eq '-u') {
+            $interpreterOptions += $token
+            $source = @($source | Select-Object -Skip 1)
+            continue
+        }
+        if ($token -eq '-X') {
+            if ($source.Count -lt 2) { throw "Scheduled Python -X option is incomplete." }
+            $interpreterOptions += @($token, [string]$source[1])
+            $source = @($source | Select-Object -Skip 2)
+            continue
+        }
+        if ($token.StartsWith('-X', [System.StringComparison]::Ordinal)) {
+            $interpreterOptions += $token
+            $source = @($source | Select-Object -Skip 1)
+            continue
+        }
+        break
+    }
+    $bootstrap = Join-Path $ReleaseRoot "scripts\dawnstrike_python_bootstrap.py"
+    if (-not (Test-Path -LiteralPath $bootstrap -PathType Leaf)) {
+        throw "Scheduled Python release bootstrap is missing."
+    }
+    $bootstrapSha256 = (Get-FileHash -LiteralPath $bootstrap -Algorithm SHA256).Hash.ToLowerInvariant()
+    $bootstrapLaunch = @(
+        '-c', (Get-DawnstrikeProcessBootstrapPreloader), $bootstrap, $bootstrapSha256,
+        '--release-root', $ReleaseRoot, '--expected-sha', $ExpectedSha
+    )
+    if ($source.Count -gt 0 -and [string]$source[0] -eq '-m') {
+        if ($source.Count -lt 2 -or [string]::IsNullOrWhiteSpace([string]$source[1])) {
+            throw "Scheduled Python module target is incomplete."
+        }
+        $module = [string]$source[1]
+        $tail = if ($source.Count -gt 2) { @($source | Select-Object -Skip 2) } else { @() }
+        return @('-I', '-B', '-S') + $interpreterOptions + $bootstrapLaunch + @(
+            '--module', $module, '--'
+        ) + $tail
+    }
+    if ($source.Count -gt 0 -and [string]$source[0] -notin @('-c', '-')) {
+        $script = [string]$source[0]
+        if ($script.ToLowerInvariant().EndsWith('.py')) {
+            $scriptPath = if ([System.IO.Path]::IsPathRooted($script)) {
+                [System.IO.Path]::GetFullPath($script)
+            }
+            else {
+                [System.IO.Path]::GetFullPath((Join-Path $ReleaseRoot $script))
+            }
+            $rootPrefix = $ReleaseRoot.TrimEnd('\') + '\'
+            if (-not $scriptPath.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw "Scheduled Python script is outside the exact release root."
+            }
+            $tail = if ($source.Count -gt 1) { @($source | Select-Object -Skip 1) } else { @() }
+            return @('-I', '-B', '-S') + $interpreterOptions + $bootstrapLaunch + @(
+                '--script', $scriptPath, '--'
+            ) + $tail
+        }
+    }
+    # Inline snippets are not used by governed scheduled stages, but retain
+    # their semantics while still forcing -S and clearing startup mappings.
+    return @('-I', '-B', '-S') + $interpreterOptions + $source
+}
+
 function Invoke-DawnstrikeNativeProcess {
     [CmdletBinding()]
     param(
@@ -54,6 +227,8 @@ function Invoke-DawnstrikeNativeProcess {
     $resolved = $null
     $resolvedExecutableSha256 = $null
     $pythonIsolated = $false
+    $pythonBootstrapPath = $null
+    $pythonBootstrapSha256 = $null
 
     try {
         # Windows PowerShell promotes native stderr records to PowerShell error
@@ -67,18 +242,13 @@ function Invoke-DawnstrikeNativeProcess {
             $approved = Get-DawnstrikeApprovedLockInterpreter
             $resolved = [string]$approved.path
             $resolvedExecutableSha256 = [string]$approved.sha256
-            if ($effectiveArguments.Count -gt 0 -and $effectiveArguments[0] -eq "-3.13") {
-                $effectiveArguments = @($effectiveArguments | Select-Object -Skip 1)
-            }
-            if ($effectiveArguments.Count -lt 2 -or
-                $effectiveArguments[0] -ne "-I" -or $effectiveArguments[1] -ne "-B") {
-                $effectiveArguments = @("-I", "-B") + $effectiveArguments
-            }
-            if ($NoSite -and ($effectiveArguments.Count -lt 3 -or
-                $effectiveArguments[2] -ne "-S")) {
-                $effectiveArguments = @($effectiveArguments[0..1]) + @("-S") +
-                    @($effectiveArguments | Select-Object -Skip 2)
-            }
+            $sourceIdentity = Assert-DawnstrikeProcessSourceBoundToHead (Join-Path $PSScriptRoot "..")
+            $releaseRoot = [string]$sourceIdentity.root
+            $effectiveArguments = ConvertTo-DawnstrikeIsolatedPythonArguments `
+                -ArgumentList $effectiveArguments -ReleaseRoot $releaseRoot `
+                -ExpectedSha ([string]$sourceIdentity.head)
+            $pythonBootstrapPath = Join-Path $releaseRoot "scripts\dawnstrike_python_bootstrap.py"
+            $pythonBootstrapSha256 = (Get-FileHash -LiteralPath $pythonBootstrapPath -Algorithm SHA256).Hash.ToLowerInvariant()
             $effectiveEnvironmentOverrides = @{
                 PYTHONHOME = $null
                 PYTHONPATH = $null
@@ -154,6 +324,8 @@ function Invoke-DawnstrikeNativeProcess {
         resolved_executable_path = $resolved
         resolved_executable_sha256 = $resolvedExecutableSha256
         python_isolated = $pythonIsolated
+        python_bootstrap_path = $pythonBootstrapPath
+        python_bootstrap_sha256 = $pythonBootstrapSha256
         started_at = $startedAt.ToString("o")
         completed_at = $completedAt.ToString("o")
         duration_ms = [math]::Round(($completedAt - $startedAt).TotalMilliseconds)

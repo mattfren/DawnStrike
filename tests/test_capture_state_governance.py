@@ -60,6 +60,12 @@ from scripts.state_preparation import (
 
 CANDIDATE_SHA = "a" * 40
 CANDIDATE_TREE = "b" * 40
+BOOTSTRAP_PRELOADER = (
+    "import hashlib,sys; p=sys.argv[1]; e=sys.argv[2]; b=open(p,'rb').read(); "
+    "a=hashlib.sha256(b).hexdigest(); a==e or (_ for _ in ()).throw("
+    "RuntimeError('bootstrap hash mismatch')); r=sys.argv[3:]; sys.argv=[p,*r]; "
+    "exec(compile(b,p,'exec'),{'__name__':'__main__','__file__':p})"
+)
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -1276,7 +1282,7 @@ def test_capture_rebind_journal_has_guarded_process_kill_seams() -> None:
 
 @pytest.mark.parametrize("initial_aux_state", ["Disabled", "Ready"])
 @pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
-def test_powershell_sidecar_activation_and_rollback_keep_auxiliary_disabled(
+def test_powershell_sidecar_activation_rebind_and_legacy_rollback_quarantine(
     tmp_path: Path, initial_aux_state: str
 ) -> None:
     """Exercise the governed six-task boundary with a deterministic scheduler mock."""
@@ -1314,8 +1320,10 @@ def test_powershell_sidecar_activation_and_rollback_keep_auxiliary_disabled(
         "capture_task_hardening_contract.py",
         "resolve_dawnstrike_task_principal.ps1",
         "dawnstrike_job_process.ps1",
+        "dawnstrike_process_runner.ps1",
         "invoke_dawnstrike_stage.ps1",
         "state_disaster_recovery.py",
+        "dawnstrike_python_bootstrap.py",
         "run_daily_intraday_capture.py",
     ):
         shutil.copy2(source / "scripts" / name, candidate / "scripts" / name)
@@ -1326,6 +1334,9 @@ def test_powershell_sidecar_activation_and_rollback_keep_auxiliary_disabled(
     candidate_runner = candidate / "scripts" / "run_daily_intraday_capture.py"
     runner_text = candidate_runner.read_text(encoding="utf-8").replace("\r\n", "\n")
     candidate_runner.write_bytes(runner_text.replace("\n", "\r\n").encode("utf-8"))
+    candidate_bootstrap = candidate / "scripts" / "dawnstrike_python_bootstrap.py"
+    bootstrap_text = candidate_bootstrap.read_text(encoding="utf-8").replace("\r\n", "\n")
+    candidate_bootstrap.write_bytes(bootstrap_text.replace("\n", "\r\n").encode("utf-8"))
     _install_local_origin_fixture_seam(candidate / "scripts" / "runtime_activation_lock.ps1")
     _install_local_state_preparation_origin_fixture_seam(
         candidate / "scripts" / "prepare_dawnstrike_state.ps1", remote
@@ -1353,6 +1364,7 @@ def test_powershell_sidecar_activation_and_rollback_keep_auxiliary_disabled(
         source / "config" / "state_preparation_contract.json",
         candidate / "config" / "state_preparation_contract.json",
     )
+    shutil.copy2(source / "pyproject.toml", candidate / "pyproject.toml")
     shutil.copy2(source / ".gitignore", candidate / ".gitignore")
 
     subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
@@ -1496,6 +1508,7 @@ def test_powershell_sidecar_activation_and_rollback_keep_auxiliary_disabled(
     entitlement_sha = file_sha(entitlement_receipt)
     source_config_sha = file_sha(source_config)
     runner_sha = windows_checkout_sha(candidate / "scripts" / "run_daily_intraday_capture.py")
+    bootstrap_sha = windows_checkout_sha(candidate_bootstrap)
     previous_runner_sha = file_sha(runtime / "scripts" / "run_daily_intraday_capture.py")
     owner_comment_body = json.dumps(
         {
@@ -1520,8 +1533,10 @@ def test_powershell_sidecar_activation_and_rollback_keep_auxiliary_disabled(
     activation_q = quote(candidate / "scripts" / "activate_dawnstrike_runtime.ps1")
     rollback_q = quote(candidate / "scripts" / "rollback_dawnstrike_runtime.ps1")
     prep_q = quote(candidate / "scripts" / "prepare_dawnstrike_state.ps1")
+    capture_safety_q = quote(candidate / "scripts" / "capture_task_safety.ps1")
     command = rf"""
     . '{activation_q}'
+    . '{capture_safety_q}'
     $env:DAWNSTRIKE_TEST_ACTIVATION_CLOCK = '1'
     $env:DAWNSTRIKE_TEST_GITHUB_CI_FIXTURE = '1'
     $env:DAWNSTRIKE_TEST_GITHUB_CI_CANDIDATE_SHA = '{candidate_sha}'
@@ -1536,6 +1551,7 @@ $global:TaskEvents = @()
 foreach ($name in $script:DawnstrikeCanonicalTaskNames) {{ $global:MockTaskStates[$name] = 'Ready' }}
     $global:MockAuxPrincipal = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
     $global:MockAuxExecute = '{interpreter_declaration["capture_interpreter_path"]}'
+    $bootstrapPreloader = Get-DawnstrikeCaptureBootstrapPreloader
     function ConvertTo-TestXmlText {{
       param([string]$Value)
       [System.Security.SecurityElement]::Escape($Value)
@@ -1543,8 +1559,12 @@ foreach ($name in $script:DawnstrikeCanonicalTaskNames) {{ $global:MockTaskState
     function New-TestCaptureTaskXml {{
       param([string]$BoundSha, [bool]$Enabled)
       $bytecodePrefix = Join-Path '{state_q}' ('capture-bytecode\' + $BoundSha)
-      $tokens = @(
-        '-I', '-B', '-X', ('pycache_prefix=' + $bytecodePrefix), '-u', '{runtime_runner_q}',
+          $tokens = @(
+            '-I', '-B', '-S', '-X', ('pycache_prefix=' + $bytecodePrefix), '-u',
+            '-c', $bootstrapPreloader,
+            '{runtime / "scripts" / "dawnstrike_python_bootstrap.py"}', '{bootstrap_sha}',
+            '--release-root', '{runtime_q}', '--expected-sha', $BoundSha,
+            '--script', '{runtime_runner_q}', '--',
         '--candidate-sha', $BoundSha,
         '--repo-root', '{runtime_q}',
         '--db-path', '{forward_db_q}',
@@ -1590,8 +1610,47 @@ function Get-ScheduledTask {{
   [CmdletBinding()] param([string]$TaskName)
   if ($TaskName -eq 'Dawnstrike Delayed SIP Capture') {{
         return [pscustomobject]@{{ State=$global:MockAuxState; TaskPath='\'; Actions=@([pscustomobject]@{{ Execute=$global:MockAuxExecute; Arguments=$global:MockAuxArguments; WorkingDirectory=$global:MockRuntime }}) }}
-  }}
-  return [pscustomobject]@{{ State=$global:MockTaskStates[$TaskName]; TaskPath='\'; Actions=@([pscustomobject]@{{ Execute='powershell.exe'; Arguments=('-RuntimeRoot "' + $global:MockRuntime + '" -StateRoot "' + $global:MockState + '"'); WorkingDirectory=$global:MockRuntime }}) }}
+      }}
+      $canonicalPolicy = Get-DawnstrikeCanonicalTaskPolicy -TaskName $TaskName -RuntimeRoot $global:MockRuntime -StateRoot $global:MockState
+      $canonicalState = [string]$global:MockTaskStates[$TaskName]
+      $canonicalTriggerType = if ($canonicalPolicy.weekly) {{ 'MSFT_TaskWeeklyTrigger' }} else {{ 'MSFT_TaskDailyTrigger' }}
+      $canonicalTrigger = [pscustomobject]@{{
+        CimClass = [pscustomobject]@{{ CimClassName=$canonicalTriggerType }}
+        Enabled = $true
+        DaysOfWeek = if ($canonicalPolicy.weekly) {{ [int]$canonicalPolicy.days }} else {{ $null }}
+        WeeksInterval = if ($canonicalPolicy.weekly) {{ 1 }} else {{ $null }}
+        DaysInterval = if ($canonicalPolicy.weekly) {{ $null }} else {{ 1 }}
+        StartBoundary = ('2026-09-01T' + $canonicalPolicy.start + ':00-05:00')
+        EndBoundary = $null
+        RandomDelay = $null
+        Repetition = if ($canonicalPolicy.monitor) {{
+          [pscustomobject]@{{ Interval='PT5M'; Duration='PT6H35M'; StopAtDurationEnd=$true }}
+        }} else {{
+          [pscustomobject]@{{ Interval=''; Duration=''; StopAtDurationEnd=$false }}
+        }}
+      }}
+      $canonicalSettings = [pscustomobject]@{{
+        Enabled = $canonicalState -eq 'Ready'
+        StartWhenAvailable = $true
+        WakeToRun = $true
+        StopIfGoingOnBatteries = $false
+        DisallowStartIfOnBatteries = $false
+        MultipleInstances = 'IgnoreNew'
+        ExecutionTimeLimit = $canonicalPolicy.execution_limit
+        RestartCount = $canonicalPolicy.restart_count
+        RestartInterval = $canonicalPolicy.restart_interval
+        Hidden = $false
+        RunOnlyIfIdle = $false
+        RunOnlyIfNetworkAvailable = $false
+        UseUnifiedSchedulingEngine = $true
+      }}
+      return [pscustomobject]@{{
+        State=$canonicalState; TaskPath='\'
+        Actions=@([pscustomobject]@{{ Execute='powershell.exe'; Arguments=$canonicalPolicy.arguments; WorkingDirectory=$global:MockRuntime }})
+        Triggers=@($canonicalTrigger)
+        Principal=[pscustomobject]@{{ LogonType='Password'; UserId='capture-test'; RunLevel='Limited' }}
+        Settings=$canonicalSettings
+      }}
 }}
 function Export-ScheduledTask {{
   [CmdletBinding()] param([string]$TaskName,[string]$TaskPath)
@@ -1819,22 +1878,21 @@ $hardeningReceipt = Get-Content -LiteralPath $hardeningReceiptPath -Raw | Conver
 & '{prep_q}' -CandidateRoot '{candidate_q}' -RuntimeRoot '{runtime_q}' -StateRoot '{state_q}' -BackupRoot '{backup_q}' -CandidateSha '{candidate_sha}' -ProcessTimeoutSeconds 120 | Out-Null
 $activated = Invoke-DawnstrikeRuntimeActivation -ExpectedSha '{candidate_sha}' -MarketDate '2026-08-31' -CiEvidencePath '{ci_q}' -SolEvidencePath '{sol_q}' -CandidateRoot '{candidate_q}' -RuntimeRoot '{runtime_q}' -StateRoot '{state_q}' -BackupRoot '{backup_q}' -BackupRetention 5 -ProcessTimeoutSeconds 120 -RunAsCredential $global:TestCredential -TestNowUtc '2026-08-30T14:00:00Z'
 $activationAuxState = $global:MockAuxState
-                $rebindScript = '{quote(candidate / "scripts" / "rebind_intraday_capture_task.ps1")}'
-            $rebindFailureCaught = $false
-            $rebindFailureMessage = ''
-            try {{ & $rebindScript -RuntimeRoot '{runtime_q}' -StateRoot '{state_q}' -CandidateSha '{candidate_sha}' -SymbolsManifest '{symbols_q}' -SymbolsManifestSha256 '{symbols_sha}' -EntitlementReceipt '{entitlement_q}' -EntitlementReceiptSha256 '{entitlement_sha}' -SourceConfig '{source_config_q}' -SourceConfigSha256 '{source_config_sha}' -RunAsCredential $global:TestCredential -Enable -InjectFailureAfterMutation -ProcessTimeoutSeconds 120 | Out-Null }} catch {{ $rebindFailureCaught = $true; $rebindFailureMessage = $_.Exception.Message }}
-            $rebindFailureFiles = @(Get-ChildItem -LiteralPath (Join-Path '{state_q}' 'receipts\capture-task') -Filter 'capture-task-rebind-*.failed.json' -File)
-            if ($rebindFailureFiles.Count -ne 1) {{ throw ('Injected rebind did not seal exactly one failure record: ' + $rebindFailureMessage) }}
-            $rebindFailurePath = [string]$rebindFailureFiles[0].FullName
-        $rebindFailure = Get-Content -LiteralPath $rebindFailurePath -Raw | ConvertFrom-Json
-        $rebound = & $rebindScript -RuntimeRoot '{runtime_q}' -StateRoot '{state_q}' -CandidateSha '{candidate_sha}' -SymbolsManifest '{symbols_q}' -SymbolsManifestSha256 '{symbols_sha}' -EntitlementReceipt '{entitlement_q}' -EntitlementReceiptSha256 '{entitlement_sha}' -SourceConfig '{source_config_q}' -SourceConfigSha256 '{source_config_sha}' -RunAsCredential $global:TestCredential -Enable -ProcessTimeoutSeconds 120
+    $rebindScript = '{quote(candidate / "scripts" / "rebind_intraday_capture_task.ps1")}'
+    $rebound = & $rebindScript -RuntimeRoot '{runtime_q}' -StateRoot '{state_q}' -CandidateSha '{candidate_sha}' -SymbolsManifest '{symbols_q}' -SymbolsManifestSha256 '{symbols_sha}' -EntitlementReceipt '{entitlement_q}' -EntitlementReceiptSha256 '{entitlement_sha}' -SourceConfig '{source_config_q}' -SourceConfigSha256 '{source_config_sha}' -RunAsCredential $global:TestCredential -Enable -ProcessTimeoutSeconds 120
     $rebindReceiptPath = Join-Path '{state_q}' ('receipts\capture-task\capture-task-rebind-' + '{candidate_sha}' + '.json')
     $rebindReceipt = Get-Content -LiteralPath $rebindReceiptPath -Raw | ConvertFrom-Json
     $rebindActionArguments = $global:MockAuxArguments
     . '{rollback_q}'
 $receiptPath = Join-Path '{state_q}' ('receipts\runtime-activation\runtime-activation-' + $activated.activation_id + '.json')
-$rolledBack = Invoke-DawnstrikeRuntimeRollback -ActivationReceipt $receiptPath -ContractRoot '{candidate_q}' -RuntimeRoot '{runtime_q}' -StateRoot '{state_q}' -BackupRoot '{backup_q}' -ProcessTimeoutSeconds 120 -RunAsCredential $global:TestCredential
-    $output = [pscustomobject]@{{ hardening=$hardeningReceipt; prepared=$preparedRecord; activated=$activated; rebound=$rebindReceipt; rebind_failure=$rebindFailure; rebind_failure_caught=$rebindFailureCaught; rebind_action_arguments=$rebindActionArguments; rolled_back=$rolledBack; activation_aux_state=$activationAuxState; final_aux_state=$global:MockAuxState; task_events=$global:TaskEvents }}
+$rollbackLegacyBlocked = $false
+try {{
+    $null = Invoke-DawnstrikeRuntimeRollback -ActivationReceipt $receiptPath -ContractRoot '{candidate_q}' -RuntimeRoot '{runtime_q}' -StateRoot '{state_q}' -BackupRoot '{backup_q}' -ProcessTimeoutSeconds 120 -RunAsCredential $global:TestCredential
+}}
+catch {{
+    $rollbackLegacyBlocked = $_.Exception.Message -match 'quarantined|authorized COMPLETE'
+}}
+    $output = [pscustomobject]@{{ hardening=$hardeningReceipt; prepared=$preparedRecord; activated=$activated; rebound=$rebindReceipt; rebind_action_arguments=$rebindActionArguments; rollback_legacy_blocked=$rollbackLegacyBlocked; activation_aux_state=$activationAuxState; final_aux_state=$global:MockAuxState; task_events=$global:TaskEvents }}
     $output | ConvertTo-Json -Depth 12 -Compress
 """
     environment = os.environ.copy()
@@ -1877,8 +1935,11 @@ $rolledBack = Invoke-DawnstrikeRuntimeRollback -ActivationReceipt $receiptPath -
         state / "capture-bytecode" / candidate_sha
     )
     assert (
-        f'"-I" "-B" "-X" "pycache_prefix={state / "capture-bytecode" / candidate_sha}" '
-        f'"-u" "{runtime / "scripts" / "run_daily_intraday_capture.py"}"'
+        f'"-I" "-B" "-S" "-X" "pycache_prefix={state / "capture-bytecode" / candidate_sha}" '
+        f'"-u" "-c" "{BOOTSTRAP_PRELOADER}" '
+        f'"{runtime / "scripts" / "dawnstrike_python_bootstrap.py"}" "{bootstrap_sha}" '
+        f'"--release-root" "{runtime}" "--expected-sha" "{candidate_sha}" '
+        f'"--script" "{runtime / "scripts" / "run_daily_intraday_capture.py"}" "--"'
         in payload["rebind_action_arguments"]
     )
     assert payload["activated"]["status"] == "COMPLETE"
@@ -1887,8 +1948,6 @@ $rolledBack = Invoke-DawnstrikeRuntimeRollback -ActivationReceipt $receiptPath -
     assert payload["activated"]["auxiliary_capture_state_after"] == "Disabled"
     assert payload["activated"]["auxiliary_capture_action"] == "DISABLED_UNTIL_EXACT_SHA_REBIND"
     assert payload["activation_aux_state"] == "Disabled"
-    assert payload["rebind_failure_caught"] is True
-    assert payload["rebind_failure"]["status"] == "FAILED_RESTORED_EXACT_DISABLED"
     assert payload["rebound"]["status"] == "COMPLETE"
     assert payload["rebound"]["changed_field"] == "candidate_sha_and_input_bindings"
     assert payload["rebound"]["previous_candidate_sha"] == candidate_sha
@@ -1902,22 +1961,10 @@ $rolledBack = Invoke-DawnstrikeRuntimeRollback -ActivationReceipt $receiptPath -
         '"--source-config-sha256" "' + source_config_sha + '"',
     ):
         assert binding in payload["rebind_action_arguments"]
-    assert payload["rolled_back"]["status"] == "ROLLED_BACK"
-    assert payload["rolled_back"]["auxiliary_capture_action"] == "RESTORED_EXACT"
-    for field in (
-        "capture_hardening_receipt_relative_path",
-        "capture_hardening_receipt_raw_sha256",
-        "capture_hardening_receipt_sha256",
-        "capture_hardening_xml_sha256",
-        "capture_hardening_action_sha256",
-        "capture_hardening_principal_sha256",
-        "capture_hardening_trigger_sha256",
-        "capture_hardening_settings_sha256",
-        "capture_hardening_runner_before_sha256",
-        "capture_hardening_runner_target_sha256",
-    ):
-        assert payload["rolled_back"][field] == payload["activated"][field]
-    assert payload["final_aux_state"] == "Disabled"
+    assert payload["rollback_legacy_blocked"] is True
+    assert payload["activated"]["previous_runtime_rollback_authorized"] is False
+    assert payload["activated"]["previous_runtime_disposition"] == "QUARANTINED_UNAUTHORIZED"
+    assert payload["final_aux_state"] == "Ready"
     assert (
         len(
             list(

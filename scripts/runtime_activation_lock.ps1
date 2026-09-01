@@ -482,7 +482,7 @@ function Set-DawnstrikeRuntimeOperationJournalAdoption {
     try{$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)}finally{$stream.Dispose()}
     try{
         $state=(Split-Path (Split-Path (Split-Path $JournalPath -Parent) -Parent) -Parent)
-        $output=& $PythonPath '-I' '-B' $contract 'seal' $input $JournalPath '--state-root' $state 2>$null
+        $output=& $PythonPath '-I' '-B' '-S' $contract 'seal' $input $JournalPath '--state-root' $state 2>$null
         if($LASTEXITCODE-ne 0){throw 'Runtime operation journal adoption seal failed.'}
         try{return ([string]($output-join''))|ConvertFrom-Json}catch{throw 'Journal seal returned invalid output.'}
     }finally{if(Test-Path -LiteralPath $input){Remove-Item -LiteralPath $input -Force}}

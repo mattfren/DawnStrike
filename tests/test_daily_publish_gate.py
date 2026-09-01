@@ -189,6 +189,7 @@ def _write_publishable_fixture(
     (root / "data" / "opportunity-projection.json.manifest.json").write_text(
         json.dumps(
             {
+                "schema_version": "dawnstrike.opportunity_projection_manifest.v1",
                 "payload_sha256": opportunity_hash,
                 "byte_count": opportunity.stat().st_size,
                 "state": "DISABLED",
@@ -198,9 +199,15 @@ def _write_publishable_fixture(
         encoding="utf-8",
     )
     calendar = root / "data" / "calendar.json"
-    calendar.write_bytes(b'{"days":[]}')
+    calendar.write_bytes(
+        json.dumps(
+            {"as_of_market_date": "2026-08-28", "days": []},
+            sort_keys=True,
+        ).encode()
+    )
     calendar_hash = hashlib.sha256(calendar.read_bytes()).hexdigest()
     calendar_manifest = {
+        "market_date": "2026-08-28",
         "status": snapshot_status,
         "manifest_id": "calendar-fixture",
         "canonical_input_hash_sha256": canonical_hash,

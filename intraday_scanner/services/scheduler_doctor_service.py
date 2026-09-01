@@ -20,8 +20,15 @@ CANONICAL_TASK_NAME = "Dawnstrike 10of10 Daily Finalize"
 AUXILIARY_TASK_NAME = "Dawnstrike Delayed SIP Capture"
 AUXILIARY_SIDECAR_CONTRACT = "dawnstrike.account_capture_trial_sidecar.v1"
 AUXILIARY_DECLARATION_FILE = Path("config") / "state_preparation_contract.json"
+AUXILIARY_PYTHON_BOOTSTRAP = Path("scripts") / "dawnstrike_python_bootstrap.py"
 AUXILIARY_CAPTURE_RUNNER = Path("scripts") / "run_daily_intraday_capture.py"
-AUXILIARY_PYTHON_PREFIX = ("-I", "-B", "-X")
+AUXILIARY_PYTHON_PREFIX = ("-I", "-B", "-S", "-X")
+AUXILIARY_BOOTSTRAP_PRELOADER = (
+    "import hashlib,sys; p=sys.argv[1]; e=sys.argv[2]; b=open(p,'rb').read(); "
+    "a=hashlib.sha256(b).hexdigest(); a==e or (_ for _ in ()).throw("
+    "RuntimeError('bootstrap hash mismatch')); r=sys.argv[3:]; sys.argv=[p,*r]; "
+    "exec(compile(b,p,'exec'),{'__name__':'__main__','__file__':p})"
+)
 AUXILIARY_INTERPRETER = Path(
     r"C:\Users\MattFields\AppData\Local\Programs\Python\Python313\python.exe"
 )
@@ -33,26 +40,25 @@ AUXILIARY_INTERPRETER_SIGNER_SUBJECT = (
 AUXILIARY_INTERPRETER_SIGNER_THUMBPRINT = "9BA3C2E210C7E8296C5056515BFC0B0BBA78AC48"
 APPROVED_GIT_PATH = Path(r"C:\Program Files\Git\cmd\git.exe")
 APPROVED_GIT_SHA256 = "37c5725818d602e951ba2563b870d62763322956b73373da4c33a0b566a80bc9"
-AUXILIARY_REQUIRED_OPTIONS = frozenset(
-    {
-        "--candidate-sha",
-        "--repo-root",
-        "--db-path",
-        "--evidence-root",
-        "--run-root",
-        "--output-root",
-        "--session-root",
-        "--symbols-manifest",
-        "--symbols-manifest-sha256",
-        "--entitlement-receipt",
-        "--entitlement-receipt-sha256",
-        "--source-config",
-        "--source-config-sha256",
-        "--env-file",
-        "--max-pages",
-        "--retries",
-    }
+AUXILIARY_REQUIRED_OPTION_ORDER = (
+    "--candidate-sha",
+    "--repo-root",
+    "--db-path",
+    "--evidence-root",
+    "--run-root",
+    "--output-root",
+    "--session-root",
+    "--symbols-manifest",
+    "--symbols-manifest-sha256",
+    "--entitlement-receipt",
+    "--entitlement-receipt-sha256",
+    "--source-config",
+    "--source-config-sha256",
+    "--env-file",
+    "--max-pages",
+    "--retries",
 )
+AUXILIARY_REQUIRED_OPTIONS = frozenset(AUXILIARY_REQUIRED_OPTION_ORDER)
 GIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 PUBLICATION_CONTRACT = {
@@ -628,6 +634,7 @@ def _auxiliary_task_check(
         "runtime_root_matches": action["runtime_root_matches"],
         "state_root_matches": action["state_root_matches"],
         "candidate_sha_matches": action["candidate_sha_matches"],
+        "bootstrap_matches": action["bootstrap_matches"],
         "runner_matches": action["runner_matches"],
         "task_path_matches": action["task_path_matches"],
         "action_count_matches": action["action_count_matches"],
@@ -1138,26 +1145,35 @@ def _validate_auxiliary_action(
     except ValueError:
         tokens = []
     prefix_matches = (
-        len(tokens) >= 7
-        and tuple(tokens[:3]) == AUXILIARY_PYTHON_PREFIX
-        and tokens[3].startswith("pycache_prefix=")
-        and tokens[4] == "-u"
+        len(tokens) >= 18
+        and tuple(tokens[:4]) == AUXILIARY_PYTHON_PREFIX
+        and tokens[4].startswith("pycache_prefix=")
+        and tokens[5] == "-u"
+        and tokens[6] == "-c"
+        and tokens[7] == AUXILIARY_BOOTSTRAP_PRELOADER
     )
-    runner = tokens[5] if prefix_matches else None
-    prefix_matches = prefix_matches and not any(
-        token in (*AUXILIARY_PYTHON_PREFIX, "-u") for token in tokens[6:]
+    bootstrap = tokens[8] if prefix_matches else None
+    bootstrap_sha = tokens[9] if prefix_matches else None
+    release_root = tokens[11] if prefix_matches and tokens[10] == "--release-root" else None
+    expected_sha = tokens[13] if prefix_matches and tokens[12] == "--expected-sha" else None
+    runner = tokens[15] if prefix_matches and tokens[14] == "--script" else None
+    separator_matches = prefix_matches and tokens[16] == "--"
+    prefix_matches = separator_matches and not any(
+        token in (*AUXILIARY_PYTHON_PREFIX, "-u") for token in tokens[12:]
     )
     option_values: dict[str, str] = {}
+    option_order: list[str] = []
     duplicate_options: set[str] = set()
     unknown_options: set[str] = set()
     unexpected_arguments = False
-    option_index = 6 if prefix_matches else len(tokens)
+    option_index = 17 if prefix_matches else len(tokens)
     while option_index < len(tokens):
         option = tokens[option_index]
         if not option.startswith("--"):
             unexpected_arguments = True
             option_index += 1
             continue
+        option_order.append(option)
         if option not in AUXILIARY_REQUIRED_OPTIONS and option != "--execute":
             unknown_options.add(option)
         if option in option_values:
@@ -1188,6 +1204,8 @@ def _validate_auxiliary_action(
         not duplicate_options
         and not unknown_options
         and not unexpected_arguments
+        and tuple(option_order)
+        == (*AUXILIARY_REQUIRED_OPTION_ORDER, "--execute")
         and set(option_values) == AUXILIARY_REQUIRED_OPTIONS | {"--execute"}
         and AUXILIARY_REQUIRED_OPTIONS.issubset(option_values)
         and option_values.get("--execute") == ""
@@ -1222,6 +1240,8 @@ def _validate_auxiliary_action(
             Path(working_directory).resolve() == runtime
             and repo_root is not None
             and Path(repo_root).resolve() == runtime
+            and release_root is not None
+            and Path(release_root).resolve() == runtime
         )
         external_values = [option_values.get(name, "") for name in external_path_options]
         external_paths = [Path(value).resolve() for value in external_values]
@@ -1254,8 +1274,19 @@ def _validate_auxiliary_action(
             )
             and external_paths_are_distinct
         )
+        bootstrap_matches = (
+            bootstrap is not None
+            and Path(bootstrap).resolve() == runtime / AUXILIARY_PYTHON_BOOTSTRAP
+            and _safe_regular_path(Path(bootstrap))
+        )
+        bootstrap_sha_matches = (
+            bootstrap is not None
+            and _safe_file_sha256(bootstrap, bootstrap_sha)
+        )
         runner_matches = (
-            runner is not None and Path(runner).resolve() == runtime / AUXILIARY_CAPTURE_RUNNER
+            runner is not None
+            and Path(runner).resolve() == runtime / AUXILIARY_CAPTURE_RUNNER
+            and _safe_regular_path(Path(runner))
         )
         env_file_matches = (
             env_file is not None
@@ -1265,13 +1296,16 @@ def _validate_auxiliary_action(
     except (OSError, RuntimeError):
         runtime_root_matches = False
         state_root_matches = False
+        bootstrap_matches = False
+        bootstrap_sha_matches = False
         runner_matches = False
         env_file_matches = False
     candidate_sha_matches = candidate == contract["candidate_sha"]
+    expected_sha_matches = expected_sha == contract["candidate_sha"]
     bytecode_prefix_matches = (
         candidate_format_valid
-        and len(tokens) >= 4
-        and tokens[3]
+        and len(tokens) >= 5
+        and tokens[4]
         == "pycache_prefix=" + str((state / "capture-bytecode" / str(candidate)).resolve())
     )
     prefix_matches = prefix_matches and bytecode_prefix_matches
@@ -1306,6 +1340,8 @@ def _validate_auxiliary_action(
     valid = all(
         (
             interpreter_matches,
+            bootstrap_matches,
+            bootstrap_sha_matches,
             runner_matches,
             prefix_matches,
             required_options_present,
@@ -1316,6 +1352,7 @@ def _validate_auxiliary_action(
             action_count_matches,
             state_matches,
             candidate_sha_matches,
+            expected_sha_matches,
             input_hashes_match,
             input_files_match,
             action_contract_matches,
@@ -1331,6 +1368,9 @@ def _validate_auxiliary_action(
         "candidate_sha_matches": candidate_sha_matches,
         "input_hashes_match": input_hashes_match,
         "input_files_match": input_files_match,
+        "bootstrap_matches": bootstrap_matches,
+        "bootstrap_sha_matches": bootstrap_sha_matches,
+        "expected_sha_matches": expected_sha_matches,
         "runner_matches": runner_matches,
         "prefix_matches": prefix_matches,
         "task_path_matches": task_path_matches,

@@ -188,6 +188,8 @@ def _validate_public_state(readiness: dict[str, object]) -> list[str]:
                 raise json.JSONDecodeError("manifest is not an object", "", 0)
         except (OSError, json.JSONDecodeError):
             failures.append("build_manifest_unreadable")
+    if snapshot_manifest.get("market_date") != build_manifest.get("market_date"):
+        failures.append("performance_manifest_market_date_mismatch")
     if RELEASE_MANIFEST_PATH.is_file():
         release_manifest = _read_object(RELEASE_MANIFEST_PATH)
         if not release_manifest:
@@ -211,6 +213,19 @@ def _validate_public_state(readiness: dict[str, object]) -> list[str]:
                 != snapshot_manifest.get("payload_sha256")
             ):
                 failures.append("calendar_performance_hash_mismatch")
+            if calendar_manifest.get("market_date") != build_manifest.get("market_date"):
+                failures.append("calendar_manifest_market_date_mismatch")
+            try:
+                calendar_payload = json.loads(calendar_bytes)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                calendar_payload = None
+            calendar_payload_date = (
+                calendar_payload.get("as_of_market_date")
+                if isinstance(calendar_payload, dict)
+                else None
+            )
+            if calendar_payload_date != build_manifest.get("market_date"):
+                failures.append("calendar_payload_market_date_mismatch")
             failures.extend(
                 _calendar_contract_failures(calendar_bytes, calendar_manifest, readiness)
             )
@@ -236,7 +251,15 @@ def _validate_public_state(readiness: dict[str, object]) -> list[str]:
             opportunity_bytes = _read_cached_bytes(OPPORTUNITY_PATH)
             opportunity_manifest = _read_object(OPPORTUNITY_MANIFEST_PATH)
             failures.extend(
-                _opportunity_failures(opportunity_bytes, opportunity_manifest)
+                _opportunity_failures(
+                    opportunity_bytes,
+                    opportunity_manifest,
+                    expected_market_date=str(
+                        build_manifest.get("market_date")
+                        or readiness.get("market_date")
+                        or ""
+                    ),
+                )
             )
         except OSError:
             failures.append("opportunity_unreadable")
@@ -675,6 +698,8 @@ def _calendar_contract_failures(
 def _opportunity_failures(
     payload_bytes: bytes,
     manifest: dict[str, object],
+    *,
+    expected_market_date: str = "",
 ) -> list[str]:
     failures: list[str] = []
     if not manifest:
@@ -692,6 +717,10 @@ def _opportunity_failures(
     if not isinstance(parsed, dict):
         failures.append("opportunity_payload_invalid")
         return failures
+    if parsed.get("schema_version") != "dawnstrike.opportunity_projection.v1":
+        failures.append("opportunity_schema_version_invalid")
+    if manifest.get("schema_version") != "dawnstrike.opportunity_projection_manifest.v1":
+        failures.append("opportunity_manifest_schema_version_invalid")
     rows = parsed.get("rows")
     if not isinstance(rows, list):
         failures.append("opportunity_rows_invalid")
@@ -715,6 +744,49 @@ def _opportunity_failures(
         failures.append("opportunity_manifest_state_mismatch")
     if manifest.get("row_count") != parsed.get("row_count"):
         failures.append("opportunity_manifest_row_count_mismatch")
+    state = parsed.get("state")
+    if state == "DATA_UNAVAILABLE" and (
+        rows
+        or parsed.get("source_run_id") is not None
+        or parsed.get("as_of") is not None
+    ):
+        failures.append("unavailable_opportunity_exposes_source")
+    if state == "DISABLED" and (
+        rows
+        or parsed.get("source_run_id") is not None
+        or parsed.get("as_of") is not None
+    ):
+        failures.append("disabled_opportunity_exposes_source")
+    if state in {"QUALIFYING", "NO_QUALIFYING"}:
+        as_of = parsed.get("as_of")
+        as_of_date: str | None = None
+        if not isinstance(as_of, str) or not as_of.strip():
+            failures.append("opportunity_as_of_missing")
+        else:
+            try:
+                parsed_as_of = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
+                if parsed_as_of.utcoffset() is None:
+                    raise ValueError("opportunity as_of must include a timezone offset")
+                as_of_date = parsed_as_of.date().isoformat()
+            except ValueError:
+                failures.append("opportunity_as_of_invalid")
+        if as_of_date is not None:
+            if expected_market_date and as_of_date != expected_market_date:
+                failures.append("opportunity_as_of_market_date_mismatch")
+            if parsed.get("market_date") != as_of_date:
+                failures.append("opportunity_market_date_mismatch")
+        elif parsed.get("market_date") not in {None, ""}:
+            failures.append("opportunity_market_date_invalid")
+        source_run_id = parsed.get("source_run_id")
+        if not isinstance(source_run_id, str) or not source_run_id.strip():
+            failures.append("opportunity_source_run_id_missing")
+        expected_manifest_date = expected_market_date or as_of_date
+        if expected_manifest_date and manifest.get("market_date") != expected_manifest_date:
+            failures.append("opportunity_manifest_market_date_mismatch")
+        if manifest.get("source_run_id") != source_run_id:
+            failures.append("opportunity_manifest_source_run_id_mismatch")
+        if manifest.get("as_of") != as_of:
+            failures.append("opportunity_manifest_as_of_mismatch")
     return failures
 
 

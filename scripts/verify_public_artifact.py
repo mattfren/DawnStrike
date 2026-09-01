@@ -8,6 +8,7 @@ import hashlib
 import json
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -283,6 +284,8 @@ def verify(
     if opportunity_path.is_file():
         opportunity_bytes = opportunity_path.read_bytes()
         opportunity = json.loads(opportunity_bytes)
+        if opportunity.get("schema_version") != "dawnstrike.opportunity_projection.v1":
+            errors.append("opportunity_schema_version_invalid")
         rows = opportunity.get("rows")
         opportunity_rows = rows if isinstance(rows, list) else []
         if not isinstance(rows, list):
@@ -310,6 +313,11 @@ def verify(
             or opportunity.get("as_of") is not None
         ):
             errors.append("unavailable_opportunity_exposes_source")
+        if opportunity.get("state") == "DISABLED" and (
+            opportunity.get("source_run_id") is not None
+            or opportunity.get("as_of") is not None
+        ):
+            errors.append("disabled_opportunity_exposes_source")
         if opportunity.get("state") == "NO_QUALIFYING" and opportunity.get("message") != (
             "NO QUALIFYING TRADE CURRENTLY EXISTS."
         ):
@@ -318,6 +326,11 @@ def verify(
         opportunity_manifest = json.loads(
             opportunity_manifest_path.read_text(encoding="utf-8")
         )
+        if (
+            opportunity_manifest.get("schema_version")
+            != "dawnstrike.opportunity_projection_manifest.v1"
+        ):
+            errors.append("opportunity_manifest_schema_version_invalid")
         if opportunity_path.is_file():
             if opportunity_manifest.get("payload_sha256") != hashlib.sha256(
                 opportunity_path.read_bytes()
@@ -331,6 +344,15 @@ def verify(
                 errors.append("opportunity_manifest_row_count_mismatch")
         if not is_lower_hex64(opportunity_manifest.get("payload_sha256")):
             errors.append("opportunity_projection_sha256_invalid")
+        if opportunity.get("state") in {"QUALIFYING", "NO_QUALIFYING"}:
+            _opportunity_lineage_failures(
+                opportunity,
+                opportunity_manifest,
+                expected_market_date=str(
+                    readiness_lineage.get("market_date") or ""
+                ),
+                errors=errors,
+            )
     if v6_path.is_file():
         v6_bytes = v6_path.read_bytes()
         v6_hash = hashlib.sha256(v6_bytes).hexdigest()
@@ -361,6 +383,23 @@ def verify(
             errors.append("source_sha_not_expected_runtime_head")
         if build_manifest.get("source_clean") is not True:
             errors.append("source_not_clean")
+        if manifest.get("market_date") != build_manifest.get("market_date"):
+            errors.append("performance_manifest_market_date_mismatch")
+        calendar_market_date = calendar_manifest.get("market_date")
+        if calendar_market_date != build_manifest.get("market_date"):
+            errors.append("calendar_manifest_market_date_mismatch")
+        if calendar_path.is_file():
+            try:
+                calendar_payload = json.loads(calendar_path.read_bytes())
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                calendar_payload = None
+            calendar_payload_date = (
+                calendar_payload.get("as_of_market_date")
+                if isinstance(calendar_payload, dict)
+                else None
+            )
+            if calendar_payload_date != build_manifest.get("market_date"):
+                errors.append("calendar_payload_market_date_mismatch")
         if not build_manifest.get("build_id"):
             errors.append("build_id_missing")
         if build_manifest.get("data_hash_sha256") != manifest.get("payload_sha256"):
@@ -373,6 +412,13 @@ def verify(
             opportunity_manifest.get("payload_sha256")
         ):
             errors.append("build_opportunity_projection_hash_mismatch")
+        if opportunity.get("state") in {"QUALIFYING", "NO_QUALIFYING"}:
+            _opportunity_lineage_failures(
+                opportunity,
+                opportunity_manifest,
+                expected_market_date=str(build_manifest.get("market_date") or ""),
+                errors=errors,
+            )
         if build_manifest.get("v6_learning_sha256") != v6_hash:
             errors.append("build_v6_learning_hash_mismatch")
         if not is_lower_hex64(v6_hash):
@@ -590,6 +636,66 @@ def public_artifact_identity(root: Path) -> dict[str, str]:
         "release_manifest_raw_sha256": artifact_hashes["release-manifest.json"],
         "public_artifact_root_sha256": artifact_root,
     }
+
+
+def _opportunity_lineage_failures(
+    payload: dict[str, object],
+    manifest: dict[str, object],
+    *,
+    expected_market_date: str,
+    errors: list[str],
+) -> None:
+    """Bind an active opportunity projection to one exact market session.
+
+    Historical opportunity runs are intentionally retained in the private
+    store. The public artifact must not turn an older run into today's pick,
+    even when every payload hash is internally consistent. The projection's
+    ``as_of`` timestamp, derived market date, source run identity, and manifest
+    metadata therefore form one small, independently checked lineage join.
+    """
+
+    if payload.get("schema_version") != "dawnstrike.opportunity_projection.v1":
+        _append_unique_error(errors, "opportunity_schema_version_invalid")
+    if manifest.get("schema_version") != "dawnstrike.opportunity_projection_manifest.v1":
+        _append_unique_error(errors, "opportunity_manifest_schema_version_invalid")
+    state = payload.get("state")
+    as_of = payload.get("as_of")
+    as_of_date: str | None = None
+    if not isinstance(as_of, str) or not as_of.strip():
+        _append_unique_error(errors, "opportunity_as_of_missing")
+    else:
+        try:
+            parsed = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
+            if parsed.utcoffset() is None:
+                raise ValueError("opportunity as_of must include a timezone offset")
+            as_of_date = parsed.date().isoformat()
+        except ValueError:
+            _append_unique_error(errors, "opportunity_as_of_invalid")
+    if as_of_date is not None:
+        if expected_market_date and as_of_date != expected_market_date:
+            _append_unique_error(errors, "opportunity_as_of_market_date_mismatch")
+        if payload.get("market_date") != as_of_date:
+            _append_unique_error(errors, "opportunity_market_date_mismatch")
+    elif payload.get("market_date") not in {None, ""}:
+        _append_unique_error(errors, "opportunity_market_date_invalid")
+    source_run_id = payload.get("source_run_id")
+    if not isinstance(source_run_id, str) or not source_run_id.strip():
+        _append_unique_error(errors, "opportunity_source_run_id_missing")
+    manifest_market_date = manifest.get("market_date")
+    expected_manifest_date = expected_market_date or as_of_date
+    if expected_manifest_date and manifest_market_date != expected_manifest_date:
+        _append_unique_error(errors, "opportunity_manifest_market_date_mismatch")
+    if manifest.get("source_run_id") != source_run_id:
+        _append_unique_error(errors, "opportunity_manifest_source_run_id_mismatch")
+    if manifest.get("as_of") != as_of:
+        _append_unique_error(errors, "opportunity_manifest_as_of_mismatch")
+    if state not in {"QUALIFYING", "NO_QUALIFYING"}:
+        _append_unique_error(errors, "opportunity_active_state_invalid")
+
+
+def _append_unique_error(errors: list[str], value: str) -> None:
+    if value not in errors:
+        errors.append(value)
 
 
 def _publication_set_sha256(

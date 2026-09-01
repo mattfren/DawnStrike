@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import sys
@@ -126,6 +127,17 @@ def test_runner_child_uses_isolated_exact_interpreter(tmp_path: Path, monkeypatc
 
     assert module.main() == 0
     command = captured["command"]
-    assert command[:4] == [sys.executable, "-I", "-B", "-u"]
-    assert Path(command[4]).resolve() == Path("scripts/capture_intraday_operations.py").resolve()
+    assert command[:6] == [sys.executable, "-I", "-B", "-S", "-u", "-c"]
+    assert command[6] == module._BOOTSTRAP_PRELOADER
+    assert Path(command[7]).resolve() == Path("scripts/dawnstrike_python_bootstrap.py").resolve()
+    assert command[8] == hashlib.sha256(Path(command[7]).read_bytes()).hexdigest()
+    assert command[9:14] == [
+        "--release-root",
+        str(Path.cwd().resolve()),
+        "--expected-sha",
+        "a" * 40,
+        "--script",
+    ]
+    assert Path(command[14]).resolve() == Path("scripts/capture_intraday_operations.py").resolve()
+    assert command[15] == "--"
     assert captured["kwargs"]["cwd"] == tmp_path

@@ -514,6 +514,27 @@ function Get-HardeningRuntimeIdentity {
     return [pscustomobject]@{ root = $Root; head = $head; tree = $tree; origin = $origin; origin_sha256 = Get-HardeningSha256Text $origin; runner_blob = $runnerHeadBlob; runner_sha256 = Get-HardeningSha256File $runner }
 }
 
+function Get-HardeningCandidateBootstrapIdentity {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Root)
+    $resolvedRoot = [System.IO.Path]::GetFullPath($Root).TrimEnd('\')
+    $path = Assert-DawnstrikeCaptureRegularPath `
+        (Join-Path $resolvedRoot "scripts\dawnstrike_python_bootstrap.py") `
+        "Candidate release bootstrap"
+    $git = (Get-DawnstrikeApprovedGit).path
+    $worktreeBlob = (& $git -C $resolvedRoot hash-object -- "scripts/dawnstrike_python_bootstrap.py" 2>$null | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) { throw "Candidate release bootstrap blob identity could not be read." }
+    $headBlob = (& $git -C $resolvedRoot rev-parse "HEAD:scripts/dawnstrike_python_bootstrap.py" 2>$null | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $worktreeBlob -notmatch '^[0-9a-fA-F]{40}$' -or $headBlob -notmatch '^[0-9a-fA-F]{40}$' -or $worktreeBlob -cne $headBlob) {
+        throw "Candidate release bootstrap is not the exact HEAD blob."
+    }
+    return [pscustomobject]@{
+        path = $path
+        blob = $headBlob
+        sha256 = Get-HardeningSha256File $path
+    }
+}
+
 function Assert-HardeningCompleteTerminal {
     [CmdletBinding()]
     param(
@@ -599,6 +620,97 @@ function Assert-HardeningCompensationReceiptExact {
     return [pscustomobject]@{ payload = $payload; hash = Get-HardeningSha256File $Path }
 }
 
+function Get-HardeningCaptureActionLayout {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Tokens,
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot,
+        [Parameter(Mandatory = $true)][string]$BytecodePrefix,
+        [switch]$AllowMissingBootstrap
+    )
+    if ($Tokens.Count -eq 0) { throw "Capture action arguments are empty." }
+    $runtime = [System.IO.Path]::GetFullPath($RuntimeRoot).TrimEnd('\')
+    $expectedBootstrap = [System.IO.Path]::GetFullPath((Join-Path $runtime "scripts\dawnstrike_python_bootstrap.py"))
+    $expectedRunner = [System.IO.Path]::GetFullPath((Join-Path $runtime "scripts\run_daily_intraday_capture.py"))
+    $expectedPrefix = [System.IO.Path]::GetFullPath($BytecodePrefix)
+    $runnerIndex = 0
+    $optionStart = 0
+    $layout = "legacy"
+    if ($Tokens.Count -ge 3 -and $Tokens[0] -eq "-3.13" -and $Tokens[1] -eq "-u") {
+        $runnerIndex = 2
+        $optionStart = 3
+    }
+    elseif ($Tokens.Count -ge 3 -and $Tokens[0] -eq "-I" -and $Tokens[1] -eq "-u") {
+        $runnerIndex = 2
+        $optionStart = 3
+        $layout = "legacy_direct"
+    }
+    elseif (
+        $Tokens.Count -ge 6 -and $Tokens[0] -eq "-I" -and $Tokens[1] -eq "-B" -and
+        $Tokens[2] -eq "-X" -and $Tokens[3] -match '^pycache_prefix=' -and $Tokens[4] -eq "-u"
+    ) {
+        if ([System.IO.Path]::GetFullPath($Tokens[3].Substring(15)) -ine $expectedPrefix) {
+            throw "Capture action bytecode prefix is not candidate-bound."
+        }
+        $runnerIndex = 5
+        $optionStart = 6
+        $layout = "legacy_direct"
+    }
+    elseif (
+        $Tokens.Count -ge 17 -and $Tokens[0] -eq "-I" -and $Tokens[1] -eq "-B" -and $Tokens[2] -eq "-S" -and
+        $Tokens[3] -eq "-X" -and $Tokens[4] -match '^pycache_prefix=' -and $Tokens[5] -eq "-u"
+    ) {
+        if ([System.IO.Path]::GetFullPath($Tokens[4].Substring(15)) -ine $expectedPrefix) {
+            throw "Capture action bytecode prefix is not candidate-bound."
+        }
+        if ($Tokens[6] -ne "-c" -or $Tokens[7] -cne (Get-DawnstrikeCaptureBootstrapPreloader)) {
+            throw "Capture action bootstrap preloader is not exact."
+        }
+        $bootstrap = [System.IO.Path]::GetFullPath($Tokens[8])
+        if (-not [string]::Equals($bootstrap, $expectedBootstrap, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $Tokens[9] -notmatch '^[0-9a-f]{64}$' -or
+            $Tokens[10] -ne "--release-root" -or
+            -not [string]::Equals([System.IO.Path]::GetFullPath($Tokens[11]).TrimEnd('\'), $runtime, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $Tokens[12] -ne "--expected-sha" -or $Tokens[13] -notmatch '^[0-9a-f]{40}$' -or
+            $Tokens[14] -ne "--script" -or
+            -not [string]::Equals([System.IO.Path]::GetFullPath($Tokens[15]), $expectedRunner, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $Tokens[16] -ne "--") {
+            throw "Capture action bootstrap root, runner, or separator is not exact."
+        }
+        if (Test-Path -LiteralPath $bootstrap) {
+            $bootstrap = Assert-DawnstrikeCaptureRegularPath $bootstrap "Capture release bootstrap"
+            if ((Get-HardeningSha256File $bootstrap) -cne [string]$Tokens[9]) {
+                throw "Capture action bootstrap bytes do not match their exact binding."
+            }
+        }
+        elseif (-not $AllowMissingBootstrap) {
+            throw "Capture release bootstrap is missing from RuntimeRoot."
+        }
+        $runnerIndex = 15
+        $optionStart = 17
+        $layout = "bootstrap"
+    }
+    else { throw "Capture action has an unsafe interpreter prefix." }
+    if ($Tokens.Count -le $runnerIndex) { throw "Capture action runner binding is missing." }
+    $runner = [System.IO.Path]::GetFullPath($Tokens[$runnerIndex])
+    if (-not [string]::Equals($runner, $expectedRunner, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Capture action runner binding is outside the exact RuntimeRoot contract."
+    }
+    if ($Tokens.Count -le $optionStart -or $Tokens[$optionStart] -ne "--candidate-sha") {
+        throw "Capture migration action candidate binding is missing."
+    }
+    if ($layout -eq "bootstrap" -and $Tokens[13] -cne $Tokens[$optionStart + 1]) {
+        throw "Capture action bootstrap expected SHA does not match its candidate binding."
+    }
+    return [pscustomobject]@{
+        layout = $layout
+        runner_index = $runnerIndex
+        option_start = $optionStart
+        runner_path = $runner
+        bootstrap_path = if ($layout -eq "bootstrap") { $expectedBootstrap } else { $null }
+    }
+}
+
 function Set-HardeningDirectCaptureAction {
     [CmdletBinding()]
     param(
@@ -606,7 +718,9 @@ function Set-HardeningDirectCaptureAction {
         [Parameter(Mandatory = $true)][System.Xml.XmlNode]$Actions,
         [Parameter(Mandatory = $true)][string]$InterpreterPath,
         [Parameter(Mandatory = $true)][string]$CandidateSha,
-        [Parameter(Mandatory = $true)][string]$BytecodePrefix
+        [Parameter(Mandatory = $true)][string]$BytecodePrefix,
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot,
+        [Parameter(Mandatory = $true)][string]$CandidateBootstrapPath
     )
     $exec = @(Get-HardeningDirectNodes $Actions "Exec")
     if ($exec.Count -ne 1) { throw "Capture task must contain exactly one Exec action." }
@@ -615,22 +729,27 @@ function Set-HardeningDirectCaptureAction {
     if ($command.Count -ne 1 -or $arguments.Count -ne 1) { throw "Capture action command contract is incomplete." }
     $tokens = @([regex]::Matches([string]$arguments[0].InnerText, '"(?<value>[^"\r\n]*)"') | ForEach-Object { [string]$_.Groups["value"].Value })
     if ($tokens.Count -eq 0 -or (($tokens | ForEach-Object { '"' + $_ + '"' }) -join ' ') -ne [string]$arguments[0].InnerText) { throw "Capture action arguments are not in canonical quoted form." }
-    $initialRunnerIndex = if ($tokens[0] -eq "-I" -and $tokens.Count -ge 6 -and $tokens[1] -eq "-B") { 5 } else { 2 }
-    if ($tokens.Count -le $initialRunnerIndex -or $tokens[$initialRunnerIndex] -notmatch 'run_daily_intraday_capture\.py$') { throw "Capture action runner binding is invalid." }
-    if ($tokens[0] -eq "-3.13") {
-        $tokens = @("-I", "-B", "-X", ("pycache_prefix=" + [System.IO.Path]::GetFullPath($BytecodePrefix)), "-u") + $tokens[2..($tokens.Count - 1)]
+    $layout = Get-HardeningCaptureActionLayout -Tokens $tokens -RuntimeRoot $RuntimeRoot -BytecodePrefix $BytecodePrefix -AllowMissingBootstrap
+    $tail = @($tokens[$layout.option_start..($tokens.Count - 1)])
+    if ($tail.Count -lt 2 -or $tail[0] -ne "--candidate-sha" -or $tail[1] -notmatch '^[0-9a-f]{40}$') {
+        throw "Capture migration action candidate binding is invalid."
     }
-    elseif ($tokens[0] -eq "-I" -and $tokens.Count -ge 5 -and $tokens[1] -eq "-B" -and $tokens[2] -eq "-X" -and $tokens[3] -like "pycache_prefix=*") {
-        if ([System.IO.Path]::GetFullPath($tokens[3].Substring(15)) -ine [System.IO.Path]::GetFullPath($BytecodePrefix) -or $tokens[4] -ne "-u") { throw "Capture action bytecode prefix is not candidate-bound." }
-    }
-    elseif ($tokens[0] -eq "-I" -and $tokens[1] -eq "-u") {
-        $tokens = @("-I", "-B", "-X", ("pycache_prefix=" + [System.IO.Path]::GetFullPath($BytecodePrefix)), "-u") + $tokens[2..($tokens.Count - 1)]
-    }
-    else { throw "Capture action has an unsafe interpreter prefix." }
-    if ($tokens.Count -lt 8 -or $tokens[6] -ne "--candidate-sha" -or $tokens[7] -notmatch '^[0-9a-f]{40}$') { throw "Capture migration action candidate binding is invalid." }
-    $tokens[7] = $CandidateSha
+    $tail[1] = $CandidateSha
+    $runtime = [System.IO.Path]::GetFullPath($RuntimeRoot).TrimEnd('\')
+    $bootstrapSource = Assert-DawnstrikeCaptureRegularPath $CandidateBootstrapPath "Candidate release bootstrap"
+    $bootstrapSha256 = Get-HardeningSha256File $bootstrapSource
+    $bootstrapPreloader = Get-DawnstrikeCaptureBootstrapPreloader
+    $bootstrap = [System.IO.Path]::GetFullPath((Join-Path $runtime "scripts\dawnstrike_python_bootstrap.py"))
+    $runner = Assert-DawnstrikeCaptureRegularPath (Join-Path $runtime "scripts\run_daily_intraday_capture.py") "Capture runner"
+    $prefix = @(
+        "-I", "-B", "-S", "-X", ("pycache_prefix=" + [System.IO.Path]::GetFullPath($BytecodePrefix)), "-u",
+        "-c", $bootstrapPreloader, $bootstrap, $bootstrapSha256,
+        "--release-root", $runtime, "--expected-sha", $CandidateSha,
+        "--script", $runner, "--"
+    )
+    $newTokens = @($prefix + $tail)
     $command[0].InnerText = $InterpreterPath
-    $arguments[0].InnerText = (($tokens | ForEach-Object { '"' + $_ + '"' }) -join ' ')
+    $arguments[0].InnerText = (($newTokens | ForEach-Object { '"' + $_ + '"' }) -join ' ')
     return [string]$Actions.OuterXml
 }
 
@@ -801,6 +920,7 @@ Assert-HardeningCandidateIdentity -ExpectedSha $CandidateSha -ExpectedTree $Cand
     -RefreshOrigin -DeferOriginMainAdmission
 $hardeningCandidateRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot "runtime_activation_lock.ps1")
+$candidateBootstrapIdentity = Get-HardeningCandidateBootstrapIdentity -Root $hardeningCandidateRoot
 $lockInterpreter = Get-DawnstrikeApprovedLockInterpreter
 $declarationContract = Join-Path $hardeningCandidateRoot "scripts\runtime_activation_contract.py"
 if (-not (Test-Path -LiteralPath $declarationContract -PathType Leaf)) { throw "State preparation declaration contract is missing." }
@@ -1090,7 +1210,7 @@ try {
         $null = Assert-DawnstrikeCaptureTaskSafety -Xml $before.xml -RuntimeRoot $runtimeRootResolved `
             -StateRoot $StateRoot -ExpectedPrincipal $taskPrincipal -ExpectedCandidateSha $CandidateSha `
             -ExpectedInterpreterPath ([string]$interpreterIdentity.path) -ExpectedInterpreterSha256 ([string]$interpreterIdentity.sha256) `
-            -ExpectedEnabled "false" -RequirePasswordPrincipal -RequireRunner
+            -ExpectedEnabled "false" -RequirePasswordPrincipal -RequireRunner -AllowMissingBootstrap
         Write-Output ([System.IO.File]::ReadAllText($ReceiptPath, [System.Text.UTF8Encoding]::new($false)).Trim())
         return
     }
@@ -1114,7 +1234,7 @@ try {
         $null = Assert-DawnstrikeCaptureTaskSafety -Xml $before.xml -RuntimeRoot $runtimeRootResolved -StateRoot $StateRoot `
             -ExpectedPrincipal $taskPrincipal -ExpectedCandidateSha $CandidateSha `
             -ExpectedInterpreterPath ([string]$interpreterIdentity.path) -ExpectedInterpreterSha256 ([string]$interpreterIdentity.sha256) `
-            -ExpectedEnabled "false" -RequirePasswordPrincipal -RequireRunner
+            -ExpectedEnabled "false" -RequirePasswordPrincipal -RequireRunner -AllowMissingBootstrap
         $hardeningInputStage = [string]$prepared.input_stage
         $beforeActionHash = [string]$prepared.action_before_sha256
         $beforeActionXml = [string]$prepared.action_sha256
@@ -1159,6 +1279,15 @@ try {
     else {
         throw "Existing delayed SIP task command is neither the exact legacy launcher nor the declared signed interpreter."
     }
+    $beforeActionExec = @((Get-HardeningSingleSection $before.document "Actions").ChildNodes | Where-Object { $_.LocalName -eq "Exec" })
+    if ($beforeActionExec.Count -ne 1) { throw "Existing capture action is ambiguous." }
+    $beforeActionArguments = @($beforeActionExec[0].ChildNodes | Where-Object { $_.LocalName -eq "Arguments" })
+    if ($beforeActionArguments.Count -ne 1) { throw "Existing capture action arguments are ambiguous." }
+    $beforeActionTokens = @([regex]::Matches([string]$beforeActionArguments[0].InnerText, '"(?<value>[^"\r\n]*)"') | ForEach-Object { [string]$_.Groups["value"].Value })
+    $beforeActionLayout = Get-HardeningCaptureActionLayout `
+        -Tokens $beforeActionTokens -RuntimeRoot $runtimeRootResolved `
+        -BytecodePrefix (Join-Path $StateRoot ("capture-bytecode\" + $CandidateSha)) `
+        -AllowMissingBootstrap
     $safetyArguments = @{
         Xml = $before.xml
         RuntimeRoot = $runtimeRootResolved
@@ -1176,17 +1305,19 @@ try {
     else {
         $safetyArguments.RequirePasswordPrincipal = $true
         $safetyArguments.ExpectedEnabled = if ($before.state -eq "Ready") { "true" } else { "false" }
+        if ($beforeActionLayout.layout -eq "legacy_direct") {
+            $safetyArguments.AllowLegacyDirectAction = $true
+        }
+        elseif ($beforeActionLayout.layout -eq "bootstrap" -and $before.state -eq "Disabled") {
+            $safetyArguments.AllowMissingBootstrap = $true
+        }
     }
     $null = Assert-DawnstrikeCaptureTaskSafety @safetyArguments
     # Freeze the legacy/current action identity before rebuilding the XML;
     # Set-HardeningTaskDefinition mutates the same document in place.
-    $beforeActionExec = @((Get-HardeningSingleSection $before.document "Actions").ChildNodes | Where-Object { $_.LocalName -eq "Exec" })
-    if ($beforeActionExec.Count -ne 1) { throw "Existing capture action is ambiguous." }
-    $beforeActionArguments = @($beforeActionExec[0].ChildNodes | Where-Object { $_.LocalName -eq "Arguments" })
     $beforeActionTokens = @([regex]::Matches([string]$beforeActionArguments[0].InnerText, '"(?<value>[^"\r\n]*)"') | ForEach-Object { [string]$_.Groups["value"].Value })
     if ($beforeActionTokens.Count -lt 3) { throw "Existing capture action bindings are incomplete." }
-    $beforeRunnerIndex = if ($beforeActionTokens[0] -eq "-I" -and $beforeActionTokens.Count -ge 6 -and $beforeActionTokens[1] -eq "-B") { 5 } else { 2 }
-    $runnerBeforePath = Assert-DawnstrikeCaptureRegularPath ([string]$beforeActionTokens[$beforeRunnerIndex]) "Existing capture runner"
+    $runnerBeforePath = Assert-DawnstrikeCaptureRegularPath ([string]$beforeActionLayout.runner_path) "Existing capture runner"
     $runnerBeforeSha256 = Get-HardeningSha256File $runnerBeforePath
     $beforeActionXml = [string]$beforeActionExec[0].ParentNode.OuterXml
     $beforeActionHash = Get-HardeningSha256Text $beforeActionXml
@@ -1225,7 +1356,9 @@ Set-HardeningTaskDefinition -Document $before.document -Principal $before.princi
 $replacementActionXml = Set-HardeningDirectCaptureAction `
     -Document $before.document -Actions (Get-HardeningSingleSection $before.document "Actions") `
     -InterpreterPath ([string]$interpreterIdentity.path) -CandidateSha $CandidateSha `
-    -BytecodePrefix (Join-Path $StateRoot ("capture-bytecode\" + $CandidateSha))
+    -BytecodePrefix (Join-Path $StateRoot ("capture-bytecode\" + $CandidateSha)) `
+    -RuntimeRoot $runtimeRootResolved `
+    -CandidateBootstrapPath ([string]$candidateBootstrapIdentity.path)
 $previewDocument = [System.Xml.XmlDocument]::new()
 $previewDocument.LoadXml('<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">' + $replacementActionXml + '</Task>')
 $previewArguments = @($previewDocument.SelectNodes("//*[local-name()='Arguments']"))
@@ -1319,7 +1452,7 @@ $statePrefix = $stateRootFull + '\'
         -ExpectedPrincipal $taskPrincipal -ExpectedCandidateSha $CandidateSha `
         -ExpectedInterpreterPath ([string]$interpreterIdentity.path) `
         -ExpectedInterpreterSha256 ([string]$interpreterIdentity.sha256) -RequirePasswordPrincipal -RequireRunner `
-        -ExpectedEnabled "false"
+        -ExpectedEnabled "false" -AllowMissingBootstrap
     $runtimeIdentityAfter = Get-HardeningRuntimeIdentity -Root $runtimeRootResolved
     if ($runtimeIdentityAfter.head -ne $runtimeIdentity.head -or $runtimeIdentityAfter.tree -ne $runtimeIdentity.tree -or $runtimeIdentityAfter.origin -ne $runtimeIdentity.origin) {
         throw "Live RuntimeRoot identity changed during task hardening."
@@ -1347,9 +1480,13 @@ $statePrefix = $stateRootFull + '\'
     $replacementExec = @($verified.actions.ChildNodes | Where-Object { $_.LocalName -eq "Exec" })[0]
     $replacementTokens = @([regex]::Matches([string](@($replacementExec.ChildNodes | Where-Object { $_.LocalName -eq "Arguments" })[0].InnerText), '"(?<value>[^"\r\n]*)"') | ForEach-Object { [string]$_.Groups["value"].Value })
     if ($replacementTokens.Count -lt 3) { throw "Replacement capture action bindings are incomplete." }
-    $runnerBeforePath = [string]$replacementTokens[5]
+    $replacementLayout = Get-HardeningCaptureActionLayout `
+        -Tokens $replacementTokens -RuntimeRoot $runtimeRootResolved `
+        -BytecodePrefix (Join-Path $StateRoot ("capture-bytecode\" + $CandidateSha)) `
+        -AllowMissingBootstrap
+    $runnerBeforePath = [string]$replacementLayout.runner_path
     $bindingValues = @{}
-    for ($bindingIndex = 6; $bindingIndex -lt ($replacementTokens.Count - 1); $bindingIndex += 2) { $bindingValues[[string]$replacementTokens[$bindingIndex]] = [string]$replacementTokens[$bindingIndex + 1] }
+    for ($bindingIndex = $replacementLayout.option_start; $bindingIndex -lt ($replacementTokens.Count - 1); $bindingIndex += 2) { $bindingValues[[string]$replacementTokens[$bindingIndex]] = [string]$replacementTokens[$bindingIndex + 1] }
     $changedFields = @()
     if ($receiptBeforePrincipalHash -ne $verified.principal_contract_sha256) { $changedFields += "principal" }
     if ($receiptBeforeSettingsHash -ne $verified.settings_contract_sha256) { $changedFields += "settings" }
@@ -1412,13 +1549,13 @@ $statePrefix = $stateRootFull + '\'
         interpreter_version = [string]$interpreterIdentity.version
         interpreter_signer_subject = [string]$interpreterIdentity.signer_subject
         interpreter_signer_thumbprint = [string]$interpreterIdentity.signer_thumbprint
-        runner_path = [string]$replacementTokens[5]
+        runner_path = [string]$replacementLayout.runner_path
         runner_before_sha256 = $runnerBeforeSha256
         runner_sha256 = $runnerTargetSha256
         action_bindings = [ordered]@{
             candidate_sha = [string]$bindingValues["--candidate-sha"]
             bytecode_prefix = $bytecodePrefix
-            runner_path = [string]$replacementTokens[5]
+            runner_path = [string]$replacementLayout.runner_path
             runner_sha256 = $runnerTargetSha256
             symbols_manifest_path = [string]$bindingValues["--symbols-manifest"]
             symbols_manifest_sha256 = [string]$bindingValues["--symbols-manifest-sha256"]

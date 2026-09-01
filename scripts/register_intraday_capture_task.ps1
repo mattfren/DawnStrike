@@ -31,6 +31,11 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$captureSafety = Join-Path $PSScriptRoot "capture_task_safety.ps1"
+if (-not (Test-Path -LiteralPath $captureSafety -PathType Leaf)) {
+    throw "Capture task safety contract is missing: $captureSafety"
+}
+. $captureSafety
 if ($ReplaceExisting) {
     if ($Create -or $InteractiveCurrentUser) {
         throw "ReplaceExisting is the governed hardening path; do not combine it with Create or InteractiveCurrentUser."
@@ -130,15 +135,24 @@ $bytecodePrefixItem = Get-Item -LiteralPath $bytecodePrefix -Force -ErrorAction 
 if (-not $bytecodePrefixItem.PSIsContainer -or ($bytecodePrefixItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
     throw "Capture bytecode prefix must be a regular non-reparse directory."
 }
-$pythonPrefix = @("-I", "-B", "-X", ("pycache_prefix=" + $bytecodePrefix), "-u")
+$pythonPrefix = @("-I", "-B", "-S", "-X", ("pycache_prefix=" + $bytecodePrefix), "-u")
 if ([string]::IsNullOrWhiteSpace($EnvFile)) {
     $EnvFile = Join-Path $StateRoot "secrets\runtime.env"
 }
 $runner = Join-Path $RuntimeRoot "scripts\run_daily_intraday_capture.py"
-if (-not (Test-Path -LiteralPath $runner -PathType Leaf)) { throw "Capture runner not found: $runner" }
+$runnerItem = Get-Item -LiteralPath $runner -Force -ErrorAction Stop
+if ($runnerItem.PSIsContainer -or ($runnerItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "Capture runner must be a regular non-reparse file."
+}
+$bootstrap = Join-Path $RuntimeRoot "scripts\dawnstrike_python_bootstrap.py"
+$bootstrapItem = Get-Item -LiteralPath $bootstrap -Force -ErrorAction Stop
+if ($bootstrapItem.PSIsContainer -or ($bootstrapItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "Capture release bootstrap must be a regular non-reparse file."
+}
+$bootstrapSha256 = Get-DawnstrikeCaptureFileSha256 $bootstrap
+$bootstrapPreloader = Get-DawnstrikeCaptureBootstrapPreloader
 
 $captureArgs = @(
-    $runner,
     "--candidate-sha", $CandidateSha, "--repo-root", $RuntimeRoot,
     "--db-path", $DbPath, "--evidence-root", $EvidenceRoot, "--run-root", $RunRoot,
     "--output-root", $OutputRoot, "--session-root", $SessionRoot,
@@ -148,7 +162,15 @@ $captureArgs = @(
     "--source-config", $SourceConfig, "--source-config-sha256", $SourceConfigSha256,
     "--env-file", $EnvFile, "--max-pages", "100", "--retries", "3", "--execute"
 )
-$argumentTokens = @($pythonPrefix + $captureArgs)
+$bootstrapArgs = @(
+    "-c", $bootstrapPreloader, $bootstrap, $bootstrapSha256,
+    "--release-root", $RuntimeRoot, "--expected-sha", $CandidateSha,
+    "--script", $runner, "--"
+)
+$captureActionArguments = @(
+    $pythonPrefix + $bootstrapArgs + $captureArgs
+)
+$argumentTokens = @($captureActionArguments)
 $actionArguments = (($argumentTokens | ForEach-Object { '"' + $_ + '"' }) -join ' ')
 $trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At $StartAt
 

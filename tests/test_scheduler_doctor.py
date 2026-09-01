@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -271,6 +272,8 @@ def _write_required_scripts(root: Path) -> None:
         "register_alphaops_tasks.ps1",
         "register_daily_finalize_task.ps1",
         "restore_dawnstrike_tasks.ps1",
+        "dawnstrike_python_bootstrap.py",
+        "run_daily_intraday_capture.py",
     ):
         (scripts / name).write_text("placeholder", encoding="utf-8")
 
@@ -388,10 +391,23 @@ def _auxiliary_task(runtime: Path, state: Path, *, candidate_sha: str = "a" * 40
         for token in (
             "-I",
             "-B",
+            "-S",
             "-X",
             f"pycache_prefix={state / 'capture-bytecode' / candidate_sha}",
             "-u",
+            "-c",
+            scheduler_service.AUXILIARY_BOOTSTRAP_PRELOADER,
+            str(runtime / "scripts" / "dawnstrike_python_bootstrap.py"),
+            hashlib.sha256(
+                (runtime / "scripts" / "dawnstrike_python_bootstrap.py").read_bytes()
+            ).hexdigest(),
+            "--release-root",
+            str(runtime),
+            "--expected-sha",
+            candidate_sha,
+            "--script",
             str(runtime / "scripts" / "run_daily_intraday_capture.py"),
+            "--",
             "--candidate-sha",
             candidate_sha,
             "--repo-root",
@@ -675,11 +691,96 @@ def test_scheduler_doctor_blocks_nonoperational_ready_auxiliary(
     [
         lambda args: args.replace('"-I" "-B"', '"-B" "-I"', 1),
         lambda args: args.replace('"-I" "-B"', '"-I"', 1),
+        lambda args: args.replace('"-S" ', "", 1),
         lambda args: args.replace('"-X" "pycache_prefix=', '"-X" "-X" "pycache_prefix=', 1),
         lambda args: args.replace('"-u"', '"-u" "python.exe"', 1),
         lambda args: args.replace('"pycache_prefix=', '"pycache_prefix=C:\\hostile\\', 1),
+        lambda args: args.replace(
+            "dawnstrike_python_bootstrap.py", "wrong_bootstrap.py", 1
+        ),
+        lambda args: args.replace(
+            scheduler_service.AUXILIARY_BOOTSTRAP_PRELOADER,
+            "import sys",
+            1,
+        ),
+        lambda args: args.replace(
+            '"-c" "' + scheduler_service.AUXILIARY_BOOTSTRAP_PRELOADER + '" ',
+            "",
+            1,
+        ),
+        lambda args: re.sub(
+            r'"[0-9a-f]{64}" "--release-root"',
+            '"' + "b" * 64 + '" "--release-root"',
+            args,
+            count=1,
+        ),
+        lambda args: re.sub(
+            r'"[0-9a-f]{64}"\s+"--release-root"',
+            '"--release-root"',
+            args,
+            count=1,
+        ),
+        lambda args: args.replace(
+            '"--expected-sha" "' + "a" * 40 + '"',
+            '"--expected-sha" "' + "b" * 40 + '"',
+            1,
+        ),
+        lambda args: re.sub(
+            r'"--expected-sha" "[0-9a-f]{40}"\s+',
+            "",
+            args,
+            count=1,
+        ),
+        lambda args: re.sub(
+            r'"[^"\r\n]*dawnstrike_python_bootstrap\.py"\s*', "", args, count=1
+        ),
+        lambda args: re.sub(
+            r'("--release-root"\s+)"[^"\r\n]+"',
+            r'\1"C:\\hostile"',
+            args,
+            count=1,
+        ),
+        lambda args: re.sub(
+            r'"--release-root"\s+"[^"\r\n]+"\s*', "", args, count=1
+        ),
+        lambda args: args.replace("run_daily_intraday_capture.py", "wrong_runner.py", 1),
+        lambda args: re.sub(
+            r'"--script"\s+"[^"\r\n]*run_daily_intraday_capture\.py"\s*',
+            "",
+            args,
+            count=1,
+        ),
+        lambda args: args.replace('"--" ', "", 1),
+        lambda args: re.sub(
+            r'"[^"\r\n]*dawnstrike_python_bootstrap\.py"\s+'
+            r'"--release-root"\s+"[^"\r\n]+"\s+"--script"\s+',
+            "",
+            args.replace('"-S" ', "", 1),
+            count=1,
+        ),
     ],
-    ids=["reordered", "missing", "duplicate", "interpreter-shadow", "wrong-pycache-root"],
+    ids=[
+        "reordered",
+        "missing-b",
+        "missing-s",
+        "duplicate",
+        "interpreter-shadow",
+        "wrong-pycache-root",
+        "wrong-bootstrap",
+        "wrong-preloader",
+        "missing-preloader",
+        "wrong-bootstrap-hash",
+        "missing-bootstrap-hash",
+        "wrong-expected-sha",
+        "missing-expected-sha",
+        "missing-bootstrap",
+        "wrong-release-root",
+        "missing-release-root",
+        "wrong-runner",
+        "missing-runner",
+        "missing-separator",
+        "old-direct-runner-action",
+    ],
 )
 def test_scheduler_doctor_rejects_auxiliary_prefix_variants(
     tmp_path: Path, monkeypatch, arguments_mutator
@@ -707,6 +808,81 @@ def test_scheduler_doctor_rejects_auxiliary_prefix_variants(
     assert result["governed_auxiliary_task"]["status"] == "FAILED"
 
 
+@pytest.mark.parametrize(
+    ("relative_path", "match_field"),
+    [
+        (scheduler_service.AUXILIARY_PYTHON_BOOTSTRAP, "bootstrap_matches"),
+        (scheduler_service.AUXILIARY_CAPTURE_RUNNER, "runner_matches"),
+    ],
+)
+@pytest.mark.parametrize("unsafe_shape", ["missing", "directory"])
+def test_scheduler_doctor_rejects_unsafe_auxiliary_action_files(
+    tmp_path: Path,
+    monkeypatch,
+    relative_path: Path,
+    match_field: str,
+    unsafe_shape: str,
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    _write_required_scripts(runtime)
+    rows = _healthy_tasks(runtime, state)
+    auxiliary = _auxiliary_task(runtime, state)
+    unsafe_path = runtime / relative_path
+    unsafe_path.unlink()
+    if unsafe_shape == "directory":
+        unsafe_path.mkdir()
+    rows.append(auxiliary)
+    monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
+    monkeypatch.setattr(
+        scheduler_service,
+        "_load_auxiliary_contract",
+        lambda _runtime, _state: _auxiliary_contract(auxiliary),
+    )
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    assert result["status"] == "BLOCKED_EXTERNAL"
+    check = result["governed_auxiliary_task"]
+    assert check["status"] == "FAILED"
+    assert check[match_field] is False
+
+
+def test_scheduler_doctor_rejects_tampered_auxiliary_bootstrap(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    _write_required_scripts(runtime)
+    rows = _healthy_tasks(runtime, state)
+    auxiliary = _auxiliary_task(runtime, state)
+    (runtime / scheduler_service.AUXILIARY_PYTHON_BOOTSTRAP).write_text(
+        "tampered", encoding="utf-8"
+    )
+    rows.append(auxiliary)
+    monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
+    monkeypatch.setattr(
+        scheduler_service,
+        "_load_auxiliary_contract",
+        lambda _runtime, _state: _auxiliary_contract(auxiliary),
+    )
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    assert result["status"] == "BLOCKED_EXTERNAL"
+    check = result["governed_auxiliary_task"]
+    assert check["status"] == "FAILED"
+    assert check["bootstrap_matches"] is True
+    action = scheduler_service._validate_auxiliary_action(
+        auxiliary, runtime, state, _auxiliary_contract(auxiliary)
+    )
+    assert action["bootstrap_sha_matches"] is False
+
+
 @pytest.mark.parametrize("duplicate_option", ["--candidate-sha", "--db-path"])
 def test_scheduler_doctor_rejects_duplicate_auxiliary_options(
     tmp_path: Path, monkeypatch, duplicate_option: str
@@ -720,6 +896,40 @@ def test_scheduler_doctor_rejects_duplicate_auxiliary_options(
     auxiliary = _auxiliary_task(runtime, state)
     auxiliary["arguments"] = auxiliary["arguments"].replace(
         '"--execute"', f'"{duplicate_option}" "duplicate" "--execute"', 1
+    )
+    rows.append(auxiliary)
+    monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
+    monkeypatch.setattr(
+        scheduler_service,
+        "_load_auxiliary_contract",
+        lambda _runtime, _state: _auxiliary_contract(auxiliary),
+    )
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    assert result["status"] == "BLOCKED_EXTERNAL"
+    assert result["unexpected_enabled_tasks"] == [auxiliary]
+    assert result["governed_auxiliary_task"]["status"] == "FAILED"
+
+
+def test_scheduler_doctor_rejects_reordered_auxiliary_options(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    _write_required_scripts(runtime)
+    rows = _healthy_tasks(runtime, state)
+    auxiliary = _auxiliary_task(runtime, state)
+    auxiliary["arguments"] = auxiliary["arguments"].replace(
+        '"--candidate-sha" "' + "a" * 40 + '" "--repo-root"',
+        '"--repo-root"',
+        1,
+    ).replace(
+        '"--db-path"',
+        '"--candidate-sha" "' + "a" * 40 + '" "--db-path"',
+        1,
     )
     rows.append(auxiliary)
     monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)

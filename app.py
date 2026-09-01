@@ -1678,7 +1678,10 @@ def _today(state: dict[str, Any]) -> None:
         st.markdown(risk_html, unsafe_allow_html=True)
     render_streamlit_opportunity_projection(
         st,
-        load_latest_opportunity_projection(state["settings"]["db_path"]),
+        load_latest_opportunity_projection(
+            state["settings"]["db_path"],
+            expected_market_date=date.today().isoformat(),
+        ),
     )
     st.markdown(
         '<div class="ds-research-footer">Dawnstrike does not place trades. '

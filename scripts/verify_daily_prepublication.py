@@ -98,13 +98,12 @@ def verify(
         errors.append("daily_run_release_sha_mismatch")
     statuses = snapshot.get("latest_stage_statuses") if isinstance(snapshot, dict) else {}
     statuses = statuses if isinstance(statuses, dict) else {}
+    stage_rows = snapshot.get("stages") if isinstance(snapshot, dict) else []
+    stage_rows = stage_rows if isinstance(stage_rows, list) else []
     for stage in PREPUBLICATION_STAGES:
         status = str((statuses.get(stage) or {}).get("status") or "")
         if status not in PREPUBLICATION_SUCCESS_STATUSES[stage]:
             errors.append(f"stage_not_acceptable:{stage}:{status or 'missing'}")
-    publication_stage = statuses.get("publication") or {}
-    if str(publication_stage.get("status") or "") != "COMPLETE":
-        errors.append("stage_not_acceptable:publication:missing_or_incomplete")
 
     root = Path(artifact_root).resolve()
     artifact = verify_public_artifact(root, expected_source_sha=normalized_sha)
@@ -147,6 +146,23 @@ def verify(
     performance_manifest = _read_object(root / "data" / "performance.json.manifest.json")
     calendar_manifest = _read_object(root / "data" / "calendar.json.manifest.json")
     publication_set = _read_object(root / "data" / "publication-set.json")
+    publication_root = publication_set.get("publication_set_sha256")
+    publication_stage = _select_local_publication_stage(
+        stage_rows,
+        run_id=run_id,
+        publication_set_sha256=publication_root,
+    )
+    if publication_stage is None:
+        errors.append("stage_not_acceptable:publication:missing_or_incomplete")
+        # Do not let an external deployment row remain in the authorization
+        # input when the exact local publication-set receipt is absent.
+        statuses.pop("publication", None)
+        publication_stage = {}
+    else:
+        # Bind the authorization identity to the local publication-set row
+        # that supplied the exact artifact hash. A newer external deployment
+        # receipt must not replace that row merely because it is latest.
+        statuses["publication"] = _stage_status_projection(publication_stage)
     canonical_stage = statuses.get("canonical_performance") or {}
     calendar_stage = statuses.get("calendar_build") or {}
     readiness_stage = statuses.get("readiness") or {}
@@ -158,7 +174,6 @@ def verify(
         "payload_sha256"
     ):
         errors.append("ledger_calendar_payload_hash_mismatch")
-    publication_root = publication_set.get("publication_set_sha256")
     if publication_stage.get("output_hash_sha256") != publication_root:
         errors.append("ledger_publication_set_hash_mismatch")
     if readiness_stage.get("input_hash_sha256") != publication_root or readiness_stage.get(
@@ -224,6 +239,75 @@ def _read_object(path: Path) -> dict[str, Any]:
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def _select_local_publication_stage(
+    stage_rows: list[object],
+    *,
+    run_id: str,
+    publication_set_sha256: object,
+) -> dict[str, Any] | None:
+    """Select the exact local publication-set receipt for this artifact.
+
+    The shared ledger may also contain a later external-deployment receipt.
+    That receipt is deliberately a different schema and must never satisfy
+    the local pre-upload gate merely by being the latest ``publication`` row.
+    """
+
+    if not isinstance(publication_set_sha256, str) or not publication_set_sha256:
+        return None
+    candidates: list[dict[str, Any]] = []
+    for value in stage_rows:
+        if not isinstance(value, dict):
+            continue
+        if (
+            value.get("run_id") != run_id
+            or value.get("stage_name") != "publication"
+            or value.get("status") != "COMPLETE"
+            or value.get("output_hash_sha256") != publication_set_sha256
+        ):
+            continue
+        attempt_no = value.get("attempt_no")
+        if isinstance(attempt_no, bool):
+            continue
+        try:
+            normalized_attempt_no = int(str(attempt_no))
+        except (TypeError, ValueError):
+            continue
+        if normalized_attempt_no < 1:
+            continue
+        payload = value.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        if (
+            payload.get("schema_version") != "dawnstrike.publication_set.v2"
+            or payload.get("publication_set_sha256") != publication_set_sha256
+        ):
+            continue
+        candidates.append({**value, "attempt_no": normalized_attempt_no})
+    if not candidates:
+        return None
+    attempt_numbers = [int(str(item["attempt_no"])) for item in candidates]
+    if len(attempt_numbers) != len(set(attempt_numbers)):
+        return None
+    candidates.sort(key=lambda item: int(str(item["attempt_no"])))
+    return candidates[-1]
+
+
+def _stage_status_projection(value: dict[str, Any]) -> dict[str, Any]:
+    """Return only stable stage identity fields used by the authorization hash."""
+
+    return {
+        "status": value.get("status"),
+        "attempt_no": value.get("attempt_no"),
+        "started_at": value.get("started_at"),
+        "completed_at": value.get("completed_at"),
+        "exit_code": value.get("exit_code"),
+        "error_code": value.get("error_code"),
+        "error_detail": value.get("error_detail"),
+        "input_hash_sha256": value.get("input_hash_sha256"),
+        "output_hash_sha256": value.get("output_hash_sha256"),
+    }
 
 
 def _git_head(root: Path) -> str:

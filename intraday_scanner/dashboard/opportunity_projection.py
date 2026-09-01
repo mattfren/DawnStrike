@@ -248,6 +248,9 @@ class OpportunityProjection:
             "message": self.message,
             "source_run_id": self.source_run_id,
             "as_of": self.as_of.isoformat() if self.as_of is not None else None,
+            "market_date": (
+                self.as_of.date().isoformat() if self.as_of is not None else None
+            ),
             "rows": [row.to_dict() for row in self.rows],
             "row_count": len(self.rows),
             "max_rows": MAX_OPPORTUNITY_ROWS,

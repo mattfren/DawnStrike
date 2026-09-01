@@ -205,10 +205,17 @@ def _main(argv: list[str] | None = None) -> int:
         output_root,
         source_sha=str(source.get("source_sha") or ""),
     )
-    opportunity_projection = load_latest_opportunity_projection(db_path)
+    # The database retains historical immutable opportunity runs. Scope the
+    # public projection to this finalize date before selecting a run so an old
+    # database-wide "latest" row can never be published as today's pick.
+    opportunity_projection = load_latest_opportunity_projection(
+        db_path,
+        expected_market_date=market_date,
+    )
     opportunity_projection_manifest = write_public_opportunity_projection(
         output_root / "data",
         opportunity_projection,
+        expected_market_date=market_date,
     )
     result["opportunity_projection"] = opportunity_projection_manifest
     readiness_value = result.get("readiness")

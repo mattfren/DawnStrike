@@ -107,7 +107,9 @@ def test_readiness_cache_invalidates_changed_immutable_bytes(tmp_path: Path) -> 
 
 def test_stage_uses_packaged_files_without_embedded_payloads() -> None:
     script = Path("scripts/build_vercel_public_stage.ps1").read_text(encoding="utf-8")
-    assert 'Copy-Item -Path (Join-Path $publicSource "*") -Destination $functionPublic' in script
+    # The function bundle must be copied from the already verified immutable
+    # staging tree, not independently from the mutable build source.
+    assert 'Copy-Item -Path (Join-Path $stagePublic "*") -Destination $functionPublic' in script
     assert "snapshot_b64" not in script
     assert "calendar_b64" not in script
     assert "scenario_b64" not in script

@@ -24,6 +24,12 @@ _APPROVED_PYTHON = Path(
     r"C:\Users\MattFields\AppData\Local\Programs\Python\Python313\python.exe"
 )
 _APPROVED_PYTHON_SHA256 = "ef8f51028ac5329641985112f8efb1c2d4c47c86b8011ddf7e6fae21e2b4e5a1"
+_BOOTSTRAP_PRELOADER = (
+    "import hashlib,sys; p=sys.argv[1]; e=sys.argv[2]; b=open(p,'rb').read(); "
+    "a=hashlib.sha256(b).hexdigest(); a==e or (_ for _ in ()).throw("
+    "RuntimeError('bootstrap hash mismatch')); r=sys.argv[3:]; sys.argv=[p,*r]; "
+    "exec(compile(b,p,'exec'),{'__name__':'__main__','__file__':p})"
+)
 
 
 def _approved_child_python() -> Path:
@@ -73,12 +79,28 @@ def main() -> int:
     session_path = args.session_root / f"expected-session-{market_date.isoformat()}.json"
     _write_once_json(session_path, session)
     child_python = _approved_child_python()
+    release_root = Path(__file__).resolve().parents[1]
+    bootstrap = release_root / "scripts" / "dawnstrike_python_bootstrap.py"
+    capture_script = release_root / "scripts" / "capture_intraday_operations.py"
+    if not bootstrap.is_file() or not capture_script.is_file():
+        raise RuntimeError("daily capture release bootstrap or child script is missing")
     command = [
         str(child_python),
         "-I",
         "-B",
+        "-S",
         "-u",
-        str(Path(__file__).with_name("capture_intraday_operations.py")),
+        "-c",
+        _BOOTSTRAP_PRELOADER,
+        str(bootstrap),
+        hashlib.sha256(bootstrap.read_bytes()).hexdigest(),
+        "--release-root",
+        str(release_root),
+        "--expected-sha",
+        args.candidate_sha,
+        "--script",
+        str(capture_script),
+        "--",
         "--mode",
         "forward_observed",
         "--provider",

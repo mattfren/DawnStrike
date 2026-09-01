@@ -54,6 +54,7 @@ ROLLBACK_SCHEMA = "dawnstrike.runtime_rollback_receipt.v1"
 
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 _ACTIVATION_ID = re.compile(r"^[0-9a-f]{24}$")
 _MARKET_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _GITHUB_RUN = re.compile(r"^https://github\.com/[^/?#]+/[^/?#]+/actions/runs/[1-9][0-9]*$")
@@ -249,10 +250,22 @@ _EXTENDED_RECEIPT_KEYS = frozenset(
         "capture_hardening_settings_sha256",
         "capture_hardening_runner_before_sha256",
         "capture_hardening_runner_target_sha256",
+        "previous_runtime_rollback_authorized",
+        "previous_runtime_disposition",
+        "previous_runtime_authorization_receipt_sha256",
+        "previous_runtime_authorization_journal_sha256",
     }
 )
 _ACTIVATION_RECEIPT_KEYS_EXTENDED = _ACTIVATION_RECEIPT_KEYS | _EXTENDED_RECEIPT_KEYS
 _ROLLBACK_RECEIPT_KEYS_EXTENDED = _ROLLBACK_RECEIPT_KEYS | _EXTENDED_RECEIPT_KEYS
+_PRIOR_RUNTIME_AUTHORIZATION_KEYS = frozenset(
+    {
+        "previous_runtime_rollback_authorized",
+        "previous_runtime_disposition",
+        "previous_runtime_authorization_receipt_sha256",
+        "previous_runtime_authorization_journal_sha256",
+    }
+)
 _CAPTURE_INTERPRETER_DECLARATION = {
     "capture_interpreter_path": (
         r"C:\Users\MattFields\AppData\Local\Programs\Python\Python313\python.exe"
@@ -808,14 +821,24 @@ def validate_receipt(payload: Mapping[str, Any]) -> dict[str, Any]:
     if schema not in {ACTIVATION_SCHEMA, ACTIVATION_SCHEMA_LEGACY, ROLLBACK_SCHEMA}:
         raise ActivationContractError("unsupported runtime receipt schema")
     extended = "state_preparation_contract" in payload
-    expected_keys = (
-        _ACTIVATION_RECEIPT_KEYS_EXTENDED
-        if schema in {ACTIVATION_SCHEMA, ACTIVATION_SCHEMA_LEGACY} and extended
-        else _ROLLBACK_RECEIPT_KEYS_EXTENDED
-        if schema == ROLLBACK_SCHEMA and extended
-        else _ACTIVATION_RECEIPT_KEYS
+    authorization_present = any(
+        field in payload for field in _PRIOR_RUNTIME_AUTHORIZATION_KEYS
+    )
+    base_keys = (
+        _ACTIVATION_RECEIPT_KEYS
         if schema in {ACTIVATION_SCHEMA, ACTIVATION_SCHEMA_LEGACY}
         else _ROLLBACK_RECEIPT_KEYS
+    )
+    expected_keys = (
+        (
+            _ACTIVATION_RECEIPT_KEYS_EXTENDED
+            if schema in {ACTIVATION_SCHEMA, ACTIVATION_SCHEMA_LEGACY}
+            else _ROLLBACK_RECEIPT_KEYS_EXTENDED
+        )
+        if extended
+        else base_keys | _PRIOR_RUNTIME_AUTHORIZATION_KEYS
+        if authorization_present
+        else base_keys
     )
     _require_exact_keys(payload, expected_keys, "runtime receipt")
     if payload.get("receipt_sha256") != self_hash(payload, "receipt_sha256"):
@@ -870,6 +893,8 @@ def validate_receipt(payload: Mapping[str, Any]) -> dict[str, Any]:
         raise ActivationContractError("runtime receipt enables broker execution")
     if extended:
         _validate_extended_receipt(payload)
+    elif authorization_present:
+        _validate_prior_runtime_authorization(payload)
     backup_id = payload.get("state_backup_id")
     expected_backup_id = "runtime-activation-" + str(payload.get("activation_id"))
     if not isinstance(backup_id, str) or backup_id != expected_backup_id:
@@ -925,6 +950,39 @@ def validate_receipt(payload: Mapping[str, Any]) -> dict[str, Any]:
         if _parse_utc(completed_at) < prepared_at:
             raise ActivationContractError("rollback completion predates preparation")
     return dict(payload)
+
+
+def _validate_prior_runtime_authorization(payload: Mapping[str, Any]) -> None:
+    """Validate the reusable-rollback disposition, including auth-only receipts."""
+
+    authorization_fields = tuple(_PRIOR_RUNTIME_AUTHORIZATION_KEYS)
+    present = [field in payload for field in authorization_fields]
+    if not any(present):
+        return
+    if not all(present):
+        raise ActivationContractError(
+            "runtime receipt prior-runtime authorization fields are incomplete"
+        )
+    if payload.get("previous_runtime_rollback_authorized") not in {True, False}:
+        raise ActivationContractError("runtime receipt prior-runtime authorization flag is invalid")
+    disposition = payload.get("previous_runtime_disposition")
+    if disposition not in {"AUTHORIZED_COMPLETE_CHAIN", "QUARANTINED_UNAUTHORIZED"}:
+        raise ActivationContractError("runtime receipt prior-runtime disposition is invalid")
+    for field in (
+        "previous_runtime_authorization_receipt_sha256",
+        "previous_runtime_authorization_journal_sha256",
+    ):
+        if not _SHA256.fullmatch(str(payload.get(field) or "")):
+            raise ActivationContractError(f"runtime receipt {field} is invalid")
+    if payload.get("previous_runtime_rollback_authorized") is True:
+        if disposition != "AUTHORIZED_COMPLETE_CHAIN":
+            raise ActivationContractError("authorized prior runtime has an invalid disposition")
+        if payload.get("previous_runtime_authorization_receipt_sha256") == _EMPTY_SHA256:
+            raise ActivationContractError("authorized prior runtime lacks its receipt binding")
+        if payload.get("previous_runtime_authorization_journal_sha256") == _EMPTY_SHA256:
+            raise ActivationContractError("authorized prior runtime lacks its journal binding")
+    elif disposition != "QUARANTINED_UNAUTHORIZED":
+        raise ActivationContractError("unauthorized prior runtime has an invalid disposition")
 
 
 def _validate_extended_receipt(payload: Mapping[str, Any]) -> None:
@@ -983,6 +1041,7 @@ def _validate_extended_receipt(payload: Mapping[str, Any]) -> None:
         raise ActivationContractError("runtime receipt durable-state backup identity is invalid")
     if payload.get("auxiliary_capture_present") not in {True, False}:
         raise ActivationContractError("runtime receipt auxiliary capture presence is invalid")
+    _validate_prior_runtime_authorization(payload)
     before = payload.get("auxiliary_capture_state_before")
     after = payload.get("auxiliary_capture_state_after")
     action = payload.get("auxiliary_capture_action")

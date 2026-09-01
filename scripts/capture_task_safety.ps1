@@ -104,6 +104,15 @@ function Get-DawnstrikeCaptureFileSha256 {
     }
 }
 
+function Get-DawnstrikeCaptureBootstrapPreloader {
+    [CmdletBinding()]
+    param()
+    # This code is intentionally one token and contains no double quotes so it
+    # can be represented by the exact quoted Task Scheduler action parser. The
+    # loader reads and hashes the bootstrap before compiling any of its bytes.
+    return "import hashlib,sys; p=sys.argv[1]; e=sys.argv[2]; b=open(p,'rb').read(); a=hashlib.sha256(b).hexdigest(); a==e or (_ for _ in ()).throw(RuntimeError('bootstrap hash mismatch')); r=sys.argv[3:]; sys.argv=[p,*r]; exec(compile(b,p,'exec'),{'__name__':'__main__','__file__':p})"
+}
+
 function Assert-DawnstrikeCaptureCanonicalXml {
     [CmdletBinding()]
     param(
@@ -270,10 +279,21 @@ function Assert-DawnstrikeCaptureTaskSafety {
         [ValidateSet("", "true", "false")][string]$ExpectedEnabled = "",
         [switch]$AllowLegacySettings,
         [switch]$AllowLegacyLauncher,
+        [switch]$AllowLegacyDirectAction,
+        [switch]$AllowMissingBootstrap,
         [switch]$RequirePasswordPrincipal,
         [switch]$RequireRunner
     )
 
+    if ($AllowLegacyDirectAction -and $ExpectedEnabled -cne "false") {
+        throw "Legacy direct capture action is permitted only for a Disabled task migration."
+    }
+    if ($AllowMissingBootstrap -and $ExpectedEnabled -cne "false") {
+        throw "A missing bootstrap is permitted only for a Disabled task pre-swap."
+    }
+    if ($AllowMissingBootstrap -and ($AllowLegacyLauncher -or $AllowLegacyDirectAction)) {
+        throw "Bootstrap absence cannot be combined with a legacy capture action."
+    }
     if ($Xml.Length -gt 1048576) { throw "Capture task XML exceeds the bounded safety limit." }
     try {
         $document = [System.Xml.XmlDocument]::new()
@@ -437,6 +457,7 @@ function Assert-DawnstrikeCaptureTaskSafety {
     }
     $legacyLauncher = [string]::Equals($record.Command, "py.exe", [System.StringComparison]::OrdinalIgnoreCase)
     if ($legacyLauncher -and -not $AllowLegacyLauncher) { throw "Legacy py.exe is forbidden after hardening." }
+    $legacyDirectAction = $false
     if (-not $legacyLauncher) {
         if ([string]::IsNullOrWhiteSpace($ExpectedInterpreterPath) -or [string]::IsNullOrWhiteSpace($ExpectedInterpreterSha256)) {
             throw "Direct capture interpreter validation requires an exact approved path and SHA-256."
@@ -448,12 +469,35 @@ function Assert-DawnstrikeCaptureTaskSafety {
         }
         $interpreterSha = Get-DawnstrikeCaptureFileSha256 $interpreter
         if ($interpreterSha -ne $ExpectedInterpreterSha256) { throw "Capture interpreter hash changed." }
-        $signature = Get-AuthenticodeSignature -LiteralPath $interpreter -ErrorAction Stop
-        if (
-            [string]$signature.Status -ne "Valid" -or $null -eq $signature.SignerCertificate -or
-            [string]$signature.SignerCertificate.Subject -ne "CN=Python Software Foundation, O=Python Software Foundation, L=Beaverton, S=Oregon, C=US" -or
-            [string]$signature.SignerCertificate.Thumbprint -ne $ExpectedInterpreterSignerThumbprint
-        ) { throw "Capture interpreter Authenticode identity is not approved." }
+        # Windows PowerShell normally exposes the security cmdlet directly,
+        # but some non-interactive hosts discover it without being able to
+        # load the module (duplicate extended type data).  Keep the exact
+        # signer checks and use the embedded Authenticode certificate only as
+        # the compatibility fallback used by the runtime lock contract.
+        $signature = $null
+        $signatureCommand = Get-Command Get-AuthenticodeSignature -CommandType Cmdlet -ErrorAction SilentlyContinue
+        if ($null -ne $signatureCommand) {
+            try { $signature = Get-AuthenticodeSignature -LiteralPath $interpreter -ErrorAction Stop } catch { $signature = $null }
+        }
+        if ($null -ne $signature) {
+            if (
+                [string]$signature.Status -ne "Valid" -or $null -eq $signature.SignerCertificate -or
+                [string]$signature.SignerCertificate.Subject -ne "CN=Python Software Foundation, O=Python Software Foundation, L=Beaverton, S=Oregon, C=US" -or
+                [string]$signature.SignerCertificate.Thumbprint -ne $ExpectedInterpreterSignerThumbprint
+            ) { throw "Capture interpreter Authenticode identity is not approved." }
+        }
+        else {
+            try {
+                $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+                    [System.Security.Cryptography.X509Certificates.X509Certificate]::CreateFromSignedFile($interpreter)
+                )
+            }
+            catch { throw "Capture interpreter Authenticode identity is not readable." }
+            if (
+                [string]$certificate.Subject -ne "CN=Python Software Foundation, O=Python Software Foundation, L=Beaverton, S=Oregon, C=US" -or
+                [string]$certificate.Thumbprint -ne $ExpectedInterpreterSignerThumbprint
+            ) { throw "Capture interpreter Authenticode identity is not approved." }
+        }
         $versionOutput = @(& $interpreter -I -c "import sys; print('.'.join(map(str, sys.version_info[:3])))" 2>$null)
         if ($LASTEXITCODE -ne 0 -or $versionOutput.Count -ne 1 -or [string]$versionOutput[0] -notmatch '^3\.13\.') { throw "Capture interpreter is not Python 3.13." }
     }
@@ -469,23 +513,102 @@ function Assert-DawnstrikeCaptureTaskSafety {
         "--entitlement-receipt", "--entitlement-receipt-sha256", "--source-config",
         "--source-config-sha256", "--env-file", "--max-pages", "--retries"
     )
-    $prefixLength = if ($legacyLauncher) { 2 } else { 5 }
-    if ($tokens.Count -ne ($prefixLength + 1 + ($optionOrder.Count * 2) + 1)) { throw "Capture action token count is not exact." }
+    $runtime = [System.IO.Path]::GetFullPath($RuntimeRoot).TrimEnd('\')
+    $state = [System.IO.Path]::GetFullPath($StateRoot).TrimEnd('\')
+    $expectedBootstrap = [System.IO.Path]::GetFullPath((Join-Path $runtime "scripts\dawnstrike_python_bootstrap.py"))
+    $expectedRunner = [System.IO.Path]::GetFullPath((Join-Path $runtime "scripts\run_daily_intraday_capture.py"))
+    $runnerIndex = 0
+    $optionStart = 0
+    $bootstrapPath = $null
+    $bootstrapSha256 = $null
+    $bootstrapPreloader = $null
+    $bootstrapExpectedSha = $null
     if ($legacyLauncher) {
-        if ($tokens[0] -ne "-3.13" -or $tokens[1] -ne "-u") { throw "Legacy capture launcher prefix is invalid." }
+        $prefixLength = 2
+        $runnerIndex = 2
+        $optionStart = 3
     }
-    else {
-        if ($tokens[0] -ne "-I" -or $tokens[1] -ne "-B" -or $tokens[2] -ne "-X" -or
-            $tokens[3] -notmatch '^pycache_prefix=') { throw "Capture action Python isolation prefix is invalid." }
+    elseif (
+        $AllowLegacyDirectAction -and
+        $tokens.Count -ge 3 -and
+        $tokens[0] -eq "-I" -and $tokens[1] -eq "-u"
+    ) {
+        # A pre-bootstrap direct action is accepted only at the explicit
+        # hardening migration boundary.  It must never pass final safety.
+        $legacyDirectAction = $true
+        $prefixLength = 2
+        $runnerIndex = 2
+        $optionStart = 3
+    }
+    elseif (
+        $AllowLegacyDirectAction -and
+        $tokens.Count -ge 6 -and
+        $tokens[0] -eq "-I" -and $tokens[1] -eq "-B" -and $tokens[2] -eq "-X" -and
+        $tokens[3] -match '^pycache_prefix=' -and $tokens[4] -eq "-u"
+    ) {
+        $legacyDirectAction = $true
+        $prefixLength = 5
+        $runnerIndex = 5
+        $optionStart = 6
         $candidateForPrefix = if ($ExpectedCandidateSha) { $ExpectedCandidateSha } else { $tokens[3].Substring(15) }
         $expectedPrefix = [System.IO.Path]::GetFullPath((Join-Path $state ("capture-bytecode\" + $candidateForPrefix)))
-        if ([System.IO.Path]::GetFullPath($tokens[3].Substring(15)) -ine $expectedPrefix -or $tokens[4] -ne "-u") {
+        if ([System.IO.Path]::GetFullPath($tokens[3].Substring(15)) -ine $expectedPrefix) {
             throw "Capture action bytecode prefix is not the exact candidate-bound path."
         }
         $null = Assert-DawnstrikeCaptureBytecodePrefix $expectedPrefix
     }
-    $runner = [System.IO.Path]::GetFullPath($tokens[$prefixLength])
-    $expectedRunner = [System.IO.Path]::GetFullPath((Join-Path $runtime "scripts\run_daily_intraday_capture.py"))
+    else {
+        $prefixLength = 6
+        $runnerIndex = 15
+        $optionStart = 17
+        if ($tokens.Count -lt $optionStart -or
+            $tokens[0] -ne "-I" -or $tokens[1] -ne "-B" -or $tokens[2] -ne "-S" -or
+            $tokens[3] -ne "-X" -or $tokens[4] -notmatch '^pycache_prefix=' -or $tokens[5] -ne "-u") {
+            throw "Capture action Python isolation prefix is invalid."
+        }
+        $candidateForPrefix = if ($ExpectedCandidateSha) { $ExpectedCandidateSha } else { $tokens[4].Substring(15) }
+        $expectedPrefix = [System.IO.Path]::GetFullPath((Join-Path $state ("capture-bytecode\" + $candidateForPrefix)))
+        if ([System.IO.Path]::GetFullPath($tokens[4].Substring(15)) -ine $expectedPrefix) {
+            throw "Capture action bytecode prefix is not the exact candidate-bound path."
+        }
+        $null = Assert-DawnstrikeCaptureBytecodePrefix $expectedPrefix
+        if ($tokens[6] -ne "-c") { throw "Capture action bootstrap preloader is missing." }
+        $bootstrapPreloader = $tokens[7]
+        if ($bootstrapPreloader -cne (Get-DawnstrikeCaptureBootstrapPreloader)) {
+            throw "Capture action bootstrap preloader is not exact."
+        }
+        $bootstrapPath = [System.IO.Path]::GetFullPath($tokens[8])
+        if (-not [string]::Equals($bootstrapPath, $expectedBootstrap, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Capture action bootstrap is outside the exact RuntimeRoot contract."
+        }
+        if (Test-Path -LiteralPath $bootstrapPath) {
+            $bootstrapPath = Assert-DawnstrikeCaptureRegularPath $bootstrapPath "Capture release bootstrap"
+        }
+        elseif (-not $AllowMissingBootstrap) {
+            throw "Capture release bootstrap is missing from RuntimeRoot."
+        }
+        $bootstrapSha256 = $tokens[9]
+        if ($bootstrapSha256 -notmatch '^[0-9a-f]{64}$') { throw "Capture action bootstrap hash is invalid." }
+        $bootstrapExpectedSha = $tokens[13]
+        if ($tokens[10] -ne "--release-root" -or
+            -not [string]::Equals([System.IO.Path]::GetFullPath($tokens[11]).TrimEnd('\'), $runtime, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $tokens[12] -ne "--expected-sha" -or $bootstrapExpectedSha -notmatch '^[0-9a-f]{40}$' -or
+            $tokens[14] -ne "--script" -or
+            -not [string]::Equals([System.IO.Path]::GetFullPath($tokens[15]), $expectedRunner, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $tokens[16] -ne "--") {
+            throw "Capture action bootstrap root, runner, or separator is not exact."
+        }
+        if ($bootstrapPath -and (Test-Path -LiteralPath $bootstrapPath -PathType Leaf)) {
+            if ((Get-DawnstrikeCaptureFileSha256 $bootstrapPath) -cne $bootstrapSha256) {
+                throw "Capture action bootstrap bytes do not match their exact binding."
+            }
+        }
+    }
+    if ($tokens.Count -ne ($optionStart + ($optionOrder.Count * 2) + 1)) { throw "Capture action token count is not exact." }
+    if ($legacyLauncher) {
+        if ($tokens[0] -ne "-3.13" -or $tokens[1] -ne "-u") { throw "Legacy capture launcher prefix is invalid." }
+    }
+    $runner = [System.IO.Path]::GetFullPath($tokens[$runnerIndex])
     if (-not [string]::Equals($runner, $expectedRunner, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "Capture action runner is outside the exact RuntimeRoot contract."
     }
@@ -493,7 +616,7 @@ function Assert-DawnstrikeCaptureTaskSafety {
         $null = Assert-DawnstrikeCaptureRegularPath $runner "Capture action runner"
     }
     $values = @{}
-    $cursor = $prefixLength + 1
+    $cursor = $optionStart
     foreach ($option in $optionOrder) {
         if ($tokens[$cursor] -ne $option) { throw "Capture action option order or name is invalid at $option." }
         $values[$option] = [string]$tokens[$cursor + 1]
@@ -503,6 +626,9 @@ function Assert-DawnstrikeCaptureTaskSafety {
     if ($tokens[$cursor] -ne "--execute") { throw "Capture action must end with the sole --execute flag." }
     if ($values["--candidate-sha"] -notmatch '^[0-9a-f]{40}$') { throw "Capture action candidate SHA is invalid." }
     if ($ExpectedCandidateSha -and $values["--candidate-sha"] -ne $ExpectedCandidateSha) { throw "Capture action candidate SHA is not the exact activated candidate." }
+    if ($bootstrapExpectedSha -and $bootstrapExpectedSha -cne $values["--candidate-sha"]) {
+        throw "Capture action bootstrap expected SHA is not the exact action candidate."
+    }
     if ($values["--max-pages"] -ne "100" -or $values["--retries"] -ne "3") { throw "Capture action retry/page policy is invalid." }
     if (-not [string]::Equals([System.IO.Path]::GetFullPath($values["--repo-root"]).TrimEnd('\'), $runtime, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "Capture action repo root does not equal RuntimeRoot."
@@ -586,8 +712,10 @@ function Assert-DawnstrikeCaptureTaskSafety {
         group_id_absent = $true
         required_privileges_absent = $true
         execute = [string]$record.Command
-        python_prefix = if ($legacyLauncher) { "-3.13 -u" } else { "-I -B -X pycache_prefix=$expectedPrefix -u" }
-        bytecode_prefix = if ($legacyLauncher) { $null } else { $expectedPrefix }
+        python_prefix = if ($legacyLauncher) { "-3.13 -u" } elseif ($legacyDirectAction) { "-I -u" } else { "-I -B -S -X pycache_prefix=$expectedPrefix -u" }
+        bytecode_prefix = if ($legacyLauncher) { $null } elseif ($legacyDirectAction -and $tokens[0] -eq "-I" -and $tokens[1] -eq "-u") { $null } else { $expectedPrefix }
+        bootstrap_path = $bootstrapPath
+        bootstrap_sha256 = $bootstrapSha256
         runner_path = $runner
         working_directory = $runtime
         candidate_sha = [string]$values["--candidate-sha"]
