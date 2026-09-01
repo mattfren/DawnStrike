@@ -16,9 +16,7 @@ def _payload(operation: str = "runtime_activation", phase: str = "INIT") -> dict
         "runtime_activation": ("INIT", "PRE_SWAP", "POST_SWAP", "COMPLETE"),
         "capture_task_rebind": ("INIT", "PRE_ENABLE", "POST_ENABLE", "COMPLETE"),
         "runtime_rollback": ("INIT", "PRE_SWAP", "POST_SWAP", "COMPLETE"),
-        "capture_task_hardening": (
-            "INIT", "PRE_TASK_UPDATE", "POST_TASK_UPDATE", "COMPLETE"
-        ),
+        "capture_task_hardening": ("INIT", "PRE_TASK_UPDATE", "POST_TASK_UPDATE", "COMPLETE"),
     }
     return {
         "schema_version": "dawnstrike.runtime_operation_journal.v1",
@@ -44,9 +42,7 @@ def _payload(operation: str = "runtime_activation", phase: str = "INIT") -> dict
         "previous_sha": "e" * 40,
         "previous_tree": "f" * 40,
         "origin_identity": "github.com/mattfren/dawnstrike",
-        "origin_identity_sha256": hashlib.sha256(
-            b"github.com/mattfren/dawnstrike"
-        ).hexdigest(),
+        "origin_identity_sha256": hashlib.sha256(b"github.com/mattfren/dawnstrike").hexdigest(),
         "state_root_sha256": "1" * 64,
         "lock_token": "2" * 32,
         "lock_file_sha256": "3" * 64,
@@ -58,9 +54,7 @@ def _payload(operation: str = "runtime_activation", phase: str = "INIT") -> dict
         "backup_contract_sha256": EMPTY if phase == "INIT" else "4" * 64,
         "task_contract_sha256": "5" * 64,
         "runtime_stage_contract_sha256": (
-            "6" * 64
-            if phase != "INIT" and operation.startswith("runtime_")
-            else EMPTY
+            "6" * 64 if phase != "INIT" and operation.startswith("runtime_") else EMPTY
         ),
         "adoption_state": "NONE",
         "old_lock_token": "2" * 32,
@@ -200,4 +194,12 @@ def test_phase_rejects_wrong_current_runtime_identity(
     payload["current_tree"] = bad_tree
     payload["journal_self_sha256"] = "0" * 64
     with pytest.raises(ValueError, match="current runtime identity"):
+        validate(json.dumps(payload).encode())
+
+
+def test_hardening_journal_rejects_cross_candidate_and_self_hash_tamper() -> None:
+    payload = _payload("capture_task_hardening", "POST_TASK_UPDATE")
+    payload["candidate_sha"] = "c" * 40
+    payload["journal_self_sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="current runtime identity|self hash"):
         validate(json.dumps(payload).encode())
