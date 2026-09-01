@@ -36,9 +36,14 @@ def _initialize_git_runtime(runtime: Path) -> str:
         check=True,
         capture_output=True,
     )
+    shutil.copytree(
+        ROOT / "scripts",
+        runtime / "scripts",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+    )
     (runtime / "app.py").write_text("print('clean')\n", encoding="utf-8")
     subprocess.run(
-        ["git", "-C", str(runtime), "add", "app.py"],
+        ["git", "-C", str(runtime), "add", "."],
         check=True,
         capture_output=True,
     )
@@ -56,11 +61,17 @@ def _initialize_git_runtime(runtime: Path) -> str:
 
 
 def _resolve_release_sha(runtime: Path, log_root: Path) -> subprocess.CompletedProcess[str]:
+    expected_sha = subprocess.run(
+        ["git", "-C", str(runtime), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
     command = (
         f". '{PROCESS_RUNNER}'; "
         "try { "
         f"$sha = Resolve-DawnstrikeReleaseSha -RuntimeRoot '{runtime}' "
-        f"-LogRoot '{log_root}'; "
+        f"-LogRoot '{log_root}' -ExpectedSha '{expected_sha}'; "
         '[Console]::Out.WriteLine("RESOLVED=$sha"); exit 0 '
         "} catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }"
     )
@@ -194,7 +205,7 @@ def test_release_sha_resolver_rejects_uncommitted_runtime_bytes(
     result = _resolve_release_sha(runtime, tmp_path / f"{mutation}-logs")
 
     assert result.returncode == 1
-    assert "deployed worktree is dirty" in result.stderr
+    assert "release checkout is not clean" in result.stderr
 
 
 @pytest.mark.parametrize("signal_count", [None, -1, 0.5])
