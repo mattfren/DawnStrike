@@ -573,8 +573,28 @@ def test_journal_aware_enter_rejects_reparse_components(
         link = state / "locks"
     try:
         os.symlink(target, link, target_is_directory=True)
-    except OSError as exc:
-        pytest.skip(f"directory symlink unavailable: {exc}")
+    except OSError as symlink_error:
+        junction = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                (
+                    "New-Item -ItemType Junction -Path "
+                    f"'{str(link).replace(chr(39), chr(39) * 2)}' -Target "
+                    f"'{str(target).replace(chr(39), chr(39) * 2)}' | Out-Null"
+                ),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if junction.returncode != 0:
+            pytest.skip(
+                "directory symlink and junction unavailable: "
+                f"{symlink_error}; {junction.stderr.strip()}"
+            )
     module = str(PS.resolve()).replace("'", "''")
     state_q = str(state).replace("'", "''")
     journal_q = str(
