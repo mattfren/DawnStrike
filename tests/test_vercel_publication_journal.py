@@ -338,6 +338,16 @@ def test_publisher_binds_every_recovery_phase_to_the_current_invocation() -> Non
         assert binding in function
 
 
+def test_publisher_crash_and_failure_seams_are_environment_guarded() -> None:
+    script = (Path(__file__).parents[1] / "scripts" / "publish_vercel_public.ps1").read_text(
+        encoding="utf-8"
+    )
+    guard = '$env:DAWNSTRIKE_TEST_VERCEL_PUBLICATION -ne "1"'
+    assert guard in script
+    assert script.index(guard) < script.index("function Test-VercelPromotionSeam")
+    assert "Vercel publication failure and crash injection are test-only." in script
+
+
 def test_compensated_terminal_dereferences_and_binds_receipt(tmp_path: Path) -> None:
     root = tmp_path / "state"
     root.mkdir()

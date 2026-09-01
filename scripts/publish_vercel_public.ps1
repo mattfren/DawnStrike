@@ -25,6 +25,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if (($TestCrashPoint -or $TestFailurePoint) -and
+    $env:DAWNSTRIKE_TEST_VERCEL_PUBLICATION -ne "1") {
+    throw "Vercel publication failure and crash injection are test-only."
+}
 if ($Promote -and $AllowDegraded) {
     throw "Production promotion requires readiness HTTP 200; -AllowDegraded cannot be combined with -Promote."
 }

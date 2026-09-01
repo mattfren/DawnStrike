@@ -57,7 +57,8 @@ def _utc(value: Any, label: str) -> None:
         parsed = datetime.fromisoformat(normalized + "+00:00")
     except ValueError as exc:
         raise ValueError(f"{label} is invalid") from exc
-    if parsed.utcoffset().total_seconds() != 0:
+    offset = parsed.utcoffset()
+    if offset is None or offset.total_seconds() != 0:
         raise ValueError(f"{label} must be UTC")
 
 

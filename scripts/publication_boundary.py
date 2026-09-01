@@ -88,6 +88,7 @@ def authorize_market_date(
     mode = str(publication_mode).strip()
     errors: list[str] = []
     parsed: date | None = None
+    session: MarketSessionDecision | None = None
     if not DATE_RE.fullmatch(requested):
         errors.append("market_date_invalid")
     else:
