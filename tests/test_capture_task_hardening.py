@@ -484,6 +484,11 @@ def test_hardening_script_is_explicit_and_preserves_capture_bindings() -> None:
         '"-I", "-B", "-X"',
         "pycache_prefix=",
         "if (-not $recoveringPrepared)",
+        "Enter-DawnstrikeGovernedRuntimeLockWithJournal",
+        "Adopt-DawnstrikeGovernedRuntimeLockWithJournal",
+        "PRE_TASK_UPDATE",
+        "POST_TASK_UPDATE",
+        "complete_receipt_sha256",
     ):
         assert marker in script
     assert "goto hardening_payload" not in script
