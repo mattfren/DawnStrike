@@ -694,6 +694,33 @@ def test_windows_activation_scripts_preserve_nonpublishing_fail_closed_boundary(
     assert rollback_disable < rollback_swap < rollback_enable
 
 
+def test_activation_seals_init_before_first_stage_filesystem_mutation() -> None:
+    activation = Path("scripts/activate_dawnstrike_runtime.ps1").read_text(
+        encoding="utf-8"
+    )
+    boundary = activation.index(
+        "# INIT and its exact runtime lock must exist before clone"
+    )
+    lock = activation.index(
+        "$activationLock = Enter-DawnstrikeGovernedRuntimeLockWithJournal",
+        boundary,
+    )
+    stage_directory_crash = activation.index(
+        'if ($TestStageCrashPoint -eq "after_stage_directory")', lock
+    )
+    clone = activation.index('-Label "Candidate runtime staging"', lock)
+    checkout_crash = activation.index(
+        'if ($TestStageCrashPoint -eq "after_stage_checkout")', clone
+    )
+    daily = activation.index(
+        "$dailyLock = Enter-DawnstrikeDailyRunLock", checkout_crash
+    )
+    assert lock < stage_directory_crash < clone < checkout_crash < daily
+    assert "DAWNSTRIKE_TEST_ACTIVATION_STAGE_CRASH" in activation
+    assert "INIT recovery could not quarantine the exact staged path" in activation
+    assert "Staging failure journal identity is invalid" in activation
+
+
 @pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
 def test_task_contract_requires_exact_ready_or_explicit_disabled(tmp_path: Path) -> None:
     script = Path("scripts/activate_dawnstrike_runtime.ps1").resolve()
