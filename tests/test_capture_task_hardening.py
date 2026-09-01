@@ -512,7 +512,7 @@ def test_standalone_entrypoints_forward_credential_without_serializing_it() -> N
 
 
 @pytest.mark.skipif(
-    subprocess.run(["where", "powershell"], capture_output=True).returncode != 0,
+    shutil.which("powershell") is None,
     reason="Windows PowerShell unavailable",
 )
 def test_hardening_script_fails_closed_without_credential() -> None:
