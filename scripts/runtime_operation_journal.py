@@ -38,7 +38,7 @@ KEYS = {
     "broker_execution_enabled", "adoption_state", "old_lock_token",
     "old_lock_file_sha256", "next_lock_token", "next_lock_file_sha256",
     "old_lock_archive_relative_path", "next_lock_relative_path",
-    "journal_self_sha256",
+    "init_owner_process_id", "init_owner_started_at_utc", "journal_self_sha256",
 }
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -153,6 +153,9 @@ def validate(raw: bytes) -> dict[str, Any]:
             raise ValueError(f"{key} is invalid")
     if not isinstance(value["lock_token"], str) or not TOKEN.fullmatch(value["lock_token"]):
         raise ValueError("lock token is invalid")
+    if type(value["init_owner_process_id"]) is not int or value["init_owner_process_id"] <= 0:
+        raise ValueError("init_owner_process_id is invalid")
+    _utc(value["init_owner_started_at_utc"])
     adoption = value["adoption_state"]
     if adoption not in {"NONE", "ADOPTION_PREPARED", "ADOPTED"}:
         raise ValueError("adoption_state is invalid")
@@ -283,6 +286,7 @@ def transition(source: Path, target: Path, previous: Path | None) -> dict[str, A
             "previous_sha", "previous_tree", "origin_identity",
             "origin_identity_sha256", "state_root_sha256",
             "prepared_receipt_relative_path", "complete_receipt_relative_path",
+            "init_owner_process_id", "init_owner_started_at_utc",
             "research_only", "broker_execution_enabled",
         }
         for key in immutable:
