@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -144,20 +145,30 @@ $approved=Get-DawnstrikeApprovedLockInterpreter
 $path='{lock_q}'
 [IO.File]::WriteAllText($path,('x'*17000))
 $before=Get-DawnstrikeRuntimeLockHash $path
-$rejected=$false;try{{$null=Get-DawnstrikeStrictRuntimeLock $path $approved.path $approved.sha256}}catch{{$rejected=$true}}
+$rejected=$false
+try{{$null=Get-DawnstrikeStrictRuntimeLock $path $approved.path $approved.sha256}}
+catch{{$rejected=$true}}
 if(-not $rejected){{throw 'huge accepted'}}
 if((Get-DawnstrikeRuntimeLockHash $path)-ne $before){{throw 'huge changed'}}
 [IO.File]::WriteAllText($path,'{{"schema_version":"x","schema_version":"y"}}')
 $before=Get-DawnstrikeRuntimeLockHash $path
-$rejected=$false;try{{$null=Get-DawnstrikeStrictRuntimeLock $path $approved.path $approved.sha256}}catch{{$rejected=$true}}
+$rejected=$false
+try{{$null=Get-DawnstrikeStrictRuntimeLock $path $approved.path $approved.sha256}}
+catch{{$rejected=$true}}
 if(-not $rejected){{throw 'tamper accepted'}}
 if((Get-DawnstrikeRuntimeLockHash $path)-ne $before){{throw 'tamper changed'}}
 Remove-Item $path -Force
 [IO.File]::WriteAllText('{target_q}','x')
-try{{New-Item -ItemType SymbolicLink -Path $path -Target '{target_q}' -ErrorAction Stop|Out-Null}}catch{{'SKIP_REPARSE';exit 0}}
-$rejected=$false;try{{$null=Get-DawnstrikeStrictRuntimeLock $path $approved.path $approved.sha256}}catch{{$rejected=$true}}
+try{{
+    New-Item -ItemType SymbolicLink -Path $path -Target '{target_q}' `
+        -ErrorAction Stop|Out-Null
+}}catch{{'SKIP_REPARSE';exit 0}}
+$rejected=$false
+try{{$null=Get-DawnstrikeStrictRuntimeLock $path $approved.path $approved.sha256}}
+catch{{$rejected=$true}}
 if(-not $rejected){{throw 'reparse accepted'}}
-if(-not ((Get-Item $path -Force).Attributes-band [IO.FileAttributes]::ReparsePoint)){{throw 'reparse changed'}}
+if(-not ((Get-Item $path -Force).Attributes-band `
+    [IO.FileAttributes]::ReparsePoint)){{throw 'reparse changed'}}
 'OK'
 """
     result = subprocess.run(
@@ -190,6 +201,7 @@ $null=Enter-DawnstrikeGovernedRuntimeLock -StateRoot '{state_q}' -Operation runt
  -CandidateSha '{"a" * 40}' -CandidateTree '{"b" * 40}' `
  -OriginIdentity 'github.com/mattfren/dawnstrike' `
  -PythonPath $python -PythonSha256 $pythonSha
+$held=Enter-DawnstrikeRuntimeLockMutex
 exit 137
 """
     )
@@ -226,3 +238,98 @@ Exit-DawnstrikeGovernedRuntimeLock $lock
     )
     assert second.returncode == 0, (second.stdout, second.stderr)
     assert "OK" in second.stdout
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="PowerShell unavailable")
+def test_journal_adoption_survives_two_consecutive_crashes(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    module = str(PS.resolve()).replace("'", "''")
+    state_q = str(state).replace("'", "''")
+    create = rf"""
+. '{module}'
+$approved=Get-DawnstrikeApprovedLockInterpreter
+$lock=Enter-DawnstrikeGovernedRuntimeLock -StateRoot '{state_q}' `
+ -Operation runtime_activation -CandidateSha ('a'*40) -CandidateTree ('b'*40) `
+ -OriginIdentity 'github.com/mattfren/dawnstrike' `
+ -PythonPath $approved.path -PythonSha256 $approved.sha256
+$lock|ConvertTo-Json -Compress
+exit 137
+"""
+    created = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", create],
+        text=True, capture_output=True, check=False,
+    )
+    assert created.returncode == 137, created.stderr
+    handle = json.loads(created.stdout.strip().splitlines()[-1])
+    empty = hashlib.sha256(b"").hexdigest()
+    origin = "github.com/mattfren/dawnstrike"
+    journal_input = state / "journal-input.json"
+    journal = state / "receipts" / "runtime-operation" / "activation.json"
+    data = {
+        "schema_version": "dawnstrike.runtime_operation_journal.v1",
+        "operation": "runtime_activation", "phase": "INIT", "sequence": 0,
+        "candidate_sha": "a" * 40, "candidate_tree": "b" * 40,
+        "current_sha": "c" * 40, "current_tree": "d" * 40,
+        "previous_sha": "e" * 40, "previous_tree": "f" * 40,
+        "origin_identity": origin,
+        "origin_identity_sha256": hashlib.sha256(origin.encode()).hexdigest(),
+        "state_root_sha256": hashlib.sha256(
+            str(state.resolve()).rstrip("\\").lower().encode()
+        ).hexdigest(),
+        "lock_token": handle["token"],
+        "lock_file_sha256": handle["bytes_sha256"],
+        "prior_journal_file_sha256": empty,
+        "receipt_relative_path": "receipts/runtime-activation/result.json",
+        "receipt_sha256": empty, "backup_contract_sha256": empty,
+        "task_contract_sha256": "5" * 64,
+        "runtime_stage_contract_sha256": empty,
+        "recorded_at_utc": "2026-08-31T23:01:02.1234567Z",
+        "research_only": True, "broker_execution_enabled": False,
+        "adoption_state": "NONE", "old_lock_token": handle["token"],
+        "old_lock_file_sha256": handle["bytes_sha256"],
+        "next_lock_token": handle["token"],
+        "next_lock_file_sha256": handle["bytes_sha256"],
+        "old_lock_archive_relative_path": "NONE",
+        "next_lock_relative_path": "NONE",
+    }
+    journal_input.write_text(json.dumps(data), encoding="utf-8")
+    subprocess.run(
+        [
+            "py", "-3.13", str(ROOT / "scripts" / "runtime_operation_journal.py"),
+            "seal", str(journal_input), str(journal), "--state-root", str(state),
+        ],
+        check=True, capture_output=True, text=True,
+    )
+
+    def adopt(crash: str = "") -> subprocess.CompletedProcess[str]:
+        crash_arg = f" -TestCrashPoint {crash}" if crash else ""
+        journal_q = str(journal).replace("'", "''")
+        command = rf"""
+. '{module}'
+$approved=Get-DawnstrikeApprovedLockInterpreter
+$lock=Adopt-DawnstrikeGovernedRuntimeLockWithJournal -StateRoot '{state_q}' `
+ -JournalPath '{journal_q}' -CandidateSha ('a'*40) -CandidateTree ('b'*40) `
+ -OriginIdentity 'github.com/mattfren/dawnstrike' `
+ -PythonPath $approved.path -PythonSha256 $approved.sha256{crash_arg}
+$lock|ConvertTo-Json -Compress
+"""
+        environment = dict(os.environ)
+        environment["DAWNSTRIKE_TEST_LOCK_JOURNAL"] = "1"
+        return subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+            text=True, capture_output=True, check=False, env=environment,
+        )
+
+    assert adopt("after_prepared").returncode == 137
+    assert adopt("after_replace").returncode == 137
+    recovered = adopt()
+    assert recovered.returncode == 0, (recovered.stdout, recovered.stderr)
+    recovered_handle = json.loads(recovered.stdout.strip().splitlines()[-1])
+    assert recovered_handle["token"] != handle["token"]
+    lock_payload = json.loads(
+        (state / "locks" / "dawnstrike-runtime-activation.lock").read_text()
+    )
+    # The standalone recovery process exits after returning, but the lock must
+    # have been minted by that third process rather than either crashed child.
+    assert lock_payload["lock_token"] == recovered_handle["token"]
