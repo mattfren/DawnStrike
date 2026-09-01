@@ -18,6 +18,14 @@ enables broker execution.
 ## Preconditions
 
 Run activation before the Morning task and outside every daily run window.
+The activation boundary is the next canonical US-equities session: after a
+completed session it is the next open date, while an overnight invocation
+before the 09:00 Eastern Morning edge may name that current open date. The
+tool rejects same-session/post-Morning dates, closed dates, and target dates
+that already have authoritative finalizer or public-build evidence. This
+prevents a runtime SHA swap from diverging from a frozen daily/public
+artifact. A read-only clock seam exists only for guarded tests.
+
 The tool fails closed unless all of the following are true:
 
 - `CandidateRoot` is a clean, self-contained Git checkout whose `HEAD` equals
