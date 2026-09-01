@@ -14,6 +14,7 @@ param(
     [switch]$Promote,
     [switch]$RecoveryOnly,
     [string]$StateRoot = "",
+    [ValidatePattern('^$|^[0-9a-f]{40}$')][string]$ExpectedSha = "",
     [ValidatePattern('^$|^\d{4}-\d{2}-\d{2}$')][string]$ExpectedMarketDate = "",
     [ValidatePattern('^$|^[0-9a-f]{64}$')][string]$PrepublicationAuthorizationId = "",
     [ValidatePattern('^$|^[0-9a-f]{64}$')][string]$DailyLedgerAuthorizationId = "",
@@ -241,6 +242,7 @@ $bootstrapSource = Assert-VercelRecoveryBootstrapSource `
     -Root $resolvedRoot -AllowedStageRoot $bootstrapStage
 . (Join-Path $PSScriptRoot "dawnstrike_job_process.ps1")
 . (Join-Path $PSScriptRoot "dawnstrike_process_runner.ps1")
+$null = Assert-DawnstrikeProcessSourceBoundToHead -ReleaseRoot $resolvedRoot -ExpectedSha $ExpectedSha -EntryScript $PSCommandPath
 . (Join-Path $resolvedRoot "scripts\vercel_source_contract.ps1")
 $approvedPython = Get-DawnstrikeApprovedLockInterpreter
 $approvedGit = Get-DawnstrikeApprovedGit

@@ -342,11 +342,12 @@ def _healthy_tasks(runtime: Path, state: Path, *, last_result: int = 0):
                 "2026-07-31T"
                 f"{scheduler_service.EXPECTED_TASK_STARTS[name]}:00-05:00"
             ),
-            "execute": "powershell.exe",
+            "execute": scheduler_service.EXPECTED_TASK_EXECUTABLE,
             "arguments": (
                 f'-NoProfile -ExecutionPolicy Bypass -File '
                 f'"{runtime / "scripts" / script}" '
-                f'-RuntimeRoot "{runtime}" -StateRoot "{state}"'
+                f'-RuntimeRoot "{runtime}" -StateRoot "{state}" '
+                f'-ExpectedSha "{_stable_runtime_contract()["candidate_sha"]}"'
                 + (
                     " -PublicationMode Production "
                     f'-VercelProjectId "{scheduler_service.EXPECTED_VERCEL_PROJECT_ID}"'

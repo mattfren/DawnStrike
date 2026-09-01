@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$RuntimeRoot = "C:\r\dawnstrike-runtime",
+    [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedSha,
     [string]$StateRoot = "C:\r\dawnstrike-state",
     [string]$MarketDate = "",
     [int]$RetryLimit = 2,
@@ -20,6 +21,7 @@ $state = (Resolve-Path $StateRoot).Path
 . (Join-Path $PSScriptRoot "dawnstrike_process_runner.ps1")
 . (Join-Path $PSScriptRoot "invoke_dawnstrike_stage.ps1")
 Import-DawnstrikeEnvironment -StateRoot $state
+$null = Assert-DawnstrikeProcessSourceBoundToHead -ReleaseRoot $runtime -ExpectedSha $ExpectedSha -EntryScript $PSCommandPath
 
 function Get-DawnstrikeFinalizeNowUtc {
     param([string]$Override)
@@ -94,7 +96,7 @@ $requestedMarketDate = if ([string]::IsNullOrWhiteSpace($MarketDate)) {
     }
 } else { $MarketDate.Trim() }
 $logRoot = Join-Path $state "logs"
-$releaseSha = Resolve-DawnstrikeReleaseSha -RuntimeRoot $runtime -LogRoot $logRoot
+$releaseSha = Resolve-DawnstrikeReleaseSha -RuntimeRoot $runtime -LogRoot $logRoot -ExpectedSha $ExpectedSha
 if ($PublicationMode -eq "Production") {
     # Converge any uniquely sealed interrupted provider operation before the
     # calendar, build, database, or current authorization can short-circuit
@@ -103,6 +105,7 @@ if ($PublicationMode -eq "Production") {
         -ProjectRoot $runtime `
         -ProjectId $VercelProjectId `
         -StateRoot $state `
+        -ExpectedSha $releaseSha `
         -ExpectedMarketDate $requestedMarketDate `
         -RecoveryOnly
 }
@@ -309,6 +312,7 @@ try {
             -ProjectRoot $runtime `
             -ProjectId $VercelProjectId `
             -StateRoot $state `
+            -ExpectedSha $releaseSha `
             -ExpectedMarketDate $MarketDate `
             -PrepublicationAuthorizationId $authorizationId `
             -DailyLedgerAuthorizationId ([string]$prepublicationPayload.daily_ledger_authorization_id) `

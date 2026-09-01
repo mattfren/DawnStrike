@@ -18,6 +18,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$script:DawnstrikePowerShellExecutable = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
 if ($InjectCrashBetweenRuntimeRenames -and $env:DAWNSTRIKE_TEST_LOCK_JOURNAL -ne "1") {
     throw "Activation runtime-rename crash injection is test-only."
 }
@@ -287,14 +288,42 @@ function Invoke-DawnstrikeActivationProcess {
             }
         }
     }
-    $result = Invoke-DawnstrikeJobProcess `
-        -FilePath $FilePath `
-        -ArgumentList $effectiveArguments `
-        -WorkingDirectory $WorkingDirectory `
-        -Label $Label `
-        -TimeoutSeconds $TimeoutSeconds `
-        -OutputDrainTimeoutSeconds 5 `
-        -EnvironmentOverrides @{ PYTHONDONTWRITEBYTECODE = "1" }
+    $savedGitEnvironment = @{}
+    $isGitProcess = [System.IO.Path]::GetFileName($FilePath).Equals("git.exe", [System.StringComparison]::OrdinalIgnoreCase)
+    if ($isGitProcess) {
+        foreach ($entry in @(Get-ChildItem Env: | Where-Object { $_.Name -like 'GIT_*' })) {
+            $savedGitEnvironment[[string]$entry.Name] = [string]$entry.Value
+            Remove-Item -LiteralPath ("Env:" + [string]$entry.Name) -ErrorAction SilentlyContinue
+        }
+    }
+    try {
+        $environment = @{ PYTHONDONTWRITEBYTECODE = "1" }
+        if ($isGitProcess) {
+            $environment.GIT_CONFIG_NOSYSTEM = "1"
+            $environment.GIT_CONFIG_GLOBAL = "NUL"
+            $environment.GIT_TERMINAL_PROMPT = "0"
+            $environment.GIT_OPTIONAL_LOCKS = "0"
+            $environment.GIT_NO_REPLACE_OBJECTS = "1"
+        }
+        $result = Invoke-DawnstrikeJobProcess `
+            -FilePath $FilePath `
+            -ArgumentList $effectiveArguments `
+            -WorkingDirectory $WorkingDirectory `
+            -Label $Label `
+            -TimeoutSeconds $TimeoutSeconds `
+            -OutputDrainTimeoutSeconds 5 `
+            -EnvironmentOverrides $environment
+    }
+    finally {
+        if ($isGitProcess) {
+            foreach ($entry in @(Get-ChildItem Env: | Where-Object { $_.Name -like 'GIT_*' })) {
+                Remove-Item -LiteralPath ("Env:" + [string]$entry.Name) -ErrorAction SilentlyContinue
+            }
+            foreach ($name in $savedGitEnvironment.Keys) {
+                Set-Item -LiteralPath ("Env:" + $name) -Value $savedGitEnvironment[$name]
+            }
+        }
+    }
     if ($result.ExitCode -ne 0) {
         # Do not echo native stderr. Remote helpers and environment-specific
         # tooling may include authentication material in their diagnostics.
@@ -383,7 +412,7 @@ function Get-DawnstrikeGitValue {
 
     $result = Invoke-DawnstrikeActivationProcess `
         -FilePath $GitPath `
-        -ArgumentList (@("-C", $Root) + $Arguments) `
+        -ArgumentList (@("-c", "core.autocrlf=true", "-C", $Root) + $Arguments) `
         -WorkingDirectory $Root `
         -Label $Label `
         -TimeoutSeconds $TimeoutSeconds
@@ -441,6 +470,18 @@ function Get-DawnstrikeGitContract {
     )
     if ($hiddenIndexEntries.Count -gt 0) {
         throw "Git checkout contains assume-unchanged or skip-worktree entries."
+    }
+    $replacements = Get-DawnstrikeGitValue $GitPath $Root @("replace", "-l") "Git replace-ref verification" $TimeoutSeconds
+    if ($replacements) {
+        throw "Git checkout contains replace refs; activation cannot trust the object identity."
+    }
+    $localConfigPath = Join-Path $gitDirectory "config"
+    if (-not (Test-Path -LiteralPath $localConfigPath -PathType Leaf)) {
+        throw "Git checkout local configuration is missing."
+    }
+    $localConfig = Get-Content -Raw -LiteralPath $localConfigPath
+    if ($localConfig -match "(?im)^\s*\[\s*filter(?:\s|\])|^\s*(?:attributesfile|hookspath|path)\s*=") {
+        throw "Git checkout contains a local execution/filter configuration."
     }
     $ignored = Get-DawnstrikeGitValue $GitPath $Root @("ls-files", "--others", "--ignored", "--exclude-standard", "-z") "Ignored runtime artifact verification" $TimeoutSeconds
     $forbiddenIgnored = @(
@@ -522,7 +563,8 @@ function Get-DawnstrikeCanonicalTaskPolicy {
     param(
         [Parameter(Mandatory = $true)][string]$TaskName,
         [Parameter(Mandatory = $true)][string]$RuntimeRoot,
-        [Parameter(Mandatory = $true)][string]$StateRoot
+        [Parameter(Mandatory = $true)][string]$StateRoot,
+        [ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedSha = ""
     )
 
     $runners = @{
@@ -539,6 +581,7 @@ function Get-DawnstrikeCanonicalTaskPolicy {
     $state = [System.IO.Path]::GetFullPath($StateRoot).TrimEnd('\')
     $runner = Join-Path $runtime ("scripts\" + [string]$runners[$TaskName])
     $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$runner`" -RuntimeRoot `"$runtime`" -StateRoot `"$state`""
+    if ($ExpectedSha) { $arguments += " -ExpectedSha `"$ExpectedSha`"" }
     if ($TaskName -eq "Dawnstrike 10of10 Daily Finalize") {
         $arguments += " -PublicationMode Production -VercelProjectId `"prj_5pef3EZF1u5YadebEz3dFjnkWOXy`""
     }
@@ -581,12 +624,18 @@ function Assert-DawnstrikeCanonicalTaskSemantics {
     param(
         [Parameter(Mandatory = $true)][string]$RuntimeRoot,
         [Parameter(Mandatory = $true)][string]$StateRoot,
+        [ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedSha = "",
         [switch]$AllowDisabled
     )
 
     $results = @()
     foreach ($taskName in $script:DawnstrikeCanonicalTaskNames) {
-        $policy = Get-DawnstrikeCanonicalTaskPolicy $taskName $RuntimeRoot $StateRoot
+        $policy = if ($ExpectedSha) {
+            Get-DawnstrikeCanonicalTaskPolicy $taskName $RuntimeRoot $StateRoot $ExpectedSha
+        }
+        else {
+            Get-DawnstrikeCanonicalTaskPolicy $taskName $RuntimeRoot $StateRoot
+        }
         $matches = @(Get-ScheduledTask -TaskName $taskName -ErrorAction Stop)
         if ($matches.Count -ne 1) { throw "Canonical task semantic check requires exactly one task: $taskName" }
         $task = $matches[0]
@@ -603,10 +652,19 @@ function Assert-DawnstrikeCanonicalTaskSemantics {
         $actions = @((Get-DawnstrikeTaskProperty $task "Actions"))
         if ($actions.Count -ne 1) { throw "Canonical task must have exactly one action: $taskName" }
         $action = $actions[0]
-        if ([string](Get-DawnstrikeTaskProperty $action "Execute") -cne "powershell.exe") {
-            throw "Canonical task executable is not powershell.exe: $taskName"
+        if ([string](Get-DawnstrikeTaskProperty $action "Execute") -cne $script:DawnstrikePowerShellExecutable) {
+            throw "Canonical task executable is not the pinned Windows PowerShell binary: $taskName"
         }
-        if ([string](Get-DawnstrikeTaskProperty $action "Arguments") -cne [string]$policy.arguments) {
+        $actualArguments = [string](Get-DawnstrikeTaskProperty $action "Arguments")
+        $argumentsMatch = $actualArguments -ceq [string]$policy.arguments
+        if (-not $ExpectedSha) {
+            # During migration/recovery the task may still carry a previously
+            # activated SHA.  Accept that bounded suffix only at the
+            # pre-rebind boundary; the caller must immediately replace it and
+            # perform a second exact-SHA assertion before enabling the task.
+            $argumentsMatch = $argumentsMatch -or ($actualArguments -cmatch ([regex]::Escape([string]$policy.arguments) + ' -ExpectedSha "[0-9a-f]{40}"$'))
+        }
+        if (-not $argumentsMatch) {
             throw "Canonical task arguments are not the exact governed action: $taskName"
         }
         if ([string](Get-DawnstrikeTaskProperty $action "WorkingDirectory") -cne [string]$RuntimeRoot) {
@@ -1782,6 +1840,24 @@ function Enable-DawnstrikeCanonicalTasks {
     }
 }
 
+function Set-DawnstrikeCanonicalTaskExpectedSha {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot,
+        [Parameter(Mandatory = $true)][string]$StateRoot,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedSha
+    )
+    foreach ($taskName in $script:DawnstrikeCanonicalTaskNames) {
+        $matches = @(Get-ScheduledTask -TaskName $taskName -ErrorAction Stop)
+        if ($matches.Count -ne 1 -or [string]$matches[0].State -ne "Disabled") {
+            throw "Canonical task must be uniquely Disabled before SHA rebind: $taskName"
+        }
+        $policy = Get-DawnstrikeCanonicalTaskPolicy $taskName $RuntimeRoot $StateRoot $ExpectedSha
+        $action = New-ScheduledTaskAction -Execute $script:DawnstrikePowerShellExecutable -Argument ([string]$policy.arguments) -WorkingDirectory $RuntimeRoot
+        Set-ScheduledTask -TaskName $taskName -TaskPath ([string]$matches[0].TaskPath) -Action $action -ErrorAction Stop | Out-Null
+    }
+}
+
 function Set-DawnstrikeTasksFailClosedDisabled {
     [CmdletBinding()]
     param(
@@ -2727,13 +2803,15 @@ function Invoke-DawnstrikeRuntimeActivation {
                             [string]$receipt.state_preparation_inventory_sha256 -ne [string]$statePreparation.inventory_sha256
                         ) { throw "Existing activation receipt does not match live state preparation." }
                     }
-                    $null = Assert-DawnstrikeTaskXmlBackup `
-                        -StateRoot $state `
-                        -BackupName ([string]$receipt.scheduler_backup_name) `
-                        -ExpectedManifestSha256 ([string]$receipt.scheduler_backup_manifest_sha256) `
-                        -ExpectedTaskContractSha256 ([string]$receipt.task_contract_sha256) `
-                        -ExpectedTaskDefinitionContractSha256 ([string]$receipt.task_definition_contract_sha256) `
-                        -ExpectedTaskActionContractSha256 ([string]$receipt.task_action_contract_sha256)
+                     $backupManifestPath = Join-Path $state ("scheduler-backups\" + [string]$receipt.scheduler_backup_name + "\manifest.json")
+                     $backupManifest = Get-Content -LiteralPath $backupManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+                     $null = Assert-DawnstrikeTaskXmlBackup `
+                         -StateRoot $state `
+                         -BackupName ([string]$receipt.scheduler_backup_name) `
+                         -ExpectedManifestSha256 ([string]$receipt.scheduler_backup_manifest_sha256) `
+                         -ExpectedTaskContractSha256 ([string]$backupManifest.task_contract_sha256) `
+                         -ExpectedTaskDefinitionContractSha256 ([string]$backupManifest.task_definition_contract_sha256) `
+                         -ExpectedTaskActionContractSha256 ([string]$backupManifest.task_action_contract_sha256)
                     $null = Assert-DawnstrikeReceiptRecoveryArtifacts `
                         -Receipt $receipt `
                         -StateRoot $state `
@@ -3337,13 +3415,10 @@ function Invoke-DawnstrikeRuntimeActivation {
                     throw "PRE_QUIESCE recovery could not prove exact canonical disablement."
                 }
                 $null = Assert-DawnstrikeCanonicalTaskSemantics -RuntimeRoot $runtime -StateRoot $state -AllowDisabled
+                Set-DawnstrikeCanonicalTaskExpectedSha -RuntimeRoot $runtime -StateRoot $state -ExpectedSha $ExpectedSha
                 Enable-DawnstrikeCanonicalTasks
                 $restored = Get-DawnstrikeTaskContract $runtime $state
-                if (
-                    $restored.task_contract_sha256 -ne [string]$journal.payload.task_contract_sha256 -or
-                    $restored.task_definition_contract_sha256 -ne [string]$quiesceManifest.task_definition_contract_sha256 -or
-                    $restored.task_action_contract_sha256 -ne [string]$quiesceManifest.task_action_contract_sha256
-                ) { throw "PRE_QUIESCE recovery did not restore exact canonical tasks." }
+                $null = Assert-DawnstrikeCanonicalTaskSemantics -RuntimeRoot $runtime -StateRoot $state -ExpectedSha $ExpectedSha
                 Remove-Item -LiteralPath $stage -Recurse -Force
                 if (Test-Path -LiteralPath $stage) { throw "PRE_QUIESCE recovery could not remove the exact staged checkout." }
                 # A crash after quiescence can leave a partially written
@@ -3471,8 +3546,9 @@ function Invoke-DawnstrikeRuntimeActivation {
             } elseif ([string]$journal.payload.phase -ne "POST_SWAP") { throw "Activation journal phase is not recoverable." }
             $installed = Get-DawnstrikeGitContract $gitPath $runtime $ProcessTimeoutSeconds $ExpectedSha
             if ($installed.tree -ne [string]$candidateContract.tree -or -not (Test-Path -LiteralPath $rollbackCheckout -PathType Container) -or (Test-Path -LiteralPath $stage)) { throw "POST_SWAP recovery filesystem state is invalid." }
-            $null = Assert-DawnstrikeCanonicalTaskSemantics -RuntimeRoot $runtime -StateRoot $state -AllowDisabled
-            Enable-DawnstrikeCanonicalTasks
+                $null = Assert-DawnstrikeCanonicalTaskSemantics -RuntimeRoot $runtime -StateRoot $state -AllowDisabled
+                Set-DawnstrikeCanonicalTaskExpectedSha -RuntimeRoot $runtime -StateRoot $state -ExpectedSha $ExpectedSha
+                Enable-DawnstrikeCanonicalTasks
             $taskAfter = Get-DawnstrikeTaskContract $runtime $state
             $payload=[ordered]@{}
             foreach($property in $prepared.PSObject.Properties){if($property.Name-ne'receipt_sha256'){$payload[$property.Name]=$property.Value}}
@@ -3838,10 +3914,10 @@ function Invoke-DawnstrikeRuntimeActivation {
                 state_schema_version = [int]$backupResult.schema_version
                 state_quick_check = [string]$backupResult.quick_check
                 rollback_bundle_sha256 = $bundleHash
-                task_count = [int]$taskLocked.task_count
-                task_contract_sha256 = [string]$taskLocked.task_contract_sha256
-                task_definition_contract_sha256 = [string]$taskLocked.task_definition_contract_sha256
-                task_action_contract_sha256 = [string]$taskLocked.task_action_contract_sha256
+                 task_count = [int]$taskLocked.task_count
+                 task_contract_sha256 = [string]$taskLocked.task_contract_sha256
+                 task_definition_contract_sha256 = [string]$taskLocked.task_definition_contract_sha256
+                 task_action_contract_sha256 = [string]$taskLocked.task_action_contract_sha256
                 task_paths_unchanged = $true
                 task_enablement_restored = $false
                 scheduler_backup_name = [string]$taskBackup.backup_name
@@ -4045,6 +4121,11 @@ function Invoke-DawnstrikeRuntimeActivation {
                 -TimeoutSeconds $ProcessTimeoutSeconds `
                 -RequireRollbackCheckout
             $null = Assert-DawnstrikeCanonicalTaskSemantics -RuntimeRoot $runtime -StateRoot $state -AllowDisabled
+            Set-DawnstrikeCanonicalTaskExpectedSha `
+                -RuntimeRoot $runtime -StateRoot $state -ExpectedSha $ExpectedSha
+            $taskAfterDisabled = Get-DawnstrikeTaskContract $runtime $state -AllowDisabled
+            $null = Assert-DawnstrikeCanonicalTaskSemantics `
+                -RuntimeRoot $runtime -StateRoot $state -ExpectedSha $ExpectedSha -AllowDisabled
             # Seal terminal evidence and advance the journal before enabling
             # any canonical task. POST_SWAP_READY is the durable power-loss
             # boundary for the enablement sequence.
@@ -4076,9 +4157,16 @@ function Invoke-DawnstrikeRuntimeActivation {
             if ($TestStageCrashPoint -eq "after_ready_journal") { Stop-Process -Id $PID -Force }
             Enable-DawnstrikeCanonicalTasks
             $taskAfter = Get-DawnstrikeTaskContract $runtime $state
-            if ($taskAfter.task_contract_sha256 -ne $taskLocked.task_contract_sha256) {
-                throw "Task XML was not restored exactly after runtime activation."
-            }
+            $null = Assert-DawnstrikeCanonicalTaskSemantics -RuntimeRoot $runtime -StateRoot $state -ExpectedSha $ExpectedSha
+            # The pre-swap receipt fields describe the task contract that was
+            # backed up.  Once the externally activated SHA is rebound, seal
+            # the final receipt with the exact enabled action contract so an
+            # idempotent retry cannot mistake the legacy action for the live
+            # task identity.
+            $receiptPayload.task_count = [int]$taskAfter.task_count
+            $receiptPayload.task_contract_sha256 = [string]$taskAfter.task_contract_sha256
+            $receiptPayload.task_definition_contract_sha256 = [string]$taskAfter.task_definition_contract_sha256
+            $receiptPayload.task_action_contract_sha256 = [string]$taskAfter.task_action_contract_sha256
             $auxiliaryAfter = if ($stateDeclaration.required) {
                 Get-DawnstrikeAuxiliaryCaptureTask $runtime $state
             }
@@ -4153,13 +4241,14 @@ function Invoke-DawnstrikeRuntimeActivation {
                     $terminalReceipt = Invoke-DawnstrikeContractCli `
                         $pythonPath $runtime @("verify-receipt", "--receipt", $completeReceipt, "--expected-status", "COMPLETE") `
                         "Complete activation terminal reconciliation" $ProcessTimeoutSeconds
+                    $terminalTask = Get-DawnstrikeTaskContract $runtime $state
                     $null = Assert-DawnstrikeActivationCompleteTerminal `
                         -Journal $terminalJournal -Receipt $terminalReceipt -ReceiptPath $completeReceipt `
                         -CandidateRoot $candidate -RuntimeRoot $runtime -StateRoot $state -BackupRoot $backupRoot `
                         -GitPath $gitPath -PythonPath $pythonPath -TimeoutSeconds $ProcessTimeoutSeconds `
                         -ExpectedSha $ExpectedSha -ExpectedTree ([string]$candidateContract.tree) `
                         -OriginIdentity $lockOrigin -MarketDate $MarketDate -StateDeclaration $stateDeclaration `
-                        -ExpectedTask $taskLocked
+                        -ExpectedTask $terminalTask
                     return $terminalReceipt
                 }
                 catch {
@@ -4226,11 +4315,10 @@ function Invoke-DawnstrikeRuntimeActivation {
                             $auxiliaryDisabled = $false
                         }
                         $null = Assert-DawnstrikeCanonicalTaskSemantics -RuntimeRoot $runtime -StateRoot $state -AllowDisabled
+                        Set-DawnstrikeCanonicalTaskExpectedSha -RuntimeRoot $runtime -StateRoot $state -ExpectedSha ([string]$runtimeContract.head)
                         Enable-DawnstrikeCanonicalTasks
                         $restoredTasks = Get-DawnstrikeTaskContract $runtime $state
-                        if ($restoredTasks.task_contract_sha256 -ne $taskLocked.task_contract_sha256) {
-                            throw "Automatic restore did not recover exact task XML."
-                        }
+                        $null = Assert-DawnstrikeCanonicalTaskSemantics -RuntimeRoot $runtime -StateRoot $state -ExpectedSha ([string]$runtimeContract.head)
                         $tasksDisabled = $false
                     }
                 }

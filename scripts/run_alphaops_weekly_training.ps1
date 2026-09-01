@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$RuntimeRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")),
+    [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedSha,
     [string]$StateRoot = "C:\r\dawnstrike-state",
     [string]$MarketDate = (Get-Date).ToString("yyyy-MM-dd")
 )
@@ -13,13 +14,14 @@ $state = (Resolve-Path $StateRoot).Path
 . (Join-Path $PSScriptRoot "dawnstrike_process_runner.ps1")
 . (Join-Path $PSScriptRoot "invoke_dawnstrike_stage.ps1")
 Import-DawnstrikeEnvironment -StateRoot $state
+$null = Assert-DawnstrikeProcessSourceBoundToHead -ReleaseRoot $runtime -ExpectedSha $ExpectedSha -EntryScript $PSCommandPath
 
 $dbPath = Join-Path $state "shadow_real.sqlite"
 $outputRoot = Join-Path $state "outputs\alpha_v6_research"
 $logRoot = Join-Path $state "logs"
 New-Item -ItemType Directory -Path $outputRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
-$releaseSha = Resolve-DawnstrikeReleaseSha -RuntimeRoot $runtime -LogRoot $logRoot
+$releaseSha = Resolve-DawnstrikeReleaseSha -RuntimeRoot $runtime -LogRoot $logRoot -ExpectedSha $ExpectedSha
 $dailyLock = Enter-DawnstrikeDailyRunLock `
     -StateRoot $state `
     -MarketDate $MarketDate `

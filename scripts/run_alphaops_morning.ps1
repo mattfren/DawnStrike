@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$RuntimeRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")),
+    [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedSha,
     [string]$StateRoot = "C:\r\dawnstrike-state",
     [string]$MarketDate = (Get-Date).ToString("yyyy-MM-dd"),
     [string]$Notify = "telegram",
@@ -21,6 +22,7 @@ $paperOpsRoot = if ($PaperOpsRoot) { [System.IO.Path]::GetFullPath($PaperOpsRoot
 . (Join-Path $PSScriptRoot "invoke_dawnstrike_stage.ps1")
 . (Join-Path $PSScriptRoot "alpha_cycle_artifact.ps1")
 Import-DawnstrikeEnvironment -StateRoot $state
+$null = Assert-DawnstrikeProcessSourceBoundToHead -ReleaseRoot $runtime -ExpectedSha $ExpectedSha -EntryScript $PSCommandPath
 $dbPath = Join-Path $state "shadow_real.sqlite"
 $sourceConfigPath = Join-Path $state "config\web_sources.yaml"
 $outputRoot = Join-Path $state "outputs\alpha_cycle\$MarketDate"
@@ -31,7 +33,7 @@ if (-not $CoreUniverseManifest -and (Test-Path -LiteralPath $defaultCoreUniverse
 $logRoot = Join-Path $state "logs"
 New-Item -ItemType Directory -Path $outputRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
-$releaseSha = Resolve-DawnstrikeReleaseSha -RuntimeRoot $runtime -LogRoot $logRoot
+$releaseSha = Resolve-DawnstrikeReleaseSha -RuntimeRoot $runtime -LogRoot $logRoot -ExpectedSha $ExpectedSha
 $startedAt = (Get-Date).ToUniversalTime().ToString("o")
 $recordStageFailed = $false
 function Write-MorningStage {

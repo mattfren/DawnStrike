@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$RuntimeRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")),
+    [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedSha,
     [string]$StateRoot = "C:\r\dawnstrike-state",
     [string]$MarketDate = (Get-Date).ToString("yyyy-MM-dd"),
     [string]$Notify = "telegram"
@@ -16,6 +17,7 @@ $state = (Resolve-Path $StateRoot).Path
 . (Join-Path $PSScriptRoot "alpha_cycle_artifact.ps1")
 . (Join-Path $PSScriptRoot "monitor_schedule_helper.ps1")
 Import-DawnstrikeEnvironment -StateRoot $state
+$null = Assert-DawnstrikeProcessSourceBoundToHead -ReleaseRoot $runtime -ExpectedSha $ExpectedSha -EntryScript $PSCommandPath
 $dbPath = Join-Path $state "shadow_real.sqlite"
 $nowUtc = [DateTimeOffset]::UtcNow
 $cycleStart = Get-DawnstrikeMonitorCycleStartUtc -NowUtc $nowUtc -IntervalSeconds 300
@@ -23,7 +25,7 @@ $cycleId = $cycleStart.ToString("yyyyMMdd'T'HHmm'Z'")
 $observationBundlePath = Join-Path $state ("price_observation_bundles\price-$cycleId.json")
 $logRoot = Join-Path $state "logs"
 New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
-$releaseSha = Resolve-DawnstrikeReleaseSha -RuntimeRoot $runtime -LogRoot $logRoot
+$releaseSha = Resolve-DawnstrikeReleaseSha -RuntimeRoot $runtime -LogRoot $logRoot -ExpectedSha $ExpectedSha
 $startedAt = (Get-Date).ToUniversalTime().ToString("o")
 $exitCode = 0
 $errorCode = ""

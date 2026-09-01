@@ -369,7 +369,7 @@ function Get-ScheduledTask {{
     $badAction = $global:MockMode -eq 'bad_action' -and
         $TaskName -in @('Dawnstrike AlphaOps Morning', 'Dawnstrike AlphaOps Monitor 5m')
     $actions = @([pscustomobject]@{{
-        Execute = if ($badAction) {{ 'cmd.exe' }} else {{ 'powershell.exe' }}
+        Execute = if ($badAction) {{ 'cmd.exe' }} else {{ $script:DawnstrikePowerShellExecutable }}
         Arguments = $policy.arguments
         WorkingDirectory = 'C:\runtime'
     }})
@@ -2191,6 +2191,7 @@ def test_disposable_activation_and_rollback_preserve_exact_runtime_and_state(
 $global:MockRuntime = '{values["runtime"]}'
 $global:MockState = '{values["state"]}'
 $global:MockTaskStates = @{{}}
+$global:MockTaskExpectedSha = @{{}}
 $global:TaskEvents = @()
 foreach ($name in $script:DawnstrikeCanonicalTaskNames) {{
     $global:MockTaskStates[$name] = 'Ready'
@@ -2198,7 +2199,12 @@ foreach ($name in $script:DawnstrikeCanonicalTaskNames) {{
     function Get-ScheduledTask {{
         [CmdletBinding()] param([string]$TaskName)
         if ($TaskName -eq 'Dawnstrike Delayed SIP Capture') {{ return @() }}
-        $policy = Get-DawnstrikeCanonicalTaskPolicy $TaskName $global:MockRuntime $global:MockState
+        $boundSha = [string]$global:MockTaskExpectedSha[$TaskName]
+        $policy = if ($boundSha) {{
+            Get-DawnstrikeCanonicalTaskPolicy $TaskName $global:MockRuntime $global:MockState $boundSha
+        }} else {{
+            Get-DawnstrikeCanonicalTaskPolicy $TaskName $global:MockRuntime $global:MockState
+        }}
         $triggerType = if ($policy.weekly) {{
             'MSFT_TaskWeeklyTrigger'
         }} else {{ 'MSFT_TaskDailyTrigger' }}
@@ -2213,8 +2219,8 @@ foreach ($name in $script:DawnstrikeCanonicalTaskNames) {{
         [pscustomobject]@{{
             State=$global:MockTaskStates[$TaskName]; TaskPath='\';
             Actions=@([pscustomobject]@{{
-                Execute='powershell.exe';
-                Arguments=$policy.arguments;
+                    Execute=$script:DawnstrikePowerShellExecutable;
+                    Arguments=$policy.arguments;
                 WorkingDirectory=$global:MockRuntime
             }});
             Triggers=@([pscustomobject]@{{
@@ -2263,6 +2269,17 @@ function Enable-ScheduledTask {{
     [CmdletBinding()] param([string]$TaskName,[string]$TaskPath)
     $global:MockTaskStates[$TaskName] = 'Ready'
     $global:TaskEvents += ('enable:' + $TaskName)
+    [pscustomobject]@{{ TaskName=$TaskName }}
+}}
+function New-ScheduledTaskAction {{
+    [CmdletBinding()] param([string]$Execute,[string]$Argument,[string]$WorkingDirectory)
+    [pscustomobject]@{{ Execute=$Execute; Arguments=$Argument; WorkingDirectory=$WorkingDirectory }}
+}}
+function Set-ScheduledTask {{
+    [CmdletBinding()] param([string]$TaskName,[string]$TaskPath,$Action)
+    $match = [regex]::Match([string](@($Action)[0].Arguments), '-ExpectedSha "([0-9a-f]{{40}})"')
+    if (-not $match.Success) {{ throw 'mock task action did not carry an exact expected SHA' }}
+    $global:MockTaskExpectedSha[$TaskName] = $match.Groups[1].Value
     [pscustomobject]@{{ TaskName=$TaskName }}
 }}
 $activated = Invoke-DawnstrikeRuntimeActivation `
