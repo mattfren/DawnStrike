@@ -13,7 +13,7 @@ param(
     [pscredential]$RunAsCredential,
     [switch]$PreflightOnly,
     [switch]$InjectCrashBetweenRuntimeRenames,
-    [ValidateSet("", "after_stage_directory", "after_stage_checkout")][string]$TestStageCrashPoint = ""
+    [ValidateSet("", "after_stage_directory", "after_stage_checkout", "after_init_recovery_lock_release", "after_pre_quiesce_recovery_lock_release", "after_candidate_runtime_rename")][string]$TestStageCrashPoint = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -1871,7 +1871,7 @@ function Invoke-DawnstrikeRuntimeActivation {
         [pscredential]$RunAsCredential,
         [switch]$PreflightOnly,
         [switch]$InjectCrashBetweenRuntimeRenames,
-        [ValidateSet("", "after_stage_directory", "after_stage_checkout")][string]$TestStageCrashPoint = ""
+        [ValidateSet("", "after_stage_directory", "after_stage_checkout", "after_init_recovery_lock_release", "after_pre_quiesce_recovery_lock_release", "after_candidate_runtime_rename")][string]$TestStageCrashPoint = ""
     )
 
     if ($TestStageCrashPoint -ne "" -and $env:DAWNSTRIKE_TEST_ACTIVATION_STAGE_CRASH -ne "1") {
@@ -2138,6 +2138,62 @@ function Invoke-DawnstrikeRuntimeActivation {
     Assert-DawnstrikeSameVolume @($runtime, $stage, $rollbackCheckout)
     $lockInterpreter = Get-DawnstrikeApprovedLockInterpreter
 
+    # Recovery cleanup releases the governed locks before deleting its durable
+    # journal.  A hard kill in that narrow interval therefore leaves a strict,
+    # owner-bound PRE_QUIESCE tombstone rather than an unrecoverable bare lock.
+    # Accept that tombstone only after proving the owner dead, every candidate
+    # artifact absent, and the exact previous runtime/task contracts unchanged.
+    $activationLockPath = Join-Path $state "locks\dawnstrike-runtime-activation.lock"
+    if (
+        (Test-Path -LiteralPath $operationJournal -PathType Leaf) -and
+        -not (Test-Path -LiteralPath $preparedReceipt) -and
+        -not (Test-Path -LiteralPath $stage) -and
+        -not (Test-Path -LiteralPath $rollbackRoot) -and
+        -not (Test-Path -LiteralPath $schedulerBackupPath)
+    ) {
+        $restartJournal = Get-DawnstrikeStrictRuntimeOperationJournal $operationJournal $lockInterpreter.path $lockInterpreter.sha256
+        if ([string]$restartJournal.payload.phase -eq "PRE_QUIESCE") {
+            $restartLock = $null
+            if (Test-Path -LiteralPath $activationLockPath -PathType Leaf) {
+                $restartLock = Adopt-DawnstrikeGovernedRuntimeLockWithJournal `
+                    -StateRoot $state -JournalPath $operationJournal -CandidateSha $ExpectedSha `
+                    -CandidateTree ([string]$candidateContract.tree) `
+                    -OriginIdentity (Convert-DawnstrikeCanonicalOriginIdentity $origin) `
+                    -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
+                $restartJournal = Get-DawnstrikeStrictRuntimeOperationJournal $operationJournal $lockInterpreter.path $lockInterpreter.sha256
+            }
+            else {
+                $restartOwner = [pscustomobject]@{
+                    process_id = [int]$restartJournal.payload.init_owner_process_id
+                    process_started_at_utc = [string]$restartJournal.payload.init_owner_started_at_utc
+                }
+                if (-not (Test-DawnstrikeRuntimeLockOwnerDead $restartOwner)) {
+                    throw "Recovery tombstone owner is still active."
+                }
+            }
+            if (
+                [string]$restartJournal.payload.operation -ne "runtime_activation" -or
+                [string]$restartJournal.payload.candidate_sha -ne $ExpectedSha -or
+                [string]$restartJournal.payload.candidate_tree -ne [string]$candidateContract.tree -or
+                [string]$restartJournal.payload.current_sha -ne [string]$runtimeContract.head -or
+                [string]$restartJournal.payload.current_tree -ne [string]$runtimeContract.tree -or
+                [string]$restartJournal.payload.previous_sha -ne [string]$runtimeContract.head -or
+                [string]$restartJournal.payload.previous_tree -ne [string]$runtimeContract.tree -or
+                [string]$restartJournal.payload.task_contract_sha256 -ne [string]$taskBefore.task_contract_sha256
+            ) { throw "Recovery tombstone identity is invalid." }
+            $restartJournalHash = [string]$restartJournal.raw_file_sha256
+            if ((Get-DawnstrikeStrictRuntimeOperationJournal $operationJournal $lockInterpreter.path $lockInterpreter.sha256).raw_file_sha256 -ne $restartJournalHash) {
+                throw "Recovery tombstone changed during validation."
+            }
+            if ($null -ne $restartLock) {
+                Exit-DawnstrikeGovernedRuntimeLock $restartLock
+                if ($TestStageCrashPoint -eq "after_pre_quiesce_recovery_lock_release") { Stop-Process -Id $PID -Force }
+            }
+            Remove-Item -LiteralPath $operationJournal -Force
+            if (Test-Path -LiteralPath $operationJournal) { throw "Recovery tombstone cleanup failed." }
+        }
+    }
+
     if (Test-Path -LiteralPath $completeReceipt -PathType Leaf) {
         $existing = Invoke-DawnstrikeContractCli $pythonPath $candidate @("verify-receipt", "--receipt", $completeReceipt, "--expected-status", "COMPLETE") "Existing activation receipt verification" $ProcessTimeoutSeconds
         if (-not (Test-Path -LiteralPath $operationJournal -PathType Leaf)) {
@@ -2280,10 +2336,11 @@ function Invoke-DawnstrikeRuntimeActivation {
                 }
                 $recoveredDaily = Enter-DawnstrikeDailyRunLock -StateRoot $state -MarketDate $MarketDate -Owner "runtime_activation"
                 if ($recoveredDaily.acquired) { Exit-DawnstrikeDailyRunLock $recoveredDaily }
-                Remove-Item -LiteralPath $operationJournal -Force
-                if (Test-Path -LiteralPath $operationJournal) { throw "INIT recovery journal cleanup failed." }
                 Exit-DawnstrikeGovernedRuntimeLock $activationLock
                 $activationLock = $null
+                if ($TestStageCrashPoint -eq "after_init_recovery_lock_release") { Stop-Process -Id $PID -Force }
+                Remove-Item -LiteralPath $operationJournal -Force
+                if (Test-Path -LiteralPath $operationJournal) { throw "INIT recovery journal cleanup failed." }
                 return Invoke-DawnstrikeRuntimeActivation @PSBoundParameters
             }
             if ([string]$journal.payload.phase -eq "PRE_QUIESCE") {
@@ -2361,10 +2418,12 @@ function Invoke-DawnstrikeRuntimeActivation {
                         if (Test-Path -LiteralPath $candidateArtifact.path) { throw "PRE_QUIESCE candidate artifact quarantine failed." }
                     }
                 }
-                Remove-Item -LiteralPath $operationJournal -Force
                 Exit-DawnstrikeDailyRunLock $recoveryDaily
                 Exit-DawnstrikeGovernedRuntimeLock $activationLock
                 $activationLock = $null
+                if ($TestStageCrashPoint -eq "after_pre_quiesce_recovery_lock_release") { Stop-Process -Id $PID -Force }
+                Remove-Item -LiteralPath $operationJournal -Force
+                if (Test-Path -LiteralPath $operationJournal) { throw "PRE_QUIESCE recovery journal cleanup failed." }
                 return Invoke-DawnstrikeRuntimeActivation @PSBoundParameters
             }
             $prepared = Invoke-DawnstrikeContractCli $pythonPath $candidate @("verify-receipt", "--receipt", $preparedReceipt, "--expected-status", "PREPARED") "Prepared activation recovery receipt" $ProcessTimeoutSeconds
@@ -2386,6 +2445,21 @@ function Invoke-DawnstrikeRuntimeActivation {
                     $staged = Get-DawnstrikeGitContract $gitPath $stage $ProcessTimeoutSeconds $ExpectedSha
                     if ($staged.tree -ne [string]$candidateContract.tree) { throw "Recovery stage tree is invalid." }
                     [IO.Directory]::Move($stage,$runtime)
+                    if ($TestStageCrashPoint -eq "after_candidate_runtime_rename") { Stop-Process -Id $PID -Force }
+                    $runtimePresent=$true;$stagePresent=$false
+                } elseif ($runtimePresent -and $rollbackPresent -and -not $stagePresent) {
+                    # Deterministic hard-crash state after the second atomic
+                    # rename but before PRE_SWAP was advanced to POST_SWAP.
+                    $candidateRecovery = Get-DawnstrikeGitContract $gitPath $runtime $ProcessTimeoutSeconds $ExpectedSha
+                    $previousRecovery = Get-DawnstrikeGitContract $gitPath $rollbackCheckout $ProcessTimeoutSeconds ([string]$journal.payload.previous_sha)
+                    $candidateRecoveryOrigin = Convert-DawnstrikeCanonicalOriginIdentity (Get-DawnstrikeGitValue $gitPath $runtime @("remote", "get-url", "origin") "PRE_SWAP installed origin verification" $ProcessTimeoutSeconds)
+                    $previousRecoveryOrigin = Convert-DawnstrikeCanonicalOriginIdentity (Get-DawnstrikeGitValue $gitPath $rollbackCheckout @("remote", "get-url", "origin") "PRE_SWAP previous origin verification" $ProcessTimeoutSeconds)
+                    if (
+                        $candidateRecovery.tree -ne [string]$candidateContract.tree -or
+                        $previousRecovery.tree -ne [string]$journal.payload.previous_tree -or
+                        $candidateRecoveryOrigin -ne [string]$journal.payload.origin_identity -or
+                        $previousRecoveryOrigin -ne [string]$journal.payload.origin_identity
+                    ) { throw "PRE_SWAP installed/previous runtime identity is invalid." }
                 } else { throw "PRE_SWAP recovery filesystem state is ambiguous." }
                 $installed = Get-DawnstrikeGitContract $gitPath $runtime $ProcessTimeoutSeconds $ExpectedSha
                 $null = Set-DawnstrikeRuntimeOperationJournalPhase `

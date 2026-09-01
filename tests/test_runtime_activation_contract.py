@@ -823,6 +823,80 @@ def test_activation_seals_init_before_first_stage_filesystem_mutation() -> None:
     assert "Staging failure journal identity is invalid" in activation
 
 
+def test_activation_recovery_teardown_keeps_journal_until_locks_are_released() -> None:
+    activation = Path("scripts/activate_dawnstrike_runtime.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    init = activation.index('if ([string]$journal.payload.phase -eq "INIT")')
+    pre_quiesce = activation.index(
+        'if ([string]$journal.payload.phase -eq "PRE_QUIESCE")', init
+    )
+    init_release = activation.index(
+        "Exit-DawnstrikeGovernedRuntimeLock $activationLock", init, pre_quiesce
+    )
+    init_kill = activation.index(
+        'if ($TestStageCrashPoint -eq "after_init_recovery_lock_release")',
+        init_release,
+        pre_quiesce,
+    )
+    init_journal_remove = activation.index(
+        "Remove-Item -LiteralPath $operationJournal -Force", init_kill, pre_quiesce
+    )
+    assert init_release < init_kill < init_journal_remove
+
+    pre_swap = activation.index(
+        'if ([string]$journal.payload.phase -eq "PRE_SWAP")', pre_quiesce
+    )
+    daily_release = activation.index(
+        "Exit-DawnstrikeDailyRunLock $recoveryDaily", pre_quiesce, pre_swap
+    )
+    activation_release = activation.index(
+        "Exit-DawnstrikeGovernedRuntimeLock $activationLock", daily_release, pre_swap
+    )
+    quiesce_kill = activation.index(
+        'if ($TestStageCrashPoint -eq "after_pre_quiesce_recovery_lock_release")',
+        activation_release,
+        pre_swap,
+    )
+    quiesce_journal_remove = activation.index(
+        "Remove-Item -LiteralPath $operationJournal -Force",
+        quiesce_kill,
+        pre_swap,
+    )
+    assert daily_release < activation_release < quiesce_kill < quiesce_journal_remove
+    assert "Recovery tombstone owner is still active" in activation
+    assert "Recovery tombstone changed during validation" in activation
+
+
+def test_activation_pre_swap_recovers_exact_post_second_rename_state() -> None:
+    activation = Path("scripts/activate_dawnstrike_runtime.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    recovery = activation.index(
+        'if ([string]$journal.payload.phase -eq "PRE_SWAP")'
+    )
+    installed_case = activation.index(
+        "elseif ($runtimePresent -and $rollbackPresent -and -not $stagePresent)",
+        recovery,
+    )
+    candidate_proof = activation.index(
+        "$candidateRecovery = Get-DawnstrikeGitContract", installed_case
+    )
+    previous_proof = activation.index(
+        "$previousRecovery = Get-DawnstrikeGitContract", candidate_proof
+    )
+    candidate_origin = activation.index(
+        "$candidateRecoveryOrigin = Convert-DawnstrikeCanonicalOriginIdentity",
+        previous_proof,
+    )
+    transition = activation.index("-Operation runtime_activation -Phase POST_SWAP", installed_case)
+    assert installed_case < candidate_proof < previous_proof < candidate_origin < transition
+    assert 'if ($TestStageCrashPoint -eq "after_candidate_runtime_rename")' in activation
+    assert "PRE_SWAP installed/previous runtime identity is invalid" in activation
+
+
 @pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
 def test_task_contract_requires_exact_ready_or_explicit_disabled(tmp_path: Path) -> None:
     script = Path("scripts/activate_dawnstrike_runtime.ps1").resolve()
