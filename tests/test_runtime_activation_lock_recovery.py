@@ -333,3 +333,55 @@ $lock|ConvertTo-Json -Compress
     # The standalone recovery process exits after returning, but the lock must
     # have been minted by that third process rather than either crashed child.
     assert lock_payload["lock_token"] == recovered_handle["token"]
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="PowerShell unavailable")
+def test_operation_journal_enforces_adjacent_owned_transitions(tmp_path: Path) -> None:
+    state_q = str(tmp_path / "state").replace("'", "''")
+    module = str(PS.resolve()).replace("'", "''")
+    command = rf"""
+. '{module}'
+$approved=Get-DawnstrikeApprovedLockInterpreter
+$origin='github.com/mattfren/dawnstrike';$empty=Get-DawnstrikeSharedLockSha256Text ''
+$lock=Enter-DawnstrikeGovernedRuntimeLock -StateRoot '{state_q}' `
+ -Operation runtime_activation -CandidateSha ('a'*40) -CandidateTree ('b'*40) `
+ -OriginIdentity $origin -PythonPath $approved.path -PythonSha256 $approved.sha256
+$journal=Join-Path '{state_q}' 'receipts\runtime-operation\activation.json'
+$common=@{{StateRoot='{state_q}';JournalPath=$journal;Lock=$lock;Operation='runtime_activation';
+ CandidateSha=('a'*40);CandidateTree=('b'*40);CurrentSha=('c'*40);CurrentTree=('d'*40);
+ PreviousSha=('e'*40);PreviousTree=('f'*40);OriginIdentity=$origin;
+ ReceiptRelativePath='receipts/runtime-activation/result.json';TaskContractSha256=('5'*64);
+ PythonPath=$approved.path;PythonSha256=$approved.sha256}}
+$null=Set-DawnstrikeRuntimeOperationJournalPhase @common -Phase INIT `
+ -ReceiptSha256 $empty -BackupContractSha256 $empty -RuntimeStageContractSha256 $empty
+$skip=$false
+try{{$null=Set-DawnstrikeRuntimeOperationJournalPhase @common -Phase POST_SWAP `
+ -ReceiptSha256 ('1'*64) -BackupContractSha256 ('2'*64) `
+ -RuntimeStageContractSha256 ('3'*64)}}catch{{$skip=$true}}
+$cross=$false;$bad=@{{}}+$common;$bad.Operation='runtime_rollback'
+try{{$null=Set-DawnstrikeRuntimeOperationJournalPhase @bad -Phase PRE_SWAP `
+ -ReceiptSha256 ('1'*64) -BackupContractSha256 ('2'*64) `
+ -RuntimeStageContractSha256 ('3'*64)}}catch{{$cross=$true}}
+$fake=[pscustomobject]@{{path=$lock.path;token=('0'*32);bytes_sha256=$lock.bytes_sha256}}
+$mismatch=$false;$badLock=@{{}}+$common;$badLock.Lock=$fake
+try{{$null=Set-DawnstrikeRuntimeOperationJournalPhase @badLock -Phase PRE_SWAP `
+ -ReceiptSha256 ('1'*64) -BackupContractSha256 ('2'*64) `
+ -RuntimeStageContractSha256 ('3'*64)}}catch{{$mismatch=$true}}
+$null=Set-DawnstrikeRuntimeOperationJournalPhase @common -Phase PRE_SWAP `
+ -ReceiptSha256 ('1'*64) -BackupContractSha256 ('2'*64) -RuntimeStageContractSha256 ('3'*64)
+$raw=[IO.File]::ReadAllText($journal)
+[IO.File]::WriteAllText($journal,$raw.Replace(('1'*64),('9'*64)))
+$tamper=$false
+try{{$null=Set-DawnstrikeRuntimeOperationJournalPhase @common -Phase POST_SWAP `
+ -ReceiptSha256 ('1'*64) -BackupContractSha256 ('2'*64) `
+ -RuntimeStageContractSha256 ('3'*64)}}catch{{$tamper=$true}}
+if(-not($skip-and$cross-and$mismatch-and$tamper)){{throw 'hostile transition accepted'}}
+Exit-DawnstrikeGovernedRuntimeLock $lock
+'OK'
+"""
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+        text=True, capture_output=True, check=False, timeout=60,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert "OK" in result.stdout

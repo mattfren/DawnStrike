@@ -100,14 +100,18 @@ def validate(raw: bytes) -> dict[str, Any]:
     if value["sequence"] != phases.index(value["phase"]):
         raise ValueError("journal phase sequence is invalid")
     empty = hashlib.sha256(b"").hexdigest()
-    if value["phase"] == "INIT" and any(
-        value[key] != empty
-        for key in (
-            "receipt_sha256", "backup_contract_sha256",
-            "runtime_stage_contract_sha256",
-        )
-    ):
-        raise ValueError("INIT journal carries non-sentinel artifact hashes")
+    receipt = value["receipt_sha256"]
+    backup = value["backup_contract_sha256"]
+    stage = value["runtime_stage_contract_sha256"]
+    if value["phase"] == "INIT":
+        if any(item != empty for item in (receipt, backup, stage)):
+            raise ValueError("INIT journal carries non-sentinel artifact hashes")
+    else:
+        if receipt == empty or backup == empty:
+            raise ValueError("mutation phase lacks receipt or backup proof")
+        runtime_operation = operation in {"runtime_activation", "runtime_rollback"}
+        if runtime_operation != (stage != empty):
+            raise ValueError("runtime stage proof sentinel is invalid")
     for key in ("candidate_sha", "candidate_tree", "current_sha", "current_tree",
                 "previous_sha", "previous_tree"):
         if not isinstance(value[key], str) or not HEX40.fullmatch(value[key]):
@@ -227,6 +231,42 @@ def seal(source: Path, target: Path) -> dict[str, Any]:
     return {"payload": value, "raw_file_sha256": hashlib.sha256(raw).hexdigest()}
 
 
+def transition(source: Path, target: Path, previous: Path | None) -> dict[str, Any]:
+    candidate = json.loads(_read_regular(source).decode("utf-8"), object_pairs_hook=_pairs)
+    if not isinstance(candidate, dict):
+        raise ValueError("journal transition input must be an object")
+    phase = candidate.get("phase")
+    operation = candidate.get("operation")
+    if operation not in OPERATIONS or phase not in PHASES[operation]:
+        raise ValueError("journal transition operation or phase is invalid")
+    if phase == "INIT":
+        if previous is not None or target.exists():
+            raise ValueError("INIT transition requires no prior journal")
+        empty = hashlib.sha256(b"").hexdigest()
+        if candidate.get("prior_journal_file_sha256") != empty:
+            raise ValueError("INIT transition prior hash is not empty")
+    else:
+        if previous is None or previous != target:
+            raise ValueError("non-INIT transition must replace its exact journal")
+        prior_raw = _read_regular(previous)
+        prior = validate(prior_raw)
+        expected_index = PHASES[operation].index(phase) - 1
+        if expected_index < 0 or prior["phase"] != PHASES[operation][expected_index]:
+            raise ValueError("journal transition is not adjacent")
+        if candidate.get("prior_journal_file_sha256") != hashlib.sha256(prior_raw).hexdigest():
+            raise ValueError("journal prior raw hash mismatch")
+        immutable = {
+            "operation", "candidate_sha", "candidate_tree", "current_sha",
+            "current_tree", "previous_sha", "previous_tree", "origin_identity",
+            "origin_identity_sha256", "state_root_sha256",
+            "receipt_relative_path", "research_only", "broker_execution_enabled",
+        }
+        for key in immutable:
+            if candidate.get(key) != prior[key]:
+                raise ValueError(f"journal immutable field changed: {key}")
+    return seal(source, target)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
@@ -237,15 +277,26 @@ def main() -> int:
     seal_parser.add_argument("input", type=Path)
     seal_parser.add_argument("output", type=Path)
     seal_parser.add_argument("--state-root", required=True, type=Path)
+    transition_parser = sub.add_parser("transition")
+    transition_parser.add_argument("input", type=Path)
+    transition_parser.add_argument("output", type=Path)
+    transition_parser.add_argument("--previous", type=Path)
+    transition_parser.add_argument("--state-root", required=True, type=Path)
     args = parser.parse_args()
     if args.command == "verify":
         _contained(args.path, args.state_root)
         raw = _read_regular(args.path)
         result = {"payload": validate(raw), "raw_file_sha256": hashlib.sha256(raw).hexdigest()}
-    else:
+    elif args.command == "seal":
         _contained(args.input, args.state_root)
         _contained(args.output, args.state_root)
         result = seal(args.input, args.output)
+    else:
+        _contained(args.input, args.state_root)
+        _contained(args.output, args.state_root)
+        if args.previous is not None:
+            _contained(args.previous, args.state_root)
+        result = transition(args.input, args.output, args.previous)
     print(json.dumps(result, separators=(",", ":")))
     return 0
 
