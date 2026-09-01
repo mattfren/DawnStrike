@@ -27,7 +27,14 @@ PHASES = {
         "INIT", "PRE_QUIESCE", "PRE_SWAP", "POST_SWAP", "POST_SWAP_READY", "COMPLETE", "COMPENSATED"
     ),
     "capture_task_rebind": ("INIT", "PRE_ENABLE", "POST_ENABLE", "COMPLETE", "COMPENSATED"),
-    "runtime_rollback": ("INIT", "PRE_SWAP", "POST_SWAP", "POST_SWAP_READY", "COMPLETE", "COMPENSATED"),
+    "runtime_rollback": (
+        "INIT",
+        "PRE_SWAP",
+        "POST_SWAP",
+        "POST_SWAP_READY",
+        "COMPLETE",
+        "COMPENSATED",
+    ),
     "capture_task_hardening": (
         "INIT", "PRE_TASK_UPDATE", "POST_TASK_UPDATE", "COMPLETE", "COMPENSATED"
     ),
@@ -191,7 +198,12 @@ def validate(raw: bytes) -> dict[str, Any]:
         # durable intermediate phase is the recovery boundary for a power loss
         # while tasks are being re-enabled: a Ready task set can never exist
         # without an exact receipt/journal pair to finish the commit.
-        if prepared_receipt == empty or complete_receipt == empty or backup == empty or stage == empty:
+        if (
+            prepared_receipt == empty
+            or complete_receipt == empty
+            or backup == empty
+            or stage == empty
+        ):
             raise ValueError("POST_SWAP_READY journal artifact proof is invalid")
     else:
         if prepared_receipt == empty or backup == empty:

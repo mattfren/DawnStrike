@@ -20,7 +20,13 @@ EMPTY = hashlib.sha256(b"").hexdigest()
 def _payload(operation: str = "runtime_activation", phase: str = "INIT") -> dict:
     phases = {
         "runtime_activation": (
-            "INIT", "PRE_QUIESCE", "PRE_SWAP", "POST_SWAP", "POST_SWAP_READY", "COMPLETE", "COMPENSATED"
+            "INIT",
+            "PRE_QUIESCE",
+            "PRE_SWAP",
+            "POST_SWAP",
+            "POST_SWAP_READY",
+            "COMPLETE",
+            "COMPENSATED",
         ),
         "capture_task_rebind": ("INIT", "PRE_ENABLE", "POST_ENABLE", "COMPLETE", "COMPENSATED"),
         "runtime_rollback": (
