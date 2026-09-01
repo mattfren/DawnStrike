@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 CAPTURE_TASK_RECEIPT_SCHEMA = "dawnstrike.capture_task_rebind_receipt.v1"
+CAPTURE_TASK_RECEIPT_SCHEMA_ATTESTED = "dawnstrike.capture_task_rebind_receipt.v2"
 CAPTURE_TASK_PREPARED_SCHEMA = "dawnstrike.capture_task_rebind_prepared.v1"
 CAPTURE_TASK_NAME = "Dawnstrike Delayed SIP Capture"
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -44,9 +45,7 @@ def _assert_no_reparse_components(path: str | Path) -> Path:
         # symlink check keeps a hostile/broken reparse component from being
         # mistaken for a missing ordinary path.
         if (os.path.lexists(current) or current.is_symlink()) and _is_reparse_point(current):
-            raise CaptureTaskContractError(
-                f"reparse-point path component is forbidden: {current}"
-            )
+            raise CaptureTaskContractError(f"reparse-point path component is forbidden: {current}")
     return absolute
 
 
@@ -152,6 +151,19 @@ def validate_receipt(
         "broker_execution_enabled",
         "receipt_sha256",
     }
+    attested = {
+        "hardening_receipt_relative_path",
+        "hardening_receipt_raw_sha256",
+        "hardening_receipt_sha256",
+        "hardening_xml_sha256",
+        "hardening_action_sha256",
+        "hardening_principal_sha256",
+        "hardening_trigger_sha256",
+        "hardening_settings_sha256",
+    }
+    schema = payload.get("schema_version")
+    if schema == CAPTURE_TASK_RECEIPT_SCHEMA_ATTESTED:
+        expected |= attested
     if set(payload) != expected:
         raise CaptureTaskContractError(
             "capture-task receipt fields do not match the strict contract"
@@ -159,7 +171,7 @@ def validate_receipt(
     if payload.get("receipt_sha256") != self_hash(payload, "receipt_sha256"):
         raise CaptureTaskContractError("capture-task receipt self-hash mismatch")
     if (
-        payload.get("schema_version") != CAPTURE_TASK_RECEIPT_SCHEMA
+        schema not in {CAPTURE_TASK_RECEIPT_SCHEMA, CAPTURE_TASK_RECEIPT_SCHEMA_ATTESTED}
         or payload.get("status") != "COMPLETE"
     ):
         raise CaptureTaskContractError("capture-task receipt is not COMPLETE")
@@ -178,6 +190,26 @@ def validate_receipt(
         raise CaptureTaskContractError("capture-task candidate SHA mismatch")
     if candidate_tree is not None and payload.get("candidate_tree") != candidate_tree:
         raise CaptureTaskContractError("capture-task candidate tree mismatch")
+    if schema == CAPTURE_TASK_RECEIPT_SCHEMA_ATTESTED:
+        relative = payload.get("hardening_receipt_relative_path")
+        if (
+            not isinstance(relative, str)
+            or not relative
+            or os.path.isabs(relative)
+            or ".." in Path(relative).parts
+        ):
+            raise CaptureTaskContractError("capture-task hardening receipt path is invalid")
+        for field in (
+            "hardening_receipt_raw_sha256",
+            "hardening_receipt_sha256",
+            "hardening_xml_sha256",
+            "hardening_action_sha256",
+            "hardening_principal_sha256",
+            "hardening_trigger_sha256",
+            "hardening_settings_sha256",
+        ):
+            if not _SHA256.fullmatch(str(payload.get(field) or "")):
+                raise CaptureTaskContractError(f"capture-task {field} is invalid")
     for field in (
         "runtime_origin_sha256",
         "activation_receipt_sha256",
