@@ -1901,14 +1901,56 @@ def test_scheduler_doctor_preserves_case_sensitive_publication_identity(
 
     assert result["status"] == "BLOCKED_EXTERNAL"
     assert result["failed_task_count"] == 1
-    checked = next(
-        row
-        for row in result["scheduled_tasks"]
-        if row["name"] == scheduler_service.CANONICAL_TASK_NAME
+
+
+def test_canonical_action_contract_rejects_comment_extra_and_reordered_manifest() -> None:
+    rows = {
+        name: {
+            "name": name,
+            "task_path": "\\",
+            "execute": scheduler_service.EXPECTED_TASK_EXECUTABLE,
+            "arguments": f"exact-{index}",
+            "working_directory": r"C:\r\dawnstrike-runtime",
+        }
+        for index, name in enumerate(scheduler_service.EXPECTED_TASKS)
+    }
+    sealed = scheduler_service._canonical_task_action_contract(rows)
+    assert sealed is not None
+
+    commented = {name: dict(row) for name, row in rows.items()}
+    first = next(iter(scheduler_service.EXPECTED_TASKS))
+    commented[first]["arguments"] += "; # exact markers remain"
+    assert scheduler_service._canonical_task_action_contract(commented) != sealed
+
+    extra = {name: dict(row) for name, row in rows.items()}
+    extra[first]["arguments"] += "; Write-Output hostile"
+    assert scheduler_service._canonical_task_action_contract(extra) != sealed
+
+    reordered = {name: dict(rows[name]) for name in reversed(scheduler_service.EXPECTED_TASKS)}
+    assert scheduler_service._canonical_task_action_contract(reordered) == sealed
+    reordered[first]["arguments"] = "foreign-manifest"
+    assert scheduler_service._canonical_task_action_contract(reordered) != sealed
+
+
+def test_scheduled_guard_requires_exact_anchored_single_line_prefix(tmp_path: Path) -> None:
+    runner = tmp_path / "run.ps1"
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    markers = (
+        f"-NoProfile -ExecutionPolicy Bypass -Command scheduled launch manifest "
+        f"{runner} {runtime} {state} {'a' * 40} -LaunchManifestPath "
+        f"{state}\\receipts\\scheduler-launch\\x.json -LaunchManifestSha256 "
+        "[IO.File]::Open [IO.FileShare]::Read SHA256"
     )
-    assert checked["action_arguments_match"] is False
-
-
+    kwargs = {
+        "expected_runner": runner,
+        "runtime_root": runtime,
+        "state_root": state,
+        "expected_sha": "a" * 40,
+    }
+    assert scheduler_service._scheduled_guard_action_matches(markers, **kwargs)
+    assert not scheduler_service._scheduled_guard_action_matches(f"# spoof {markers}", **kwargs)
+    assert not scheduler_service._scheduled_guard_action_matches(markers + "\nextra", **kwargs)
 @pytest.mark.parametrize(
     ("task_name", "field", "value", "match_field"),
     [

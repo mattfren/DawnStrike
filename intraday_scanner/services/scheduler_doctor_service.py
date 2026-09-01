@@ -179,6 +179,9 @@ def scheduler_doctor(
     task_rows = _normalize_task_rows(queried)
     observation_date = datetime.now(SCHEDULE_TIMEZONE).date()
     activation_completed_at = _load_exact_activation_completion(runtime, state)
+    expected_action_contract = _load_exact_activation_action_contract(
+        runtime, state, runtime_identity_before
+    )
     by_name: dict[str, dict[str, Any]] = {}
     for row in task_rows:
         name = str(row.get("name") or "")
@@ -223,6 +226,26 @@ def scheduler_doctor(
         )
     for check in checks:
         check["principal_identity_matches"] = principal_identity_matches
+    observed_action_contract = _canonical_task_action_contract(by_name)
+    guarded_actions_present = any(
+        _scheduled_guard_action_matches(
+            str(by_name.get(name, {}).get("arguments") or ""),
+            expected_runner=runtime / "scripts" / script,
+            runtime_root=runtime,
+            state_root=state,
+            expected_sha=expected_runtime_sha,
+        )
+        for name, script in EXPECTED_TASKS.items()
+    )
+    action_contract_matches = not guarded_actions_present or (
+        expected_action_contract is not None
+        and observed_action_contract == expected_action_contract
+    )
+    for check in checks:
+        if check.get("name") in EXPECTED_TASKS:
+            check["task_action_contract_matches"] = action_contract_matches
+            if not action_contract_matches:
+                check["status"] = "FAILED"
     auxiliary_unexpected = _auxiliary_unexpected_rows(auxiliary_rows, auxiliary_check)
     unexpected_enabled = [
         row
@@ -1485,6 +1508,10 @@ def _scheduled_guard_action_matches(
 ) -> bool:
     """Recognize the immutable inline task guard without executing its text."""
 
+    if not arguments.startswith("-NoProfile -ExecutionPolicy Bypass -Command "):
+        return False
+    if "\r" in arguments or "\n" in arguments or arguments.rstrip() != arguments:
+        return False
     normalized = arguments.casefold()
     required = (
         "-command",
@@ -1507,6 +1534,48 @@ def _scheduled_guard_action_matches(
         return False
     manifest_prefix = str(state_root).casefold().rstrip("\\/") + "\\receipts\\scheduler-launch\\"
     return manifest_prefix in normalized
+
+
+def _canonical_task_action_contract(rows: dict[str, dict[str, Any]]) -> str | None:
+    records: list[str] = []
+    for task_name in EXPECTED_TASKS:
+        row = rows.get(task_name)
+        if row is None or str(row.get("task_path") or "") != "\\":
+            return None
+        values = [row.get(field) for field in ("execute", "arguments", "working_directory")]
+        if any(not isinstance(value, str) for value in values):
+            return None
+        action_text = "|".join(values)
+        records.append(f"{task_name}\0\\\0{action_text}\n")
+    return hashlib.sha256("".join(records).encode()).hexdigest()
+
+
+def _load_exact_activation_action_contract(
+    runtime: Path, state: Path, contract: dict[str, str] | None
+) -> str | None:
+    if contract is None:
+        return None
+    try:
+        from scripts.runtime_activation_contract import load_receipt
+
+        matches: list[str] = []
+        receipt_root = state / "receipts" / "runtime-activation"
+        for path in sorted(receipt_root.glob("runtime-activation-*.json")):
+            if re.fullmatch(r"runtime-activation-[0-9a-f]{24}\.json", path.name) is None:
+                continue
+            payload = load_receipt(path)
+            value = str(payload.get("task_action_contract_sha256") or "")
+            if (
+                payload.get("status") == "COMPLETE"
+                and payload.get("candidate_sha") == contract["candidate_sha"]
+                and payload.get("candidate_tree") == contract["candidate_tree"]
+                and payload.get("runtime_origin_sha256") == contract["runtime_origin_sha256"]
+                and re.fullmatch(r"[0-9a-f]{64}", value)
+            ):
+                matches.append(value)
+        return matches[0] if len(matches) == 1 else None
+    except (ImportError, OSError, TypeError, ValueError):
+        return None
 
 
 def _optional_int_matches(value: Any, expected: int | None) -> bool:
