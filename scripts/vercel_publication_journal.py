@@ -9,6 +9,7 @@ import os
 import re
 import stat
 import tempfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -28,14 +29,18 @@ KEYS = {
     "sequence",
     "project_id",
     "project_name",
+    "provider_scope",
     "production_aliases",
     "candidate_preview_url",
     "candidate_preview_deployment_id",
     "candidate_source_sha",
     "candidate_source_tree",
+    "toolchain_identity_sha256",
     "candidate_market_date",
     "candidate_build_id",
     "candidate_build_sha",
+    "candidate_build_manifest_sha256",
+    "candidate_release_manifest_sha256",
     "candidate_manifest_sha256",
     "candidate_package_manifest_sha256",
     "prior_aliases",
@@ -144,8 +149,80 @@ def _result_authorization(value: Any, expected_market_date: str) -> None:
         raise ValueError("production result expected market date mismatch")
 
 
+def _artifact_proofs(
+    result: dict[str, Any], *, preview_url: str, aliases: list[str], build_sha: str
+) -> None:
+    keys = {"endpoint", "build_sha", "asset_count", "total_bytes", "file_hashes_sha256"}
+
+    def check(proof: Any, endpoint: str) -> tuple[str, int, int, str]:
+        if not isinstance(proof, dict) or set(proof) != keys:
+            raise ValueError("governed artifact proof keys are not exact")
+        if proof["endpoint"] != endpoint.rstrip("/") or proof["build_sha"] != build_sha:
+            raise ValueError("governed artifact proof identity mismatch")
+        if type(proof["asset_count"]) is not int or not 1 <= proof["asset_count"] <= 256:
+            raise ValueError("governed artifact proof count is invalid")
+        if type(proof["total_bytes"]) is not int or not 0 <= proof["total_bytes"] <= 134_217_728:
+            raise ValueError("governed artifact proof byte count is invalid")
+        _hash(proof["file_hashes_sha256"], "file_hashes_sha256")
+        return (
+            str(proof["build_sha"]),
+            int(proof["asset_count"]),
+            int(proof["total_bytes"]),
+            str(proof["file_hashes_sha256"]),
+        )
+
+    expected_digest = check(result.get("preview_artifact_proof"), preview_url)
+    production = result.get("production_artifact_proofs")
+    if not isinstance(production, list) or len(production) != len(aliases):
+        raise ValueError("production governed artifact proofs are incomplete")
+    observed_endpoints = [
+        item.get("endpoint") if isinstance(item, dict) else None for item in production
+    ]
+    if observed_endpoints != aliases:
+        raise ValueError("production governed artifact proof aliases are not exact")
+    for proof, alias in zip(production, aliases, strict=True):
+        if check(proof, alias) != expected_digest:
+            raise ValueError("cross-alias governed artifact proof tuples diverge")
+
+
+ALIAS_KEYS = {
+    "alias",
+    "deployment_id",
+    "deployment_url",
+    "health_status",
+    "readiness_status",
+    "readiness_http_status",
+    "source_sha",
+    "source_tree",
+    "source_manifest_sha256",
+    "build_manifest_sha256",
+    "release_manifest_sha256",
+    "artifact_proof",
+}
+ARTIFACT_PROOF_KEYS = {
+    "endpoint",
+    "build_sha",
+    "asset_count",
+    "total_bytes",
+    "file_hashes_sha256",
+}
+
+
+def _single_artifact_proof(value: Any, endpoint: str) -> None:
+    if not isinstance(value, dict) or set(value) != ARTIFACT_PROOF_KEYS:
+        raise ValueError("governed artifact proof keys are not exact")
+    if value["endpoint"] != endpoint:
+        raise ValueError("governed artifact proof endpoint mismatch")
+    _hash(value["build_sha"], "artifact_proof.build_sha")
+    _hash(value["file_hashes_sha256"], "artifact_proof.file_hashes_sha256")
+    if type(value["asset_count"]) is not int or not 1 <= value["asset_count"] <= 256:
+        raise ValueError("governed artifact proof count is invalid")
+    if type(value["total_bytes"]) is not int or not 0 <= value["total_bytes"] <= 134_217_728:
+        raise ValueError("governed artifact proof byte count is invalid")
+
+
 def _alias(value: Any) -> None:
-    if not isinstance(value, dict) or set(value) != {"alias", "deployment_id", "deployment_url"}:
+    if not isinstance(value, dict) or set(value) != ALIAS_KEYS:
         raise ValueError("prior alias keys are not exact")
     if not isinstance(value["alias"], str) or not value["alias"].startswith("https://"):
         raise ValueError("prior alias is invalid")
@@ -153,6 +230,19 @@ def _alias(value: Any) -> None:
         raise ValueError("prior alias deployment ID is invalid")
     if not isinstance(value["deployment_url"], str) or not value["deployment_url"]:
         raise ValueError("prior alias deployment URL is invalid")
+    if value["health_status"] != "alive":
+        raise ValueError("prior alias health status is invalid")
+    if value["readiness_status"] != "ready" or value["readiness_http_status"] != 200:
+        raise ValueError("prior alias readiness status is invalid")
+    _identity(value["source_sha"], "prior alias source SHA")
+    _identity(value["source_tree"], "prior alias source tree")
+    for field in (
+        "source_manifest_sha256",
+        "build_manifest_sha256",
+        "release_manifest_sha256",
+    ):
+        _hash(value[field], f"prior alias {field}")
+    _single_artifact_proof(value["artifact_proof"], value["alias"])
 
 
 def _rollback_evidence(value: Any) -> None:
@@ -163,6 +253,15 @@ def _rollback_evidence(value: Any) -> None:
         "observed_deployment_id",
         "observed_deployment_url",
         "restored",
+        "health_status",
+        "readiness_status",
+        "readiness_http_status",
+        "source_sha",
+        "source_tree",
+        "source_manifest_sha256",
+        "build_manifest_sha256",
+        "release_manifest_sha256",
+        "artifact_proof",
     }
     if not isinstance(value, dict) or set(value) != keys:
         raise ValueError("rollback evidence keys are not exact")
@@ -176,6 +275,23 @@ def _rollback_evidence(value: Any) -> None:
             raise ValueError(f"rollback evidence {field} is invalid")
     if value["restored"] is not True:
         raise ValueError("rollback evidence is not restored")
+    if value["observed_deployment_id"] != value["expected_deployment_id"]:
+        raise ValueError("rollback evidence observed deployment mismatch")
+    if value["observed_deployment_url"] != value["expected_deployment_url"]:
+        raise ValueError("rollback evidence observed URL mismatch")
+    if value["health_status"] != "alive":
+        raise ValueError("rollback evidence health status is invalid")
+    if value["readiness_status"] != "ready" or value["readiness_http_status"] != 200:
+        raise ValueError("rollback evidence readiness status is invalid")
+    _identity(value["source_sha"], "rollback source SHA")
+    _identity(value["source_tree"], "rollback source tree")
+    for field in (
+        "source_manifest_sha256",
+        "build_manifest_sha256",
+        "release_manifest_sha256",
+    ):
+        _hash(value[field], f"rollback {field}")
+    _single_artifact_proof(value["artifact_proof"], value["alias"])
 
 
 def validate(
@@ -210,8 +326,11 @@ def validate(
         _identity(value[field], field)
     for field in (
         "candidate_build_sha",
+        "candidate_build_manifest_sha256",
+        "candidate_release_manifest_sha256",
         "candidate_manifest_sha256",
         "candidate_package_manifest_sha256",
+        "toolchain_identity_sha256",
         "production_result_sha256",
         "compensation_sha256",
         "journal_self_sha256",
@@ -221,6 +340,8 @@ def validate(
         raise ValueError("project ID is invalid")
     if not isinstance(value["project_name"], str) or not value["project_name"]:
         raise ValueError("project name is invalid")
+    if not isinstance(value["provider_scope"], str) or not value["provider_scope"]:
+        raise ValueError("provider scope is invalid")
     if (
         not isinstance(value["production_aliases"], list)
         or not value["production_aliases"]
@@ -300,6 +421,8 @@ def validate(
                 "promoted_deployment_url"
             ].startswith("https://"):
                 raise ValueError("promoted deployment URL is invalid")
+        if value["result_payload"] is not None or value["production_result_sha256"] != EMPTY_SHA256:
+            raise ValueError("COMPENSATED journal carries a success result")
     else:
         if (
             not isinstance(value["promoted_deployment_id"], str)
@@ -338,10 +461,18 @@ def validate(
             "build_id": value["candidate_build_id"],
             "build_sha": value["candidate_build_sha"],
             "project_id": value["project_id"],
+            "provider_scope": value["provider_scope"],
             "promoted_deployment_id": value["promoted_deployment_id"],
             "production_deployment_id": value["promoted_deployment_id"],
             "vercel_source_manifest_sha256": value["candidate_manifest_sha256"],
             "vercel_package_manifest_sha256": value["candidate_package_manifest_sha256"],
+            "authorized_build_manifest_sha256": value[
+                "candidate_build_manifest_sha256"
+            ],
+            "authorized_release_manifest_sha256": value[
+                "candidate_release_manifest_sha256"
+            ],
+            "toolchain_identity_sha256": value["toolchain_identity_sha256"],
             "allow_degraded": False,
             "promoted": True,
             "live_trading_enabled": False,
@@ -357,6 +488,16 @@ def validate(
         if type(result.get("promoted")) is not bool:
             raise ValueError("COMPLETE result promotion authorization is invalid")
         _result_authorization(result, value["candidate_market_date"])
+        _hash(result.get("build_manifest_sha256"), "build_manifest_sha256")
+        _hash(
+            result.get("authorized_build_manifest_sha256"),
+            "authorized_build_manifest_sha256",
+        )
+        _hash(
+            result.get("authorized_release_manifest_sha256"),
+            "authorized_release_manifest_sha256",
+        )
+        _hash(result.get("toolchain_identity_sha256"), "toolchain_identity_sha256")
         for field in (
             "expected_market_date",
             "prepublication_authorization_id",
@@ -367,6 +508,12 @@ def validate(
         for field, expected in bindings.items():
             if result.get(field) != expected:
                 raise ValueError(f"COMPLETE result identity mismatch: {field}")
+        _artifact_proofs(
+            result,
+            preview_url=value["candidate_preview_url"],
+            aliases=value["production_aliases"],
+            build_sha=value["candidate_build_sha"],
+        )
     if value["research_only"] is not True or value["broker_execution_enabled"] is not False:
         raise ValueError("journal safety boundary is invalid")
     _utc(value["recorded_at_utc"])
@@ -462,6 +609,19 @@ def validate_compensation(raw: bytes) -> dict[str, Any]:
             raise ValueError("compensation rollback expected deployment mismatch")
         if item["expected_deployment_url"] != prior["deployment_url"]:
             raise ValueError("compensation rollback expected URL mismatch")
+        for field in (
+            "health_status",
+            "readiness_status",
+            "readiness_http_status",
+            "source_sha",
+            "source_tree",
+            "source_manifest_sha256",
+            "build_manifest_sha256",
+            "release_manifest_sha256",
+            "artifact_proof",
+        ):
+            if item[field] != prior[field]:
+                raise ValueError(f"compensation rollback evidence mismatch: {field}")
     if value["rollback_status"] != "ROLLED_BACK":
         raise ValueError("compensation rollback status is invalid")
     if (
@@ -539,6 +699,45 @@ def _atomic_write(path: Path, raw: bytes, *, exclusive: bool = False) -> None:
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
+
+
+@contextmanager
+def _publication_os_gate(path: Path, state_root: Path):
+    """Serialize stale-owner adoption and release across processes.
+
+    The gate file is deliberately persistent. Removing it would permit two
+    processes to lock different inodes during replacement and recreate the
+    stale-adopter race this gate closes.
+    """
+
+    gate = path.with_name(f"{path.name}.gate")
+    _contained(gate, state_root)
+    gate.parent.mkdir(parents=True, exist_ok=True)
+    if gate.exists() and (_is_reparse(gate) or not stat.S_ISREG(gate.lstat().st_mode)):
+        raise ValueError("publication OS gate must be a regular non-reparse leaf")
+    with gate.open("a+b") as stream:
+        if stream.seek(0, os.SEEK_END) == 0:
+            stream.write(b"\0")
+            stream.flush()
+            os.fsync(stream.fileno())
+        stream.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
 def _process_start_time_utc(pid: int) -> str:
@@ -695,34 +894,27 @@ def acquire_lock(
     _validate_lock(payload)
     _contained(path, state_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        _atomic_write(path, raw, exclusive=True)
-    except FileExistsError:
-        existing, _ = _read_lock(path, state_root)
-        owner_is_live = _process_owner_is_live(
-            int(existing["pid"]), str(existing["process_start_time_utc"])
-        )
-        if owner_is_live:
-            raise ValueError("publication lock is held by a live owner") from None
-        # Rename the stale owner first, then retry exclusive creation. A
-        # concurrent adopter can win; either outcome remains fail-closed.
-        stale = path.with_name(
-            f"{path.name}.stale-{os.getpid()}-{os.urandom(8).hex()}"
-        )
+    with _publication_os_gate(path, state_root):
         try:
+            _atomic_write(path, raw, exclusive=True)
+        except FileExistsError:
+            existing, _ = _read_lock(path, state_root)
+            owner_is_live = _process_owner_is_live(
+                int(existing["pid"]), str(existing["process_start_time_utc"])
+            )
+            if owner_is_live:
+                raise ValueError("publication lock is held by a live owner") from None
+            stale = path.with_name(
+                f"{path.name}.stale-{os.getpid()}-{os.urandom(8).hex()}"
+            )
             os.replace(path, stale)
-        except OSError as exc:
-            raise ValueError("publication lock owner is stale but adoption raced") from exc
-        try:
             try:
                 _atomic_write(path, raw, exclusive=True)
-            except FileExistsError as exc:
-                raise ValueError("publication lock is held by another owner") from exc
-        finally:
-            try:
-                stale.unlink()
-            except OSError:
-                pass
+            finally:
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
     return payload
 
 
@@ -734,27 +926,25 @@ def release_lock(
     pid: int | None = None,
 ) -> None:
     pid = os.getpid() if pid is None else pid
-    existing, raw = _read_lock(path, state_root)
-    if existing["owner_id"] != owner_id or existing["pid"] != pid:
-        raise ValueError("publication lock owner binding mismatch")
-    if existing["process_start_time_utc"] != _process_start_time_utc(pid):
-        raise ValueError("publication lock process identity mismatch")
-    # Re-read immediately before the atomic move, then remove only the moved
-    # identity. A new owner may acquire ``path`` after the move, but this
-    # releaser never unlinks that new owner's path.
-    current = _read_regular(path)
-    if current != raw:
-        raise ValueError("publication lock changed before release")
-    released = path.with_name(f"{path.name}.released-{pid}-{os.urandom(8).hex()}")
-    _contained(released, state_root)
-    try:
-        os.replace(path, released)
-    except OSError as exc:
-        raise ValueError("publication lock could not be atomically released") from exc
-    moved = _read_regular(released)
-    if moved != raw:
-        raise ValueError("publication lock identity changed during release")
-    released.unlink()
+    with _publication_os_gate(path, state_root):
+        existing, raw = _read_lock(path, state_root)
+        if existing["owner_id"] != owner_id or existing["pid"] != pid:
+            raise ValueError("publication lock owner binding mismatch")
+        if existing["process_start_time_utc"] != _process_start_time_utc(pid):
+            raise ValueError("publication lock process identity mismatch")
+        current = _read_regular(path)
+        if current != raw:
+            raise ValueError("publication lock changed before release")
+        released = path.with_name(f"{path.name}.released-{pid}-{os.urandom(8).hex()}")
+        _contained(released, state_root)
+        try:
+            os.replace(path, released)
+        except OSError as exc:
+            raise ValueError("publication lock could not be atomically released") from exc
+        moved = _read_regular(released)
+        if moved != raw:
+            raise ValueError("publication lock identity changed during release")
+        released.unlink()
 
 
 def seal(source: Path, target: Path, *, state_root: Path | None = None) -> dict[str, Any]:
@@ -820,7 +1010,9 @@ def transition(
     for key in immutable:
         if value.get(key) != prior.get(key):
             raise ValueError(f"journal immutable field changed: {key}")
-    if prior.get("result_payload") is not None or value.get("result_payload") is not None:
+    if value["phase"] != "COMPENSATED" and (
+        prior.get("result_payload") is not None or value.get("result_payload") is not None
+    ):
         prior_result = prior.get("result_payload") or {}
         next_result = value.get("result_payload") or {}
         for key in (

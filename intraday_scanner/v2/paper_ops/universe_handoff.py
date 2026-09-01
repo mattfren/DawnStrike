@@ -20,6 +20,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from intraday_scanner.approved_tools import run_git
 from intraday_scanner.services.luna_core_universe_service import (
     _TRUSTED_SOURCE_ROOTS,
     CORE_INDEXES,
@@ -484,32 +485,19 @@ def _validate_runtime_release_sha(
     claimed = str(cycle_contract.get("code_sha") or "").strip()
     runtime_root = Path(__file__).resolve().parents[3]
     try:
-        result = subprocess.run(  # nosec B603, B607
-            ["git", "-C", str(runtime_root), "rev-parse", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
+        result = run_git(runtime_root, "rev-parse", "HEAD", timeout=10)
     except (OSError, subprocess.SubprocessError) as exc:
         raise UniverseHandoffError("executing runtime Git HEAD is unavailable") from exc
     actual = result.stdout.strip().lower()
     if not re.fullmatch(r"[0-9a-f]{40}", actual) or claimed != actual:
         raise UniverseHandoffError("Morning release SHA does not match executing runtime HEAD")
     try:
-        status = subprocess.run(  # nosec B603, B607
-            [
-                "git",
-                "-C",
-                str(runtime_root),
-                "status",
-                "--porcelain=v1",
-                "--untracked-files=all",
-                "--ignore-submodules=none",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
+        status = run_git(
+            runtime_root,
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--ignore-submodules=none",
             timeout=10,
         )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -517,13 +505,7 @@ def _validate_runtime_release_sha(
     if status.stdout.strip():
         raise UniverseHandoffError("executing runtime worktree is dirty")
     try:
-        after_result = subprocess.run(  # nosec B603, B607
-            ["git", "-C", str(runtime_root), "rev-parse", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
+        after_result = run_git(runtime_root, "rev-parse", "HEAD", timeout=10)
     except (OSError, subprocess.SubprocessError) as exc:
         raise UniverseHandoffError(
             "executing runtime Git HEAD changed during verification"

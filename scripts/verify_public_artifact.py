@@ -16,11 +16,15 @@ if _REPO_ROOT_TEXT in sys.path:
     sys.path.remove(_REPO_ROOT_TEXT)
 sys.path.insert(0, _REPO_ROOT_TEXT)
 
+from scripts import public_artifact_inventory as _public_inventory  # noqa: E402
 from scripts import public_lineage as _public_lineage  # noqa: E402
 
 _EXPECTED_LINEAGE = (_REPO_ROOT / "scripts" / "public_lineage.py").resolve()
 if Path(_public_lineage.__file__).resolve() != _EXPECTED_LINEAGE:
     raise RuntimeError("public artifact verifier did not load the exact candidate lineage code")
+_EXPECTED_INVENTORY = (_REPO_ROOT / "scripts" / "public_artifact_inventory.py").resolve()
+if Path(_public_inventory.__file__).resolve() != _EXPECTED_INVENTORY:
+    raise RuntimeError("public artifact verifier did not load the exact candidate inventory code")
 is_lower_hex64 = _public_lineage.is_lower_hex64
 
 MAX_SNAPSHOT_BYTES = 250 * 1024
@@ -48,26 +52,7 @@ V6_TOP_LEVEL_KEYS = frozenset(
         "broker_execution_enabled",
     }
 )
-REQUIRED_FILES = (
-    "index.html",
-    "favicon.svg",
-    "readiness.json",
-    "stage-manifest.json",
-    "build-manifest.json",
-    "assets/dawnstrike.css",
-    "assets/dawnstrike.js",
-    "data/performance.json",
-    "data/performance.json.manifest.json",
-    "data/calendar.json",
-    "data/calendar.json.manifest.json",
-    "data/publication-set.json",
-    "data/v6-learning.json",
-    "data/scenarios.json",
-    "data/scenarios.json.manifest.json",
-    "data/opportunity-projection.json",
-    "data/opportunity-projection.json.manifest.json",
-    "release-manifest.json",
-)
+REQUIRED_FILES = tuple(sorted(_public_inventory.PUBLIC_ARTIFACT_FILES))
 FORBIDDEN_FILE_PARTS = (".sqlite", ".db", "telegram", "scanner", "ui.py")
 ABSOLUTE_PATH_PATTERN = re.compile(
     r"(?:[A-Za-z]:(?:\\|\\\\)(?:Users|r)(?:\\|\\\\)|/(?:Users|home|var|opt)/)",
@@ -82,20 +67,27 @@ def verify(
     expected_source_sha: str = "",
 ) -> dict[str, object]:
     errors: list[str] = []
+    inventory_valid = False
+    try:
+        _public_inventory.assert_exact_public_inventory(root)
+    except _public_inventory.PublicArtifactInventoryError as exc:
+        errors.append(f"public_inventory_invalid:{exc}")
+    else:
+        inventory_valid = True
     missing = [name for name in REQUIRED_FILES if not (root / name).is_file()]
     errors.extend(f"missing:{name}" for name in missing)
 
     forbidden = []
-    if root.exists():
-        for path in root.rglob("*"):
-            if path.is_file() and any(part in path.name.lower() for part in FORBIDDEN_FILE_PARTS):
+    if inventory_valid:
+        for name in REQUIRED_FILES:
+            path = root / name
+            if any(part in path.name.lower() for part in FORBIDDEN_FILE_PARTS):
                 forbidden.append(str(path.relative_to(root)).replace("\\", "/"))
     errors.extend(f"forbidden_file:{name}" for name in forbidden)
     exposed_paths = []
-    if root.exists():
-        for path in root.rglob("*"):
-            if not path.is_file():
-                continue
+    if inventory_valid:
+        for name in REQUIRED_FILES:
+            path = root / name
             try:
                 text = path.read_text(encoding="utf-8")
             except UnicodeDecodeError:
@@ -321,13 +313,15 @@ def verify(
         if not isinstance(recorded_hashes, dict):
             errors.append("file_hashes_missing")
         else:
-            for name in REQUIRED_FILES:
-                if name == "build-manifest.json":
-                    continue
-                if name not in recorded_hashes:
-                    errors.append(f"required_file_hash_missing:{name}")
-            for name, expected_hash in recorded_hashes.items():
-                path = root / str(name)
+            expected_hash_names = set(REQUIRED_FILES) - {"build-manifest.json"}
+            observed_hash_names = set(recorded_hashes)
+            for name in sorted(expected_hash_names - observed_hash_names):
+                errors.append(f"required_file_hash_missing:{name}")
+            for name in sorted(observed_hash_names - expected_hash_names):
+                errors.append(f"unexpected_file_hash:{name}")
+            for name in sorted(expected_hash_names & observed_hash_names):
+                expected_hash = recorded_hashes[name]
+                path = root / name
                 if not path.is_file():
                     errors.append(f"file_hash_path_missing:{name}")
                 elif hashlib.sha256(path.read_bytes()).hexdigest() != expected_hash:
@@ -365,6 +359,13 @@ def verify(
                 errors.append("readiness_research_only_missing")
             if readiness.get("broker_execution_enabled") is not False:
                 errors.append("readiness_broker_execution_enabled")
+
+    try:
+        _public_inventory.assert_exact_public_inventory(root)
+    except _public_inventory.PublicArtifactInventoryError as exc:
+        terminal_inventory_error = f"public_inventory_changed:{exc}"
+        if terminal_inventory_error not in errors:
+            errors.append(terminal_inventory_error)
 
     result = {
         "status": "PASS" if not errors else "FAIL",

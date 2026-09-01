@@ -11,6 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from intraday_scanner.approved_tools import run_git
 from intraday_scanner.providers.web_source_base import validate_web_source_config
 
 
@@ -24,12 +25,8 @@ def main() -> int:
     result["validated_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     if args.runtime_root:
         try:
-            result["runtime_sha"] = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=Path(args.runtime_root),
-                check=True,
-                capture_output=True,
-                text=True,
+            result["runtime_sha"] = run_git(
+                Path(args.runtime_root), "rev-parse", "HEAD"
             ).stdout.strip()
         except (OSError, subprocess.CalledProcessError) as exc:
             result["ready"] = False

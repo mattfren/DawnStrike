@@ -18,6 +18,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from intraday_scanner.approved_tools import run_git
 from intraday_scanner.services.daily_run_service import (
     REQUIRED_UPSTREAM_STAGES,
     daily_run_snapshot,
@@ -166,13 +167,7 @@ def _read_object(path: Path) -> dict[str, Any]:
 
 def _git_head(root: Path) -> str:
     try:
-        return subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=root,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip().lower()
+        return run_git(root, "rev-parse", "HEAD").stdout.strip().lower()
     except (OSError, subprocess.CalledProcessError):
         return ""
 

@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -14,6 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from intraday_scanner.approved_tools import run_git
 from intraday_scanner.dashboard.opportunity_projection_store import (
     load_latest_opportunity_projection,
     write_public_opportunity_projection,
@@ -25,11 +28,21 @@ from intraday_scanner.services.scheduler_doctor_service import scheduler_doctor
 from intraday_scanner.services.v6_learning_service import v6_public_status
 from intraday_scanner.storage.migrations import get_schema_version
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
+from scripts.public_artifact_inventory import (
+    PRIVATE_BUILD_FILES,
+    PUBLIC_ARTIFACT_FILES,
+    PublicArtifactInventoryError,
+    assert_contained_no_reparse,
+    assert_exact_public_inventory,
+    inventory_files_no_reparse,
+)
 from scripts.public_lineage import build_sha as _lineage_build_sha
 from scripts.verify_public_artifact_security import scan_public_artifact
 
+_ACTIVE_PUBLIC_BUILD_OPERATION: _PublicBuildOperation | None = None
 
-def main(argv: list[str] | None = None) -> int:
+
+def _main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--db-path", default="data/shadow_real.sqlite")
     parser.add_argument(
@@ -81,6 +94,25 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 2
+    final_output_root = Path(os.path.abspath(root / args.out_dir))
+    try:
+        final_output_root.relative_to(root)
+    except ValueError:
+        print(json.dumps({"status": "FAILED", "reason": "public_output_outside_runtime"}))
+        return 2
+    try:
+        assert_contained_no_reparse(root, final_output_root)
+        final_output_root.parent.mkdir(parents=True, exist_ok=True)
+        assert_contained_no_reparse(root, final_output_root.parent)
+        operation = _enter_public_build_operation(root, final_output_root)
+    except (OSError, PublicArtifactInventoryError) as exc:
+        print(
+            json.dumps(
+                {"status": "FAILED", "reason": "public_output_path_unsafe", "detail": str(exc)},
+                sort_keys=True,
+            )
+        )
+        return 2
     source = _source_metadata(root)
     if source.get("source_clean") is not True and not args.allow_dirty:
         print(
@@ -96,10 +128,10 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 2
-    output_root = (root / args.out_dir).resolve()
-    output_root.mkdir(parents=True, exist_ok=True)
-    _clear_known_outputs(output_root)
     market_date = args.date or datetime.now().date().isoformat()
+    output_root = operation.begin(
+        source_sha=str(source.get("source_sha") or ""), market_date=market_date
+    )
     paper_ops_root = Path(args.paper_ops_root)
     if not paper_ops_root.is_absolute():
         paper_ops_root = root / paper_ops_root
@@ -118,6 +150,7 @@ def main(argv: list[str] | None = None) -> int:
         retry_delay_seconds=max(0, args.retry_delay_seconds),
         scenario_payload=scenario_payload,
     )
+    _remove_private_build_files(output_root)
     shutil.copy2(root / "web" / "index.html", output_root / "index.html")
     shutil.copy2(root / "web" / "favicon.svg", output_root / "favicon.svg")
     shutil.copytree(root / "web" / "assets", output_root / "assets", dirs_exist_ok=True)
@@ -178,11 +211,19 @@ def main(argv: list[str] | None = None) -> int:
     result["deployment_url"] = args.deployment_url
     if args.result_out:
         result_out = Path(args.result_out).resolve()
+        if _is_relative_to(result_out, final_output_root) or _is_relative_to(
+            result_out, output_root
+        ):
+            raise ValueError("Private finalize result cannot be written into the public artifact")
         result_out.parent.mkdir(parents=True, exist_ok=True)
         result_out.write_text(
             json.dumps(result, sort_keys=True, indent=2, default=str),
             encoding="utf-8",
         )
+    assert_exact_public_inventory(
+        output_root,
+        expected=PUBLIC_ARTIFACT_FILES - {"build-manifest.json", "release-manifest.json"},
+    )
     artifact_hashes = _file_hashes(
         output_root,
         exclude={"build-manifest.json", "release-manifest.json"},
@@ -200,6 +241,9 @@ def main(argv: list[str] | None = None) -> int:
     (output_root / "release-manifest.json").write_text(
         json.dumps(release_manifest, sort_keys=True, indent=2),
         encoding="utf-8",
+    )
+    assert_exact_public_inventory(
+        output_root, expected=PUBLIC_ARTIFACT_FILES - {"build-manifest.json"}
     )
     file_hashes = _file_hashes(output_root, exclude={"build-manifest.json"})
     generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -230,6 +274,7 @@ def main(argv: list[str] | None = None) -> int:
         ),
         encoding="utf-8",
     )
+    assert_exact_public_inventory(output_root)
     violations = scan_public_artifact(output_root)
     if violations:
         print(
@@ -253,9 +298,27 @@ def main(argv: list[str] | None = None) -> int:
                 indent=2,
             )
         )
+        _remove_tree_no_reparse(root, output_root)
         return 2
+    operation.mark("STAGED")
+    _promote_public_artifact(root, output_root, final_output_root, operation=operation)
     print(json.dumps(result, sort_keys=True, indent=2, default=str))
     return 0 if result.get("status") == "COMPLETE" and readiness.get("status") == "ready" else 2
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run one serialized build and converge any interrupted directory swap."""
+
+    global _ACTIVE_PUBLIC_BUILD_OPERATION
+    try:
+        return _main(argv)
+    finally:
+        operation = _ACTIVE_PUBLIC_BUILD_OPERATION
+        if operation is not None:
+            try:
+                operation.close()
+            finally:
+                _ACTIVE_PUBLIC_BUILD_OPERATION = None
 
 
 def _resolve_repository_database(
@@ -364,15 +427,9 @@ def _public_scheduler_status(value: dict[str, object]) -> dict[str, object]:
 
 def _source_metadata(root: Path) -> dict[str, object]:
     try:
-        source_sha = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=root, check=True, capture_output=True, text=True
-        ).stdout.strip()
-        dirty = subprocess.run(
-            ["git", "status", "--porcelain", "--untracked-files=all"],
-            cwd=root,
-            check=True,
-            capture_output=True,
-            text=True,
+        source_sha = run_git(root, "rev-parse", "HEAD").stdout.strip()
+        dirty = run_git(
+            root, "status", "--porcelain", "--untracked-files=all"
         ).stdout.strip()
         return {"source_sha": source_sha, "source_clean": not bool(dirty)}
     except (OSError, subprocess.CalledProcessError):
@@ -380,13 +437,47 @@ def _source_metadata(root: Path) -> dict[str, object]:
 
 
 def _file_hashes(root: Path, *, exclude: set[str]) -> dict[str, str]:
-    return {
-        str(path.relative_to(root)).replace("\\", "/"): hashlib.sha256(
-            path.read_bytes()
-        ).hexdigest()
-        for path in sorted(root.rglob("*"))
-        if path.is_file() and str(path.relative_to(root)).replace("\\", "/") not in exclude
-    }
+    expected = PUBLIC_ARTIFACT_FILES - exclude
+    observed = inventory_files_no_reparse(root)
+    if observed != expected:
+        raise PublicArtifactInventoryError(
+            "public artifact inventory changed before hashing; "
+            f"unexpected={sorted(observed - expected)}; "
+            f"missing={sorted(expected - observed)}"
+        )
+    hashes: dict[str, str] = {}
+    for relative in sorted(observed):
+        path = root / relative
+        assert_contained_no_reparse(root, path)
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode) or _stat_is_reparse(before):
+            raise PublicArtifactInventoryError(
+                f"public artifact hash input is not a regular file: {relative}"
+            )
+        payload = path.read_bytes()
+        after = path.lstat()
+        if not stat.S_ISREG(after.st_mode) or _stat_is_reparse(after):
+            raise PublicArtifactInventoryError(
+                f"public artifact hash input changed type: {relative}"
+            )
+        before_identity = (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+        )
+        after_identity = (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        )
+        if before_identity != after_identity or len(payload) != after.st_size:
+            raise PublicArtifactInventoryError(
+                f"public artifact hash input changed while reading: {relative}"
+            )
+        hashes[relative] = hashlib.sha256(payload).hexdigest()
+    return hashes
 
 
 def _build_sha(
@@ -421,22 +512,396 @@ def _is_relative_to(path: Path, root: Path) -> bool:
     return True
 
 
-def _clear_known_outputs(output_root: Path) -> None:
-    for name in (
-        "index.html",
-        "readiness.json",
-        "stage-manifest.json",
-        "build-manifest.json",
-        "release-manifest.json",
-        "daily-finalize-result.json",
-    ):
+def _remove_private_build_files(output_root: Path) -> None:
+    for name in PRIVATE_BUILD_FILES:
         path = output_root / name
-        if path.is_file():
+        if path.exists() or path.is_symlink():
+            details = path.lstat()
+            if not stat.S_ISREG(details.st_mode) or _stat_is_reparse(details):
+                raise PublicArtifactInventoryError(f"private build path is unsafe: {name}")
             path.unlink()
-    for name in ("assets", "data"):
-        path = output_root / name
-        if path.is_dir():
-            shutil.rmtree(path)
+
+
+def _remove_tree_no_reparse(governed_root: Path, target: Path) -> None:
+    assert_contained_no_reparse(governed_root, target)
+
+    def remove(directory: Path) -> None:
+        with os.scandir(directory) as entries:
+            for entry in list(entries):
+                path = Path(entry.path)
+                details = entry.stat(follow_symlinks=False)
+                if _stat_is_reparse(details):
+                    raise PublicArtifactInventoryError(
+                        f"refusing to remove reparse entry: {path}"
+                    )
+                if entry.is_dir(follow_symlinks=False):
+                    remove(path)
+                elif entry.is_file(follow_symlinks=False):
+                    path.unlink()
+                else:
+                    raise PublicArtifactInventoryError(
+                        f"refusing to remove non-file entry: {path}"
+                    )
+        directory.rmdir()
+
+    remove(target)
+
+
+def _stat_is_reparse(details: os.stat_result) -> bool:
+    return bool(
+        stat.S_ISLNK(details.st_mode)
+        or getattr(details, "st_file_attributes", 0)
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    )
+
+
+class _PublicBuildOperation:
+    """Serialize and converge the two-rename public artifact promotion."""
+
+    _SCHEMA = "dawnstrike.public_build_operation.v1"
+    _PHASES = frozenset(
+        {"INIT", "BUILDING", "STAGED", "PRE_SWAP", "PRIOR_MOVED", "PROMOTED"}
+    )
+
+    def __init__(self, governed_root: Path, final_root: Path) -> None:
+        self.governed_root = governed_root
+        self.final_root = final_root
+        self.stage_root = final_root.with_name(f".{final_root.name}-build-next")
+        self.backup_root = final_root.with_name(f".{final_root.name}-retired")
+        self.journal_path = final_root.with_name(f".{final_root.name}-build-operation.json")
+        self.journal_temp_path = final_root.with_name(
+            f".{final_root.name}-build-operation.json.tmp"
+        )
+        self.lock_path = final_root.with_name(f".{final_root.name}-build-operation.lock")
+        self._lock_handle: object | None = None
+        self._locked = False
+        for path in (
+            self.final_root,
+            self.stage_root,
+            self.backup_root,
+            self.journal_path,
+            self.journal_temp_path,
+            self.lock_path,
+        ):
+            assert_contained_no_reparse(governed_root, path)
+        self._reject_legacy_operation_paths()
+        self._acquire_lock()
+        try:
+            self.recover()
+        except BaseException:
+            self._release_lock()
+            raise
+
+    def _reject_legacy_operation_paths(self) -> None:
+        allowed = {self.stage_root.name, self.backup_root.name}
+        discovered = set(
+            self.final_root.parent.glob(f".{self.final_root.name}-build-*")
+        )
+        discovered.update(
+            self.final_root.parent.glob(f".{self.final_root.name}-retired-*")
+        )
+        candidates = {
+            path
+            for path in discovered
+            if path.is_dir() or path.is_symlink()
+        }
+        unexpected = sorted(path.name for path in candidates if path.name not in allowed)
+        if unexpected:
+            raise PublicArtifactInventoryError(
+                f"ambiguous legacy public build operation paths: {unexpected}"
+            )
+
+    def _acquire_lock(self) -> None:
+        assert_contained_no_reparse(self.governed_root, self.lock_path)
+        handle = self.lock_path.open("a+b")
+        try:
+            details = self.lock_path.lstat()
+            if not stat.S_ISREG(details.st_mode) or _stat_is_reparse(details):
+                raise PublicArtifactInventoryError("public build lock path is unsafe")
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+                os.fsync(handle.fileno())
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BaseException:
+            handle.close()
+            raise
+        self._lock_handle = handle
+        self._locked = True
+
+    def _release_lock(self) -> None:
+        if not self._locked or self._lock_handle is None:
+            return
+        handle = self._lock_handle
+        try:
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+            self._lock_handle = None
+            self._locked = False
+
+    def _load_journal(self) -> dict[str, object]:
+        try:
+            raw = self.journal_path.read_text(encoding="utf-8")
+            payload = json.loads(raw, object_pairs_hook=_reject_duplicate_json_pairs)
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise PublicArtifactInventoryError(
+                "public build operation journal is unreadable"
+            ) from exc
+        if not isinstance(payload, dict) or set(payload) != {
+            "schema_version",
+            "source_sha",
+            "market_date",
+            "phase",
+            "journal_sha256",
+        }:
+            raise PublicArtifactInventoryError("public build operation journal shape is invalid")
+        if payload.get("schema_version") != self._SCHEMA:
+            raise PublicArtifactInventoryError("public build operation schema is invalid")
+        source_sha = payload.get("source_sha")
+        market_date = payload.get("market_date")
+        phase = payload.get("phase")
+        if not isinstance(source_sha, str) or len(source_sha) != 40 or any(
+            char not in "0123456789abcdef" for char in source_sha
+        ):
+            raise PublicArtifactInventoryError("public build operation source SHA is invalid")
+        try:
+            parsed_date = datetime.fromisoformat(str(market_date)).date().isoformat()
+        except ValueError as exc:
+            raise PublicArtifactInventoryError(
+                "public build operation market date is invalid"
+            ) from exc
+        if parsed_date != market_date or phase not in self._PHASES:
+            raise PublicArtifactInventoryError("public build operation identity is invalid")
+        expected_hash = _public_build_journal_hash(
+            source_sha=source_sha, market_date=str(market_date), phase=str(phase)
+        )
+        if payload.get("journal_sha256") != expected_hash:
+            raise PublicArtifactInventoryError("public build operation hash is invalid")
+        return payload
+
+    def _write_journal(self, *, source_sha: str, market_date: str, phase: str) -> None:
+        if phase not in self._PHASES:
+            raise PublicArtifactInventoryError("public build operation phase is invalid")
+        payload = {
+            "schema_version": self._SCHEMA,
+            "source_sha": source_sha,
+            "market_date": market_date,
+            "phase": phase,
+            "journal_sha256": _public_build_journal_hash(
+                source_sha=source_sha, market_date=market_date, phase=phase
+            ),
+        }
+        if self.journal_temp_path.exists() or self.journal_temp_path.is_symlink():
+            _remove_regular_operation_file(self.journal_temp_path)
+        encoded = json.dumps(payload, sort_keys=True, indent=2).encode("utf-8")
+        with self.journal_temp_path.open("xb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(self.journal_temp_path, self.journal_path)
+        if self._load_journal() != payload:
+            raise PublicArtifactInventoryError("public build operation journal did not persist")
+
+    def begin(self, *, source_sha: str, market_date: str) -> Path:
+        if self.journal_path.exists() or self.stage_root.exists() or self.backup_root.exists():
+            raise PublicArtifactInventoryError("public build operation was not fully recovered")
+        self._write_journal(
+            source_sha=source_sha, market_date=market_date, phase="INIT"
+        )
+        self.stage_root.mkdir()
+        assert_contained_no_reparse(self.governed_root, self.stage_root)
+        self.mark("BUILDING")
+        return self.stage_root
+
+    def mark(self, phase: str) -> None:
+        journal = self._load_journal()
+        self._write_journal(
+            source_sha=str(journal["source_sha"]),
+            market_date=str(journal["market_date"]),
+            phase=phase,
+        )
+
+    def finish(self) -> None:
+        if self.stage_root.exists() or self.backup_root.exists():
+            raise PublicArtifactInventoryError("public build terminal paths remain")
+        assert_exact_public_inventory(self.final_root)
+        _remove_regular_operation_file(self.journal_path)
+        if self.journal_temp_path.exists() or self.journal_temp_path.is_symlink():
+            _remove_regular_operation_file(self.journal_temp_path)
+
+    def recover(self) -> None:
+        if self.journal_temp_path.exists() or self.journal_temp_path.is_symlink():
+            _remove_regular_operation_file(self.journal_temp_path)
+        journal_exists = self.journal_path.exists() or self.journal_path.is_symlink()
+        stage_exists = self.stage_root.exists() or self.stage_root.is_symlink()
+        backup_exists = self.backup_root.exists() or self.backup_root.is_symlink()
+        final_exists = self.final_root.exists() or self.final_root.is_symlink()
+        if not journal_exists:
+            if stage_exists or backup_exists:
+                raise PublicArtifactInventoryError(
+                    "public build operation paths exist without their journal"
+                )
+            return
+        self._load_journal()
+        if stage_exists:
+            assert_contained_no_reparse(self.governed_root, self.stage_root)
+        if backup_exists:
+            assert_contained_no_reparse(self.governed_root, self.backup_root)
+        if final_exists:
+            assert_contained_no_reparse(self.governed_root, self.final_root)
+
+        if backup_exists and not final_exists:
+            if stage_exists and _is_exact_public_artifact(self.stage_root):
+                os.replace(self.stage_root, self.final_root)
+                stage_exists = False
+                final_exists = True
+                _remove_tree_no_reparse(self.governed_root, self.backup_root)
+                backup_exists = False
+            else:
+                _assert_safe_previous_public_artifact(self.backup_root)
+                if stage_exists:
+                    _remove_tree_no_reparse(self.governed_root, self.stage_root)
+                    stage_exists = False
+                os.replace(self.backup_root, self.final_root)
+                backup_exists = False
+                final_exists = True
+        elif backup_exists and final_exists:
+            if stage_exists:
+                raise PublicArtifactInventoryError(
+                    "public build operation has an ambiguous three-directory state"
+                )
+            assert_exact_public_inventory(self.final_root)
+            _assert_safe_previous_public_artifact(self.backup_root)
+            _remove_tree_no_reparse(self.governed_root, self.backup_root)
+            backup_exists = False
+        elif stage_exists:
+            if final_exists:
+                _assert_safe_previous_public_artifact(self.final_root)
+                _remove_tree_no_reparse(self.governed_root, self.stage_root)
+                stage_exists = False
+            elif _is_exact_public_artifact(self.stage_root):
+                os.replace(self.stage_root, self.final_root)
+                stage_exists = False
+                final_exists = True
+            else:
+                _remove_tree_no_reparse(self.governed_root, self.stage_root)
+                stage_exists = False
+
+        if stage_exists or backup_exists:
+            raise PublicArtifactInventoryError("public build recovery did not converge")
+        if final_exists and not _is_safe_previous_public_artifact(self.final_root):
+            raise PublicArtifactInventoryError("recovered public artifact is unsafe")
+        _remove_regular_operation_file(self.journal_path)
+
+    def close(self) -> None:
+        try:
+            self.recover()
+        finally:
+            self._release_lock()
+
+
+def _reject_duplicate_json_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise json.JSONDecodeError("duplicate object key", key, 0)
+        result[key] = value
+    return result
+
+
+def _public_build_journal_hash(*, source_sha: str, market_date: str, phase: str) -> str:
+    canonical = json.dumps(
+        {
+            "schema_version": _PublicBuildOperation._SCHEMA,
+            "source_sha": source_sha,
+            "market_date": market_date,
+            "phase": phase,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _remove_regular_operation_file(path: Path) -> None:
+    details = path.lstat()
+    if not stat.S_ISREG(details.st_mode) or _stat_is_reparse(details):
+        raise PublicArtifactInventoryError(f"public build operation file is unsafe: {path}")
+    path.unlink()
+
+
+def _is_exact_public_artifact(path: Path) -> bool:
+    try:
+        assert_exact_public_inventory(path)
+    except (OSError, PublicArtifactInventoryError):
+        return False
+    return True
+
+
+def _is_safe_previous_public_artifact(path: Path) -> bool:
+    try:
+        observed = inventory_files_no_reparse(path)
+    except (OSError, PublicArtifactInventoryError):
+        return False
+    return observed - PRIVATE_BUILD_FILES == PUBLIC_ARTIFACT_FILES
+
+
+def _assert_safe_previous_public_artifact(path: Path) -> None:
+    if not _is_safe_previous_public_artifact(path):
+        raise PublicArtifactInventoryError("previous public artifact inventory is unsafe")
+
+
+def _enter_public_build_operation(
+    governed_root: Path, final_root: Path
+) -> _PublicBuildOperation:
+    global _ACTIVE_PUBLIC_BUILD_OPERATION
+    if _ACTIVE_PUBLIC_BUILD_OPERATION is not None:
+        raise PublicArtifactInventoryError("a public build operation is already active")
+    operation = _PublicBuildOperation(governed_root, final_root)
+    _ACTIVE_PUBLIC_BUILD_OPERATION = operation
+    return operation
+
+
+def _promote_public_artifact(
+    governed_root: Path,
+    staged_root: Path,
+    final_root: Path,
+    *,
+    operation: _PublicBuildOperation,
+) -> None:
+    assert_exact_public_inventory(staged_root)
+    assert_contained_no_reparse(governed_root, final_root)
+    backup = operation.backup_root
+    assert_contained_no_reparse(governed_root, backup)
+    operation.mark("PRE_SWAP")
+    if final_root.exists() or final_root.is_symlink():
+        _assert_safe_previous_public_artifact(final_root)
+        os.replace(final_root, backup)
+    operation.mark("PRIOR_MOVED")
+    os.replace(staged_root, final_root)
+    operation.mark("PROMOTED")
+    assert_exact_public_inventory(final_root)
+    if backup.exists():
+        _remove_tree_no_reparse(governed_root, backup)
+    operation.finish()
 
 
 if __name__ == "__main__":

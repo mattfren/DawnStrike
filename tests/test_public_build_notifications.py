@@ -1,4 +1,6 @@
+import hashlib
 import json
+import shutil
 import sqlite3
 from pathlib import Path
 
@@ -7,16 +9,28 @@ from scripts import build_public
 from scripts.verify_public_artifact import verify
 
 
-def test_public_build_records_auditable_finalize_notification(tmp_path: Path, monkeypatch) -> None:
+def test_public_build_records_auditable_finalize_notification(
+    tmp_path: Path, monkeypatch, request
+) -> None:
     monkeypatch.delenv("DAWNSTRIKE_OPPORTUNITY_PROJECTION_ENABLED", raising=False)
     monkeypatch.setattr(
         build_public,
         "_source_metadata",
-        lambda root: {"source_sha": "clean-fixture-sha", "source_clean": True},
+        lambda root: {"source_sha": "a" * 40, "source_clean": True},
     )
     db_path = tmp_path / "notification.sqlite"
     SQLiteScanStore(db_path).initialize()
-    output = tmp_path / "public"
+    token = hashlib.sha256(str(tmp_path).encode("utf-8")).hexdigest()[:16]
+    output = Path("build") / f"test-public-{token}"
+    operation_prefix = f".{output.name}-build-operation"
+
+    def cleanup() -> None:
+        shutil.rmtree(output, ignore_errors=True)
+        for suffix in (".json", ".json.tmp", ".lock"):
+            (output.parent / f"{operation_prefix}{suffix}").unlink(missing_ok=True)
+
+    cleanup()
+    request.addfinalizer(cleanup)
     monkeypatch.setattr(
         build_public,
         "_resolve_repository_database",
@@ -28,7 +42,7 @@ def test_public_build_records_auditable_finalize_notification(tmp_path: Path, mo
             "--db-path",
             str(db_path),
             "--out-dir",
-            str(output),
+            output.as_posix(),
             "--date",
             "2026-07-29",
             "--retry-limit",

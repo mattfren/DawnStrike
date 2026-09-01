@@ -14,6 +14,7 @@ from intraday_scanner.alpha.v5_policy import (
     ALPHAOPS_V5_STRATEGY_VERSION,
 )
 from intraday_scanner.alpha.v6_shadow import ALPHAOPS_V6_STRATEGY_VERSION
+from intraday_scanner.approved_tools import run_git
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 
@@ -78,13 +79,7 @@ def resolve_release_sha(runtime_root: str | Path) -> str:
     if configured:
         return configured
     try:
-        return subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=Path(runtime_root),
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
+        return run_git(Path(runtime_root), "rev-parse", "HEAD").stdout.strip()
     except (OSError, subprocess.CalledProcessError) as exc:
         raise ValueError(
             "A release SHA is required for the shared daily run ledger."

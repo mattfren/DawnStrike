@@ -10,6 +10,7 @@ param(
 $ErrorActionPreference = "Stop"
 $resolvedRoot = (Resolve-Path $ProjectRoot).Path
 $stage = Join-Path $resolvedRoot $StageRoot
+. (Join-Path $resolvedRoot "scripts\runtime_activation_lock.ps1")
 . (Join-Path $resolvedRoot "scripts\vercel_source_contract.ps1")
 Assert-VercelGitSourceStable `
     -Root $resolvedRoot `
@@ -49,7 +50,24 @@ $verifyArgs = @(
 if ($AllowDegraded) {
     $verifyArgs += "--allow-degraded"
 }
-& py.exe @verifyArgs
+$approvedPython = Get-DawnstrikeApprovedLockInterpreter
+$previousPythonHome = $env:PYTHONHOME
+$previousPythonPath = $env:PYTHONPATH
+$previousPythonStartup = $env:PYTHONSTARTUP
+$previousNoBytecode = $env:PYTHONDONTWRITEBYTECODE
+try {
+    $env:PYTHONHOME = ""
+    $env:PYTHONPATH = ""
+    $env:PYTHONSTARTUP = ""
+    $env:PYTHONDONTWRITEBYTECODE = "1"
+    & $approvedPython.path -I -B @verifyArgs
+}
+finally {
+    $env:PYTHONHOME = $previousPythonHome
+    $env:PYTHONPATH = $previousPythonPath
+    $env:PYTHONSTARTUP = $previousPythonStartup
+    $env:PYTHONDONTWRITEBYTECODE = $previousNoBytecode
+}
 if ($LASTEXITCODE -ne 0) { throw "Public artifact verification failed" }
 $scanRoots = @(
     $public,

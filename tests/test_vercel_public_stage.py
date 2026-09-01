@@ -48,9 +48,8 @@ def test_stage_builder_declares_dependency_free_python_stage() -> None:
     assert 'Copy-Item -Path (Join-Path $publicSource "*") -Destination $functionPublic' in script
     assert "performance-snapshot.json" not in script
     assert "performance-snapshot-manifest.json" not in script
-    assert "scenarios.json.manifest.json" not in script
+    assert "Assert-VercelPublicArtifactInventory" in script
     assert "scenario_b64" not in script
-    assert "opportunity-projection.json.manifest.json" not in script
     assert "opportunity_b64" not in script
     assert "snapshot_b64" not in script
     assert "calendar_b64" not in script
@@ -97,8 +96,9 @@ def test_daily_vercel_publisher_builds_once_verifies_and_can_roll_back() -> None
     script = Path("scripts/publish_vercel_public.ps1").read_text(encoding="utf-8")
     runner = Path("scripts/dawnstrike_job_process.ps1").read_text(encoding="utf-8")
 
-    assert "vercel@58.4.0" in script
-    assert "sysconfig.get_path('scripts')" in script
+    assert "vercel_toolchain_contract.py" in script
+    assert "$vercelEntryPath" in script
+    assert "toolchain_identity_sha256" in script
     assert '-Arguments @("build", "--yes", "--project", $ProjectId)' in script
     assert '"--prebuilt"' in script
     assert "verify_vercel_candidate.ps1" in script
@@ -117,8 +117,9 @@ def test_daily_vercel_publisher_builds_once_verifies_and_can_roll_back() -> None
     assert "$priorProduction.id" not in script
     assert "$deployment.readyState" not in script
     assert "function Invoke-VercelProcess" in script
-    assert "Get-Command node.exe" in script
-    assert '"node_modules\\npm\\bin\\npx-cli.js"' in script
+    assert "Assert-VercelNodeIdentity" in script
+    assert "Get-Command node.exe" not in script
+    assert '"node_modules\\npm\\bin\\npx-cli.js"' not in script
     assert '. (Join-Path $PSScriptRoot "dawnstrike_job_process.ps1")' in script
     assert "Invoke-DawnstrikeJobProcess" in script
     assert "VercelBuildTimeoutSeconds = 600" in script

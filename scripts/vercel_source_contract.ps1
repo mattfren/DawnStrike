@@ -9,6 +9,36 @@ if (Test-Path -LiteralPath $jobProcessScript -PathType Leaf) {
     . $jobProcessScript
 }
 
+$script:VercelApprovedGitPath = 'C:\Program Files\Git\cmd\git.exe'
+$script:VercelApprovedGitSha256 = '37c5725818d602e951ba2563b870d62763322956b73373da4c33a0b566a80bc9'
+$script:VercelApprovedGitSubject = 'CN=Johannes Schindelin, O=Johannes Schindelin, S=Nordrhein-Westfalen, C=DE'
+$script:VercelApprovedGitThumbprint = '3EB14A3AEF84B7153E139397F0A49E2FAC662B0E'
+
+function Get-VercelApprovedGitPath {
+    if (Get-Command Get-DawnstrikeApprovedGit -ErrorAction SilentlyContinue) {
+        return [string](Get-DawnstrikeApprovedGit).path
+    }
+    $cursor = [System.IO.FileInfo]::new($script:VercelApprovedGitPath)
+    while ($null -ne $cursor) {
+        if ($cursor.Exists -and ($cursor.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+            throw "Approved Vercel Git path contains a reparse point."
+        }
+        $cursor = if ($cursor -is [System.IO.FileInfo]) { $cursor.Directory } else { $cursor.Parent }
+    }
+    if (-not (Test-Path -LiteralPath $script:VercelApprovedGitPath -PathType Leaf) -or
+        (Get-FileHash -LiteralPath $script:VercelApprovedGitPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+            $script:VercelApprovedGitSha256) {
+        throw "Approved Vercel Git executable identity changed."
+    }
+    $signature = Get-AuthenticodeSignature -LiteralPath $script:VercelApprovedGitPath -ErrorAction Stop
+    if ([string]$signature.Status -cne 'Valid' -or $null -eq $signature.SignerCertificate -or
+        [string]$signature.SignerCertificate.Subject -cne $script:VercelApprovedGitSubject -or
+        [string]$signature.SignerCertificate.Thumbprint -cne $script:VercelApprovedGitThumbprint) {
+        throw "Approved Vercel Git executable signer changed."
+    }
+    return $script:VercelApprovedGitPath
+}
+
 # Windows PowerShell's ConvertFrom-Json keeps the last value for a duplicate
 # object key.  That is unsafe for a receipt/config boundary: an attacker can
 # append a second handler or route and rely on a different parser downstream.
@@ -205,11 +235,53 @@ function Invoke-VercelGitText {
         [Parameter(Mandatory = $true)][string[]]$Arguments,
         [Parameter(Mandatory = $true)][string]$Label
     )
-    $output = & git.exe -C $Root @Arguments 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "$Label failed: $((@($output) | ForEach-Object { [string]$_ }) -join ' ')"
+    if (-not ("Dawnstrike.Native.JobProcessRunner" -as [type])) {
+        throw "The bounded Dawnstrike process helper is unavailable for $Label."
     }
-    return ((@($output) | ForEach-Object { [string]$_ }) -join "`n").Trim()
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = Get-VercelApprovedGitPath
+    $startInfo.Arguments = (
+        @(
+            '-c', 'core.fsmonitor=false',
+            '-c', 'core.hooksPath=NUL',
+            '-c', 'protocol.ext.allow=never',
+            '-c', 'submodule.recurse=false',
+            '-C', $Root
+        ) + @($Arguments) |
+            ForEach-Object {
+                [Dawnstrike.Native.JobProcessRunner]::QuoteArgument([string]$_)
+            }
+    ) -join ' '
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    foreach ($name in @($startInfo.EnvironmentVariables.Keys | ForEach-Object { [string]$_ })) {
+        if ($name -like 'GIT_*') { $startInfo.EnvironmentVariables.Remove($name) }
+    }
+    $startInfo.EnvironmentVariables['GIT_CONFIG_NOSYSTEM'] = '1'
+    $startInfo.EnvironmentVariables['GIT_CONFIG_GLOBAL'] = 'NUL'
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    if (-not $process.Start()) { throw "$Label could not start Git." }
+    $bytes = $null
+    try {
+        $bytes = [System.IO.MemoryStream]::new()
+        $stdoutTask = $process.StandardOutput.BaseStream.CopyToAsync($bytes)
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit(30000)) {
+            try { $process.Kill() } catch { }
+            throw "$Label timed out."
+        }
+        $null = [System.Threading.Tasks.Task]::WaitAll(@($stdoutTask, $stderrTask), 30000)
+        if ($process.ExitCode -ne 0) { throw "$Label failed: $($stderrTask.Result)" }
+        $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+        return $utf8.GetString($bytes.ToArray()).Trim()
+    }
+    finally {
+        if ($null -ne $bytes) { $bytes.Dispose() }
+        $process.Dispose()
+    }
 }
 
 function Get-VercelIgnoredPublicationPaths {
@@ -226,7 +298,10 @@ function Get-VercelIgnoredPublicationPaths {
         -Arguments @("ls-files", "--others", "--ignored", "--exclude-standard", "-z") `
         -Label "Ignored publication artifact verification"
     return @(
-        ([string]$ignored).Split([char]0, [System.StringSplitOptions]::RemoveEmptyEntries) |
+        ([string]$ignored).Split(
+            [char[]]@([char]0),
+            [System.StringSplitOptions]::RemoveEmptyEntries
+        ) |
             Where-Object {
                 $relative = [string]$_
                 $full = [System.IO.Path]::GetFullPath((Join-Path $Root $relative))
@@ -245,11 +320,66 @@ function Get-VercelIgnoredPublicationPaths {
     )
 }
 
+function Assert-VercelLocalGitConfigurationSafe {
+    param([Parameter(Mandatory = $true)][string]$Root)
+    $raw = Invoke-VercelGitText `
+        -Root $Root `
+        -Arguments @('config', '--local', '--no-includes', '--name-only', '--null', '--list') `
+        -Label 'Publication local Git config verification'
+    $seen = @{}
+    $fixed = @{
+        'core.repositoryformatversion' = '0'
+        'core.filemode' = 'false'
+        'core.bare' = 'false'
+        'core.logallrefupdates' = 'true'
+        'core.symlinks' = 'false'
+        'core.ignorecase' = 'true'
+        'remote.origin.url' = 'https://github.com/mattfren/DawnStrike.git'
+        'remote.origin.fetch' = '+refs/heads/*:refs/remotes/origin/*'
+        'lfs.repositoryformatversion' = '0'
+    }
+    $nonExecuting = @('user.email', 'user.name')
+    foreach ($record in ([string]$raw).Split(
+        [char[]]@([char]0), [System.StringSplitOptions]::RemoveEmptyEntries
+    )) {
+        $key = ([string]$record).ToLowerInvariant()
+        if ($seen.ContainsKey($key)) { throw 'Publication local Git config contains a duplicate key.' }
+        $seen[$key] = $true
+        $value = Invoke-VercelGitText `
+            -Root $Root `
+            -Arguments @('config', '--local', '--no-includes', '--get-all', $key) `
+            -Label "Publication local Git config value verification for $key"
+        if ([string]$value -match "[`r`n]") {
+            throw 'Publication local Git config contains a duplicate or multiline value.'
+        }
+        if ($fixed.ContainsKey($key)) {
+            if ([string]$fixed[$key] -cne $value) {
+                throw "Publication local Git config value is not governed: $key"
+            }
+            continue
+        }
+        if ($key -in $nonExecuting -and $value.Length -ge 1 -and $value.Length -le 512) {
+            continue
+        }
+        if ($key -match '^branch\.([a-z0-9._/-]+)\.(remote|merge)$') {
+            $branchName = $Matches[1]
+            $field = $Matches[2]
+            $expected = if ($field -eq 'remote') { 'origin' } else { "refs/heads/$branchName" }
+            if ($value -cne $expected) {
+                throw "Publication branch Git config value is not governed: $key"
+            }
+            continue
+        }
+        throw "Publication local Git config key is not governed: $key"
+    }
+}
+
 function Get-VercelGitSourceContract {
     param(
         [Parameter(Mandatory = $true)][string]$Root,
         [string]$AllowedStageRoot = ""
     )
+    Assert-VercelLocalGitConfigurationSafe -Root $Root
     $top = Invoke-VercelGitText -Root $Root -Arguments @("rev-parse", "--show-toplevel") `
         -Label "Publication Git root verification"
     if (-not [System.String]::Equals(
@@ -309,10 +439,17 @@ function Write-VercelGitBlob {
     if (-not ("Dawnstrike.Native.JobProcessRunner" -as [type])) {
         throw "The bounded Dawnstrike process helper is unavailable for Git blob extraction."
     }
+    Assert-VercelLocalGitConfigurationSafe -Root $Root
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-    $startInfo.FileName = "git.exe"
+    $startInfo.FileName = Get-VercelApprovedGitPath
     $startInfo.Arguments = (
-        @("-C", $Root, "cat-file", "blob", "$Commit`:$RelativePath") |
+        @(
+            "-c", "core.fsmonitor=false",
+            "-c", "core.hooksPath=NUL",
+            "-c", "protocol.ext.allow=never",
+            "-c", "submodule.recurse=false",
+            "-C", $Root, "cat-file", "blob", "$Commit`:$RelativePath"
+        ) |
             ForEach-Object {
                 [Dawnstrike.Native.JobProcessRunner]::QuoteArgument([string]$_)
             }
@@ -321,6 +458,11 @@ function Write-VercelGitBlob {
     $startInfo.CreateNoWindow = $true
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
+    foreach ($name in @($startInfo.EnvironmentVariables.Keys | ForEach-Object { [string]$_ })) {
+        if ($name -like 'GIT_*') { $startInfo.EnvironmentVariables.Remove($name) }
+    }
+    $startInfo.EnvironmentVariables['GIT_CONFIG_NOSYSTEM'] = '1'
+    $startInfo.EnvironmentVariables['GIT_CONFIG_GLOBAL'] = 'NUL'
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
     if (-not $process.Start()) { throw "Could not start Git blob extraction for $RelativePath." }
@@ -332,7 +474,7 @@ function Write-VercelGitBlob {
             try { $process.Kill() } catch { }
             throw "Git blob extraction timed out for $RelativePath."
         }
-        [System.Threading.Tasks.Task]::WaitAll(@($stdoutTask, $stderrTask), 30000)
+        $null = [System.Threading.Tasks.Task]::WaitAll(@($stdoutTask, $stderrTask), 30000)
         $stderr = $stderrTask.Result
         if ($process.ExitCode -ne 0) {
             throw "Git blob extraction failed for $RelativePath`: $stderr"
@@ -497,6 +639,37 @@ function Get-VercelRelativePath {
         }
     }
     return $fullPath.Substring($rootPrefix.Length)
+}
+
+function Assert-VercelContainedPathNoReparse {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$Target,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    $rootFull = [System.IO.Path]::GetFullPath($Root).TrimEnd('\')
+    $targetFull = [System.IO.Path]::GetFullPath($Target)
+    $prefix = $rootFull + '\'
+    if (-not $targetFull.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "$Label escaped the governed project root."
+    }
+    $cursor = $targetFull
+    while ($true) {
+        if (Test-Path -LiteralPath $cursor) {
+            $item = Get-Item -LiteralPath $cursor -Force -ErrorAction Stop
+            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "$Label contains a reparse point."
+            }
+        }
+        if ([string]::Equals($cursor, $rootFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+            break
+        }
+        $parent = Split-Path -Parent $cursor
+        if (-not $parent -or [string]::Equals($parent, $cursor, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "$Label does not descend from the governed project root."
+        }
+        $cursor = $parent
+    }
 }
 
 function Get-VercelPackageDirectories {
