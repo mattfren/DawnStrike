@@ -39,7 +39,7 @@ function Enter-DawnstrikeRuntimeLockMutex {
     $created = $false
     $mutex = [Threading.Mutex]::new($false, "Global\DawnstrikeRuntimeActivationLockV2", [ref]$created)
     try { $owned=$mutex.WaitOne([TimeSpan]::FromSeconds(30)) }
-    catch [Threading.AbandonedMutexException] { $mutex.Dispose(); throw "Runtime activation lock mutex was abandoned; recovery evidence is required." }
+    catch [Threading.AbandonedMutexException] { $owned=$true; $script:DawnstrikeLockMutexAbandoned=$true }
     if (-not $owned) { $mutex.Dispose(); throw "Runtime activation lock mutex timed out." }
     return $mutex
 }
@@ -137,6 +137,7 @@ function Enter-DawnstrikeGovernedRuntimeLock {
     $path = Join-Path $lockRoot "dawnstrike-runtime-activation.lock"
     $mutex = Enter-DawnstrikeRuntimeLockMutex
     try {
+        if($script:DawnstrikeLockMutexAbandoned){$script:DawnstrikeLockMutexAbandoned=$false;throw 'Runtime activation lock mutex was abandoned; only exact stale-lock recovery is permitted.'}
         $daily=@(Get-ChildItem -LiteralPath $lockRoot -Filter 'dawnstrike-daily-*.lock' -File -Force -ErrorAction SilentlyContinue)
         if($daily.Count){throw "A daily run lock exists; runtime activation is not permitted."}
         if (Test-Path -LiteralPath $path) { $null = Get-DawnstrikeStrictRuntimeLock $path $PythonPath $PythonSha256; throw "A runtime activation lock already exists and requires governed recovery." }
@@ -161,11 +162,12 @@ function Enter-DawnstrikeGovernedRuntimeLock {
 
 function Adopt-DawnstrikeGovernedRuntimeLock {
     [CmdletBinding()]
-    param([string]$StateRoot,[string]$ExpectedToken,[string]$ExpectedFileSha256,[string]$ExpectedOperation,[string]$CandidateSha,[string]$CandidateTree,[string]$OriginIdentity,[string]$PythonPath,[string]$PythonSha256)
+    param([string]$StateRoot,[string]$ExpectedToken,[string]$ExpectedFileSha256,[string]$ExpectedOperation,[string]$CandidateSha,[string]$CandidateTree,[string]$OriginIdentity,[string]$PythonPath,[string]$PythonSha256,[ValidateSet("capture_task_rebind","runtime_activation","runtime_rollback","recovery")][string]$RecoveryOperation="recovery")
     $state = Assert-DawnstrikeRuntimeLockStateRoot $StateRoot
     $path = Join-Path $state "locks\dawnstrike-runtime-activation.lock"
     $mutex = Enter-DawnstrikeRuntimeLockMutex
     try {
+        $script:DawnstrikeLockMutexAbandoned=$false
         $stale = Get-DawnstrikeStrictRuntimeLock $path $PythonPath $PythonSha256
         if ($stale.payload.lock_token -ne $ExpectedToken -or $stale.raw_file_sha256 -ne $ExpectedFileSha256 -or $stale.payload.operation -ne $ExpectedOperation -or $stale.payload.candidate_sha -ne $CandidateSha -or $stale.payload.candidate_tree -ne $CandidateTree -or $stale.payload.origin_identity -ne $OriginIdentity) { throw "Stale runtime lock does not match the PREPARED contract." }
         if (-not (Test-DawnstrikeRuntimeLockOwnerDead $stale.payload)) { throw "Runtime activation lock owner is still active." }
@@ -173,7 +175,7 @@ function Adopt-DawnstrikeGovernedRuntimeLock {
         Assert-DawnstrikeSharedLockNoReparse $archive 'Stale lock archive'
         if (Test-Path -LiteralPath $archive) { throw "Stale lock archive already exists; adoption is ambiguous." }
         $token=[guid]::NewGuid().ToString("N")
-        $json=(New-DawnstrikeRuntimeLockPayload "recovery" $CandidateSha $CandidateTree $OriginIdentity $token)|ConvertTo-Json -Compress
+        $json=(New-DawnstrikeRuntimeLockPayload $RecoveryOperation $CandidateSha $CandidateTree $OriginIdentity $token)|ConvertTo-Json -Compress
         $temp=Join-Path (Split-Path $path -Parent) (".lock-recovery-"+[guid]::NewGuid().ToString('N')+".tmp")
         Assert-DawnstrikeSharedLockNoReparse $temp 'Recovery lock temporary file'
         $bytes=[Text.UTF8Encoding]::new($false).GetBytes($json)
@@ -182,8 +184,110 @@ function Adopt-DawnstrikeGovernedRuntimeLock {
         try { [IO.File]::Replace($temp,$path,$archive,$true) } finally { if(Test-Path -LiteralPath $temp){Remove-Item -LiteralPath $temp -Force} }
         if ((Get-DawnstrikeRuntimeLockHash $archive) -ne $ExpectedFileSha256) { throw "Stale lock archive changed during atomic adoption." }
         $current=Get-DawnstrikeStrictRuntimeLock $path $PythonPath $PythonSha256
-        return [pscustomobject]@{path=$path;token=$token;bytes_sha256=$current.raw_file_sha256;operation="recovery";python_path=$PythonPath;python_sha256=$PythonSha256;stale_archive=$archive;acquired=$true}
+        return [pscustomobject]@{path=$path;token=$token;bytes_sha256=$current.raw_file_sha256;operation=$RecoveryOperation;python_path=$PythonPath;python_sha256=$PythonSha256;stale_archive=$archive;acquired=$true}
     } finally { Exit-DawnstrikeRuntimeLockMutex $mutex }
+}
+
+function Get-DawnstrikeStrictRuntimeOperationJournal {
+    param([string]$Path,[string]$PythonPath,[string]$PythonSha256)
+    $contract=Join-Path $PSScriptRoot 'runtime_operation_journal.py'
+    Assert-DawnstrikeSharedLockNoReparse $contract 'Runtime operation journal contract'
+    Assert-DawnstrikeSharedLockNoReparse $Path 'Runtime operation journal'
+    if($PythonPath-ne $script:DawnstrikeApprovedPythonPath-or $PythonSha256-ne $script:DawnstrikeApprovedPythonSha256){throw 'Journal interpreter is not approved.'}
+    $item=Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if($item.PSIsContainer-or($item.Attributes-band [IO.FileAttributes]::ReparsePoint)-or$item.Length-gt 65536){throw 'Runtime operation journal leaf is unsafe.'}
+    $state=(Split-Path (Split-Path (Split-Path $Path -Parent) -Parent) -Parent)
+    $output=& $PythonPath '-I' '-B' $contract 'verify' $Path '--state-root' $state 2>$null
+    if($LASTEXITCODE-ne 0){throw 'Runtime operation journal is malformed or unsafe.'}
+    try{return ([string]($output-join''))|ConvertFrom-Json}catch{throw 'Runtime operation journal validator returned invalid output.'}
+}
+
+function Set-DawnstrikeRuntimeOperationJournalAdoption {
+    param([object]$Journal,[string]$JournalPath,[string]$State,[string]$CurrentToken,
+        [string]$CurrentHash,[string]$OldToken,[string]$OldHash,[string]$NextToken,
+        [string]$NextHash,[string]$ArchiveRelative,[string]$NextRelative,
+        [string]$PythonPath,[string]$PythonSha256)
+    $contract=Join-Path $PSScriptRoot 'runtime_operation_journal.py'
+    $payload=[ordered]@{}
+    foreach($property in $Journal.payload.PSObject.Properties){
+        if($property.Name-ne'journal_self_sha256'){$payload[$property.Name]=$property.Value}
+    }
+    $payload.adoption_state=$State;$payload.lock_token=$CurrentToken
+    $payload.lock_file_sha256=$CurrentHash;$payload.old_lock_token=$OldToken
+    $payload.old_lock_file_sha256=$OldHash;$payload.next_lock_token=$NextToken
+    $payload.next_lock_file_sha256=$NextHash
+    $payload.old_lock_archive_relative_path=$ArchiveRelative
+    $payload.next_lock_relative_path=$NextRelative
+    $payload.prior_journal_file_sha256=[string]$Journal.raw_file_sha256
+    $payload.recorded_at_utc=[DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ')
+    $input=Join-Path (Split-Path $JournalPath -Parent) ('.journal-input-'+[guid]::NewGuid().ToString('N')+'.json')
+    Assert-DawnstrikeSharedLockNoReparse $input 'Runtime operation journal input'
+    $bytes=[Text.UTF8Encoding]::new($false).GetBytes(($payload|ConvertTo-Json -Depth 8 -Compress))
+    $stream=[IO.File]::Open($input,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+    try{$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)}finally{$stream.Dispose()}
+    try{
+        $state=(Split-Path (Split-Path (Split-Path $JournalPath -Parent) -Parent) -Parent)
+        $output=& $PythonPath '-I' '-B' $contract 'seal' $input $JournalPath '--state-root' $state 2>$null
+        if($LASTEXITCODE-ne 0){throw 'Runtime operation journal adoption seal failed.'}
+        try{return ([string]($output-join''))|ConvertFrom-Json}catch{throw 'Journal seal returned invalid output.'}
+    }finally{if(Test-Path -LiteralPath $input){Remove-Item -LiteralPath $input -Force}}
+}
+
+function Adopt-DawnstrikeGovernedRuntimeLockWithJournal {
+    [CmdletBinding()]
+    param([string]$StateRoot,[string]$JournalPath,[string]$CandidateSha,
+        [string]$CandidateTree,[string]$OriginIdentity,[string]$PythonPath,
+        [string]$PythonSha256,[ValidateSet('after_prepared','after_replace')][string]$TestCrashPoint='')
+    if($TestCrashPoint-and$env:DAWNSTRIKE_TEST_LOCK_JOURNAL-ne'1'){throw 'Journal crash injection is test-only.'}
+    $state=Assert-DawnstrikeRuntimeLockStateRoot $StateRoot
+    $statePrefix=$state.TrimEnd('\')+'\'
+    $journalFull=[IO.Path]::GetFullPath($JournalPath)
+    if(-not$journalFull.StartsWith($statePrefix,[StringComparison]::OrdinalIgnoreCase)){throw 'Journal must be inside StateRoot.'}
+    $path=Join-Path $state 'locks\dawnstrike-runtime-activation.lock'
+    $mutex=Enter-DawnstrikeRuntimeLockMutex
+    try{
+        while($true){
+        $journal=Get-DawnstrikeStrictRuntimeOperationJournal $journalFull $PythonPath $PythonSha256
+        $payload=$journal.payload
+        if($payload.candidate_sha-ne$CandidateSha-or$payload.candidate_tree-ne$CandidateTree-or$payload.origin_identity-ne$OriginIdentity){throw 'Journal source identity does not match recovery.'}
+        $current=Get-DawnstrikeStrictRuntimeLock $path $PythonPath $PythonSha256
+        $ownerStart=(Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ')
+        $ownedByCurrent=([int]$current.payload.process_id-eq[int]$PID-and[string]$current.payload.process_started_at_utc-eq$ownerStart)
+        if(-not$ownedByCurrent-and-not(Test-DawnstrikeRuntimeLockOwnerDead $current.payload)){throw 'Runtime activation lock owner is still active.'}
+        $lockRoot=Split-Path $path -Parent
+        if($payload.adoption_state-eq'NONE'-or$payload.adoption_state-eq'ADOPTED'){
+            if($payload.lock_token-ne$current.payload.lock_token-or$payload.lock_file_sha256-ne$current.raw_file_sha256){throw 'Journal does not bind the stale lock.'}
+            if($ownedByCurrent){return [pscustomobject]@{path=$path;token=[string]$current.payload.lock_token;bytes_sha256=[string]$current.raw_file_sha256;operation=[string]$current.payload.operation;python_path=$PythonPath;python_sha256=$PythonSha256;acquired=$true;journal_path=$journalFull;journal_sha256=[string]$journal.raw_file_sha256}}
+            $oldToken=[string]$current.payload.lock_token;$oldHash=[string]$current.raw_file_sha256
+            $nextToken=[guid]::NewGuid().ToString('N')
+            $nextJson=(New-DawnstrikeRuntimeLockPayload ([string]$current.payload.operation) $CandidateSha $CandidateTree $OriginIdentity $nextToken)|ConvertTo-Json -Compress
+            $nextBytes=[Text.UTF8Encoding]::new($false).GetBytes($nextJson)
+            $nextHash=Get-DawnstrikeSharedLockSha256Text $nextJson
+            $nextName='.next-runtime-lock-'+$nextHash+'.tmp';$nextPath=Join-Path $lockRoot $nextName
+            $nextStream=[IO.File]::Open($nextPath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+            try{$nextStream.Write($nextBytes,0,$nextBytes.Length);$nextStream.Flush($true)}finally{$nextStream.Dispose()}
+            $archiveName='recovered-stale-'+$oldHash+'.lock'
+            $journal=Set-DawnstrikeRuntimeOperationJournalAdoption $journal $journalFull 'ADOPTION_PREPARED' $oldToken $oldHash $oldToken $oldHash $nextToken $nextHash ('locks/'+$archiveName) ('locks/'+$nextName) $PythonPath $PythonSha256
+            if($TestCrashPoint-eq'after_prepared'){exit 137}
+            $payload=$journal.payload
+        }elseif($payload.adoption_state-ne'ADOPTION_PREPARED'-and$payload.adoption_state-ne'ADOPTED'){throw 'Journal adoption state is not recoverable.'}
+        $oldPath=Join-Path $state ([string]$payload.old_lock_archive_relative_path).Replace('/','\')
+        $nextPath=if($payload.next_lock_relative_path-ne'NONE'){Join-Path $state ([string]$payload.next_lock_relative_path).Replace('/','\')}else{$null}
+        if($payload.adoption_state-eq'ADOPTION_PREPARED'){
+            if($current.raw_file_sha256-eq$payload.old_lock_file_sha256){
+                if(-not(Test-Path -LiteralPath $nextPath -PathType Leaf)-or(Get-DawnstrikeRuntimeLockHash $nextPath)-ne$payload.next_lock_file_sha256){throw 'Prepared next-lock bytes are missing or changed.'}
+                [IO.File]::Replace($nextPath,$path,$oldPath,$true)
+            }elseif($current.raw_file_sha256-ne$payload.next_lock_file_sha256-or-not(Test-Path -LiteralPath $oldPath -PathType Leaf)-or(Get-DawnstrikeRuntimeLockHash $oldPath)-ne$payload.old_lock_file_sha256){throw 'Prepared adoption lock/archive pair is invalid.'}
+            if($TestCrashPoint-eq'after_replace'){exit 137}
+            $current=Get-DawnstrikeStrictRuntimeLock $path $PythonPath $PythonSha256
+            $journal=Set-DawnstrikeRuntimeOperationJournalAdoption $journal $journalFull 'ADOPTED' ([string]$current.payload.lock_token) ([string]$current.raw_file_sha256) ([string]$payload.old_lock_token) ([string]$payload.old_lock_file_sha256) ([string]$payload.next_lock_token) ([string]$payload.next_lock_file_sha256) ([string]$payload.old_lock_archive_relative_path) 'NONE' $PythonPath $PythonSha256
+        }
+        $current=Get-DawnstrikeStrictRuntimeLock $path $PythonPath $PythonSha256
+        # A recovered precomputed lock can belong to a recovery process that
+        # crashed after replacement. Loop under the same mutex until the lock
+        # payload is owned by this exact PID/start pair.
+        }
+    }finally{Exit-DawnstrikeRuntimeLockMutex $mutex}
 }
 
 function Exit-DawnstrikeGovernedRuntimeLock {

@@ -1,0 +1,139 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+
+import pytest
+
+from scripts.runtime_operation_journal import seal, validate
+
+EMPTY = hashlib.sha256(b"").hexdigest()
+
+
+def _payload(operation: str = "runtime_activation", phase: str = "INIT") -> dict:
+    phases = {
+        "runtime_activation": ("INIT", "PRE_SWAP", "POST_SWAP", "COMPLETE"),
+        "capture_task_rebind": ("INIT", "PRE_ENABLE", "POST_ENABLE", "COMPLETE"),
+        "runtime_rollback": ("INIT", "PRE_SWAP", "POST_SWAP", "COMPLETE"),
+        "capture_task_hardening": (
+            "INIT", "PRE_TASK_UPDATE", "POST_TASK_UPDATE", "COMPLETE"
+        ),
+    }
+    return {
+        "schema_version": "dawnstrike.runtime_operation_journal.v1",
+        "operation": operation,
+        "phase": phase,
+        "sequence": phases[operation].index(phase),
+        "candidate_sha": "a" * 40,
+        "candidate_tree": "b" * 40,
+        "current_sha": "c" * 40,
+        "current_tree": "d" * 40,
+        "previous_sha": "e" * 40,
+        "previous_tree": "f" * 40,
+        "origin_identity": "github.com/mattfren/dawnstrike",
+        "origin_identity_sha256": hashlib.sha256(
+            b"github.com/mattfren/dawnstrike"
+        ).hexdigest(),
+        "state_root_sha256": "1" * 64,
+        "lock_token": "2" * 32,
+        "lock_file_sha256": "3" * 64,
+        "prior_journal_file_sha256": EMPTY,
+        "receipt_relative_path": "receipts/runtime-activation/example.json",
+        "receipt_sha256": EMPTY,
+        "backup_contract_sha256": EMPTY if phase == "INIT" else "4" * 64,
+        "task_contract_sha256": "5" * 64,
+        "runtime_stage_contract_sha256": EMPTY if phase == "INIT" else "6" * 64,
+        "adoption_state": "NONE",
+        "old_lock_token": "2" * 32,
+        "old_lock_file_sha256": "3" * 64,
+        "next_lock_token": "2" * 32,
+        "next_lock_file_sha256": "3" * 64,
+        "old_lock_archive_relative_path": "NONE",
+        "next_lock_relative_path": "NONE",
+        "recorded_at_utc": "2026-08-31T23:01:02.1234567Z",
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+
+
+@pytest.mark.parametrize(
+    ("operation", "phase"),
+    [
+        ("runtime_activation", "INIT"),
+        ("runtime_activation", "POST_SWAP"),
+        ("capture_task_rebind", "POST_ENABLE"),
+        ("runtime_rollback", "COMPLETE"),
+        ("capture_task_hardening", "POST_TASK_UPDATE"),
+    ],
+)
+def test_journal_seals_and_validates_exact_phase(
+    tmp_path: Path, operation: str, phase: str
+) -> None:
+    source = tmp_path / "input.json"
+    target = tmp_path / "journal.json"
+    source.write_text(json.dumps(_payload(operation, phase)), encoding="utf-8")
+    result = seal(source, target)
+    assert validate(target.read_bytes()) == result["payload"]
+    assert result["raw_file_sha256"] == hashlib.sha256(target.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"sequence": 2},
+        {"origin_identity": "evil.invalid/repo"},
+        {"lock_token": "0" * 31},
+        {"receipt_relative_path": "../escape.json"},
+        {"research_only": False},
+        {"broker_execution_enabled": True},
+    ],
+)
+def test_journal_rejects_hostile_payload(tmp_path: Path, mutation: dict) -> None:
+    payload = _payload()
+    payload.update(mutation)
+    source = tmp_path / "input.json"
+    source.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError):
+        seal(source, tmp_path / "journal.json")
+
+
+def test_journal_rejects_duplicate_keys() -> None:
+    with pytest.raises(ValueError, match="duplicate key"):
+        validate(b'{"schema_version":"x","schema_version":"y"}')
+
+
+@pytest.mark.parametrize("state", ["ADOPTION_PREPARED", "ADOPTED"])
+def test_journal_seals_two_phase_adoption(tmp_path: Path, state: str) -> None:
+    payload = _payload()
+    payload.update(
+        adoption_state=state,
+        old_lock_token="2" * 32,
+        old_lock_file_sha256="3" * 64,
+        next_lock_token="7" * 32,
+        next_lock_file_sha256="8" * 64,
+        old_lock_archive_relative_path="locks/recovered-stale-3.lock",
+        next_lock_relative_path=(
+            "locks/next-runtime.lock" if state == "ADOPTION_PREPARED" else "NONE"
+        ),
+    )
+    if state == "ADOPTED":
+        payload["lock_token"] = payload["next_lock_token"]
+        payload["lock_file_sha256"] = payload["next_lock_file_sha256"]
+    source = tmp_path / "input.json"
+    source.write_text(json.dumps(payload), encoding="utf-8")
+    result = seal(source, tmp_path / "journal.json")
+    assert result["payload"]["adoption_state"] == state
+
+
+def test_prepared_adoption_rejects_same_old_and_next_identity(tmp_path: Path) -> None:
+    payload = _payload()
+    payload.update(
+        adoption_state="ADOPTION_PREPARED",
+        old_lock_archive_relative_path="locks/archive.lock",
+        next_lock_relative_path="locks/next.lock",
+    )
+    source = tmp_path / "input.json"
+    source.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="prepared adoption identities"):
+        seal(source, tmp_path / "journal.json")
