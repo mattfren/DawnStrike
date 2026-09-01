@@ -444,6 +444,20 @@ $lock=Enter-DawnstrikeGovernedRuntimeLockWithJournal -StateRoot '{state_q}' `
         text=True, capture_output=True, check=False, env=environment,
     )
     assert crashed.returncode != 0, (crashed.stdout, crashed.stderr)
+    if crash == "after_init":
+        for wrong in (
+            command().replace("-CurrentSha ('e'*40)", "-CurrentSha ('d'*40)"),
+            command().replace(
+                "receipts/runtime-activation/prepared.json",
+                "receipts/runtime-activation/other-prepared.json",
+            ),
+        ):
+            mismatch = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", wrong],
+                text=True, capture_output=True, check=False, env=environment,
+            )
+            assert mismatch.returncode != 0
+            assert "identity is invalid" in mismatch.stderr
     recovered = subprocess.run(
         ["powershell", "-NoProfile", "-NonInteractive", "-Command", command(cleanup=True)],
         text=True, capture_output=True, check=False, env=environment,
@@ -494,3 +508,95 @@ $lock=Enter-DawnstrikeGovernedRuntimeLockWithJournal -StateRoot '{state_q}' `
     assert "still active" in contender.stderr
     owner.kill()
     owner.wait(timeout=10)
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="PowerShell unavailable")
+def test_journal_aware_enter_enforces_daily_lock_and_task_hash(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    module = str(PS.resolve()).replace("'", "''")
+    state_q = str(state).replace("'", "''")
+    command = rf"""
+. '{module}'
+$approved=Get-DawnstrikeApprovedLockInterpreter
+$journal=Join-Path '{state_q}' 'receipts\runtime-operation\activation.json'
+$common=@{{StateRoot='{state_q}';JournalPath=$journal;Operation='runtime_activation';
+ CandidateSha=('a'*40);CandidateTree=('b'*40);CurrentSha=('e'*40);CurrentTree=('f'*40);
+ PreviousSha=('e'*40);PreviousTree=('f'*40);OriginIdentity='github.com/mattfren/dawnstrike';
+ PreparedReceiptRelativePath='receipts/runtime-activation/prepared.json';
+ CompleteReceiptRelativePath='receipts/runtime-activation/complete.json';
+ TaskContractSha256=('5'*64);PythonPath=$approved.path;PythonSha256=$approved.sha256}}
+$locks=Join-Path '{state_q}' 'locks';New-Item $locks -ItemType Directory -Force|Out-Null
+$daily=Join-Path $locks 'dawnstrike-daily-before.lock';[IO.File]::WriteAllText($daily,'test')
+$before=$false
+try{{$null=Enter-DawnstrikeGovernedRuntimeLockWithJournal @common}}
+catch{{$before=$_.Exception.Message-match'daily run lock'}}
+Remove-Item $daily -Force
+$race=$false
+try{{$null=Enter-DawnstrikeGovernedRuntimeLockWithJournal `
+ @common -TestInjectDailyLockRace}}
+catch{{$race=$_.Exception.Message-match'appeared'}}
+Remove-Item (Join-Path $locks 'dawnstrike-daily-injected.lock') -Force
+$empty=$false;$bad=@{{}}+$common;$bad.TaskContractSha256=Get-DawnstrikeSharedLockSha256Text ''
+try{{$null=Enter-DawnstrikeGovernedRuntimeLockWithJournal @bad}}
+catch{{$empty=$_.Exception.Message-match'nonempty'}}
+if(-not($before-and$race-and$empty)){{throw 'journal initializer guard failed'}}
+$lockPath=Join-Path $locks 'dawnstrike-runtime-activation.lock'
+if((Test-Path $journal)-or(Test-Path $lockPath)){{
+ throw 'guard left mutation evidence'
+}}
+'OK'
+"""
+    environment = dict(os.environ)
+    environment["DAWNSTRIKE_TEST_LOCK_JOURNAL"] = "1"
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+        text=True, capture_output=True, check=False, env=environment,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert "OK" in result.stdout
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="PowerShell unavailable")
+@pytest.mark.parametrize("kind", ["journal", "lock"])
+def test_journal_aware_enter_rejects_reparse_components(
+    tmp_path: Path, kind: str
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    target = tmp_path / "outside"
+    target.mkdir()
+    if kind == "journal":
+        (state / "receipts").mkdir()
+        link = state / "receipts" / "runtime-operation"
+    else:
+        link = state / "locks"
+    try:
+        os.symlink(target, link, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlink unavailable: {exc}")
+    module = str(PS.resolve()).replace("'", "''")
+    state_q = str(state).replace("'", "''")
+    journal_q = str(
+        state / "receipts" / "runtime-operation" / "activation.json"
+    ).replace("'", "''")
+    command = rf"""
+. '{module}'
+$approved=Get-DawnstrikeApprovedLockInterpreter
+$null=Enter-DawnstrikeGovernedRuntimeLockWithJournal -StateRoot '{state_q}' `
+ -JournalPath '{journal_q}' -Operation runtime_activation `
+ -CandidateSha ('a'*40) -CandidateTree ('b'*40) `
+ -CurrentSha ('e'*40) -CurrentTree ('f'*40) `
+ -PreviousSha ('e'*40) -PreviousTree ('f'*40) `
+ -OriginIdentity 'github.com/mattfren/dawnstrike' `
+ -PreparedReceiptRelativePath 'receipts/runtime-activation/prepared.json' `
+ -CompleteReceiptRelativePath 'receipts/runtime-activation/complete.json' `
+ -TaskContractSha256 ('5'*64) -PythonPath $approved.path `
+ -PythonSha256 $approved.sha256
+"""
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+        text=True, capture_output=True, check=False,
+    )
+    assert result.returncode != 0
+    assert "reparse" in result.stderr.lower() or "governed receipt root" in result.stderr
