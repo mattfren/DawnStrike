@@ -1091,6 +1091,16 @@ def test_activation_and_rollback_receipts_are_strict_self_hashed_and_atomic(
     assert not list(activation_path.parent.glob("*.tmp"))
 
 
+def test_rollback_ready_receipt_is_strict_and_not_terminal(tmp_path: Path) -> None:
+    ready_payload = _receipt_payload(
+        schema="dawnstrike.runtime_rollback_receipt.v2", status="PREPARED"
+    )
+    ready = seal_receipt(ready_payload, tmp_path / "rollback-ready.json")
+    assert ready["status"] == "PREPARED"
+    assert ready["task_enablement_restored"] is False
+    assert load_receipt(tmp_path / "rollback-ready.json") == ready
+
+
 def test_extended_rollback_requires_untampered_capture_hardening_chain(
     tmp_path: Path,
 ) -> None:
@@ -1669,19 +1679,26 @@ def test_activation_seals_truthful_ready_then_terminal_evidence() -> None:
     assert "FileOptions]::WriteThrough" in activation
 
 
-def test_rollback_seals_terminal_evidence_before_task_enablement() -> None:
+def test_rollback_seals_ready_then_terminal_evidence_after_task_enablement() -> None:
     rollback = Path("scripts/rollback_dawnstrike_runtime.ps1").read_text(
         encoding="utf-8"
     )
-    receipt = rollback.index('"Rollback receipt sealing"')
+    receipt = rollback.index('"Rollback ready receipt sealing"')
     ready = rollback.index(
         "-Operation runtime_rollback -Phase POST_SWAP_READY", receipt
     )
     enable = rollback.index("        Enable-DawnstrikeCanonicalTasks", ready)
+    terminal_receipt = rollback.index('"Rollback terminal receipt sealing"', enable)
     complete = rollback.index(
-        "-Operation runtime_rollback -Phase COMPLETE", enable
+        "-Operation runtime_rollback -Phase COMPLETE", terminal_receipt
     )
-    assert receipt < ready < enable < complete
+    assert receipt < ready < enable < terminal_receipt < complete
+    assert 'schema_version = "dawnstrike.runtime_rollback_receipt.v2"' in rollback
+    assert 'schema_version = "dawnstrike.runtime_rollback_receipt.v1"' in rollback
+    assert "Set-DawnstrikeCanonicalTaskExpectedSha" in rollback
+    assert "-ExpectedSha $previousSha" in rollback
+    assert "Get-DawnstrikeTaskXmlBackupManifest" in rollback
+    assert "previous-SHA Ready boundary" in rollback
     assert 'journalPhase -in @("POST_SWAP", "POST_SWAP_READY")' in rollback
     assert 'DAWNSTRIKE_TEST_ROLLBACK_CRASH_POINT -eq "after_ready"' in rollback
     assert 'DAWNSTRIKE_TEST_ROLLBACK_CRASH_POINT -eq "after_enable"' in rollback
