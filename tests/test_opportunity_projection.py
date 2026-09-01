@@ -37,6 +37,7 @@ from intraday_scanner.dashboard.opportunity_projection_render import (  # noqa: 
     render_streamlit_opportunity_projection,
 )
 from intraday_scanner.dashboard.opportunity_projection_store import (  # noqa: E402
+    _market_date_for_timestamp,
     load_latest_opportunity_projection,
     opportunity_projection_enabled,
     write_public_opportunity_projection,
@@ -216,6 +217,12 @@ def test_latest_run_scope_rejects_historical_row_for_requested_market_date(
     assert current.reason_code is OpportunityProjectionReason.NO_PERSISTED_RUN
     assert matching.state is OpportunityProjectionState.QUALIFYING
     assert matching.source_run_id == qualifying_result.run_id
+
+
+def test_market_date_uses_new_york_exchange_date_for_utc_cross_day_timestamp() -> None:
+    assert _market_date_for_timestamp(
+        datetime(2026, 8, 12, 0, 30, tzinfo=timezone.utc)
+    ) == "2026-08-11"
 
 
 def test_public_projection_manifest_binds_active_lineage(

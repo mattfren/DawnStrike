@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
+from zoneinfo import ZoneInfo
 
 from intraday_scanner.v2.opportunity.models import TradeDecisionValue
 from intraday_scanner.v2.opportunity.pipeline import PipelineResult
@@ -18,6 +19,7 @@ MAX_OPPORTUNITY_ROWS = 5
 MAX_TEXT_ITEMS = 24
 MAX_ANOMALIES = 20
 MAX_TEXT_LENGTH = 240
+MARKET_TIMEZONE = ZoneInfo("America/New_York")
 NO_QUALIFYING_MESSAGE = "NO QUALIFYING TRADE CURRENTLY EXISTS."
 NOT_AVAILABLE = "Not available"
 
@@ -249,7 +251,9 @@ class OpportunityProjection:
             "source_run_id": self.source_run_id,
             "as_of": self.as_of.isoformat() if self.as_of is not None else None,
             "market_date": (
-                self.as_of.date().isoformat() if self.as_of is not None else None
+                self.as_of.astimezone(MARKET_TIMEZONE).date().isoformat()
+                if self.as_of is not None
+                else None
             ),
             "rows": [row.to_dict() for row in self.rows],
             "row_count": len(self.rows),

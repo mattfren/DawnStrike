@@ -10,6 +10,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _REPO_ROOT_TEXT = str(_REPO_ROOT)
@@ -17,6 +18,9 @@ if _REPO_ROOT_TEXT in sys.path:
     sys.path.remove(_REPO_ROOT_TEXT)
 sys.path.insert(0, _REPO_ROOT_TEXT)
 
+from api.readiness import (  # noqa: E402
+    validate_opportunity_projection_rows,
+)
 from scripts import public_artifact_inventory as _public_inventory  # noqa: E402
 from scripts import public_lineage as _public_lineage  # noqa: E402
 
@@ -290,6 +294,8 @@ def verify(
         opportunity_rows = rows if isinstance(rows, list) else []
         if not isinstance(rows, list):
             errors.append("opportunity_rows_invalid")
+        else:
+            errors.extend(validate_opportunity_projection_rows(rows))
         if len(opportunity_rows) > 5:
             errors.append("opportunity_row_limit_exceeded")
         if opportunity.get("row_count") != len(opportunity_rows):
@@ -668,7 +674,7 @@ def _opportunity_lineage_failures(
             parsed = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
             if parsed.utcoffset() is None:
                 raise ValueError("opportunity as_of must include a timezone offset")
-            as_of_date = parsed.date().isoformat()
+            as_of_date = parsed.astimezone(ZoneInfo("America/New_York")).date().isoformat()
         except ValueError:
             _append_unique_error(errors, "opportunity_as_of_invalid")
     if as_of_date is not None:

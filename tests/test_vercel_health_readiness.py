@@ -387,6 +387,44 @@ def test_readiness_rejects_active_opportunity_from_prior_market_date() -> None:
     assert "opportunity_as_of_market_date_mismatch" in failures
 
 
+def test_readiness_binds_utc_cross_day_opportunity_to_new_york_market_date() -> None:
+    from api import readiness
+
+    payload = json.dumps(
+        {
+            "schema_version": "dawnstrike.opportunity_projection.v1",
+            "state": "QUALIFYING",
+            "message": "research",
+            "source_run_id": "opportunity-run:ny-cross-day",
+            "as_of": "2026-08-12T00:30:00+00:00",
+            "market_date": "2026-08-11",
+            "rows": [],
+            "row_count": 0,
+            "research_only": True,
+            "order_execution_enabled": False,
+        },
+        sort_keys=True,
+    ).encode()
+    manifest = {
+        "schema_version": "dawnstrike.opportunity_projection_manifest.v1",
+        "payload_sha256": hashlib.sha256(payload).hexdigest(),
+        "byte_count": len(payload),
+        "state": "QUALIFYING",
+        "row_count": 0,
+        "market_date": "2026-08-11",
+        "source_run_id": "opportunity-run:ny-cross-day",
+        "as_of": "2026-08-12T00:30:00+00:00",
+    }
+
+    failures = readiness._opportunity_failures(
+        payload,
+        manifest,
+        expected_market_date="2026-08-11",
+    )
+
+    assert failures == []
+
+
 def test_readiness_rejects_unversioned_or_naive_active_opportunity() -> None:
     from api import readiness
 
@@ -423,3 +461,39 @@ def test_readiness_rejects_unversioned_or_naive_active_opportunity() -> None:
     assert "opportunity_schema_version_invalid" in failures
     assert "opportunity_manifest_schema_version_invalid" in failures
     assert "opportunity_as_of_invalid" in failures
+
+
+def test_shared_opportunity_row_safety_rejects_forged_live_decision() -> None:
+    from api.readiness import validate_opportunity_projection_rows
+
+    row = {
+        "rank": 1,
+        "symbol": "AAPL",
+        "strategy_id": "alphaops_v5",
+        "strategy_version": "dawnstrike-alphaops-v5.0.0",
+        "direction": "long",
+        "decision": "LIVE_ORDER",
+        "lifecycle": "production_eligible",
+        "evidence_kind": "research",
+        "validation_wording": "Research only.",
+        "market_regime": "unknown",
+        "market_regime_evidence_kind": "not_available",
+        "security_regime": "unknown",
+        "security_regime_evidence_kind": "not_available",
+        "triggered_anomalies": [],
+        "liquidity_score": None,
+        "liquidity_evidence_kind": None,
+        "why": [],
+        "risks": [],
+        "vetoes": [],
+        "entry_price": None,
+        "invalidation_price": None,
+        "target_price": None,
+        "limitations": [],
+        "research_only": True,
+        "order_execution_enabled": False,
+    }
+
+    failures = validate_opportunity_projection_rows([row])
+
+    assert "opportunity_row_0_decision_invalid" in failures

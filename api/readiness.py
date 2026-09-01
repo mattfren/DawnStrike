@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import cast
@@ -75,6 +76,23 @@ OFFICIAL_ACCOUNT_SESSION_IDENTITY = {
 
 _IMMUTABLE_BYTES_CACHE: dict[tuple[object, ...], bytes] = {}
 _LOWER_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+_OPPORTUNITY_ROW_KEYS = frozenset(
+    {
+        "rank", "symbol", "strategy_id", "strategy_version", "direction", "decision",
+        "lifecycle", "evidence_kind", "validation_wording", "market_regime",
+        "market_regime_evidence_kind", "security_regime", "security_regime_evidence_kind",
+        "triggered_anomalies", "liquidity_score", "liquidity_evidence_kind", "why",
+        "risks", "vetoes", "entry_price", "invalidation_price", "target_price",
+        "limitations", "research_only", "order_execution_enabled",
+    }
+)
+_OPPORTUNITY_ANOMALY_KEYS = frozenset({"name", "strength", "evidence_kind"})
+_OPPORTUNITY_UNSAFE_TEXT = re.compile(
+    r"(?i)(?:[A-Za-z]:[\\/]|\\\\|/(?:Users|home|var|opt|tmp)/|https?://|"
+    r"(?:api[_-]?key|secret|access[_-]?token|password|authorization)\s*[:=]|"
+    r"\bbearer\s+|\b(?:select|insert|update|delete|pragma|drop\s+table|create\s+table)\b|"
+    r"[<>]|[\x00-\x08\x0b\x0c\x0e-\x1f])"
+)
 
 
 def is_lower_hex64(value: object) -> bool:
@@ -725,6 +743,7 @@ def _opportunity_failures(
     if not isinstance(rows, list):
         failures.append("opportunity_rows_invalid")
         rows = []
+    failures.extend(validate_opportunity_projection_rows(rows))
     if len(rows) > 5:
         failures.append("opportunity_row_limit_exceeded")
     if parsed.get("row_count") != len(rows):
@@ -767,7 +786,11 @@ def _opportunity_failures(
                 parsed_as_of = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
                 if parsed_as_of.utcoffset() is None:
                     raise ValueError("opportunity as_of must include a timezone offset")
-                as_of_date = parsed_as_of.date().isoformat()
+                as_of_date = (
+                    parsed_as_of.astimezone(ZoneInfo("America/New_York"))
+                    .date()
+                    .isoformat()
+                )
             except ValueError:
                 failures.append("opportunity_as_of_invalid")
         if as_of_date is not None:
@@ -788,6 +811,94 @@ def _opportunity_failures(
         if manifest.get("as_of") != as_of:
             failures.append("opportunity_manifest_as_of_mismatch")
     return failures
+
+
+def validate_opportunity_projection_rows(rows: object) -> list[str]:
+    """Validate canonical row shape, bounded text, numerics, and safety flags."""
+
+    if not isinstance(rows, list):
+        return ["opportunity_rows_invalid"]
+    failures: list[str] = []
+    ranks: list[int] = []
+    text_fields = (
+        "symbol", "strategy_id", "strategy_version", "direction", "decision",
+        "lifecycle", "evidence_kind", "validation_wording", "market_regime",
+        "market_regime_evidence_kind", "security_regime", "security_regime_evidence_kind",
+    )
+    list_fields = ("why", "risks", "vetoes", "limitations")
+    numeric_fields = ("liquidity_score", "entry_price", "invalidation_price", "target_price")
+    for index, row in enumerate(rows):
+        prefix = f"opportunity_row_{index}"
+        if not isinstance(row, dict) or set(row) != _OPPORTUNITY_ROW_KEYS:
+            failures.append(f"{prefix}_schema_invalid")
+            continue
+        rank = row.get("rank")
+        if type(rank) is not int or rank < 1:
+            failures.append(f"{prefix}_rank_invalid")
+        else:
+            ranks.append(rank)
+        for field in text_fields:
+            if not _safe_opportunity_text(row.get(field)):
+                failures.append(f"{prefix}_{field}_invalid")
+        if row.get("decision") not in {"WATCH", "TAKE"}:
+            failures.append(f"{prefix}_decision_invalid")
+        evidence = row.get("liquidity_evidence_kind")
+        if evidence is not None and not _safe_opportunity_text(evidence):
+            failures.append(f"{prefix}_liquidity_evidence_kind_invalid")
+        for field in list_fields:
+            value = row.get(field)
+            if not isinstance(value, list) or len(value) > 24:
+                failures.append(f"{prefix}_{field}_invalid")
+                continue
+            if any(not _safe_opportunity_text(item) for item in value):
+                failures.append(f"{prefix}_{field}_invalid")
+            elif len(value) != len(set(value)):
+                failures.append(f"{prefix}_{field}_invalid")
+        for field in numeric_fields:
+            value = row.get(field)
+            if value is None:
+                continue
+            try:
+                if not isinstance(value, str) or not Decimal(value).is_finite():
+                    raise InvalidOperation
+            except (InvalidOperation, ValueError):
+                failures.append(f"{prefix}_{field}_invalid")
+        anomalies = row.get("triggered_anomalies")
+        if not isinstance(anomalies, list) or len(anomalies) > 20:
+            failures.append(f"{prefix}_triggered_anomalies_invalid")
+        else:
+            for anomaly_index, anomaly in enumerate(anomalies):
+                anomaly_prefix = f"{prefix}_anomaly_{anomaly_index}"
+                if not isinstance(anomaly, dict) or set(anomaly) != _OPPORTUNITY_ANOMALY_KEYS:
+                    failures.append(f"{anomaly_prefix}_schema_invalid")
+                    continue
+                if not _safe_opportunity_text(anomaly.get("name")) or not _safe_opportunity_text(
+                    anomaly.get("evidence_kind")
+                ):
+                    failures.append(f"{anomaly_prefix}_text_invalid")
+                strength = anomaly.get("strength")
+                if strength is not None:
+                    try:
+                        if not isinstance(strength, str) or not Decimal(strength).is_finite():
+                            raise InvalidOperation
+                    except (InvalidOperation, ValueError):
+                        failures.append(f"{anomaly_prefix}_strength_invalid")
+        if row.get("research_only") is not True:
+            failures.append(f"{prefix}_research_only_invalid")
+        if row.get("order_execution_enabled") is not False:
+            failures.append(f"{prefix}_execution_boundary_invalid")
+    if ranks != list(range(1, len(ranks) + 1)):
+        failures.append("opportunity_row_rank_order_invalid")
+    return failures
+
+
+def _safe_opportunity_text(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and len(value) <= 240
+        and _OPPORTUNITY_UNSAFE_TEXT.search(value) is None
+    )
 
 
 def _freshness_failures(value: object) -> list[str]:

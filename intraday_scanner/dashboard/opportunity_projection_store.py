@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from intraday_scanner.errors import StorageError
 from intraday_scanner.storage.opportunity_store import (
@@ -26,6 +27,8 @@ from .opportunity_projection import (
     disabled_projection,
     unavailable_projection,
 )
+
+MARKET_TIMEZONE = ZoneInfo("America/New_York")
 
 OPPORTUNITY_PROJECTION_FLAG = "DAWNSTRIKE_OPPORTUNITY_PROJECTION_ENABLED"
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
@@ -95,16 +98,21 @@ def load_latest_opportunity_projection(
                 """
             ).fetchone()
         else:
-            latest = connection.execute(
+            rows = connection.execute(
                 """
-                SELECT run_id
+                SELECT run_id, decision_at
                 FROM opportunity_pipeline_runs
-                WHERE substr(decision_at, 1, 10) = ?
                 ORDER BY decision_at DESC, first_recorded_at DESC, run_id DESC
-                LIMIT 1
-                """,
-                (normalized_market_date,),
-            ).fetchone()
+                """
+            ).fetchall()
+            latest = next(
+                (
+                    row
+                    for row in rows
+                    if _market_date_for_timestamp(row[1]) == normalized_market_date
+                ),
+                None,
+            )
         if latest is None:
             return unavailable_projection(OpportunityProjectionReason.NO_PERSISTED_RUN)
         run_id = str(latest[0])
@@ -122,7 +130,7 @@ def load_latest_opportunity_projection(
             return unavailable_projection(OpportunityProjectionReason.REPLAY_FAILED)
         if (
             normalized_market_date is not None
-            and result.decision_at.date().isoformat() != normalized_market_date
+            and _market_date_for_timestamp(result.decision_at) != normalized_market_date
         ):
             return unavailable_projection(OpportunityProjectionReason.REPLAY_FAILED)
         return build_opportunity_projection(result)
@@ -193,7 +201,22 @@ def _normalize_market_date(value: object) -> str | None:
 def _projection_market_date(projection: OpportunityProjection) -> str | None:
     if projection.as_of is None:
         return None
-    return projection.as_of.date().isoformat()
+    return projection.as_of.astimezone(MARKET_TIMEZONE).date().isoformat()
+
+
+def _market_date_for_timestamp(value: object) -> str | None:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(MARKET_TIMEZONE).date().isoformat()
 
 
 __all__ = [
