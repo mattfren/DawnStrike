@@ -24,6 +24,7 @@ from intraday_scanner.services.daily_run_service import (
     shared_daily_run_id,
 )
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
+from scripts.publication_boundary import prepublication_authorization_id
 from scripts.verify_public_artifact import verify as verify_public_artifact
 
 PREPUBLICATION_STAGES = (
@@ -51,6 +52,7 @@ def verify(
     release_sha: str,
     *,
     runtime_root: str | Path | None = None,
+    expected_market_date: str | None = None,
 ) -> dict[str, object]:
     """Return a machine-readable authorization decision without publishing."""
 
@@ -61,6 +63,9 @@ def verify(
     normalized_sha = str(release_sha).strip()
     if re.fullmatch(r"[0-9a-f]{40}", normalized_sha) is None:
         errors.append("release_sha_invalid")
+    expected = str(expected_market_date or normalized_date).strip()
+    if expected != normalized_date:
+        errors.append("expected_market_date_mismatch")
 
     if runtime_root is not None:
         observed_sha = _git_head(Path(runtime_root))
@@ -115,12 +120,33 @@ def verify(
     if build_manifest.get("broker_execution_enabled") is not False:
         errors.append("build_broker_execution_must_be_disabled")
 
+    artifact_identity = {
+        "build_sha": build_manifest.get("build_sha"),
+        "build_id": build_manifest.get("build_id"),
+        "publication_set_sha256": build_manifest.get("publication_set_sha256"),
+        "release_manifest_sha256": build_manifest.get("release_manifest_sha256"),
+    }
+    authorization_id = prepublication_authorization_id(
+        expected_market_date=expected,
+        release_sha=normalized_sha,
+        run_id=run_id,
+        stage_statuses=statuses,
+        artifact_identity=artifact_identity,
+    )
+    if any(value in (None, "") for value in artifact_identity.values()):
+        errors.append("prepublication_artifact_identity_missing")
+
     return {
         "status": "PASS" if not errors else "BLOCKED",
         "ready": not errors,
         "run_id": run_id,
         "market_date": normalized_date,
         "release_sha": normalized_sha,
+        "expected_market_date": expected,
+        "authorization_schema_version": "dawnstrike.prepublication_authorization.v1",
+        "authorization_id": authorization_id,
+        "prepublication_authorization_id": authorization_id,
+        "daily_ledger_authorization_id": authorization_id,
         "required_stages": list(PREPUBLICATION_STAGES),
         "publication_stage_excluded": True,
         "errors": list(dict.fromkeys(errors)),
@@ -158,6 +184,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--market-date", required=True)
     parser.add_argument("--release-sha", required=True)
     parser.add_argument("--runtime-root", default=None)
+    parser.add_argument("--expected-market-date", default=None)
     args = parser.parse_args(argv)
     result = verify(
         args.db_path,
@@ -165,6 +192,7 @@ def main(argv: list[str] | None = None) -> int:
         args.market_date,
         args.release_sha,
         runtime_root=args.runtime_root,
+        expected_market_date=args.expected_market_date,
     )
     print(json.dumps(result, indent=2, sort_keys=True, default=str))
     return 0 if result["ready"] is True else 4

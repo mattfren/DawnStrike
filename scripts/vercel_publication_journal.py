@@ -50,6 +50,11 @@ KEYS = {
     "broker_execution_enabled",
     "journal_self_sha256",
 }
+AUTHORIZATION_KEYS = KEYS | {
+    "expected_market_date",
+    "prepublication_authorization_id",
+    "daily_ledger_authorization_id",
+}
 COMPENSATION_KEYS = {
     "schema_version",
     "status",
@@ -107,6 +112,38 @@ def _hash(value: Any, field: str) -> None:
         raise ValueError(f"{field} must be lowercase 64-hex")
 
 
+def _result_authorization(value: Any, expected_market_date: str) -> None:
+    """Validate optional governed daily-publication identity fields."""
+
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        raise ValueError("production result payload is invalid")
+    present = {
+        key
+        for key in (
+            "expected_market_date",
+            "prepublication_authorization_id",
+            "daily_ledger_authorization_id",
+        )
+        if key in value
+    }
+    if not present:
+        return  # retain validation of historical v1 journal payloads
+    if present != {
+        "expected_market_date",
+        "prepublication_authorization_id",
+        "daily_ledger_authorization_id",
+    }:
+        raise ValueError("production result authorization identity is incomplete")
+    if value["expected_market_date"] != expected_market_date:
+        raise ValueError("production result expected market date mismatch")
+    _hash(value["prepublication_authorization_id"], "prepublication_authorization_id")
+    _hash(value["daily_ledger_authorization_id"], "daily_ledger_authorization_id")
+    if value["prepublication_authorization_id"] != value["daily_ledger_authorization_id"]:
+        raise ValueError("production result authorization identities diverge")
+
+
 def _alias(value: Any) -> None:
     if not isinstance(value, dict) or set(value) != {"alias", "deployment_id", "deployment_url"}:
         raise ValueError("prior alias keys are not exact")
@@ -123,8 +160,9 @@ def validate(raw: bytes) -> dict[str, Any]:
         value = json.loads(raw.decode("utf-8"), object_pairs_hook=_pairs)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise ValueError(f"invalid strict journal JSON: {exc}") from exc
-    if not isinstance(value, dict) or set(value) != KEYS:
+    if not isinstance(value, dict) or set(value) not in (KEYS, AUTHORIZATION_KEYS):
         raise ValueError("journal keys are not exact")
+    has_authorization = set(value) == AUTHORIZATION_KEYS
     if value["schema_version"] not in {SCHEMA, COMPENSATED_SCHEMA}:
         raise ValueError("journal schema is invalid")
     if value["operation"] != "vercel_publication":
@@ -187,6 +225,13 @@ def validate(raw: bytes) -> dict[str, Any]:
         r"\d{4}-\d{2}-\d{2}", value["candidate_market_date"]
     ):
         raise ValueError("candidate market date is invalid")
+    if has_authorization:
+        if value["expected_market_date"] != value["candidate_market_date"]:
+            raise ValueError("journal expected market date mismatch")
+        _hash(value["prepublication_authorization_id"], "prepublication_authorization_id")
+        _hash(value["daily_ledger_authorization_id"], "daily_ledger_authorization_id")
+        if value["prepublication_authorization_id"] != value["daily_ledger_authorization_id"]:
+            raise ValueError("journal authorization identities diverge")
     if not isinstance(value["candidate_build_id"], str) or not value["candidate_build_id"]:
         raise ValueError("candidate build ID is invalid")
     if not isinstance(value["result_relative_path"], str):
@@ -232,6 +277,7 @@ def validate(raw: bytes) -> dict[str, Any]:
             != value["production_result_sha256"]
         ):
             raise ValueError("production result hash mismatch")
+        _result_authorization(value["result_payload"], value["candidate_market_date"])
     if phase == "COMPLETE" and value["result_payload"].get("status") != "PRODUCTION_VERIFIED":
         raise ValueError("COMPLETE result is not PRODUCTION_VERIFIED")
     if value["research_only"] is not True or value["broker_execution_enabled"] is not False:
@@ -338,7 +384,10 @@ def _atomic_write(path: Path, raw: bytes, *, exclusive: bool = False) -> None:
 
 def seal(source: Path, target: Path) -> dict[str, Any]:
     value = json.loads(_read_regular(source).decode("utf-8"), object_pairs_hook=_pairs)
-    if not isinstance(value, dict) or set(value) != KEYS - {"journal_self_sha256"}:
+    if not isinstance(value, dict) or set(value) not in (
+        KEYS - {"journal_self_sha256"},
+        AUTHORIZATION_KEYS - {"journal_self_sha256"},
+    ):
         raise ValueError("journal input keys are not exact")
     value["journal_self_sha256"] = hashlib.sha256(canonical_json(value)).hexdigest()
     raw = canonical_json(value)
@@ -349,7 +398,10 @@ def seal(source: Path, target: Path) -> dict[str, Any]:
 
 def transition(source: Path, target: Path, previous: Path) -> dict[str, Any]:
     value = json.loads(_read_regular(source).decode("utf-8"), object_pairs_hook=_pairs)
-    if not isinstance(value, dict) or set(value) != KEYS - {"journal_self_sha256"}:
+    if not isinstance(value, dict) or set(value) not in (
+        KEYS - {"journal_self_sha256"},
+        AUTHORIZATION_KEYS - {"journal_self_sha256"},
+    ):
         raise ValueError("journal transition keys are not exact")
     prior_raw = _read_regular(previous)
     prior = validate(prior_raw)
@@ -365,7 +417,7 @@ def transition(source: Path, target: Path, previous: Path) -> dict[str, Any]:
         raise ValueError("terminal journal cannot be compensated")
     immutable = {
         key
-        for key in KEYS
+        for key in set(value)
         if key
         not in {
             "phase",
@@ -385,6 +437,16 @@ def transition(source: Path, target: Path, previous: Path) -> dict[str, Any]:
     for key in immutable:
         if value[key] != prior[key]:
             raise ValueError(f"journal immutable field changed: {key}")
+    if prior.get("result_payload") is not None or value.get("result_payload") is not None:
+        prior_result = prior.get("result_payload") or {}
+        next_result = value.get("result_payload") or {}
+        for key in (
+            "expected_market_date",
+            "prepublication_authorization_id",
+            "daily_ledger_authorization_id",
+        ):
+            if key in prior_result and next_result.get(key) != prior_result.get(key):
+                raise ValueError(f"journal authorization identity changed: {key}")
     return seal(source, target)
 
 

@@ -43,3 +43,13 @@ Get-Content build\public\stage-manifest.json
 Expected behavior is conservative: a complete or explicit no-trade snapshot
 is ready; missing or degraded truth is published only as a non-ready artifact
 with HTTP 503 semantics.
+
+## Publication date boundary
+
+Scheduled `Preview` and `Production` finalization resolves the authoritative
+current exchange session from the market calendar and wall clock, and only
+publishes that session after its scheduled close. Prior, future, and closed
+dates are blocked. `LocalOnly` remains available for explicit offline or
+historical replay and does not consult the wall clock. Production publication
+also requires the immutable prepublication/daily-ledger authorization identity
+and rejects regressive or divergent same-day Vercel lineage.

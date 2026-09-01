@@ -2,13 +2,14 @@
 param(
     [string]$RuntimeRoot = "C:\r\dawnstrike-runtime",
     [string]$StateRoot = "C:\r\dawnstrike-state",
-    [string]$MarketDate = (Get-Date).ToString("yyyy-MM-dd"),
+    [string]$MarketDate = "",
     [int]$RetryLimit = 2,
     [int]$RetryDelaySeconds = 900,
     [ValidateSet("LocalOnly", "Preview", "Production")]
     [string]$PublicationMode = "Production",
     [string]$VercelProjectId = "prj_5pef3EZF1u5YadebEz3dFjnkWOXy",
-    [string]$ProductionUrl = "https://dawnstrike-command-center-x3.vercel.app"
+    [string]$ProductionUrl = "https://dawnstrike-command-center-x3.vercel.app",
+    [string]$TestNowUtc = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -19,6 +20,87 @@ $state = (Resolve-Path $StateRoot).Path
 . (Join-Path $PSScriptRoot "dawnstrike_process_runner.ps1")
 . (Join-Path $PSScriptRoot "invoke_dawnstrike_stage.ps1")
 Import-DawnstrikeEnvironment -StateRoot $state
+
+function Get-DawnstrikeFinalizeNowUtc {
+    param([string]$Override)
+    if (-not [string]::IsNullOrWhiteSpace($Override)) {
+        if ($env:DAWNSTRIKE_TEST_CLOCK -ne "1") {
+            throw "Finalize clock override is test-only."
+        }
+        try {
+            $parsed = [DateTimeOffset]::Parse(
+                $Override,
+                [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::RoundtripKind
+            )
+        } catch { throw "Finalize clock override is invalid." }
+        if ($parsed.Offset -ne [TimeSpan]::Zero) {
+            throw "Finalize clock override must be UTC."
+        }
+        return $parsed.ToUniversalTime()
+    }
+    return [DateTimeOffset]::UtcNow
+}
+
+function Resolve-DawnstrikeFinalizeMarketBoundary {
+    param(
+        [Parameter(Mandatory = $true)][string]$Mode,
+        [Parameter(Mandatory = $true)][string]$RequestedDate,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$NowUtc,
+        [Parameter(Mandatory = $true)][string]$LogRoot,
+        [switch]$UseClockOverride
+    )
+    if ($Mode -eq "LocalOnly") {
+        return [pscustomobject]@{
+            expected_market_date = $RequestedDate
+            current_market_date = $null
+            authorization_required = $false
+            offline_replay = $true
+        }
+    }
+    $boundaryArguments = @(
+        "scripts\publication_boundary.py", "validate",
+        "--market-date", $RequestedDate,
+        "--publication-mode", $Mode
+    )
+    if ($UseClockOverride) {
+        $boundaryArguments += @("--now-utc", $NowUtc.ToUniversalTime().ToString("o"))
+    }
+    $boundary = Invoke-DawnstrikeNativeProcess `
+        -FilePath "py.exe" `
+        -ArgumentList $boundaryArguments `
+        -LogRoot $LogRoot `
+        -LogName "daily_finalize_market_boundary-$RequestedDate"
+    if ($boundary.exit_code -ne 0) {
+        throw "Daily finalize market boundary blocked the requested date $RequestedDate."
+    }
+    try {
+        $payload = (Get-Content -LiteralPath $boundary.stdout_path -Raw) | ConvertFrom-Json
+    } catch { throw "Daily finalize market boundary returned invalid JSON." }
+    if ($payload.ready -ne $true -or [string]$payload.expected_market_date -ne $RequestedDate) {
+        throw "Daily finalize market boundary did not authorize the requested date."
+    }
+    return $payload
+}
+
+$finalizeNowUtc = Get-DawnstrikeFinalizeNowUtc -Override $TestNowUtc
+$requestedMarketDate = if ([string]::IsNullOrWhiteSpace($MarketDate)) {
+    if ($PublicationMode -eq "LocalOnly") {
+        (Get-Date).ToString("yyyy-MM-dd")
+    } else {
+        [TimeZoneInfo]::ConvertTimeBySystemTimeZoneId(
+            $finalizeNowUtc, "Eastern Standard Time"
+        ).ToString("yyyy-MM-dd")
+    }
+} else { $MarketDate.Trim() }
+$logRoot = Join-Path $state "logs"
+$boundary = Resolve-DawnstrikeFinalizeMarketBoundary `
+    -Mode $PublicationMode `
+    -RequestedDate $requestedMarketDate `
+    -NowUtc $finalizeNowUtc `
+    -LogRoot $logRoot `
+    -UseClockOverride:(-not [string]::IsNullOrWhiteSpace($TestNowUtc))
+$MarketDate = [string]$boundary.expected_market_date
 $releaseSha = Resolve-DawnstrikeReleaseSha -RuntimeRoot $runtime -LogRoot (Join-Path $state "logs")
 $dbPath = Join-Path $state "shadow_real.sqlite"
 $paperOpsRoot = Join-Path $state "v2_paper_ops_live"
@@ -194,12 +276,20 @@ try {
         -ArgumentList @(
             "scripts\verify_daily_prepublication.py", "--db-path", $dbPath,
             "--artifact-root", $outputPath, "--market-date", $MarketDate,
-            "--release-sha", $releaseSha, "--runtime-root", $runtime
+            "--release-sha", $releaseSha, "--runtime-root", $runtime,
+            "--expected-market-date", $MarketDate
         ) `
         -LogRoot $logRoot `
         -LogName "daily_finalize_prepublication-$MarketDate"
     if ($prepublication.exit_code -ne 0) {
         throw "Daily prepublication gate blocked Vercel publication."
+    }
+    try {
+        $prepublicationPayload = (Get-Content -LiteralPath $prepublication.stdout_path -Raw) | ConvertFrom-Json
+    } catch { throw "Daily prepublication gate returned invalid JSON." }
+    $authorizationId = [string]$prepublicationPayload.authorization_id
+    if ([string]::IsNullOrWhiteSpace($authorizationId)) {
+        throw "Daily prepublication gate did not return an immutable authorization identity."
     }
 
     try {
@@ -207,6 +297,10 @@ try {
             -ProjectRoot $runtime `
             -ProjectId $VercelProjectId `
             -StateRoot $state `
+            -ExpectedMarketDate $MarketDate `
+            -PrepublicationAuthorizationId $authorizationId `
+            -DailyLedgerAuthorizationId ([string]$prepublicationPayload.daily_ledger_authorization_id) `
+            -TestNowUtc $TestNowUtc `
             -Promote:($PublicationMode -eq "Production")
     }
     catch {
