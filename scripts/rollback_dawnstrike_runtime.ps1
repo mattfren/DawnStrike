@@ -256,7 +256,7 @@ function Invoke-DawnstrikeRuntimeRollback {
         throw "Activation receipt is not valid JSON."
     }
     if (
-        [string]$receiptHint.schema_version -ne "dawnstrike.runtime_activation_receipt.v1" -or
+        [string]$receiptHint.schema_version -notin @("dawnstrike.runtime_activation_receipt.v1", "dawnstrike.runtime_activation_receipt.v2") -or
         [string]$receiptHint.candidate_sha -notmatch '^[0-9a-f]{40}$' -or
         [string]$receiptHint.candidate_tree -notmatch '^[0-9a-f]{40}$'
     ) {
@@ -278,7 +278,7 @@ function Invoke-DawnstrikeRuntimeRollback {
         -Arguments @("verify-receipt", "--receipt", $receiptPath) `
         -Label "Activation receipt verification" `
         -TimeoutSeconds $ProcessTimeoutSeconds
-    if ($activation.schema_version -ne "dawnstrike.runtime_activation_receipt.v1") {
+    if ($activation.schema_version -notin @("dawnstrike.runtime_activation_receipt.v1", "dawnstrike.runtime_activation_receipt.v2")) {
         throw "Rollback requires an activation receipt."
     }
     if (

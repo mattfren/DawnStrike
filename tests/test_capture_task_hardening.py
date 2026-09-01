@@ -60,7 +60,7 @@ def _prepared() -> dict[str, object]:
         "old_last_task_result": 2147942402,
         "old_last_run_time": "2026-08-31T15:20:00.0000000Z",
         "intended_receipt_path": (
-            r"C:\state\receipts\capture-task-hardening-"
+            r"C:\state\receipts\capture-task\capture-task-hardening-"
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"
         ),
         "rollback_contract": "RESTORE_EXACT_XML_AND_ENABLEMENT_HISTORY_NOT_RESTORED",

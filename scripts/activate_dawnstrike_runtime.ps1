@@ -31,6 +31,7 @@ $script:DawnstrikeCanonicalTaskNames = @(
 )
 $script:DawnstrikeAuxiliaryCaptureTaskName = "Dawnstrike Delayed SIP Capture"
 $script:DawnstrikeStatePreparationContractFile = "config\state_preparation_contract.json"
+. (Join-Path $PSScriptRoot "capture_task_safety.ps1")
 
 function Get-DawnstrikeSha256Text {
     [CmdletBinding()]
@@ -542,7 +543,7 @@ function Get-DawnstrikeAuxiliarySectionHash {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$Xml,
-        [Parameter(Mandatory = $true)][ValidateSet("Principal", "Triggers", "Settings")][string]$Name
+        [Parameter(Mandatory = $true)][ValidateSet("Principal", "Triggers", "Settings", "Actions")][string]$Name
     )
     try {
         $document = [System.Xml.XmlDocument]::new()
@@ -1482,6 +1483,77 @@ function Get-DawnstrikeStatePreparationProof {
     }
 }
 
+function Assert-DawnstrikeCaptureHardeningAttestation {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][object]$Auxiliary,
+        [Parameter(Mandatory = $true)][string]$CandidateRoot,
+        [Parameter(Mandatory = $true)][string]$StateRoot,
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot,
+        [Parameter(Mandatory = $true)][string]$CandidateSha,
+        [Parameter(Mandatory = $true)][string]$CandidateTree,
+        [Parameter(Mandatory = $true)][string]$PythonPath,
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds,
+        [ValidateSet("PRE_SWAP", "POST_SWAP")][string]$Stage = "PRE_SWAP"
+    )
+    if (-not $Auxiliary.present -or $Auxiliary.state -ne "Disabled") {
+        throw "Activation requires the auxiliary capture task to be exactly Disabled."
+    }
+    $root = Join-Path $StateRoot "receipts\capture-task"
+    Assert-DawnstrikeNoReparseComponents $root "Capture-task hardening receipt root"
+    $expectedPath = Join-Path $root ("capture-task-hardening-" + $CandidateSha + ".json")
+    Assert-DawnstrikeNoReparseComponents $expectedPath "Candidate hardening receipt"
+    if (-not (Test-Path -LiteralPath $expectedPath -PathType Leaf)) { throw "Activation requires the exact current-candidate hardening receipt." }
+    $paths = @(Get-Item -LiteralPath $expectedPath -Force -ErrorAction Stop)
+    $contract = Join-Path $CandidateRoot "scripts\capture_task_hardening_contract.py"
+    $result = Invoke-DawnstrikeActivationProcess $PythonPath @(
+        $contract, "verify-hardening", "--receipt", $paths[0].FullName,
+        "--candidate-sha", $CandidateSha, "--candidate-tree", $CandidateTree
+    ) $CandidateRoot "Activation hardening receipt verification" $TimeoutSeconds
+    try { $receipt = [string]$result.Stdout | ConvertFrom-Json } catch { throw "Activation hardening receipt verification did not return valid JSON." }
+    $stateFull = [System.IO.Path]::GetFullPath($StateRoot).TrimEnd('\') + '\'
+    $receiptRelative = ([System.IO.Path]::GetFullPath($paths[0].FullName).Substring($stateFull.Length) -replace '\','/')
+    if ([string]$receipt.status -ne "COMPLETE" -or [string]$receipt.schema_version -ne "dawnstrike.capture_task_hardening_receipt.v2" -or [string]$receipt.candidate_sha -ne $CandidateSha -or [string]$receipt.candidate_tree -ne $CandidateTree -or [string]$receipt.final_state -ne "Disabled" -or [string]$receipt.receipt_relative_path -ne $receiptRelative) { throw "Activation hardening receipt is not bound to the exact disabled candidate task." }
+    $principalHash = Get-DawnstrikeAuxiliarySectionHash ([string]$Auxiliary.xml) "Principal"
+    $triggerHash = Get-DawnstrikeAuxiliarySectionHash ([string]$Auxiliary.xml) "Triggers"
+    $settingsHash = Get-DawnstrikeAuxiliarySectionHash ([string]$Auxiliary.xml) "Settings"
+    $actionHash = Get-DawnstrikeAuxiliarySectionHash ([string]$Auxiliary.xml) "Actions"
+    if ([string]$receipt.xml_after_sha256 -ne [string]$Auxiliary.xml_sha256 -or [string]$receipt.principal_after_sha256 -ne $principalHash -or [string]$receipt.trigger_sha256 -ne $triggerHash -or [string]$receipt.settings_after_sha256 -ne $settingsHash -or [string]$receipt.action_after_sha256 -ne $actionHash) { throw "Activation hardening receipt does not match the current auxiliary task." }
+    $null = Assert-DawnstrikeCaptureTaskSafety -Xml ([string]$Auxiliary.xml) -RuntimeRoot $RuntimeRoot -StateRoot $StateRoot -ExpectedCandidateSha $CandidateSha -ExpectedInterpreterPath ([string]$receipt.interpreter_path) -ExpectedInterpreterSha256 ([string]$receipt.interpreter_sha256) -ExpectedInterpreterSignerThumbprint ([string]$receipt.interpreter_signer_thumbprint) -ExpectedEnabled "false" -RequirePasswordPrincipal -RequireRunner
+    $receiptBindings = $receipt.action_bindings
+    if ([string]$receipt.runner_path -ne [string]$receiptBindings.runner_path -or [string]$receipt.runner_sha256 -ne [string]$receiptBindings.runner_sha256 -or [string]$receiptBindings.candidate_sha -ne $CandidateSha) { throw "Activation hardening input bindings are not exact." }
+    $taskDocument = [System.Xml.XmlDocument]::new()
+    $taskDocument.LoadXml([string]$Auxiliary.xml)
+    $execNode = @($taskDocument.SelectNodes("//*[local-name()='Exec']"))
+    if ($execNode.Count -ne 1) { throw "Activation hardening action is ambiguous." }
+    $argumentNode = @($execNode[0].ChildNodes | Where-Object { $_.LocalName -eq "Arguments" })
+    if ($argumentNode.Count -ne 1) { throw "Activation hardening action arguments are missing." }
+    $tokens = @(Get-DawnstrikeCaptureQuotedTokens ([string]$argumentNode[0].InnerText))
+    $actionValues = @{}
+    for ($index = 3; $index -lt ($tokens.Count - 1); $index += 2) { $actionValues[[string]$tokens[$index]] = [string]$tokens[$index + 1] }
+    foreach ($binding in @(
+        @("--candidate-sha", "candidate_sha"), @("--symbols-manifest", "symbols_manifest_path"),
+        @("--symbols-manifest-sha256", "symbols_manifest_sha256"), @("--entitlement-receipt", "entitlement_receipt_path"),
+        @("--entitlement-receipt-sha256", "entitlement_receipt_sha256"), @("--source-config", "source_config_path"),
+        @("--source-config-sha256", "source_config_sha256")
+    )) {
+        if ([string]$actionValues[$binding[0]] -ne [string]$receiptBindings.($binding[1])) { throw "Activation hardening receipt input binding does not match the disabled task." }
+    }
+    $liveRunner = [System.IO.Path]::GetFullPath((Join-Path $RuntimeRoot "scripts\run_daily_intraday_capture.py"))
+    $candidateRunner = [System.IO.Path]::GetFullPath((Join-Path $CandidateRoot "scripts\run_daily_intraday_capture.py"))
+    if ((Get-DawnstrikeSha256File $candidateRunner) -ne [string]$receipt.runner_sha256) {
+        throw "Hardening receipt candidate runner identity is invalid."
+    }
+    $runtimeRunnerSha = Get-DawnstrikeSha256File $liveRunner
+    if ($Stage -eq "PRE_SWAP" -and $runtimeRunnerSha -ne [string]$receipt.runner_before_sha256) {
+        throw "Pre-swap runtime runner does not match the hardening migration identity."
+    }
+    if ($Stage -eq "POST_SWAP" -and $runtimeRunnerSha -ne [string]$receipt.runner_sha256) {
+        throw "Post-swap runtime runner does not match the attested candidate identity."
+    }
+    return [pscustomobject]@{ path = $paths[0].FullName; payload = $receipt; raw_sha256 = Get-DawnstrikeSha256File $paths[0].FullName }
+}
+
 function Assert-DawnstrikeCaptureRebindChain {
     [CmdletBinding()]
     param(
@@ -1529,6 +1601,31 @@ function Assert-DawnstrikeCaptureRebindChain {
         (Get-DawnstrikeAuxiliarySectionHash ([string]$Auxiliary.xml) "Triggers") -ne [string]$capture.trigger_sha256 -or
         (Get-DawnstrikeAuxiliarySectionHash ([string]$Auxiliary.xml) "Settings") -ne [string]$capture.settings_sha256
     ) { throw "Ready auxiliary task is not bound to the exact activation receipt chain." }
+    $hardeningRelative = [string]$ActivationReceipt.capture_hardening_receipt_relative_path
+    if ([string]::IsNullOrWhiteSpace($hardeningRelative) -or $hardeningRelative -eq "NONE" -or $hardeningRelative -match '(^|[\\/])\.\.?([\\/]|$)') {
+        throw "Ready auxiliary task is missing its activation-bound hardening receipt path."
+    }
+    $hardeningPath = [System.IO.Path]::GetFullPath((Join-Path $StateRoot ($hardeningRelative -replace '/', '\')))
+    $statePrefix = [System.IO.Path]::GetFullPath($StateRoot).TrimEnd('\') + '\'
+    if (-not $hardeningPath.StartsWith($statePrefix, [System.StringComparison]::OrdinalIgnoreCase)) { throw "Activation-bound hardening receipt escaped StateRoot." }
+    Assert-DawnstrikeNoReparseComponents $hardeningPath "Activation-bound hardening receipt"
+    if (-not (Test-Path -LiteralPath $hardeningPath -PathType Leaf) -or (Get-DawnstrikeSha256File $hardeningPath) -ne [string]$ActivationReceipt.capture_hardening_receipt_raw_sha256) {
+        throw "Activation-bound hardening receipt raw identity is invalid."
+    }
+    $hardeningContract = Join-Path $CandidateRoot "scripts\capture_task_hardening_contract.py"
+    $hardeningResult = Invoke-DawnstrikeActivationProcess $PythonPath @(
+        $hardeningContract, "verify-hardening", "--receipt", $hardeningPath,
+        "--candidate-sha", $CandidateSha, "--candidate-tree", $CandidateTree
+    ) $CandidateRoot "Ready auxiliary hardening-chain verification" $TimeoutSeconds
+    try { $hardening = [string]$hardeningResult.Stdout | ConvertFrom-Json } catch { throw "Ready auxiliary hardening-chain verification did not return valid JSON." }
+    if (
+        [string]$hardening.schema_version -ne "dawnstrike.capture_task_hardening_receipt.v2" -or
+        [string]$hardening.receipt_sha256 -ne [string]$ActivationReceipt.capture_hardening_receipt_sha256 -or
+        [string]$hardening.action_after_sha256 -ne [string]$ActivationReceipt.capture_hardening_action_sha256 -or
+        [string]$hardening.principal_after_sha256 -ne [string]$ActivationReceipt.capture_hardening_principal_sha256 -or
+        [string]$hardening.trigger_sha256 -ne [string]$ActivationReceipt.capture_hardening_trigger_sha256 -or
+        [string]$hardening.settings_after_sha256 -ne [string]$ActivationReceipt.capture_hardening_settings_sha256
+    ) { throw "Ready auxiliary task hardening attestation chain is not exact." }
     if ([string]$capture.changed_field -ne "candidate_sha_and_input_bindings") {
         throw "Ready auxiliary task receipt does not attest the permitted input-binding transformation."
     }
@@ -1892,6 +1989,13 @@ function Invoke-DawnstrikeRuntimeActivation {
                                     $existingAuxiliary.definition_contract_sha256 -ne [string]$receipt.auxiliary_capture_definition_contract_sha256 -or
                                     $existingAuxiliary.action_contract_sha256 -ne [string]$receipt.auxiliary_capture_action_contract_sha256
                                 ) { throw "Existing activation receipt does not match the disabled auxiliary task." }
+                                $existingHardening = Assert-DawnstrikeCaptureHardeningAttestation `
+                                    -Auxiliary $existingAuxiliary -CandidateRoot $candidate -StateRoot $state `
+                                    -RuntimeRoot $runtime -CandidateSha $ExpectedSha -CandidateTree $candidateContract.tree `
+                                    -PythonPath $pythonPath -TimeoutSeconds $ProcessTimeoutSeconds -Stage POST_SWAP
+                                if ([string]$receipt.capture_hardening_receipt_raw_sha256 -ne [string]$existingHardening.raw_sha256 -or [string]$receipt.capture_hardening_receipt_sha256 -ne [string]$existingHardening.payload.receipt_sha256) {
+                                    throw "Existing activation receipt does not match the hardening attestation chain."
+                                }
                             }
                             elseif ($existingAuxiliary.state -eq "Ready") {
                                 $null = Assert-DawnstrikeCaptureRebindChain `
@@ -1952,6 +2056,14 @@ function Invoke-DawnstrikeRuntimeActivation {
     if ($auxiliaryBefore.present -and -not $stateDeclaration.required) {
         throw "Auxiliary capture task is present but the candidate does not declare its governed sidecar contract."
     }
+    $hardeningAttestation = $null
+    if ($stateDeclaration.required -and $auxiliaryBefore.present) {
+        $hardeningAttestation = Assert-DawnstrikeCaptureHardeningAttestation `
+            -Auxiliary $auxiliaryBefore -CandidateRoot $candidate -StateRoot $state `
+            -RuntimeRoot $runtime `
+            -CandidateSha $ExpectedSha -CandidateTree $candidateContract.tree `
+            -PythonPath $pythonPath -TimeoutSeconds $ProcessTimeoutSeconds
+    }
 
     if ($PreflightOnly) {
         return [pscustomobject]@{
@@ -1972,6 +2084,8 @@ function Invoke-DawnstrikeRuntimeActivation {
             auxiliary_capture_state_before = if ($auxiliaryBefore.present) { [string]$auxiliaryBefore.state } else { "ABSENT" }
             auxiliary_capture_state_after = if ($auxiliaryBefore.present) { [string]$auxiliaryBefore.state } else { "ABSENT" }
             auxiliary_capture_action = if ($auxiliaryBefore.present) { "PREPARED_FOR_QUIESCE" } else { "ABSENT_ALLOWED" }
+            hardening_receipt_path = if ($null -ne $hardeningAttestation) { $hardeningAttestation.path } else { "NONE" }
+            hardening_receipt_sha256 = if ($null -ne $hardeningAttestation) { $hardeningAttestation.raw_sha256 } else { Get-DawnstrikeSha256Text "" }
             research_only = $true
             broker_execution_enabled = $false
         }
@@ -2030,6 +2144,13 @@ function Invoke-DawnstrikeRuntimeActivation {
                         $currentAuxiliary.definition_contract_sha256 -ne [string]$existing.auxiliary_capture_definition_contract_sha256 -or
                         $currentAuxiliary.action_contract_sha256 -ne [string]$existing.auxiliary_capture_action_contract_sha256
                     ) { throw "Existing activation receipt does not match the disabled auxiliary task." }
+                    $existingHardening = Assert-DawnstrikeCaptureHardeningAttestation `
+                        -Auxiliary $currentAuxiliary -CandidateRoot $candidate -StateRoot $state `
+                        -RuntimeRoot $runtime -CandidateSha $ExpectedSha -CandidateTree $candidateContract.tree `
+                        -PythonPath $pythonPath -TimeoutSeconds $ProcessTimeoutSeconds -Stage POST_SWAP
+                    if ([string]$existing.capture_hardening_receipt_raw_sha256 -ne [string]$existingHardening.raw_sha256 -or [string]$existing.capture_hardening_receipt_sha256 -ne [string]$existingHardening.payload.receipt_sha256) {
+                        throw "Existing activation receipt does not match the hardening attestation chain."
+                    }
                 }
                 elseif ($currentAuxiliary.state -eq "Ready") {
                     $null = Assert-DawnstrikeCaptureRebindChain `
@@ -2139,6 +2260,22 @@ function Invoke-DawnstrikeRuntimeActivation {
                 if ($auxiliaryBoundary.xml_sha256 -ne $auxiliaryBefore.xml_sha256) {
                     throw "Auxiliary capture task XML changed while entering the disabled boundary."
                 }
+                # Re-read the task and the exact candidate-named attestation
+                # under the shared activation lock immediately before any
+                # backup/swap boundary.  The pre-lock observation is only a
+                # hint and cannot authorize a checkout change.
+                $auxiliaryLocked = Get-DawnstrikeAuxiliaryCaptureTask $runtime $state -AllowDisabled
+                if ($auxiliaryLocked.state -ne "Disabled" -or $auxiliaryLocked.xml_sha256 -ne $auxiliaryBefore.xml_sha256) {
+                    throw "Auxiliary capture task changed during the locked activation boundary."
+                }
+                $lockedHardeningAttestation = Assert-DawnstrikeCaptureHardeningAttestation `
+                    -Auxiliary $auxiliaryLocked -CandidateRoot $candidate -StateRoot $state `
+                    -RuntimeRoot $runtime -CandidateSha $ExpectedSha -CandidateTree $candidateContract.tree `
+                    -PythonPath $pythonPath -TimeoutSeconds $ProcessTimeoutSeconds
+                if ($lockedHardeningAttestation.raw_sha256 -ne $hardeningAttestation.raw_sha256 -or [string]$lockedHardeningAttestation.payload.receipt_sha256 -ne [string]$hardeningAttestation.payload.receipt_sha256) {
+                    throw "Hardening attestation changed during the locked activation boundary."
+                }
+                $hardeningAttestation = $lockedHardeningAttestation
             }
             if ($stateDeclaration.required) {
                 # Re-read every database sidecar hash only after both locks and
@@ -2300,7 +2437,7 @@ function Invoke-DawnstrikeRuntimeActivation {
 
             $preparedAt = [DateTime]::UtcNow.ToString("o")
             $receiptPayload = [ordered]@{
-                schema_version = "dawnstrike.runtime_activation_receipt.v1"
+                schema_version = "dawnstrike.runtime_activation_receipt.v2"
                 status = "PREPARED"
                 activation_id = $activationId
                 market_date = $MarketDate
@@ -2369,6 +2506,28 @@ function Invoke-DawnstrikeRuntimeActivation {
                 $receiptPayload.auxiliary_capture_action_contract_sha256 = [string]$auxiliaryBefore.action_contract_sha256
                 $receiptPayload.auxiliary_capture_backup_name = if ($auxiliaryBefore.present) { [string]$taskBackup.backup_name } else { "NONE" }
                 $receiptPayload.auxiliary_capture_backup_manifest_sha256 = [string]$taskBackup.manifest_sha256
+                $receiptPayload.capture_hardening_receipt_relative_path = "NONE"
+                $receiptPayload.capture_hardening_receipt_raw_sha256 = Get-DawnstrikeSha256Text ""
+                $receiptPayload.capture_hardening_receipt_sha256 = Get-DawnstrikeSha256Text ""
+                $receiptPayload.capture_hardening_xml_sha256 = Get-DawnstrikeSha256Text ""
+                $receiptPayload.capture_hardening_action_sha256 = Get-DawnstrikeSha256Text ""
+                $receiptPayload.capture_hardening_principal_sha256 = Get-DawnstrikeSha256Text ""
+                $receiptPayload.capture_hardening_trigger_sha256 = Get-DawnstrikeSha256Text ""
+                $receiptPayload.capture_hardening_settings_sha256 = Get-DawnstrikeSha256Text ""
+                $receiptPayload.capture_hardening_runner_before_sha256 = Get-DawnstrikeSha256Text ""
+                $receiptPayload.capture_hardening_runner_target_sha256 = Get-DawnstrikeSha256Text ""
+                if ($null -ne $hardeningAttestation) {
+                    $receiptPayload.capture_hardening_receipt_relative_path = ([System.IO.Path]::GetFullPath($hardeningAttestation.path).Substring(([System.IO.Path]::GetFullPath($state)).TrimEnd('\').Length + 1) -replace '\','/')
+                    $receiptPayload.capture_hardening_receipt_raw_sha256 = [string]$hardeningAttestation.raw_sha256
+                    $receiptPayload.capture_hardening_receipt_sha256 = [string]$hardeningAttestation.payload.receipt_sha256
+                    $receiptPayload.capture_hardening_xml_sha256 = [string]$hardeningAttestation.payload.xml_after_sha256
+                    $receiptPayload.capture_hardening_action_sha256 = [string]$hardeningAttestation.payload.action_after_sha256
+                    $receiptPayload.capture_hardening_principal_sha256 = [string]$hardeningAttestation.payload.principal_after_sha256
+                    $receiptPayload.capture_hardening_trigger_sha256 = [string]$hardeningAttestation.payload.trigger_sha256
+                    $receiptPayload.capture_hardening_settings_sha256 = [string]$hardeningAttestation.payload.settings_after_sha256
+                    $receiptPayload.capture_hardening_runner_before_sha256 = [string]$hardeningAttestation.payload.runner_before_sha256
+                    $receiptPayload.capture_hardening_runner_target_sha256 = [string]$hardeningAttestation.payload.runner_sha256
+                }
             }
             $inputReceipt = Join-Path $receiptRoot ".$activationId.input.json"
             Write-DawnstrikeActivationJson $receiptPayload $inputReceipt

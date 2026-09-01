@@ -38,7 +38,8 @@ CURRENT_SCHEMA_VERSION = _storage_migrations.CURRENT_SCHEMA_VERSION
 
 CI_SCHEMA = "dawnstrike.runtime_activation_ci_evidence.v1"
 SOL_SCHEMA = "dawnstrike.runtime_activation_sol_evidence.v1"
-ACTIVATION_SCHEMA = "dawnstrike.runtime_activation_receipt.v1"
+ACTIVATION_SCHEMA = "dawnstrike.runtime_activation_receipt.v2"
+ACTIVATION_SCHEMA_LEGACY = "dawnstrike.runtime_activation_receipt.v1"
 ROLLBACK_SCHEMA = "dawnstrike.runtime_rollback_receipt.v1"
 
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -189,6 +190,16 @@ _EXTENDED_RECEIPT_KEYS = frozenset(
         "auxiliary_capture_action_contract_sha256",
         "auxiliary_capture_backup_name",
         "auxiliary_capture_backup_manifest_sha256",
+        "capture_hardening_receipt_relative_path",
+        "capture_hardening_receipt_raw_sha256",
+        "capture_hardening_receipt_sha256",
+        "capture_hardening_xml_sha256",
+        "capture_hardening_action_sha256",
+        "capture_hardening_principal_sha256",
+        "capture_hardening_trigger_sha256",
+        "capture_hardening_settings_sha256",
+        "capture_hardening_runner_before_sha256",
+        "capture_hardening_runner_target_sha256",
     }
 )
 _ACTIVATION_RECEIPT_KEYS_EXTENDED = _ACTIVATION_RECEIPT_KEYS | _EXTENDED_RECEIPT_KEYS
@@ -210,6 +221,22 @@ _CAPTURE_INTERPRETER_DECLARATION = {
     ),
 }
 _STATE_PREPARATION_DECLARATION_KEYS = frozenset(
+    {
+        "schema_version",
+        "sidecar_contract",
+        "sidecar_version",
+        "legacy_schema_marker",
+        "required_before_activation",
+        "research_only",
+        "broker_execution_enabled",
+        "capture_interpreter_path",
+        "capture_interpreter_version",
+        "capture_interpreter_sha256",
+        "capture_interpreter_signer_subject",
+        "capture_interpreter_signer_thumbprint",
+    }
+)
+_STATE_PREPARATION_DECLARATION_LEGACY_KEYS = frozenset(
     {
         "schema_version",
         "sidecar_contract",
@@ -252,9 +279,7 @@ def _assert_no_reparse_components(path: str | Path) -> Path:
     for component in absolute.parts[1:]:
         current /= component
         if (os.path.lexists(current) or current.is_symlink()) and _is_reparse_point(current):
-            raise ActivationContractError(
-                f"reparse-point path component is forbidden: {current}"
-            )
+            raise ActivationContractError(f"reparse-point path component is forbidden: {current}")
     return absolute
 
 
@@ -441,16 +466,16 @@ def validate_receipt(payload: Mapping[str, Any]) -> dict[str, Any]:
 
     _reject_sensitive_keys(payload)
     schema = payload.get("schema_version")
-    if schema not in {ACTIVATION_SCHEMA, ROLLBACK_SCHEMA}:
+    if schema not in {ACTIVATION_SCHEMA, ACTIVATION_SCHEMA_LEGACY, ROLLBACK_SCHEMA}:
         raise ActivationContractError("unsupported runtime receipt schema")
     extended = "state_preparation_contract" in payload
     expected_keys = (
         _ACTIVATION_RECEIPT_KEYS_EXTENDED
-        if schema == ACTIVATION_SCHEMA and extended
+        if schema in {ACTIVATION_SCHEMA, ACTIVATION_SCHEMA_LEGACY} and extended
         else _ROLLBACK_RECEIPT_KEYS_EXTENDED
         if schema == ROLLBACK_SCHEMA and extended
         else _ACTIVATION_RECEIPT_KEYS
-        if schema == ACTIVATION_SCHEMA
+        if schema in {ACTIVATION_SCHEMA, ACTIVATION_SCHEMA_LEGACY}
         else _ROLLBACK_RECEIPT_KEYS
     )
     _require_exact_keys(payload, expected_keys, "runtime receipt")
@@ -623,6 +648,29 @@ def _validate_extended_receipt(payload: Mapping[str, Any]) -> None:
     after = payload.get("auxiliary_capture_state_after")
     action = payload.get("auxiliary_capture_action")
     if payload.get("auxiliary_capture_present") is True:
+        if payload.get("schema_version") == ACTIVATION_SCHEMA:
+            relative = payload.get("capture_hardening_receipt_relative_path")
+            if (
+                not isinstance(relative, str)
+                or not relative
+                or Path(relative).is_absolute()
+                or ".." in Path(relative).parts
+                or not relative.lower().endswith(".json")
+            ):
+                raise ActivationContractError("runtime receipt hardening receipt path is invalid")
+            for field in (
+                "capture_hardening_receipt_raw_sha256",
+                "capture_hardening_receipt_sha256",
+                "capture_hardening_xml_sha256",
+                "capture_hardening_action_sha256",
+                "capture_hardening_principal_sha256",
+                "capture_hardening_trigger_sha256",
+                "capture_hardening_settings_sha256",
+                "capture_hardening_runner_before_sha256",
+                "capture_hardening_runner_target_sha256",
+            ):
+                if not _SHA256.fullmatch(str(payload.get(field) or "")):
+                    raise ActivationContractError(f"runtime receipt {field} is invalid")
         if before not in {"Ready", "Disabled"}:
             raise ActivationContractError("runtime receipt auxiliary capture state is invalid")
         if payload.get("schema_version") == ACTIVATION_SCHEMA:
@@ -691,6 +739,8 @@ def _require_exact_keys(payload: Mapping[str, Any], expected: frozenset[str], la
 
 def validate_state_preparation_declaration(
     payload: Mapping[str, Any],
+    *,
+    require_interpreter_identity: bool = False,
 ) -> dict[str, Any]:
     """Validate the candidate's exact additive sidecar declaration.
 
@@ -699,15 +749,15 @@ def validate_state_preparation_declaration(
     Python loader before PowerShell consumes any fields.
     """
 
-    _require_exact_keys(
-        payload,
-        _STATE_PREPARATION_DECLARATION_KEYS,
-        "state preparation declaration",
+    expected_keys = (
+        _STATE_PREPARATION_DECLARATION_KEYS
+        if require_interpreter_identity
+        else _STATE_PREPARATION_DECLARATION_LEGACY_KEYS
     )
+    _require_exact_keys(payload, expected_keys, "state preparation declaration")
     if (
         payload.get("schema_version") != "dawnstrike.state_preparation_contract.v1"
-        or payload.get("sidecar_contract")
-        != "dawnstrike.account_capture_trial_sidecar.v1"
+        or payload.get("sidecar_contract") != "dawnstrike.account_capture_trial_sidecar.v1"
         or type(payload.get("sidecar_version")) is not int
         or payload.get("sidecar_version") != 1
         or type(payload.get("legacy_schema_marker")) is not int
@@ -723,9 +773,32 @@ def validate_state_preparation_declaration(
         or type(payload.get("broker_execution_enabled")) is not bool
         or payload.get("broker_execution_enabled") is not False
     ):
-        raise ActivationContractError(
-            "state preparation declaration violates the sidecar contract"
-        )
+        raise ActivationContractError("state preparation declaration violates the sidecar contract")
+    if not require_interpreter_identity:
+        return dict(payload)
+    interpreter_path = payload.get("capture_interpreter_path")
+    if (
+        not isinstance(interpreter_path, str)
+        or not os.path.isabs(interpreter_path)
+        or "\n" in interpreter_path
+        or "\r" in interpreter_path
+        or not interpreter_path.lower().endswith("\\python.exe")
+    ):
+        raise ActivationContractError("capture interpreter path is invalid")
+    if not isinstance(payload.get("capture_interpreter_version"), str) or not re.fullmatch(
+        r"3\.13\.\d+", payload["capture_interpreter_version"]
+    ):
+        raise ActivationContractError("capture interpreter version is invalid")
+    if not _SHA256.fullmatch(str(payload.get("capture_interpreter_sha256") or "")):
+        raise ActivationContractError("capture interpreter SHA-256 is invalid")
+    if payload.get("capture_interpreter_signer_subject") != (
+        "CN=Python Software Foundation, O=Python Software Foundation, L=Beaverton, S=Oregon, C=US"
+    ):
+        raise ActivationContractError("capture interpreter signer subject is invalid")
+    if not re.fullmatch(
+        r"[0-9A-F]{40}", str(payload.get("capture_interpreter_signer_thumbprint") or "")
+    ):
+        raise ActivationContractError("capture interpreter signer thumbprint is invalid")
     return dict(payload)
 
 
@@ -843,7 +916,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "seal-receipt":
             result = seal_receipt(_load_object(args.input), args.output)
         elif args.command == "validate-state-preparation-declaration":
-            result = validate_state_preparation_declaration(_load_object(args.input))
+            result = validate_state_preparation_declaration(
+                _load_object(args.input), require_interpreter_identity=True
+            )
         else:
             result = load_receipt(args.receipt)
             if args.expected_status and result.get("status") != args.expected_status:

@@ -555,6 +555,13 @@ def validate_prepared(payload: Mapping[str, Any]) -> dict[str, Any]:
         or not re.match(r"^[A-Za-z]:[\\/].*scheduler-backups[\\/].+$", backup_path, re.I)
     ):
         raise CaptureTaskHardeningContractError("prepared backup path is invalid")
+    intended_receipt_path = payload.get("intended_receipt_path")
+    if not isinstance(intended_receipt_path, str) or not re.match(
+        rf"^[A-Za-z]:[\\/].*[\\/]receipts[\\/]capture-task[\\/]capture-task-hardening-{payload['candidate_sha']}\.json$",
+        intended_receipt_path,
+        re.I,
+    ):
+        raise CaptureTaskHardeningContractError("prepared receipt path is not candidate-bound")
     if (
         payload.get("research_only") is not True
         or payload.get("broker_execution_enabled") is not False

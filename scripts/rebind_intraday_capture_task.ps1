@@ -100,30 +100,28 @@ function Get-DawnstrikeHardeningReceipt {
     )
     $root = Join-Path $StateRoot "receipts\capture-task"
     Assert-DawnstrikeNoReparseComponents $root "Capture-task hardening receipt root"
-    $paths = @(Get-ChildItem -LiteralPath $root -Filter "capture-task-hardening-*.json" -File -ErrorAction SilentlyContinue)
-    $matches = @()
-    foreach ($path in $paths) {
-        try {
-            Assert-DawnstrikeNoReparseComponents $path.FullName "Capture-task hardening receipt"
-            $result = Invoke-DawnstrikeActivationProcess $PythonPath @(
-                $ContractPath, "verify-hardening", "--receipt", $path.FullName,
-                "--candidate-sha", $CandidateSha, "--candidate-tree", $CandidateTree
-            ) $PSScriptRoot "Capture-task hardening receipt verification" $TimeoutSeconds
-            $payload = [string]$result.Stdout | ConvertFrom-Json
-            $matches += [pscustomobject]@{ path = $path.FullName; payload = $payload }
-        }
-        catch { }
+    $path = Join-Path $root ("capture-task-hardening-" + $CandidateSha + ".json")
+    Assert-DawnstrikeNoReparseComponents $path "Capture-task hardening receipt"
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw "The exact candidate-named delayed-SIP hardening receipt is missing."
     }
-    if ($matches.Count -ne 1) {
-        throw "Exactly one valid exact-candidate delayed-SIP hardening receipt is required before enablement."
+    $result = Invoke-DawnstrikeActivationProcess $PythonPath @(
+        $ContractPath, "verify-hardening", "--receipt", $path,
+        "--candidate-sha", $CandidateSha, "--candidate-tree", $CandidateTree
+    ) $PSScriptRoot "Capture-task hardening receipt verification" $TimeoutSeconds
+    try { $payload = [string]$result.Stdout | ConvertFrom-Json }
+    catch { throw "Capture-task hardening receipt verification did not return valid JSON." }
+    if ([string]$payload.schema_version -ne "dawnstrike.capture_task_hardening_receipt.v2") {
+        throw "Only the attested v2 hardening receipt may authorize rebind."
     }
-    return $matches[0]
+    return [pscustomobject]@{ path = $path; payload = $payload }
 }
 
 function Assert-DawnstrikeCaptureHardeningBoundary {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][object]$Current,
+        [Parameter(Mandatory = $true)][object]$ActivationReceipt,
         [Parameter(Mandatory = $true)][string]$OriginalXml,
         [Parameter(Mandatory = $true)][string]$StateRoot,
         [Parameter(Mandatory = $true)][string]$PythonPath,
@@ -131,12 +129,31 @@ function Assert-DawnstrikeCaptureHardeningBoundary {
         [Parameter(Mandatory = $true)][string]$CandidateSha,
         [Parameter(Mandatory = $true)][string]$CandidateTree,
         [Parameter(Mandatory = $true)][string]$OriginUrl,
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot,
         [Parameter(Mandatory = $true)][int]$TimeoutSeconds
     )
     $receiptRecord = Get-DawnstrikeHardeningReceipt `
         -StateRoot $StateRoot -PythonPath $PythonPath -ContractPath $ContractPath `
         -CandidateSha $CandidateSha -CandidateTree $CandidateTree -TimeoutSeconds $TimeoutSeconds
     $receipt = $receiptRecord.payload
+    if (
+        [string]$ActivationReceipt.capture_hardening_receipt_relative_path -ne
+            [string]$receipt.receipt_relative_path -or
+        [string]$ActivationReceipt.capture_hardening_receipt_raw_sha256 -ne
+            (Get-DawnstrikeSha256File $receiptRecord.path) -or
+        [string]$ActivationReceipt.capture_hardening_receipt_sha256 -ne
+            [string]$receipt.receipt_sha256 -or
+        [string]$ActivationReceipt.capture_hardening_xml_sha256 -ne
+            [string]$receipt.xml_after_sha256 -or
+        [string]$ActivationReceipt.capture_hardening_action_sha256 -ne
+            [string]$receipt.action_after_sha256 -or
+        [string]$ActivationReceipt.capture_hardening_principal_sha256 -ne
+            [string]$receipt.principal_after_sha256 -or
+        [string]$ActivationReceipt.capture_hardening_trigger_sha256 -ne
+            [string]$receipt.trigger_sha256 -or
+        [string]$ActivationReceipt.capture_hardening_settings_sha256 -ne
+            [string]$receipt.settings_after_sha256
+    ) { throw "Activation receipt is not bound to the exact hardening receipt identity." }
     if ([string]$receipt.task_name -ne $script:DawnstrikeAuxiliaryCaptureTaskName -or [string]$receipt.task_path -ne "\") {
         throw "Hardening receipt task identity is invalid."
     }
@@ -170,8 +187,9 @@ function Assert-DawnstrikeCaptureHardeningBoundary {
             throw "Hardening PREPARED record hash does not match the receipt."
         }
     }
-    if ([string]$receipt.xml_after_sha256 -ne (Get-DawnstrikeSha256Text $OriginalXml)) {
-        throw "Hardening receipt is not bound to the activation-original task XML."
+    $receiptRelative = ([System.IO.Path]::GetFullPath($receiptRecord.path).Substring(([System.IO.Path]::GetFullPath($StateRoot)).TrimEnd('\').Length + 1) -replace '\','/')
+    if ([string]$receipt.receipt_relative_path -ne $receiptRelative -or [string]$receipt.xml_before_sha256 -ne (Get-DawnstrikeSha256Text $OriginalXml) -or [string]$receipt.xml_after_sha256 -ne [string]$Current.xml_sha256) {
+        throw "Hardening receipt is not bound to the exact migration and disabled replacement task XML."
     }
     if (
         [string]$receipt.origin_url_sha256 -ne (Get-DawnstrikeSha256Text $OriginUrl) -or
@@ -180,21 +198,44 @@ function Assert-DawnstrikeCaptureHardeningBoundary {
     if ([string]$receipt.action_sha256 -ne (Get-DawnstrikeHardeningSectionHash $OriginalXml "Actions")) {
         throw "Hardening receipt action binding does not match the activation-original task."
     }
+    if ([string]$receipt.schema_version -ne "dawnstrike.capture_task_hardening_receipt.v2") {
+        throw "Only the attested v2 hardening receipt may authorize rebind."
+    }
+    if ([string]$receipt.action_after_sha256 -ne (Get-DawnstrikeHardeningSectionHash $Current.xml "Actions")) {
+        throw "Hardening receipt final action binding does not match the current task."
+    }
     if ([string]$receipt.trigger_sha256 -ne (Get-DawnstrikeHardeningSectionHash $Current.xml "Triggers")) {
         throw "Hardening receipt trigger binding does not match the current task."
     }
     if ([string]$receipt.principal_after_sha256 -ne (Get-DawnstrikeHardeningSectionHash $Current.xml "Principal")) {
         throw "Hardening receipt principal binding does not match the current task."
     }
-    $originalSettings = [System.Xml.XmlDocument]::new()
-    $originalSettings.PreserveWhitespace = $true
-    $originalSettings.LoadXml($OriginalXml)
-    $originalSettingsNode = @($originalSettings.SelectNodes("//*[local-name()='Settings']"))
-    if ($originalSettingsNode.Count -ne 1) { throw "Activation-original task has no unique Settings section." }
-    $originalEnabled = @($originalSettingsNode[0].ChildNodes | Where-Object { $_.LocalName -eq "Enabled" })
-    $normalizeEnabledTo = if ($originalEnabled.Count -eq 1) { [string]$originalEnabled[0].InnerText } else { "" }
-    if ([string]$receipt.settings_after_sha256 -ne (Get-DawnstrikeHardeningSectionHash $Current.xml "Settings" $normalizeEnabledTo)) {
+    if ([string]$receipt.settings_after_sha256 -ne (Get-DawnstrikeHardeningSectionHash $Current.xml "Settings")) {
         throw "Hardening receipt settings binding does not match the current task."
+    }
+    $currentDocument = [System.Xml.XmlDocument]::new()
+    $currentDocument.LoadXml([string]$Current.xml)
+    $currentPrincipalUser = @($currentDocument.SelectNodes("//*[local-name()='Principal']/*[local-name()='UserId']"))
+    if ($currentPrincipalUser.Count -ne 1) { throw "Current auxiliary task principal is ambiguous." }
+    $null = Assert-DawnstrikeCaptureTaskSafety -Xml ([string]$Current.xml) -RuntimeRoot $RuntimeRoot -StateRoot $StateRoot -ExpectedPrincipal ([string]$currentPrincipalUser[0].InnerText) -ExpectedCandidateSha $CandidateSha -ExpectedInterpreterPath ([string]$receipt.interpreter_path) -ExpectedInterpreterSha256 ([string]$receipt.interpreter_sha256) -ExpectedInterpreterSignerThumbprint ([string]$receipt.interpreter_signer_thumbprint) -ExpectedEnabled "false" -RequirePasswordPrincipal -RequireRunner
+    $records = @(Get-DawnstrikeCaptureActionRecords ([string]$Current.xml))
+    if ($records.Count -ne 1) { throw "Current auxiliary task action is ambiguous." }
+    $bindingPairs = @(
+        @("candidate-sha", "candidate_sha"),
+        @("symbols-manifest", "symbols_manifest_path"),
+        @("symbols-manifest-sha256", "symbols_manifest_sha256"),
+        @("entitlement-receipt", "entitlement_receipt_path"),
+        @("entitlement-receipt-sha256", "entitlement_receipt_sha256"),
+        @("source-config", "source_config_path"),
+        @("source-config-sha256", "source_config_sha256")
+    )
+    foreach ($pair in $bindingPairs) {
+        if ([string](Get-DawnstrikeCaptureBindingValue ([string]$records[0].arguments) $pair[0]) -ne [string]$receipt.action_bindings.($pair[1])) {
+            throw "Hardening receipt action input binding does not match the current task."
+        }
+    }
+    if ((Get-DawnstrikeSha256File ([string]$receipt.runner_path)) -ne [string]$receipt.runner_sha256) {
+        throw "Hardening receipt runner hash does not match the runner bytes."
     }
     if ([string]$receipt.logon_type -ne "Password" -or $receipt.network_capable -ne $true) {
         throw "Hardening receipt does not attest a network-capable Password principal."
@@ -208,6 +249,7 @@ function Assert-DawnstrikeCaptureHardeningBoundary {
     if ($receipt.research_only -ne $true -or $receipt.broker_execution_enabled -ne $false) {
         throw "Hardening receipt safety boundary is invalid."
     }
+    $receipt | Add-Member -NotePropertyName __path -NotePropertyValue $receiptRecord.path -Force
     return $receipt
 }
 
@@ -716,10 +758,11 @@ function New-DawnstrikeCaptureReceiptPayload {
         [Parameter(Mandatory = $true)][string]$ActivationId,
         [Parameter(Mandatory = $true)][string]$ActivationReceiptName,
         [Parameter(Mandatory = $true)][string]$ActivationReceiptSha256,
-        [Parameter(Mandatory = $true)][string]$RuntimeOriginSha256
+        [Parameter(Mandatory = $true)][string]$RuntimeOriginSha256,
+        [Parameter(Mandatory = $true)][object]$HardeningReceipt
     )
     return [ordered]@{
-        schema_version = "dawnstrike.capture_task_rebind_receipt.v1"
+        schema_version = "dawnstrike.capture_task_rebind_receipt.v2"
         status = "COMPLETE"
         task_name = $script:DawnstrikeAuxiliaryCaptureTaskName
         candidate_sha = $CandidateSha
@@ -748,6 +791,14 @@ function New-DawnstrikeCaptureReceiptPayload {
         completed_at_utc = [DateTime]::UtcNow.ToString("o")
         research_only = $true
         broker_execution_enabled = $false
+        hardening_receipt_relative_path = [string]$HardeningReceipt.receipt_relative_path
+        hardening_receipt_raw_sha256 = Get-DawnstrikeSha256File ([string]$HardeningReceipt.__path)
+        hardening_receipt_sha256 = [string]$HardeningReceipt.receipt_sha256
+        hardening_xml_sha256 = [string]$HardeningReceipt.xml_after_sha256
+        hardening_action_sha256 = [string]$HardeningReceipt.action_after_sha256
+        hardening_principal_sha256 = [string]$HardeningReceipt.principal_after_sha256
+        hardening_trigger_sha256 = [string]$HardeningReceipt.trigger_sha256
+        hardening_settings_sha256 = [string]$HardeningReceipt.settings_after_sha256
     }
 }
 
@@ -910,9 +961,9 @@ try {
     }
     $original = Get-DawnstrikeCaptureOriginalFromActivationBackup $state $activationReceipt.payload
     $hardeningReceipt = Assert-DawnstrikeCaptureHardeningBoundary `
-        -Current $auxiliary -OriginalXml ([string]$original.xml) -StateRoot $state `
+        -Current $auxiliary -ActivationReceipt $activationReceipt.payload -OriginalXml ([string]$original.xml) -StateRoot $state `
         -PythonPath $python -ContractPath $hardeningContract -CandidateSha $CandidateSha `
-        -CandidateTree ([string]$runtimeContract.tree) -OriginUrl $origin -TimeoutSeconds $ProcessTimeoutSeconds
+        -CandidateTree ([string]$runtimeContract.tree) -OriginUrl $origin -RuntimeRoot $runtime -TimeoutSeconds $ProcessTimeoutSeconds
     $resolvedRebindPrincipal = Resolve-DawnstrikeTaskPrincipal -Credential $RunAsCredential
     $principalDocument = [System.Xml.XmlDocument]::new()
     $principalDocument.LoadXml([string]$auxiliary.xml)
@@ -949,7 +1000,7 @@ try {
                 -Prepared $preparedRecord -Final $auxiliary -CandidateSha $CandidateSha `
                 -CandidateTree ([string]$runtimeContract.tree) -ActivationId $activationId `
                 -ActivationReceiptName $activationReceiptName -ActivationReceiptSha256 $activationReceiptSha256 `
-                -RuntimeOriginSha256 (Get-DawnstrikeSha256Text $origin)
+                -RuntimeOriginSha256 (Get-DawnstrikeSha256Text $origin) -HardeningReceipt $hardeningReceipt
             $recoveryInput = "$receiptFull.$([guid]::NewGuid().ToString('N')).input.json"
             try {
                 Write-DawnstrikeActivationJson $recoveryPayload $recoveryInput
@@ -1112,9 +1163,9 @@ try {
             throw "Capture-task action SHA was not changed."
         }
         $null = Assert-DawnstrikeCaptureHardeningBoundary `
-            -Current $boundDisabled -OriginalXml ([string]$original.xml) -StateRoot $state `
+            -Current $boundDisabled -ActivationReceipt $activationReceipt.payload -OriginalXml ([string]$original.xml) -StateRoot $state `
             -PythonPath $python -ContractPath $hardeningContract -CandidateSha $CandidateSha `
-            -CandidateTree ([string]$runtimeContract.tree) -OriginUrl $origin -TimeoutSeconds $ProcessTimeoutSeconds
+            -CandidateTree ([string]$runtimeContract.tree) -OriginUrl $origin -RuntimeRoot $runtime -TimeoutSeconds $ProcessTimeoutSeconds
         if ($InjectFailureAfterMutation) { throw "Injected capture-task post-mutation failure." }
         Enable-ScheduledTask -TaskName $script:DawnstrikeAuxiliaryCaptureTaskName `
             -TaskPath ([string]$boundDisabled.task_path) -ErrorAction Stop | Out-Null
@@ -1127,11 +1178,16 @@ try {
             -SymbolsManifest $SymbolsManifest -SymbolsManifestSha256 $SymbolsManifestSha256 `
             -EntitlementReceipt $EntitlementReceipt -EntitlementReceiptSha256 $EntitlementReceiptSha256 `
             -SourceConfig $SourceConfig -SourceConfigSha256 $SourceConfigSha256 | Out-Null
+        $finalDocument = [System.Xml.XmlDocument]::new()
+        $finalDocument.LoadXml([string]$final.xml)
+        $finalPrincipal = @($finalDocument.SelectNodes("//*[local-name()='Principal']/*[local-name()='UserId']"))
+        if ($finalPrincipal.Count -ne 1) { throw "Final capture task principal is ambiguous." }
+        $null = Assert-DawnstrikeCaptureTaskSafety -Xml ([string]$final.xml) -RuntimeRoot $runtime -StateRoot $state -ExpectedPrincipal ([string]$finalPrincipal[0].InnerText) -ExpectedCandidateSha $CandidateSha -ExpectedInterpreterPath ([string]$hardeningReceipt.interpreter_path) -ExpectedInterpreterSha256 ([string]$hardeningReceipt.interpreter_sha256) -ExpectedInterpreterSignerThumbprint ([string]$hardeningReceipt.interpreter_signer_thumbprint) -ExpectedEnabled "true" -RequirePasswordPrincipal -RequireRunner
         $payload = New-DawnstrikeCaptureReceiptPayload `
             -Prepared $preparedRecord -Final $final -CandidateSha $CandidateSha `
             -CandidateTree ([string]$runtimeContract.tree) -ActivationId $activationId `
             -ActivationReceiptName $activationReceiptName -ActivationReceiptSha256 $activationReceiptSha256 `
-            -RuntimeOriginSha256 (Get-DawnstrikeSha256Text $origin)
+            -RuntimeOriginSha256 (Get-DawnstrikeSha256Text $origin) -HardeningReceipt $hardeningReceipt
         $inputReceipt = "$receiptFull.$([guid]::NewGuid().ToString('N')).input.json"
         Write-DawnstrikeActivationJson $payload $inputReceipt
         $result = Invoke-DawnstrikeActivationProcess $python @(
