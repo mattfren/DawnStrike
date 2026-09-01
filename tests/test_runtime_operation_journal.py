@@ -73,7 +73,15 @@ def _payload(operation: str = "runtime_activation", phase: str = "INIT") -> dict
         "prior_journal_file_sha256": EMPTY,
         "prepared_receipt_relative_path": "receipts/runtime-activation/prepared.json",
         "prepared_receipt_sha256": EMPTY if phase in {"INIT", "PRE_QUIESCE"} else "9" * 64,
-        "complete_receipt_relative_path": "receipts/runtime-activation/complete.json",
+        "complete_receipt_relative_path": (
+            "receipts/runtime-activation/"
+            "runtime-activation-111111111111111111111111.json"
+            if operation == "runtime_activation" and phase == "COMPLETE"
+            else "receipts/runtime-activation/"
+            "runtime-activation-111111111111111111111111.ready.json"
+            if operation == "runtime_activation"
+            else "receipts/runtime-activation/complete.json"
+        ),
         "complete_receipt_sha256": "8" * 64 if phase in {"POST_SWAP_READY", "COMPLETE"} else EMPTY,
         "backup_contract_sha256": EMPTY if phase == "INIT" else "4" * 64,
         "task_contract_sha256": "5" * 64,
@@ -234,6 +242,27 @@ def test_capture_rebind_journal_cannot_skip_enablement_phases(tmp_path: Path) ->
     source.write_text(json.dumps(complete), encoding="utf-8")
     sealed = transition(source, journal, journal)
     assert sealed["payload"]["phase"] == "COMPLETE"
+
+
+def test_activation_terminal_receipt_path_switch_is_exact(tmp_path: Path) -> None:
+    source = tmp_path / "input.json"
+    journal = tmp_path / "journal.json"
+    prior = None
+    for phase in ("INIT", "PRE_QUIESCE", "PRE_SWAP", "POST_SWAP", "POST_SWAP_READY"):
+        payload = _payload("runtime_activation", phase)
+        if prior is not None:
+            payload["prior_journal_file_sha256"] = prior["raw_file_sha256"]
+        source.write_text(json.dumps(payload), encoding="utf-8")
+        prior = transition(source, journal, journal if prior is not None else None)
+
+    hostile = _payload("runtime_activation", "COMPLETE")
+    hostile["complete_receipt_relative_path"] = (
+        "receipts/runtime-activation/runtime-activation-foreign.json"
+    )
+    hostile["prior_journal_file_sha256"] = prior["raw_file_sha256"]
+    source.write_text(json.dumps(hostile), encoding="utf-8")
+    with pytest.raises(ValueError, match="complete_receipt_relative_path"):
+        transition(source, journal, journal)
 
 
 @pytest.mark.parametrize(

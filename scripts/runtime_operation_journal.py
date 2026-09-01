@@ -378,13 +378,36 @@ def transition(source: Path, target: Path, previous: Path | None) -> dict[str, A
             "operation", "candidate_sha", "candidate_tree",
             "previous_sha", "previous_tree", "origin_identity",
             "origin_identity_sha256", "state_root_sha256",
-            "prepared_receipt_relative_path", "complete_receipt_relative_path",
+            "prepared_receipt_relative_path",
             "init_owner_process_id", "init_owner_started_at_utc",
             "research_only", "broker_execution_enabled",
         }
         for key in immutable:
             if candidate.get(key) != prior[key]:
                 raise ValueError(f"journal immutable field changed: {key}")
+        prior_complete_path = str(prior["complete_receipt_relative_path"])
+        next_complete_path = str(candidate.get("complete_receipt_relative_path") or "")
+        if next_complete_path != prior_complete_path:
+            ready_match = re.fullmatch(
+                r"receipts/runtime-activation/"
+                r"runtime-activation-([0-9a-f]{24})\.ready\.json",
+                prior_complete_path,
+            )
+            exact_terminal_path = (
+                "receipts/runtime-activation/"
+                f"runtime-activation-{ready_match.group(1)}.json"
+                if ready_match
+                else ""
+            )
+            if not (
+                operation == "runtime_activation"
+                and prior["phase"] == "POST_SWAP_READY"
+                and phase == "COMPLETE"
+                and next_complete_path == exact_terminal_path
+            ):
+                raise ValueError(
+                    "journal immutable field changed: complete_receipt_relative_path"
+                )
         candidate_pair = (candidate["candidate_sha"], candidate["candidate_tree"])
         previous_pair = (candidate["previous_sha"], candidate["previous_tree"])
         current_pair = (candidate["current_sha"], candidate["current_tree"])

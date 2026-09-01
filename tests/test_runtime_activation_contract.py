@@ -1648,20 +1648,21 @@ def test_activation_pre_swap_recovers_exact_post_second_rename_state() -> None:
     assert "PRE_SWAP installed/previous runtime identity is invalid" in activation
 
 
-def test_activation_seals_terminal_evidence_before_task_enablement() -> None:
+def test_activation_seals_truthful_ready_then_terminal_evidence() -> None:
     activation = Path("scripts/activate_dawnstrike_runtime.ps1").read_text(
         encoding="utf-8"
     )
     ready = activation.index(
         "-Operation runtime_activation -Phase POST_SWAP_READY -CandidateSha $ExpectedSha"
     )
-    receipt = activation.index('"Complete activation receipt sealing"', ready - 5000)
+    ready_receipt = activation.index('"Ready-to-enable activation receipt sealing"')
     enable = activation.index("            Enable-DawnstrikeCanonicalTasks", ready)
+    complete_receipt = activation.index('"Complete activation receipt sealing"', enable)
     complete = activation.index(
         "-Operation runtime_activation -Phase COMPLETE -CandidateSha $ExpectedSha",
         enable,
     )
-    assert receipt < ready < enable < complete
+    assert ready_receipt < ready < enable < complete_receipt < complete
     assert 'if ($TestStageCrashPoint -eq "after_ready_journal")' in activation
     assert 'if ($TestStageCrashPoint -eq "after_enable_before_complete")' in activation
     assert 'phase -eq "POST_SWAP_READY"' in activation
@@ -2201,7 +2202,8 @@ foreach ($name in $script:DawnstrikeCanonicalTaskNames) {{
         if ($TaskName -eq 'Dawnstrike Delayed SIP Capture') {{ return @() }}
         $boundSha = [string]$global:MockTaskExpectedSha[$TaskName]
         $policy = if ($boundSha) {{
-            Get-DawnstrikeCanonicalTaskPolicy $TaskName $global:MockRuntime $global:MockState $boundSha
+            Get-DawnstrikeCanonicalTaskPolicy `
+                $TaskName $global:MockRuntime $global:MockState $boundSha
         }} else {{
             Get-DawnstrikeCanonicalTaskPolicy $TaskName $global:MockRuntime $global:MockState
         }}
