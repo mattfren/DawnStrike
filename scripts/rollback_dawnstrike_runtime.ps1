@@ -1027,6 +1027,10 @@ function Invoke-DawnstrikeRuntimeRollback {
                 [System.IO.Directory]::Move($deactivatedCandidate, $runtime)
             }
             if ($tasksDisabled) {
+                if ($env:DAWNSTRIKE_TEST_ROLLBACK_THROW_POINT -eq "during_compensation") {
+                    if ($env:DAWNSTRIKE_TEST_LOCK_JOURNAL -ne "1") { throw "Rollback failure injection is test-only." }
+                    throw "Injected rollback compensation failure."
+                }
                 if ($null -eq $currentContract) {
                     throw "The pre-rollback runtime was missing, so automatic recovery is ambiguous."
                 }
@@ -1079,6 +1083,16 @@ function Invoke-DawnstrikeRuntimeRollback {
             catch {
                 $preserveLocks = $true
                 throw "Runtime rollback and automatic candidate restore failed; exact task state is unverified and operator recovery is required."
+            }
+            # Compensation failed, but the best-effort Disabled boundary was
+            # proven. Keep both exact locks while PRE_SWAP/POST_SWAP evidence
+            # remains so the next invocation can adopt and retry safely.
+            if ($journalPhase -in @("PRE_SWAP", "POST_SWAP")) {
+                if ($null -eq $activationLock -or $null -eq $dailyLock) {
+                    $preserveLocks = $true
+                    throw "Nonterminal rollback compensation lacks its adoptable lock pair."
+                }
+                $preserveLocks = $true
             }
             throw "Runtime rollback failed and automatic candidate restore could not be completed; canonical tasks are proven Disabled and all rollback artifacts must be preserved. Original failure: $($failure.Exception.Message)"
         }

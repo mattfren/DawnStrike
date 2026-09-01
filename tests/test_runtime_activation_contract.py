@@ -796,6 +796,49 @@ def test_windows_activation_scripts_preserve_nonpublishing_fail_closed_boundary(
     assert rollback_disable < rollback_swap < rollback_enable
 
 
+def test_rollback_compensation_failure_preserves_adoptable_locks() -> None:
+    rollback = Path("scripts/rollback_dawnstrike_runtime.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    seam = rollback.index(
+        'DAWNSTRIKE_TEST_ROLLBACK_THROW_POINT -eq "during_compensation"'
+    )
+    seam_guard = rollback.index(
+        'DAWNSTRIKE_TEST_LOCK_JOURNAL -ne "1"', seam
+    )
+    compensation_catch = rollback.index(
+        "# Compensation failed, but the best-effort Disabled boundary was",
+        seam,
+    )
+    fail_closed = rollback.rindex(
+        "Set-DawnstrikeTasksFailClosedDisabled $runtime $state", seam, compensation_catch
+    )
+    phase_guard = rollback.index(
+        'journalPhase -in @("PRE_SWAP", "POST_SWAP")', compensation_catch
+    )
+    preserve = rollback.index("$preserveLocks = $true", phase_guard)
+    lock_pair_guard = rollback.index(
+        "Nonterminal rollback compensation lacks its adoptable lock pair.", preserve
+    )
+    rethrow = rollback.index(
+        "Runtime rollback failed and automatic candidate restore could not be completed;",
+        lock_pair_guard,
+    )
+    assert (
+        seam
+        < seam_guard
+        < fail_closed
+        < compensation_catch
+        < phase_guard
+        < preserve
+        < lock_pair_guard
+        < rethrow
+    )
+    compensation_block = rollback[phase_guard:rethrow]
+    assert "$null -eq $activationLock -or $null -eq $dailyLock" in compensation_block
+
+
 def test_activation_seals_init_before_first_stage_filesystem_mutation() -> None:
     activation = Path("scripts/activate_dawnstrike_runtime.ps1").read_text(
         encoding="utf-8"
