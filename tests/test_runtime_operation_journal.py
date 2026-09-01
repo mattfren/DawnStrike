@@ -73,6 +73,8 @@ def _payload(operation: str = "runtime_activation", phase: str = "INIT") -> dict
         "next_lock_file_sha256": "3" * 64,
         "old_lock_archive_relative_path": "NONE",
         "next_lock_relative_path": "NONE",
+        "init_owner_process_id": 1234,
+        "init_owner_started_at_utc": "2026-08-31T23:01:01.1234567Z",
         "recorded_at_utc": "2026-08-31T23:01:02.1234567Z",
         "research_only": True,
         "broker_execution_enabled": False,

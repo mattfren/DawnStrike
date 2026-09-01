@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -294,6 +295,8 @@ exit 137
         "next_lock_file_sha256": handle["bytes_sha256"],
         "old_lock_archive_relative_path": "NONE",
         "next_lock_relative_path": "NONE",
+        "init_owner_process_id": 1234,
+        "init_owner_started_at_utc": "2026-08-31T23:01:01.1234567Z",
     }
     journal_input.write_text(json.dumps(data), encoding="utf-8")
     subprocess.run(
@@ -394,3 +397,100 @@ Exit-DawnstrikeGovernedRuntimeLock $lock
     )
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert "OK" in result.stdout
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="PowerShell unavailable")
+@pytest.mark.parametrize("crash", ["after_init", "after_lock"])
+def test_journal_aware_enter_recovers_acquisition_crashes(
+    tmp_path: Path, crash: str
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    module = str(PS.resolve()).replace("'", "''")
+    state_q = str(state).replace("'", "''")
+    journal_q = str(
+        state / "receipts" / "runtime-operation" / "activation.json"
+    ).replace("'", "''")
+
+    def command(crash_point: str = "", cleanup: bool = False) -> str:
+        crash_arg = f" -TestCrashPoint {crash_point}" if crash_point else ""
+        cleanup_code = (
+            "$token=$lock.token;Exit-DawnstrikeGovernedRuntimeLock $lock;"
+            f"Remove-Item -LiteralPath '{journal_q}' -Force;"
+            "$token"
+            if cleanup
+            else "$lock.token"
+        )
+        return rf"""
+. '{module}'
+$approved=Get-DawnstrikeApprovedLockInterpreter
+$lock=Enter-DawnstrikeGovernedRuntimeLockWithJournal -StateRoot '{state_q}' `
+ -JournalPath '{journal_q}' -Operation runtime_activation `
+ -CandidateSha ('a'*40) -CandidateTree ('b'*40) `
+ -CurrentSha ('e'*40) -CurrentTree ('f'*40) `
+ -PreviousSha ('e'*40) -PreviousTree ('f'*40) `
+ -OriginIdentity 'github.com/mattfren/dawnstrike' `
+ -PreparedReceiptRelativePath 'receipts/runtime-activation/prepared.json' `
+ -CompleteReceiptRelativePath 'receipts/runtime-activation/complete.json' `
+ -TaskContractSha256 ('5'*64) -PythonPath $approved.path `
+ -PythonSha256 $approved.sha256{crash_arg}
+{cleanup_code}
+"""
+
+    environment = dict(os.environ)
+    environment["DAWNSTRIKE_TEST_LOCK_JOURNAL"] = "1"
+    crashed = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", command(crash)],
+        text=True, capture_output=True, check=False, env=environment,
+    )
+    assert crashed.returncode != 0, (crashed.stdout, crashed.stderr)
+    recovered = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", command(cleanup=True)],
+        text=True, capture_output=True, check=False, env=environment,
+    )
+    assert recovered.returncode == 0, (recovered.stdout, recovered.stderr)
+    assert not (state / "locks" / "dawnstrike-runtime-activation.lock").exists()
+    assert not (state / "receipts" / "runtime-operation" / "activation.json").exists()
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="PowerShell unavailable")
+def test_journal_aware_enter_rejects_live_owner(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    module = str(PS.resolve()).replace("'", "''")
+    state_q = str(state).replace("'", "''")
+    journal_q = str(
+        state / "receipts" / "runtime-operation" / "activation.json"
+    ).replace("'", "''")
+    base = rf"""
+. '{module}'
+$approved=Get-DawnstrikeApprovedLockInterpreter
+$lock=Enter-DawnstrikeGovernedRuntimeLockWithJournal -StateRoot '{state_q}' `
+ -JournalPath '{journal_q}' -Operation runtime_activation `
+ -CandidateSha ('a'*40) -CandidateTree ('b'*40) `
+ -CurrentSha ('e'*40) -CurrentTree ('f'*40) `
+ -PreviousSha ('e'*40) -PreviousTree ('f'*40) `
+ -OriginIdentity 'github.com/mattfren/dawnstrike' `
+ -PreparedReceiptRelativePath 'receipts/runtime-activation/prepared.json' `
+ -CompleteReceiptRelativePath 'receipts/runtime-activation/complete.json' `
+ -TaskContractSha256 ('5'*64) -PythonPath $approved.path `
+ -PythonSha256 $approved.sha256
+"""
+    owner = subprocess.Popen(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", base + "Start-Sleep 30"],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    lock_path = state / "locks" / "dawnstrike-runtime-activation.lock"
+    for _ in range(100):
+        if lock_path.exists():
+            break
+        time.sleep(0.05)
+    assert lock_path.exists()
+    contender = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", base],
+        text=True, capture_output=True, check=False, timeout=20,
+    )
+    assert contender.returncode != 0
+    assert "still active" in contender.stderr
+    owner.kill()
+    owner.wait(timeout=10)

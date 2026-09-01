@@ -355,6 +355,7 @@ function Set-DawnstrikeRuntimeOperationJournalPhase {
         old_lock_token=[string]$current.payload.lock_token;old_lock_file_sha256=[string]$current.raw_file_sha256
         next_lock_token=[string]$current.payload.lock_token;next_lock_file_sha256=[string]$current.raw_file_sha256
         old_lock_archive_relative_path='NONE';next_lock_relative_path='NONE'
+        init_owner_process_id=[int]$current.payload.process_id;init_owner_started_at_utc=[string]$current.payload.process_started_at_utc
     }
     New-Item -ItemType Directory -Path (Split-Path $journalFull -Parent) -Force|Out-Null
     $input=Join-Path (Split-Path $journalFull -Parent) ('.journal-transition-'+[guid]::NewGuid().ToString('N')+'.json')
@@ -369,6 +370,97 @@ function Set-DawnstrikeRuntimeOperationJournalPhase {
         if($LASTEXITCODE-ne 0){throw 'Runtime operation journal phase transition failed.'}
         try{return ([string]($output-join''))|ConvertFrom-Json}catch{throw 'Journal transition returned invalid output.'}
     }finally{if(Test-Path -LiteralPath $input){Remove-Item -LiteralPath $input -Force}}
+}
+
+function Enter-DawnstrikeGovernedRuntimeLockWithJournal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)][string]$StateRoot,
+        [Parameter(Mandatory=$true)][string]$JournalPath,
+        [ValidateSet('runtime_activation','runtime_rollback','capture_task_rebind','capture_task_hardening')][string]$Operation,
+        [ValidatePattern('^[0-9a-f]{40}$')][string]$CandidateSha,
+        [ValidatePattern('^[0-9a-f]{40}$')][string]$CandidateTree,
+        [ValidatePattern('^[0-9a-f]{40}$')][string]$CurrentSha,
+        [ValidatePattern('^[0-9a-f]{40}$')][string]$CurrentTree,
+        [ValidatePattern('^[0-9a-f]{40}$')][string]$PreviousSha,
+        [ValidatePattern('^[0-9a-f]{40}$')][string]$PreviousTree,
+        [Parameter(Mandatory=$true)][string]$OriginIdentity,
+        [Parameter(Mandatory=$true)][string]$PreparedReceiptRelativePath,
+        [Parameter(Mandatory=$true)][string]$CompleteReceiptRelativePath,
+        [ValidatePattern('^[0-9a-f]{64}$')][string]$TaskContractSha256,
+        [Parameter(Mandatory=$true)][string]$PythonPath,
+        [Parameter(Mandatory=$true)][ValidatePattern('^[0-9a-f]{64}$')][string]$PythonSha256,
+        [ValidateSet('after_init','after_lock')][string]$TestCrashPoint=''
+    )
+    if($TestCrashPoint-and$env:DAWNSTRIKE_TEST_LOCK_JOURNAL-ne'1'){throw 'Journal acquisition crash injection is test-only.'}
+    $state=Assert-DawnstrikeRuntimeLockStateRoot $StateRoot
+    $journalFull=[IO.Path]::GetFullPath($JournalPath)
+    $journalRoot=[IO.Path]::GetFullPath((Join-Path $state 'receipts\runtime-operation')).TrimEnd('\')+'\'
+    if(-not$journalFull.StartsWith($journalRoot,[StringComparison]::OrdinalIgnoreCase)){throw 'Runtime operation journal must be inside its governed receipt root.'}
+    $lockRoot=Join-Path $state 'locks';New-Item -ItemType Directory -Path $lockRoot -Force|Out-Null
+    $lockPath=Join-Path $lockRoot 'dawnstrike-runtime-activation.lock'
+    $mutex=Enter-DawnstrikeRuntimeLockMutex
+    try{
+        $abandoned=[bool]$script:DawnstrikeLockMutexAbandoned
+        $script:DawnstrikeLockMutexAbandoned=$false
+        $hasJournal=Test-Path -LiteralPath $journalFull -PathType Leaf
+        $hasLock=Test-Path -LiteralPath $lockPath -PathType Leaf
+        if($hasJournal){
+            $journal=Get-DawnstrikeStrictRuntimeOperationJournal $journalFull $PythonPath $PythonSha256
+            if([string]$journal.payload.phase-ne'INIT'-or[string]$journal.payload.operation-ne$Operation-or[string]$journal.payload.candidate_sha-ne$CandidateSha-or[string]$journal.payload.candidate_tree-ne$CandidateTree-or[string]$journal.payload.origin_identity-ne$OriginIdentity-or[string]$journal.payload.task_contract_sha256-ne$TaskContractSha256){throw 'Existing INIT journal identity is invalid.'}
+            if(-not$hasLock){
+                $initOwner=[pscustomobject]@{process_id=[int]$journal.payload.init_owner_process_id;process_started_at_utc=[string]$journal.payload.init_owner_started_at_utc}
+                if(-not$abandoned-and-not(Test-DawnstrikeRuntimeLockOwnerDead $initOwner)){throw 'Orphan INIT journal owner is still active.'}
+                $before=[string]$journal.raw_file_sha256
+                if((Get-DawnstrikeStrictRuntimeOperationJournal $journalFull $PythonPath $PythonSha256).raw_file_sha256-ne$before){throw 'Orphan INIT journal changed during recovery.'}
+                Remove-Item -LiteralPath $journalFull -Force
+                if(Test-Path -LiteralPath $journalFull){throw 'Orphan INIT journal cleanup failed.'}
+                $hasJournal=$false
+            }else{
+                $lock=Get-DawnstrikeStrictRuntimeLock $lockPath $PythonPath $PythonSha256
+                if($journal.payload.lock_token-ne$lock.payload.lock_token-or$journal.payload.lock_file_sha256-ne$lock.raw_file_sha256){throw 'INIT journal and lock do not match.'}
+                if(-not(Test-DawnstrikeRuntimeLockOwnerDead $lock.payload)){throw 'Runtime activation lock owner is still active.'}
+                return Adopt-DawnstrikeGovernedRuntimeLockWithJournal -StateRoot $state -JournalPath $journalFull -CandidateSha $CandidateSha -CandidateTree $CandidateTree -OriginIdentity $OriginIdentity -PythonPath $PythonPath -PythonSha256 $PythonSha256
+            }
+        }elseif($hasLock){throw 'Runtime lock exists without its exact INIT journal.'}
+        $token=[guid]::NewGuid().ToString('N')
+        $lockJson=(New-DawnstrikeRuntimeLockPayload $Operation $CandidateSha $CandidateTree $OriginIdentity $token)|ConvertTo-Json -Compress
+        $lockBytes=[Text.UTF8Encoding]::new($false).GetBytes($lockJson)
+        $lockHash=Get-DawnstrikeSharedLockSha256Text $lockJson
+        $empty=Get-DawnstrikeSharedLockSha256Text ''
+        $payload=[ordered]@{
+            schema_version='dawnstrike.runtime_operation_journal.v1';operation=$Operation;phase='INIT';sequence=0
+            candidate_sha=$CandidateSha;candidate_tree=$CandidateTree;current_sha=$CurrentSha;current_tree=$CurrentTree
+            previous_sha=$PreviousSha;previous_tree=$PreviousTree;origin_identity=$OriginIdentity
+            origin_identity_sha256=Get-DawnstrikeSharedLockSha256Text $OriginIdentity
+            state_root_sha256=Get-DawnstrikeSharedLockSha256Text $state.ToLowerInvariant()
+            lock_token=$token;lock_file_sha256=$lockHash;prior_journal_file_sha256=$empty
+            prepared_receipt_relative_path=$PreparedReceiptRelativePath;prepared_receipt_sha256=$empty
+            complete_receipt_relative_path=$CompleteReceiptRelativePath;complete_receipt_sha256=$empty
+            backup_contract_sha256=$empty;task_contract_sha256=$TaskContractSha256;runtime_stage_contract_sha256=$empty
+            recorded_at_utc=[DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ');research_only=$true;broker_execution_enabled=$false
+            adoption_state='NONE';old_lock_token=$token;old_lock_file_sha256=$lockHash;next_lock_token=$token;next_lock_file_sha256=$lockHash
+            old_lock_archive_relative_path='NONE';next_lock_relative_path='NONE'
+            init_owner_process_id=[int]$PID;init_owner_started_at_utc=(Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ')
+        }
+        New-Item -ItemType Directory -Path (Split-Path $journalFull -Parent) -Force|Out-Null
+        $input=Join-Path (Split-Path $journalFull -Parent) ('.journal-init-'+[guid]::NewGuid().ToString('N')+'.json')
+        $inputBytes=[Text.UTF8Encoding]::new($false).GetBytes(($payload|ConvertTo-Json -Depth 8 -Compress))
+        $inputStream=[IO.File]::Open($input,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+        try{$inputStream.Write($inputBytes,0,$inputBytes.Length);$inputStream.Flush($true)}finally{$inputStream.Dispose()}
+        try{
+            $contract=Join-Path $PSScriptRoot 'runtime_operation_journal.py'
+            $output=& $PythonPath '-I' '-B' $contract 'transition' $input $journalFull '--state-root' $state 2>$null
+            if($LASTEXITCODE -ne 0){throw 'INIT journal sealing failed.'}
+        }finally{if(Test-Path $input){Remove-Item $input -Force}}
+        if($TestCrashPoint-eq'after_init'){Stop-Process -Id $PID -Force}
+        $stream=[IO.File]::Open($lockPath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+        try{$stream.Write($lockBytes,0,$lockBytes.Length);$stream.Flush($true)}finally{$stream.Dispose()}
+        $strict=Get-DawnstrikeStrictRuntimeLock $lockPath $PythonPath $PythonSha256
+        if($strict.raw_file_sha256-ne$lockHash-or$strict.payload.lock_token-ne$token){throw 'Created lock does not match INIT journal.'}
+        if($TestCrashPoint-eq'after_lock'){Stop-Process -Id $PID -Force}
+        return [pscustomobject]@{path=$lockPath;token=$token;bytes_sha256=$lockHash;operation=$Operation;python_path=$PythonPath;python_sha256=$PythonSha256;acquired=$true;journal_path=$journalFull}
+    }finally{Exit-DawnstrikeRuntimeLockMutex $mutex}
 }
 
 function Exit-DawnstrikeGovernedRuntimeLock {
