@@ -11,6 +11,11 @@ param(
     ),
     [switch]$AllowDegraded,
     [switch]$Promote,
+    [string]$StateRoot = "",
+    [ValidateSet("", "after_promote", "after_aliases", "after_production_verification", "after_result_write_before_complete")]
+    [string]$TestCrashPoint = "",
+    [ValidateSet("", "after_promote", "after_aliases", "after_production_verification", "result_write", "after_result_write_before_complete")]
+    [string]$TestFailurePoint = "",
     [ValidateRange(1, 3600)][int]$VercelBuildTimeoutSeconds = 600,
     [ValidateRange(1, 3600)][int]$VercelCommandTimeoutSeconds = 180
 )
@@ -33,6 +38,17 @@ if ($expectedSourceTree -notmatch '^[0-9a-f]{40}$') {
 $stage = Join-Path $resolvedRoot $StageRoot
 $resultPath = Join-Path $resolvedRoot "build\daily-deployment-result.json"
 $rollbackResultPath = Join-Path $resolvedRoot "build\daily-deployment-rollback-result.json"
+$resolvedStateRoot = if ([string]::IsNullOrWhiteSpace($StateRoot)) {
+    $resolvedRoot
+}
+else {
+    New-Item -ItemType Directory -Path $StateRoot -Force | Out-Null
+    (Resolve-Path $StateRoot).Path
+}
+$journalRoot = Join-Path $resolvedStateRoot "outputs\daily_finalize\vercel-publication"
+$journalPath = Join-Path $journalRoot "vercel-publication-operation.json"
+$journalHelper = Join-Path $resolvedRoot "scripts\vercel_publication_journal.py"
+$resultRelativePath = "build/daily-deployment-result.json"
 $vercel = @("--yes", "vercel@58.4.0")
 $vercelAuth = @()
 if (-not [string]::IsNullOrWhiteSpace($env:VERCEL_TOKEN)) {
@@ -55,7 +71,7 @@ $priorProductionAliases = @{}
 $promotedDeployment = $null
 $packageManifestSha256 = $null
 $allProductionAliases = @($ProductionAlias) + @($AdditionalProductionAliases) |
-    Select-Object -Unique
+    Select-Object -Unique | Sort-Object
 
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
     $pythonScripts = (& py.exe -c "import sysconfig; print(sysconfig.get_path('scripts'))").Trim()
@@ -333,6 +349,110 @@ function Get-Sha256Hex {
         $hash.Dispose()
     }
 }
+$emptySha256 = Get-Sha256Hex ""
+
+function ConvertTo-VercelCanonicalObject {
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [System.Collections.IDictionary]) {
+        $ordered = [ordered]@{}
+        foreach ($key in ($Value.Keys | ForEach-Object { [string]$_ } | Sort-Object)) {
+            $ordered[$key] = ConvertTo-VercelCanonicalObject $Value[$key]
+        }
+        return $ordered
+    }
+    if ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string]) {
+        return @($Value | ForEach-Object { ConvertTo-VercelCanonicalObject $_ })
+    }
+    if ($Value.PSObject -and $Value.PSObject.Properties.Count -gt 0 -and
+        $Value -isnot [ValueType] -and $Value -isnot [string]) {
+        $ordered = [ordered]@{}
+        foreach ($property in ($Value.PSObject.Properties | Sort-Object Name)) {
+            $ordered[$property.Name] = ConvertTo-VercelCanonicalObject $property.Value
+        }
+        return $ordered
+    }
+    return $Value
+}
+
+function ConvertTo-VercelCanonicalJson {
+    param([Parameter(Mandatory = $true)][object]$Value)
+    return ((ConvertTo-VercelCanonicalObject $Value) | ConvertTo-Json -Depth 40 -Compress)
+}
+
+function Invoke-VercelJournalTool {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    $python = Get-Command py.exe -CommandType Application -ErrorAction SilentlyContinue
+    if ($null -eq $python) { throw "py.exe is required for the Vercel publication journal." }
+    $output = & $python.Source -3.13 $journalHelper @Arguments 2>$null
+    if ($LASTEXITCODE -ne 0) { throw "$Label failed." }
+    try { return (($output -join "`n") | ConvertFrom-Json) }
+    catch { throw "$Label returned invalid journal JSON." }
+}
+
+function Get-VercelPublicationJournal {
+    if (-not (Test-Path -LiteralPath $journalPath -PathType Leaf)) { return $null }
+    $verified = Invoke-VercelJournalTool `
+        -Arguments @("verify", $journalPath, "--state-root", $resolvedStateRoot) `
+        -Label "Vercel publication journal verification"
+    return $verified.payload
+}
+
+function Write-VercelPublicationJournal {
+    param(
+        [Parameter(Mandatory = $true)][object]$Payload,
+        [switch]$Transition
+    )
+    New-Item -ItemType Directory -Path $journalRoot -Force | Out-Null
+    $temporary = Join-Path $journalRoot (".journal-input-" + [guid]::NewGuid().ToString("N") + ".json")
+    try {
+        $json = ConvertTo-VercelCanonicalJson $Payload
+        [System.IO.File]::WriteAllText($temporary, $json, (New-Object System.Text.UTF8Encoding($false)))
+        $args = if ($Transition) {
+            @("transition", $temporary, $journalPath, "--previous", $journalPath, "--state-root", $resolvedStateRoot)
+        }
+        else {
+            @("seal", $temporary, $journalPath, "--state-root", $resolvedStateRoot)
+        }
+        return (Invoke-VercelJournalTool -Arguments $args -Label "Vercel publication journal write")
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporary -PathType Leaf) {
+            Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-VercelPromotionSeam {
+    param([Parameter(Mandatory = $true)][string]$Point)
+    if ($TestFailurePoint -eq $Point) { throw "Test-only Vercel publication failure seam: $Point" }
+    if ($TestCrashPoint -eq $Point) { Stop-Process -Id $PID -Force }
+}
+
+function Get-VercelResultSha256 {
+    param([Parameter(Mandatory = $true)][object]$Payload)
+    return Get-Sha256Hex (ConvertTo-VercelCanonicalJson $Payload)
+}
+
+function Write-VercelResultAtomic {
+    param([Parameter(Mandatory = $true)][object]$Payload)
+    $json = ConvertTo-VercelCanonicalJson $Payload
+    $temporary = "$resultPath.$([guid]::NewGuid().ToString('N')).tmp"
+    try {
+        [System.IO.File]::WriteAllText($temporary, $json, (New-Object System.Text.UTF8Encoding($false)))
+        $stream = [System.IO.File]::Open($temporary, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+        try { $stream.Flush($true) } finally { $stream.Dispose() }
+        [System.IO.File]::Move($temporary, $resultPath, $true)
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporary -PathType Leaf) {
+            Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
 
 function Assert-LowerHex64 {
     param([AllowNull()][object]$Value, [string]$Field, [string]$Label)
@@ -431,7 +551,347 @@ function Assert-PublicationState {
     }
 }
 
-& (Join-Path $resolvedRoot "scripts\build_vercel_public_stage.ps1") `
+function Get-VercelAliasObservation {
+    param([Parameter(Mandatory = $true)][string]$Alias)
+    $observed = Invoke-VercelJson `
+        -Arguments @("inspect", $Alias, "--json") `
+        -Label "Publication alias inspect for $Alias"
+    $id = [string](Get-OptionalJsonProperty -InputObject $observed -Name "id")
+    $url = [string](Get-OptionalJsonProperty -InputObject $observed -Name "url")
+    if (-not $id -or -not $url) { throw "Publication alias inspect is incomplete for $Alias." }
+    return [pscustomobject]@{ alias = $Alias; id = $id; url = $url }
+}
+
+function Test-VercelAliasSetMatches {
+    param(
+        [Parameter(Mandatory = $true)][object]$Journal,
+        [Parameter(Mandatory = $true)][ValidateSet("prior", "candidate")][string]$Kind
+    )
+    $observed = @($allProductionAliases | ForEach-Object { Get-VercelAliasObservation ([string]$_) })
+    $matches = $true
+    foreach ($item in $observed) {
+        if ($Kind -eq "prior") {
+            $expected = @($Journal.prior_aliases | Where-Object { [string]$_.alias -eq [string]$item.alias })[0]
+            if ($null -eq $expected -or [string]$expected.deployment_id -ne [string]$item.id -or
+                (Normalize-VercelDeploymentUrl $expected.deployment_url) -ne (Normalize-VercelDeploymentUrl $item.url)) {
+                $matches = $false
+            }
+        }
+        else {
+            if ([string]$Journal.promoted_deployment_id -ne [string]$item.id -or
+                (Normalize-VercelDeploymentUrl $Journal.promoted_deployment_url) -ne (Normalize-VercelDeploymentUrl $item.url)) {
+                $matches = $false
+            }
+        }
+    }
+    return [bool]$matches
+}
+
+function Test-VercelAliasSourceMatchesJournal {
+    param([Parameter(Mandatory = $true)][object]$Journal)
+    foreach ($alias in $allProductionAliases) {
+        try {
+            $proof = Get-VercelAliasEndpointProof -AliasUrl ([string]$alias) -CacheBuster ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
+            if (-not $proof.source_manifest_available -or
+                [string]$proof.source_sha -ne [string]$Journal.candidate_source_sha -or
+                [string]$proof.source_tree -ne [string]$Journal.candidate_source_tree -or
+                [string]$proof.source_manifest_sha256 -ne [string]$Journal.candidate_manifest_sha256) { return $false }
+        }
+        catch { return $false }
+    }
+    return $true
+}
+
+function New-VercelPublicationJournalPayload {
+    param(
+        [Parameter(Mandatory = $true)][string]$Phase,
+        [Parameter(Mandatory = $true)][int]$Sequence,
+        [Parameter(Mandatory = $true)][object]$CandidateDeployment,
+        [Parameter(Mandatory = $true)][object]$PreviewManifest,
+        [Parameter(Mandatory = $true)][string]$PackageManifestSha256,
+        [string]$CandidateManifestSha256 = "",
+        [Parameter(Mandatory = $true)][object[]]$PriorAliases,
+        [AllowNull()][object]$PromotedDeployment,
+        [AllowNull()][object]$ResultPayload,
+        [string]$PriorJournalHash = $emptySha256,
+        [string]$CompensationRelativePath = "NONE",
+        [string]$CompensationSha256 = $emptySha256
+    )
+    $resultHash = if ($null -eq $ResultPayload) { $emptySha256 } else { Get-VercelResultSha256 $ResultPayload }
+    return [ordered]@{
+        schema_version = if ($Phase -eq "COMPENSATED") { "dawnstrike.vercel_publication_journal.v2" } else { "dawnstrike.vercel_publication_journal.v1" }
+        operation = "vercel_publication"
+        phase = $Phase
+        sequence = $Sequence
+        project_id = $ProjectId
+        project_name = $ProjectName
+        production_aliases = @($allProductionAliases)
+        candidate_preview_url = [string]$CandidateDeployment.url
+        candidate_preview_deployment_id = [string]$CandidateDeployment.id
+        candidate_source_sha = [string]$PreviewManifest.source_sha
+        candidate_source_tree = $expectedSourceTree
+        candidate_market_date = [string]$PreviewManifest.market_date
+        candidate_build_id = [string]$PreviewManifest.build_id
+        candidate_build_sha = [string]$PreviewManifest.build_sha
+        candidate_manifest_sha256 = if ($CandidateManifestSha256) { $CandidateManifestSha256 } else {
+            Get-Sha256Hex (Get-VercelSourceManifestCanonicalJson -Path (Join-Path $stage "vercel-source-manifest.json"))
+        }
+        candidate_package_manifest_sha256 = $PackageManifestSha256
+        prior_aliases = @($PriorAliases)
+        promoted_deployment_id = if ($null -eq $PromotedDeployment) { $null } else { [string]$PromotedDeployment.id }
+        promoted_deployment_url = if ($null -eq $PromotedDeployment) { $null } else { [string]$PromotedDeployment.url }
+        production_result_sha256 = $resultHash
+        result_relative_path = $resultRelativePath
+        result_payload = $ResultPayload
+        prior_journal_file_sha256 = $PriorJournalHash
+        compensation_relative_path = $CompensationRelativePath
+        compensation_sha256 = $CompensationSha256
+        recorded_at_utc = [DateTimeOffset]::UtcNow.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.ffffff'Z'")
+        research_only = $true
+        broker_execution_enabled = $false
+    }
+}
+
+function Invoke-VercelPublicationCompensation {
+    param(
+        [Parameter(Mandatory = $true)][object]$Journal,
+        [Parameter(Mandatory = $true)][string]$FailureType
+    )
+    $errors = @()
+    foreach ($alias in $allProductionAliases) {
+        try {
+            $prior = @($Journal.prior_aliases | Where-Object { [string]$_.alias -eq [string]$alias })[0]
+            if ($null -eq $prior) { throw "No exact prior snapshot exists for $alias." }
+            Set-VercelAlias -DeploymentUrl ([string]$prior.deployment_url) -AliasUrl ([string]$alias) -Label "Compensation rollback for $alias"
+            $after = Get-VercelAliasObservation ([string]$alias)
+            if ([string]$after.id -ne [string]$prior.deployment_id -or
+                (Normalize-VercelDeploymentUrl $after.url) -ne (Normalize-VercelDeploymentUrl $prior.deployment_url)) {
+                throw "Compensation rollback resolved the wrong deployment for $alias."
+            }
+        }
+        catch { $errors += "${alias}: $($_.Exception.Message)" }
+    }
+    if ($errors.Count -gt 0) { throw "Vercel publication compensation failed: $($errors -join '; ')" }
+    $compensation = [ordered]@{
+        schema_version = "dawnstrike.vercel_publication_compensation.v1"
+        status = "COMPENSATED"
+        operation = "vercel_publication"
+        candidate_source_sha = [string]$Journal.candidate_source_sha
+        candidate_source_tree = [string]$Journal.candidate_source_tree
+        candidate_preview_deployment_id = [string]$Journal.candidate_preview_deployment_id
+        prior_aliases = @($Journal.prior_aliases)
+        failure_type = $FailureType
+        research_only = $true
+        broker_execution_enabled = $false
+        recorded_at_utc = [DateTimeOffset]::UtcNow.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.ffffff'Z'")
+    }
+    $compensation.receipt_self_sha256 = Get-VercelResultSha256 $compensation
+    $compensationJson = ConvertTo-VercelCanonicalJson $compensation
+    $compensationPath = Join-Path $journalRoot ("vercel-publication-compensation-" + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + ".json")
+    [System.IO.File]::WriteAllText($compensationPath, $compensationJson, (New-Object System.Text.UTF8Encoding($false)))
+    $null = Invoke-VercelJournalTool `
+        -Arguments @("verify-compensation", $compensationPath, "--state-root", $resolvedStateRoot) `
+        -Label "Vercel publication compensation verification"
+    $compensationHash = Get-VercelFileSha256 -Path $compensationPath
+    $next = New-VercelPublicationJournalPayload `
+        -Phase "COMPENSATED" -Sequence 3 `
+        -CandidateDeployment ([pscustomobject]@{ url = $Journal.candidate_preview_url; id = $Journal.candidate_preview_deployment_id }) `
+        -PreviewManifest ([pscustomobject]@{ source_sha = $Journal.candidate_source_sha; market_date = $Journal.candidate_market_date; build_id = $Journal.candidate_build_id; build_sha = $Journal.candidate_build_sha }) `
+        -PackageManifestSha256 ([string]$Journal.candidate_package_manifest_sha256) `
+        -CandidateManifestSha256 ([string]$Journal.candidate_manifest_sha256) `
+        -PriorAliases @($Journal.prior_aliases) `
+        -PromotedDeployment (if ($Journal.promoted_deployment_id) { [pscustomobject]@{ id = $Journal.promoted_deployment_id; url = $Journal.promoted_deployment_url } } else { $null }) `
+        -ResultPayload $Journal.result_payload `
+        -PriorJournalHash (Get-Sha256Hex ([System.IO.File]::ReadAllText($journalPath))) `
+        -CompensationRelativePath (([System.IO.Path]::GetRelativePath($resolvedStateRoot, $compensationPath)) -replace '\\','/') `
+        -CompensationSha256 $compensationHash
+    $null = Write-VercelPublicationJournal -Payload $next -Transition
+}
+
+function Get-VercelJournalPreviewEvidence {
+    param([Parameter(Mandatory = $true)][object]$Journal, [switch]$UsePromoted)
+    $previewUrl = if ($UsePromoted -and $Journal.promoted_deployment_url) {
+        [string]$Journal.promoted_deployment_url
+    }
+    else { [string]$Journal.candidate_preview_url }
+    $health = Invoke-VercelJson -Arguments @("curl", "$previewUrl/api/health?recovery_verify=1") -Label "Recovery preview health"
+    $readiness = Invoke-VercelJson -Arguments @("curl", "$previewUrl/api/readiness?recovery_verify=1") -Label "Recovery preview readiness"
+    $manifest = Invoke-VercelJson -Arguments @("curl", "$previewUrl/build-manifest.json?recovery_verify=1") -Label "Recovery preview build manifest"
+    $release = Invoke-VercelJson -Arguments @("curl", "$previewUrl/release-manifest.json?recovery_verify=1") -Label "Recovery preview release manifest"
+    Assert-PublicationState -Health $health -Readiness $readiness -BuildManifest $manifest -ReleaseManifest $release -ExpectedSourceSha $expectedSourceSha -Label "Recovery preview"
+    if ([string]$manifest.source_sha -ne [string]$Journal.candidate_source_sha -or
+        [string]$manifest.build_id -ne [string]$Journal.candidate_build_id -or
+        [string]$manifest.build_sha -ne [string]$Journal.candidate_build_sha -or
+        [string]$manifest.market_date -ne [string]$Journal.candidate_market_date) {
+        throw "Recovery preview identity does not match the journal candidate."
+    }
+    return [pscustomobject]@{
+        url = $previewUrl
+        id = [string]$Journal.candidate_preview_deployment_id
+        health = $health
+        readiness = $readiness
+        manifest = $manifest
+        release = $release
+    }
+}
+
+function New-VercelRecoveredResultPayload {
+    param(
+        [Parameter(Mandatory = $true)][object]$Journal,
+        [Parameter(Mandatory = $true)][object]$Live,
+        [Parameter(Mandatory = $true)][object]$Health,
+        [Parameter(Mandatory = $true)][object]$Readiness,
+        [Parameter(Mandatory = $true)][object]$Manifest,
+        [Parameter(Mandatory = $true)][object]$ReleaseManifest
+    )
+    Assert-PublicationState -Health $Health -Readiness $Readiness -BuildManifest $Manifest -ReleaseManifest $ReleaseManifest -ExpectedSourceSha $expectedSourceSha -Label "Recovered production"
+    return [ordered]@{
+        schema_version = "dawnstrike.daily_deployment.v1"
+        generated_at = [DateTimeOffset]::UtcNow.ToString("o")
+        project_id = [string]$Journal.project_id
+        preview_url = [string]$Journal.candidate_preview_url
+        preview_deployment_id = [string]$Journal.candidate_preview_deployment_id
+        preview_ready_state = "READY"
+        source_sha = [string]$Manifest.source_sha
+        source_tree = [string]$Journal.candidate_source_tree
+        vercel_source_manifest_sha256 = [string]$Journal.candidate_manifest_sha256
+        vercel_package_manifest_sha256 = [string]$Journal.candidate_package_manifest_sha256
+        build_id = [string]$Manifest.build_id
+        build_sha = [string]$Manifest.build_sha
+        data_hash_sha256 = [string]$Manifest.data_hash_sha256
+        publication_set_sha256 = [string]$Manifest.publication_set_sha256
+        opportunity_projection_sha256 = [string]$Manifest.opportunity_projection_sha256
+        v6_learning_sha256 = [string]$Manifest.v6_learning_sha256
+        release_manifest_sha256 = Get-OptionalJsonProperty -InputObject $ReleaseManifest -Name "release_manifest_sha256"
+        market_date = [string]$Manifest.market_date
+        snapshot_status = [string]$Readiness.snapshot_status
+        readiness_status = [string]$Readiness.status
+        readiness_http_status = $Readiness.http_status
+        allow_degraded = $false
+        promoted = $true
+        prior_production_deployment_id = @($Journal.prior_aliases | Where-Object { [string]$_.alias -eq [string]$ProductionAlias })[0].deployment_id
+        production_aliases = @($allProductionAliases)
+        promoted_deployment_id = [string]$Live.id
+        production_deployment_id = [string]$Live.id
+        live_trading_enabled = $false
+        research_only = $true
+        status = "PRODUCTION_VERIFIED"
+    }
+}
+
+function Complete-VercelJournalRecovery {
+    param([Parameter(Mandatory = $true)][object]$Journal)
+    if (-not (Test-VercelAliasSetMatches -Journal $Journal -Kind candidate)) {
+        throw "Recovery candidate aliases are not exact."
+    }
+    $evidence = Get-VercelJournalPreviewEvidence -Journal $Journal -UsePromoted
+    if ($null -eq $Journal.result_payload) { throw "Recovery journal has no exact production result payload." }
+    if (-not (Test-Path -LiteralPath $resultPath -PathType Leaf) -or
+        (Get-VercelFileSha256 -Path $resultPath) -ne [string]$Journal.production_result_sha256) {
+        Write-VercelResultAtomic -Payload $Journal.result_payload
+    }
+    if ((Get-VercelFileSha256 -Path $resultPath) -ne [string]$Journal.production_result_sha256) {
+        throw "Recovery result bytes do not match the journal result hash."
+    }
+    Test-VercelPromotionSeam "after_result_write_before_complete"
+    $complete = [ordered]@{}
+    foreach ($property in $Journal.PSObject.Properties) { $complete[$property.Name] = $property.Value }
+    $complete.phase = "COMPLETE"
+    $complete.sequence = 2
+    $complete.prior_journal_file_sha256 = Get-VercelFileSha256 -Path $journalPath
+    $complete.recorded_at_utc = [DateTimeOffset]::UtcNow.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.ffffff'Z'")
+    $null = Write-VercelPublicationJournal -Payload $complete -Transition
+    return (Get-Content -Raw -LiteralPath $resultPath)
+}
+
+$recoveryRetry = $false
+$existingJournal = if ($Promote) { Get-VercelPublicationJournal } else { $null }
+if ($null -ne $existingJournal) {
+    if ([string]$existingJournal.phase -eq "COMPENSATED") {
+        throw "A terminal compensated Vercel publication journal already exists; manual review is required."
+    }
+    if ([string]$existingJournal.phase -eq "COMPLETE") {
+        if (-not (Test-VercelAliasSetMatches -Journal $existingJournal -Kind candidate)) {
+            throw "Complete Vercel publication journal does not match the live aliases."
+        }
+        if (-not (Test-Path -LiteralPath $resultPath -PathType Leaf) -or
+            (Get-VercelFileSha256 -Path $resultPath) -ne [string]$existingJournal.production_result_sha256) {
+            Write-VercelResultAtomic -Payload $existingJournal.result_payload
+        }
+        if ((Get-VercelFileSha256 -Path $resultPath) -ne [string]$existingJournal.production_result_sha256) {
+            throw "Complete Vercel publication result is not byte-exact."
+        }
+        Write-Output (Get-Content -Raw -LiteralPath $resultPath)
+        return
+    }
+    $candidateLive = ([string]$existingJournal.phase -ne "PRE_MUTATION" -and
+        (Test-VercelAliasSetMatches -Journal $existingJournal -Kind candidate)) -or
+        ([string]$existingJournal.phase -eq "PRE_MUTATION" -and
+        (Test-VercelAliasSourceMatchesJournal -Journal $existingJournal))
+    if ($candidateLive) {
+        if ([string]$existingJournal.phase -eq "PRE_MUTATION") {
+            $live = Get-VercelAliasObservation ([string]$ProductionAlias)
+            $liveHealth = Invoke-VercelJson -Arguments @("curl", "$ProductionAlias/api/health?recovery_verify=1") -Label "Recovered production health"
+            $liveReadiness = Invoke-VercelJson -Arguments @("curl", "$ProductionAlias/api/readiness?recovery_verify=1") -Label "Recovered production readiness"
+            $liveManifest = Invoke-VercelJson -Arguments @("curl", "$ProductionAlias/build-manifest.json?recovery_verify=1") -Label "Recovered production build manifest"
+            $liveRelease = Invoke-VercelJson -Arguments @("curl", "$ProductionAlias/release-manifest.json?recovery_verify=1") -Label "Recovered production release manifest"
+            $recoveredResult = New-VercelRecoveredResultPayload -Journal $existingJournal -Live $live -Health $liveHealth -Readiness $liveReadiness -Manifest $liveManifest -ReleaseManifest $liveRelease
+            $postRecovery = New-VercelPublicationJournalPayload `
+                -Phase "POST_ALIASES" -Sequence 1 `
+                -CandidateDeployment ([pscustomobject]@{ id = $existingJournal.candidate_preview_deployment_id; url = $existingJournal.candidate_preview_url }) `
+                -PreviewManifest ([pscustomobject]@{ source_sha = $existingJournal.candidate_source_sha; market_date = $existingJournal.candidate_market_date; build_id = $existingJournal.candidate_build_id; build_sha = $existingJournal.candidate_build_sha }) `
+                -PackageManifestSha256 ([string]$existingJournal.candidate_package_manifest_sha256) `
+                -CandidateManifestSha256 ([string]$existingJournal.candidate_manifest_sha256) `
+                -PriorAliases @($existingJournal.prior_aliases) `
+                -PromotedDeployment $live `
+                -ResultPayload $recoveredResult `
+                -PriorJournalHash (Get-VercelFileSha256 -Path $journalPath)
+            $null = Write-VercelPublicationJournal -Payload $postRecovery -Transition
+            $existingJournal = Get-VercelPublicationJournal
+        }
+        Write-Output (Complete-VercelJournalRecovery -Journal $existingJournal)
+        return
+    }
+    if (-not (Test-VercelAliasSetMatches -Journal $existingJournal -Kind prior)) {
+        try { Invoke-VercelPublicationCompensation -Journal $existingJournal -FailureType "mixed_or_uncertain_alias_state_on_retry" }
+        catch { throw "Vercel publication retry is mixed or uncertain and compensation did not complete: $($_.Exception.Message)" }
+        throw "Vercel publication retry found mixed or uncertain aliases; publication was compensated."
+    }
+    $recoveryRetry = $true
+    foreach ($priorRecord in @($existingJournal.prior_aliases)) {
+        $priorProductionAliases[[string]$priorRecord.alias] = [pscustomobject]@{
+            id = [string]$priorRecord.deployment_id
+            url = [string]$priorRecord.deployment_url
+            health_available = $false
+            health_status = $null
+            readiness_available = $false
+            readiness_status = $null
+            readiness_http_status = $null
+            source_manifest_available = $false
+            source_sha = $null
+            source_tree = $null
+            source_manifest_sha256 = $null
+        }
+    }
+    $recoveryPreview = Get-VercelJournalPreviewEvidence -Journal $existingJournal
+    $deployment = [pscustomobject]@{ id = [string]$existingJournal.candidate_preview_deployment_id; url = [string]$existingJournal.candidate_preview_url }
+    $deploymentId = [string]$existingJournal.candidate_preview_deployment_id
+    $previewUrl = [string]$existingJournal.candidate_preview_url
+    $previewHealth = $recoveryPreview.health
+    $previewReadiness = $recoveryPreview.readiness
+    $previewManifest = $recoveryPreview.manifest
+    $previewReleaseManifest = $recoveryPreview.release
+    $packageManifestSha256 = [string]$existingJournal.candidate_package_manifest_sha256
+    $candidateManifestSha256 = [string]$existingJournal.candidate_manifest_sha256
+    $journalPriorAliases = @($existingJournal.prior_aliases)
+    $journalCandidate = [pscustomobject]@{ id = $deploymentId; url = $previewUrl }
+    $priorProduction = [pscustomobject]@{
+        id = @($existingJournal.prior_aliases | Where-Object { [string]$_.alias -eq [string]$ProductionAlias })[0].deployment_id
+    }
+}
+
+if (-not $recoveryRetry) {
+ & (Join-Path $resolvedRoot "scripts\build_vercel_public_stage.ps1") `
     -ProjectRoot $resolvedRoot `
     -StageRoot $StageRoot `
     -ExpectedSourceSha $expectedSourceSha `
@@ -504,6 +964,7 @@ try {
 finally {
     Pop-Location
 }
+}
 
 $deploymentId = Get-OptionalJsonProperty -InputObject $deployment -Name "id"
 $previewUrl = [string](
@@ -537,6 +998,9 @@ Assert-PublicationState `
     -ReleaseManifest $previewReleaseManifest `
     -ExpectedSourceSha $expectedSourceSha `
     -Label "Preview"
+if (-not $candidateManifestSha256) {
+    $candidateManifestSha256 = Get-Sha256Hex (Get-VercelSourceManifestCanonicalJson -Path (Join-Path $stage "vercel-source-manifest.json"))
+}
 
 if ($Promote) {
     # Every alias is independent external state.  Snapshot each target before
@@ -575,6 +1039,23 @@ if ($Promote) {
             $priorProduction = $snapshot
         }
     }
+    $journalPriorAliases = @($allProductionAliases | ForEach-Object {
+        $prior = $priorProductionAliases[[string]$_]
+        [ordered]@{
+            alias = [string]$_
+            deployment_id = [string]$prior.id
+            deployment_url = [string]$prior.url
+        }
+    })
+    $journalCandidate = [pscustomobject]@{ id = [string]$deploymentId; url = [string]$previewUrl }
+    $preMutationJournal = New-VercelPublicationJournalPayload `
+        -Phase "PRE_MUTATION" -Sequence 0 `
+        -CandidateDeployment $journalCandidate `
+        -PreviewManifest $previewManifest `
+        -PackageManifestSha256 $packageManifestSha256 `
+        -CandidateManifestSha256 $candidateManifestSha256 `
+        -PriorAliases $journalPriorAliases
+    $null = Write-VercelPublicationJournal -Payload $preMutationJournal
 }
 
 try {
@@ -603,6 +1084,7 @@ try {
             -Arguments @("promote", $previewUrl, "--yes") `
             -Label "Vercel promotion" `
             -TimeoutSeconds $VercelCommandTimeoutSeconds
+        Test-VercelPromotionSeam "after_promote"
         $promotionVerificationError = $null
         for ($attempt = 1; $attempt -le 10; $attempt++) {
             try {
@@ -718,6 +1200,14 @@ try {
                 -AliasUrl ([string]$alias) `
                 -Label "Production alias assignment for $alias"
         }
+        Test-VercelPromotionSeam "after_aliases"
+        foreach ($alias in $allProductionAliases) {
+            $aliasAfterPromotion = Get-VercelAliasObservation ([string]$alias)
+            if ([string]$aliasAfterPromotion.id -ne [string]$promotedDeploymentId -or
+                (Normalize-VercelDeploymentUrl $aliasAfterPromotion.url) -ne (Normalize-VercelDeploymentUrl $promotedUrl)) {
+                throw "Production alias verification resolved the wrong deployment for $alias."
+            }
+        }
 
         $productionVerificationError = $null
         for ($attempt = 1; $attempt -le 10; $attempt++) {
@@ -776,12 +1266,75 @@ try {
         if ($productionVerificationError) {
             throw "Production verification did not converge: $productionVerificationError"
         }
+        Test-VercelPromotionSeam "after_production_verification"
     }
     else {
         $production = $null
         $productionHealth = $null
         $productionReadiness = $null
         $productionManifest = $null
+    }
+    $result = [ordered]@{
+        schema_version = "dawnstrike.daily_deployment.v1"
+        generated_at = [DateTimeOffset]::UtcNow.ToString("o")
+        project_id = $ProjectId
+        preview_url = $previewUrl
+        preview_deployment_id = $deploymentId
+        preview_ready_state = Get-OptionalJsonProperty -InputObject $deployment -Name "readyState"
+        source_sha = $previewManifest.source_sha
+        source_tree = $expectedSourceTree
+        vercel_source_manifest_sha256 = Get-VercelFileSha256 -Path (Join-Path $stage "vercel-source-manifest.json")
+        vercel_package_manifest_sha256 = $packageManifestSha256
+        build_id = $previewManifest.build_id
+        build_sha = $previewManifest.build_sha
+        data_hash_sha256 = $previewManifest.data_hash_sha256
+        publication_set_sha256 = $previewManifest.publication_set_sha256
+        opportunity_projection_sha256 = $previewManifest.opportunity_projection_sha256
+        v6_learning_sha256 = $previewManifest.v6_learning_sha256
+        release_manifest_sha256 = Get-OptionalJsonProperty -InputObject $previewReleaseManifest -Name "release_manifest_sha256"
+        market_date = $previewManifest.market_date
+        snapshot_status = $previewReadiness.snapshot_status
+        readiness_status = $previewReadiness.status
+        readiness_http_status = $previewReadiness.http_status
+        allow_degraded = [bool]$AllowDegraded
+        promoted = [bool]$Promote
+        prior_production_deployment_id = Get-OptionalJsonProperty -InputObject $priorProduction -Name "id"
+        production_aliases = if ($Promote) { @($allProductionAliases) } else { @() }
+        promoted_deployment_id = Get-OptionalJsonProperty -InputObject $promotedDeployment -Name "id"
+        production_deployment_id = Get-OptionalJsonProperty -InputObject $production -Name "id"
+        live_trading_enabled = $false
+        research_only = $true
+        status = if ($Promote) { "PRODUCTION_VERIFIED" } else { "PREVIEW_VERIFIED" }
+    }
+    $journalNeedsPostTransition = $null -eq $existingJournal -or [string]$existingJournal.phase -eq "PRE_MUTATION"
+    if ($Promote -and $journalNeedsPostTransition) {
+        $postJournal = New-VercelPublicationJournalPayload `
+            -Phase "POST_ALIASES" -Sequence 1 `
+            -CandidateDeployment $journalCandidate `
+            -PreviewManifest $previewManifest `
+            -PackageManifestSha256 $packageManifestSha256 `
+            -CandidateManifestSha256 $candidateManifestSha256 `
+            -PriorAliases $journalPriorAliases `
+            -PromotedDeployment ([pscustomobject]@{ id = [string]$promotedDeploymentId; url = [string]$promotedUrl }) `
+            -ResultPayload $result `
+            -PriorJournalHash (Get-VercelFileSha256 -Path $journalPath)
+        $null = Write-VercelPublicationJournal -Payload $postJournal -Transition
+    }
+    Test-VercelPromotionSeam "result_write"
+    Write-VercelResultAtomic -Payload $result
+    if ($Promote) {
+        Test-VercelPromotionSeam "after_result_write_before_complete"
+        $completeJournal = New-VercelPublicationJournalPayload `
+            -Phase "COMPLETE" -Sequence 2 `
+            -CandidateDeployment $journalCandidate `
+            -PreviewManifest $previewManifest `
+            -PackageManifestSha256 $packageManifestSha256 `
+            -CandidateManifestSha256 $candidateManifestSha256 `
+            -PriorAliases $journalPriorAliases `
+            -PromotedDeployment ([pscustomobject]@{ id = [string]$promotedDeploymentId; url = [string]$promotedUrl }) `
+            -ResultPayload $result `
+            -PriorJournalHash (Get-VercelFileSha256 -Path $journalPath)
+        $null = Write-VercelPublicationJournal -Payload $completeJournal -Transition
     }
 }
 catch {
@@ -877,47 +1430,22 @@ catch {
         if (-not $rollbackSucceeded) {
             throw "$publicationError Rollback errors: $($rollbackErrors -join '; ')"
         }
+        if (Test-Path -LiteralPath $journalPath -PathType Leaf) {
+            try {
+                $failedJournal = Get-VercelPublicationJournal
+                if ($null -ne $failedJournal -and [string]$failedJournal.phase -ne "COMPLETE") {
+                    Invoke-VercelPublicationCompensation `
+                        -Journal $failedJournal `
+                        -FailureType "publication_failure_rollback_completed"
+                }
+            }
+            catch {
+                throw "$publicationError Rollback completed but terminal compensation could not be persisted: $($_.Exception.Message)"
+            }
+        }
     }
     elseif ($promoted) {
         throw "$publicationError Rollback blocked: a complete per-alias production snapshot was not captured."
     }
     throw $publicationError
 }
-
-$result = [ordered]@{
-    schema_version = "dawnstrike.daily_deployment.v1"
-    generated_at = [DateTimeOffset]::UtcNow.ToString("o")
-    project_id = $ProjectId
-    preview_url = $previewUrl
-    preview_deployment_id = $deploymentId
-    preview_ready_state = Get-OptionalJsonProperty -InputObject $deployment -Name "readyState"
-    source_sha = $previewManifest.source_sha
-    source_tree = $expectedSourceTree
-    vercel_source_manifest_sha256 = Get-VercelFileSha256 `
-        -Path (Join-Path $stage "vercel-source-manifest.json")
-    vercel_package_manifest_sha256 = $packageManifestSha256
-    build_id = $previewManifest.build_id
-    build_sha = $previewManifest.build_sha
-    data_hash_sha256 = $previewManifest.data_hash_sha256
-    publication_set_sha256 = $previewManifest.publication_set_sha256
-    opportunity_projection_sha256 = $previewManifest.opportunity_projection_sha256
-    v6_learning_sha256 = $previewManifest.v6_learning_sha256
-    release_manifest_sha256 = Get-OptionalJsonProperty -InputObject $previewReleaseManifest -Name "release_manifest_sha256"
-    market_date = $previewManifest.market_date
-    snapshot_status = $previewReadiness.snapshot_status
-    readiness_status = $previewReadiness.status
-    readiness_http_status = $previewReadiness.http_status
-    allow_degraded = [bool]$AllowDegraded
-    promoted = [bool]$Promote
-    prior_production_deployment_id = Get-OptionalJsonProperty -InputObject $priorProduction -Name "id"
-    production_aliases = if ($Promote) { @($allProductionAliases) } else { @() }
-    promoted_deployment_id = Get-OptionalJsonProperty -InputObject $promotedDeployment -Name "id"
-    production_deployment_id = Get-OptionalJsonProperty -InputObject $production -Name "id"
-    live_trading_enabled = $false
-    research_only = $true
-    status = if ($Promote) { "PRODUCTION_VERIFIED" } else { "PREVIEW_VERIFIED" }
-}
-$json = $result | ConvertTo-Json -Depth 20
-$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-[System.IO.File]::WriteAllText($resultPath, $json, $utf8NoBom)
-$json
