@@ -6,7 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from scripts.runtime_operation_journal import seal, transition, validate
+from scripts.runtime_operation_journal import (
+    _validate_compensation,
+    seal,
+    seal_compensation,
+    transition,
+    validate,
+)
 
 EMPTY = hashlib.sha256(b"").hexdigest()
 
@@ -16,9 +22,11 @@ def _payload(operation: str = "runtime_activation", phase: str = "INIT") -> dict
         "runtime_activation": (
             "INIT", "PRE_QUIESCE", "PRE_SWAP", "POST_SWAP", "COMPLETE"
         ),
-        "capture_task_rebind": ("INIT", "PRE_ENABLE", "POST_ENABLE", "COMPLETE"),
+        "capture_task_rebind": ("INIT", "PRE_ENABLE", "POST_ENABLE", "COMPLETE", "COMPENSATED"),
         "runtime_rollback": ("INIT", "PRE_SWAP", "POST_SWAP", "COMPLETE"),
-        "capture_task_hardening": ("INIT", "PRE_TASK_UPDATE", "POST_TASK_UPDATE", "COMPLETE"),
+        "capture_task_hardening": (
+            "INIT", "PRE_TASK_UPDATE", "POST_TASK_UPDATE", "COMPLETE", "COMPENSATED"
+        ),
     }
     return {
         "schema_version": "dawnstrike.runtime_operation_journal.v1",
@@ -269,3 +277,118 @@ def test_hardening_journal_rejects_cross_candidate_and_self_hash_tamper() -> Non
     payload["journal_self_sha256"] = "0" * 64
     with pytest.raises(ValueError, match="current runtime identity|self hash"):
         validate(json.dumps(payload).encode())
+
+
+def _compensation_payload(tmp_path: Path) -> dict:
+    prior = tmp_path / "prior-receipt.json"
+    prior.write_text("immutable prior receipt", encoding="utf-8")
+    prior_hash = hashlib.sha256(prior.read_bytes()).hexdigest()
+    return {
+        "schema_version": "dawnstrike.runtime_compensation_receipt.v1",
+        "status": "COMPENSATED",
+        "operation": "capture_task_rebind",
+        "candidate_sha": "a" * 40,
+        "candidate_tree": "b" * 40,
+        "prior_journal_file_sha256": "c" * 64,
+        "task_contract_sha256": "d" * 64,
+        "task_state": "Disabled",
+        "task_xml_sha256": "e" * 64,
+        "task_action_contract_sha256": "f" * 64,
+        "task_definition_contract_sha256": "1" * 64,
+        "prior_receipt_relative_path": prior.name,
+        "prior_receipt_sha256": prior_hash,
+        "failure_type": "RuntimeError",
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+
+
+def test_compensation_receipt_is_strict_self_hashed_and_prior_bound(tmp_path: Path) -> None:
+    source = tmp_path / "compensation.input.json"
+    target = tmp_path / "compensation.json"
+    source.write_text(json.dumps(_compensation_payload(tmp_path)), encoding="utf-8")
+    sealed = seal_compensation(source, target, tmp_path)
+    assert sealed["payload"]["status"] == "COMPENSATED"
+    assert sealed["raw_file_sha256"] == hashlib.sha256(target.read_bytes()).hexdigest()
+    target.write_text(
+        target.read_text(encoding="utf-8").replace("RuntimeError", "TamperedError"),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="self hash"):
+        _validate_compensation(target.read_bytes())
+
+
+def test_compensation_rejects_missing_or_tampered_prior_receipt(tmp_path: Path) -> None:
+    payload = _compensation_payload(tmp_path)
+    source = tmp_path / "input.json"
+    target = tmp_path / "output.json"
+    source.write_text(json.dumps(payload), encoding="utf-8")
+    (tmp_path / "prior-receipt.json").write_text("tampered", encoding="utf-8")
+    with pytest.raises(ValueError, match="prior receipt changed"):
+        seal_compensation(source, target, tmp_path)
+    (tmp_path / "prior-receipt.json").unlink()
+    with pytest.raises(ValueError, match="prior receipt changed|missing"):
+        seal_compensation(source, target, tmp_path)
+
+
+def test_compensation_rejects_inconsistent_prior_receipt_sentinel(tmp_path: Path) -> None:
+    payload = _compensation_payload(tmp_path)
+    payload["prior_receipt_relative_path"] = "NONE"
+    source = tmp_path / "input.json"
+    source.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="prior receipt sentinel"):
+        seal_compensation(source, tmp_path / "output.json", tmp_path)
+
+
+def test_compensation_receipt_cannot_be_overwritten(tmp_path: Path) -> None:
+    source = tmp_path / "input.json"
+    target = tmp_path / "output.json"
+    source.write_text(json.dumps(_compensation_payload(tmp_path)), encoding="utf-8")
+    seal_compensation(source, target, tmp_path)
+    with pytest.raises(ValueError, match="already exists"):
+        seal_compensation(source, target, tmp_path)
+
+
+def test_v2_compensated_journal_is_terminal_and_requires_compensation_proof(tmp_path: Path) -> None:
+    initial = _payload("capture_task_rebind", "INIT")
+    initial.update(
+        schema_version="dawnstrike.runtime_operation_journal.v2",
+        compensation_receipt_relative_path="NONE",
+        compensation_receipt_sha256=EMPTY,
+    )
+    source = tmp_path / "input.json"
+    journal = tmp_path / "journal.json"
+    source.write_text(json.dumps(initial), encoding="utf-8")
+    first = transition(source, journal, None)
+    compensated = _payload("capture_task_rebind", "COMPENSATED")
+    compensated.update(
+        schema_version="dawnstrike.runtime_operation_journal.v2",
+        prior_journal_file_sha256=first["raw_file_sha256"],
+        compensation_receipt_relative_path="receipts/compensated.json",
+        compensation_receipt_sha256="9" * 64,
+    )
+    source.write_text(json.dumps(compensated), encoding="utf-8")
+    terminal = transition(source, journal, journal)
+    assert terminal["payload"]["phase"] == "COMPENSATED"
+
+
+def test_consumers_keep_nonterminal_journal_until_compensation_or_completion() -> None:
+    for script_name, crash_marker, complete_marker in (
+        (
+            "scripts/rebind_intraday_capture_task.ps1",
+            "after_receipt_seal_before_complete",
+            "-Phase COMPLETE",
+        ),
+        (
+            "scripts/harden_intraday_capture_task.ps1",
+            "after_receipt_seal_before_complete",
+            "-Phase COMPLETE",
+        ),
+    ):
+        script = Path(script_name).read_text(encoding="utf-8")
+        assert crash_marker in script
+        assert "-Phase COMPENSATED" in script
+        assert "retained for governed recovery" in script
+        assert script.index(crash_marker) < script.rindex(complete_marker)
+        compensated = script.index("after_compensated_before_release")
+        assert compensated < script.index("Exit-DawnstrikeGovernedRuntimeLock", compensated)

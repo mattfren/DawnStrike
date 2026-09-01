@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA = "dawnstrike.runtime_operation_journal.v1"
+COMPENSATED_SCHEMA = "dawnstrike.runtime_operation_journal.v2"
 OPERATIONS = {
     "runtime_activation", "capture_task_rebind", "runtime_rollback",
     "capture_task_hardening",
@@ -23,10 +24,10 @@ PHASES = {
     # mutation.  It lets activation recovery distinguish an interrupted
     # quiescence operation from an unstarted activation.
     "runtime_activation": ("INIT", "PRE_QUIESCE", "PRE_SWAP", "POST_SWAP", "COMPLETE"),
-    "capture_task_rebind": ("INIT", "PRE_ENABLE", "POST_ENABLE", "COMPLETE"),
+    "capture_task_rebind": ("INIT", "PRE_ENABLE", "POST_ENABLE", "COMPLETE", "COMPENSATED"),
     "runtime_rollback": ("INIT", "PRE_SWAP", "POST_SWAP", "COMPLETE"),
     "capture_task_hardening": (
-        "INIT", "PRE_TASK_UPDATE", "POST_TASK_UPDATE", "COMPLETE"
+        "INIT", "PRE_TASK_UPDATE", "POST_TASK_UPDATE", "COMPLETE", "COMPENSATED"
     ),
 }
 KEYS = {
@@ -42,7 +43,9 @@ KEYS = {
     "old_lock_file_sha256", "next_lock_token", "next_lock_file_sha256",
     "old_lock_archive_relative_path", "next_lock_relative_path",
     "init_owner_process_id", "init_owner_started_at_utc", "journal_self_sha256",
+    "compensation_receipt_relative_path", "compensation_receipt_sha256",
 }
+LEGACY_KEYS = KEYS - {"compensation_receipt_relative_path", "compensation_receipt_sha256"}
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 TOKEN = re.compile(r"^[0-9a-f]{32}$")
@@ -93,11 +96,16 @@ def validate(raw: bytes) -> dict[str, Any]:
         value = json.loads(raw.decode(), object_pairs_hook=_pairs)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise ValueError(f"invalid strict JSON: {exc}") from exc
-    if not isinstance(value, dict) or set(value) != KEYS:
+    if not isinstance(value, dict) or set(value) not in (LEGACY_KEYS, KEYS):
         raise ValueError("journal keys are not exact")
     operation = value["operation"]
-    if value["schema_version"] != SCHEMA or operation not in OPERATIONS:
+    if value["schema_version"] not in (SCHEMA, COMPENSATED_SCHEMA) or operation not in OPERATIONS:
         raise ValueError("journal schema or operation is invalid")
+    extended = set(value) == KEYS
+    if value["schema_version"] == COMPENSATED_SCHEMA and not extended:
+        raise ValueError("compensated journal keys are incomplete")
+    if value["schema_version"] == SCHEMA and extended:
+        raise ValueError("legacy journal carries compensation keys")
     phases = PHASES[operation]
     if value["phase"] not in phases or type(value["sequence"]) is not int:
         raise ValueError("journal phase or sequence is invalid")
@@ -132,6 +140,11 @@ def validate(raw: bytes) -> dict[str, Any]:
     if value["phase"] == "INIT":
         if any(item != empty for item in (prepared_receipt, complete_receipt, backup, stage)):
             raise ValueError("INIT journal carries non-sentinel artifact hashes")
+        if extended and (
+            value["compensation_receipt_relative_path"] != "NONE"
+            or value["compensation_receipt_sha256"] != empty
+        ):
+            raise ValueError("INIT journal carries compensation proof")
     elif value["phase"] == "PRE_QUIESCE":
         # The task backup and stage identity are sealed before scheduler
         # disablement.  The state/activation PREPARED receipt is intentionally
@@ -143,11 +156,27 @@ def validate(raw: bytes) -> dict[str, Any]:
             or stage == empty
         ):
             raise ValueError("PRE_QUIESCE journal artifact proof is invalid")
+    elif value["phase"] == "COMPENSATED":
+        # Compensation is legal from any recoverable task-operation phase,
+        # including INIT when the failure occurred before PREPARED existed.
+        if not extended or value["schema_version"] != COMPENSATED_SCHEMA:
+            raise ValueError("compensated phase requires the v2 journal contract")
+        if complete_receipt != empty or value["compensation_receipt_sha256"] == empty:
+            raise ValueError("compensated receipt proof is invalid")
+        if value["compensation_receipt_relative_path"] == "NONE":
+            raise ValueError("compensated receipt path is invalid")
+        if value["runtime_stage_contract_sha256"] != empty:
+            raise ValueError("compensated task journal carries runtime stage proof")
     else:
         if prepared_receipt == empty or backup == empty:
             raise ValueError("mutation phase lacks prepared receipt or backup proof")
         if (value["phase"] == "COMPLETE") != (complete_receipt != empty):
             raise ValueError("complete receipt proof sentinel is invalid")
+        elif extended and (
+            value["compensation_receipt_sha256"] != empty
+            or value["compensation_receipt_relative_path"] != "NONE"
+        ):
+            raise ValueError("non-compensated journal carries compensation proof")
         runtime_operation = operation in {"runtime_activation", "runtime_rollback"}
         if runtime_operation != (stage != empty):
             raise ValueError("runtime stage proof sentinel is invalid")
@@ -215,6 +244,8 @@ def validate(raw: bytes) -> dict[str, Any]:
         raise ValueError("adopted journal identities are inconsistent")
     _safe_relative(value["prepared_receipt_relative_path"])
     _safe_relative(value["complete_receipt_relative_path"])
+    if extended and value["compensation_receipt_relative_path"] != "NONE":
+        _safe_relative(value["compensation_receipt_relative_path"])
     _utc(value["recorded_at_utc"])
     if value["research_only"] is not True or value["broker_execution_enabled"] is not False:
         raise ValueError("journal safety flags are invalid")
@@ -256,7 +287,10 @@ def _contained(path: Path, root: Path) -> None:
 
 def seal(source: Path, target: Path) -> dict[str, Any]:
     value = json.loads(_read_regular(source).decode("utf-8"), object_pairs_hook=_pairs)
-    if set(value) != KEYS - {"journal_self_sha256"}:
+    if set(value) not in (
+        LEGACY_KEYS - {"journal_self_sha256"},
+        KEYS - {"journal_self_sha256"},
+    ):
         raise ValueError("journal input keys are not exact")
     value["journal_self_sha256"] = hashlib.sha256(_canonical(value)).hexdigest()
     raw = _canonical(value)
@@ -295,7 +329,10 @@ def transition(source: Path, target: Path, previous: Path | None) -> dict[str, A
         prior_raw = _read_regular(previous)
         prior = validate(prior_raw)
         expected_index = PHASES[operation].index(phase) - 1
-        if expected_index < 0 or prior["phase"] != PHASES[operation][expected_index]:
+        if phase == "COMPENSATED":
+            if prior["phase"] in {"COMPLETE", "COMPENSATED"}:
+                raise ValueError("journal compensation transition is not recoverable")
+        elif expected_index < 0 or prior["phase"] != PHASES[operation][expected_index]:
             raise ValueError("journal transition is not adjacent")
         if candidate.get("prior_journal_file_sha256") != hashlib.sha256(prior_raw).hexdigest():
             raise ValueError("journal prior raw hash mismatch")
@@ -323,7 +360,115 @@ def transition(source: Path, target: Path, previous: Path | None) -> dict[str, A
             expected = previous_pair
         if current_pair != expected:
             raise ValueError("current runtime identity is invalid for the phase")
+        if phase == "COMPENSATED":
+            if prior["schema_version"] != COMPENSATED_SCHEMA:
+                raise ValueError("compensation requires a v2 journal")
+            if candidate.get("compensation_receipt_sha256") == hashlib.sha256(b"").hexdigest():
+                raise ValueError("compensation requires a receipt hash")
     return seal(source, target)
+
+
+COMPENSATION_KEYS = {
+    "schema_version", "status", "operation", "candidate_sha", "candidate_tree",
+    "prior_journal_file_sha256", "task_contract_sha256", "task_state",
+    "task_xml_sha256", "task_action_contract_sha256", "task_definition_contract_sha256",
+    "prior_receipt_relative_path", "prior_receipt_sha256", "failure_type",
+    "research_only", "broker_execution_enabled", "receipt_self_sha256",
+}
+
+
+def _validate_compensation(raw: bytes) -> dict[str, Any]:
+    try:
+        value = json.loads(raw.decode(), object_pairs_hook=_pairs)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError(f"invalid strict compensation JSON: {exc}") from exc
+    if not isinstance(value, dict) or set(value) != COMPENSATION_KEYS:
+        raise ValueError("compensation receipt keys are not exact")
+    if value["schema_version"] != "dawnstrike.runtime_compensation_receipt.v1":
+        raise ValueError("compensation receipt schema is invalid")
+    if value["status"] != "COMPENSATED" or value["operation"] not in {
+        "capture_task_rebind", "capture_task_hardening"
+    }:
+        raise ValueError("compensation receipt status or operation is invalid")
+    for key in ("candidate_sha", "candidate_tree"):
+        if not isinstance(value[key], str) or not HEX40.fullmatch(value[key]):
+            raise ValueError("compensation candidate identity is invalid")
+    for key in ("prior_journal_file_sha256", "task_contract_sha256", "task_xml_sha256",
+                "task_action_contract_sha256", "task_definition_contract_sha256",
+                "prior_receipt_sha256", "receipt_self_sha256"):
+        if not isinstance(value[key], str) or not HEX64.fullmatch(value[key]):
+            raise ValueError(f"compensation {key} is invalid")
+    if value["prior_receipt_relative_path"] != "NONE":
+        _safe_relative(value["prior_receipt_relative_path"])
+    if (value["prior_receipt_relative_path"] == "NONE") != (
+        value["prior_receipt_sha256"] == hashlib.sha256(b"").hexdigest()
+    ):
+        raise ValueError("compensation prior receipt sentinel is inconsistent")
+    if value["task_state"] not in {"Disabled", "Ready"}:
+        raise ValueError("compensation task state is invalid")
+    if (
+        not isinstance(value["failure_type"], str)
+        or not value["failure_type"]
+        or len(value["failure_type"]) > 128
+    ):
+        raise ValueError("compensation failure type is invalid")
+    if value["research_only"] is not True or value["broker_execution_enabled"] is not False:
+        raise ValueError("compensation safety flags are invalid")
+    unsigned = dict(value)
+    claimed = unsigned.pop("receipt_self_sha256")
+    if hashlib.sha256(_canonical(unsigned)).hexdigest() != claimed:
+        raise ValueError("compensation receipt self hash mismatch")
+    return value
+
+
+def _validate_compensation_reference(value: dict[str, Any], state_root: Path) -> None:
+    if value["prior_receipt_relative_path"] == "NONE":
+        return
+    prior = state_root / value["prior_receipt_relative_path"].replace("/", os.sep)
+    _contained(prior, state_root)
+    try:
+        raw = _read_regular(prior)
+    except (FileNotFoundError, OSError) as exc:
+        raise ValueError("compensation prior receipt changed or is missing") from exc
+    if hashlib.sha256(raw).hexdigest() != value["prior_receipt_sha256"]:
+        raise ValueError("compensation prior receipt changed or is missing")
+
+
+def seal_compensation(source: Path, target: Path, state_root: Path | None = None) -> dict[str, Any]:
+    value = json.loads(_read_regular(source).decode("utf-8"), object_pairs_hook=_pairs)
+    if set(value) != COMPENSATION_KEYS - {"receipt_self_sha256"}:
+        raise ValueError("compensation input keys are not exact")
+    value["receipt_self_sha256"] = hashlib.sha256(_canonical(value)).hexdigest()
+    raw = _canonical(value)
+    _validate_compensation(raw)
+    if state_root is not None:
+        _validate_compensation_reference(value, state_root)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        raise ValueError(
+            "compensation receipt already exists; immutable evidence cannot be replaced"
+        )
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=".compensation-", suffix=".tmp", dir=target.parent
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        # Hard-link publication is an exclusive create on Windows/NTFS: it
+        # cannot clobber a receipt that won the race after the preflight.
+        try:
+            os.link(temporary, target)
+        except FileExistsError as exc:
+            raise ValueError(
+                "compensation receipt already exists; immutable evidence cannot be replaced"
+            ) from exc
+        os.unlink(temporary)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    return {"payload": value, "raw_file_sha256": hashlib.sha256(raw).hexdigest()}
 
 
 def main() -> int:
@@ -341,11 +486,28 @@ def main() -> int:
     transition_parser.add_argument("output", type=Path)
     transition_parser.add_argument("--previous", type=Path)
     transition_parser.add_argument("--state-root", required=True, type=Path)
+    compensation = sub.add_parser("seal-compensation")
+    compensation.add_argument("--input", required=True, type=Path)
+    compensation.add_argument("--output", required=True, type=Path)
+    compensation.add_argument("--state-root", required=True, type=Path)
+    verify_compensation = sub.add_parser("verify-compensation")
+    verify_compensation.add_argument("--receipt", required=True, type=Path)
+    verify_compensation.add_argument("--state-root", required=True, type=Path)
     args = parser.parse_args()
     if args.command == "verify":
         _contained(args.path, args.state_root)
         raw = _read_regular(args.path)
         result = {"payload": validate(raw), "raw_file_sha256": hashlib.sha256(raw).hexdigest()}
+    elif args.command == "verify-compensation":
+        _contained(args.receipt, args.state_root)
+        raw = _read_regular(args.receipt)
+        payload = _validate_compensation(raw)
+        _validate_compensation_reference(payload, args.state_root)
+        result = {"payload": payload, "raw_file_sha256": hashlib.sha256(raw).hexdigest()}
+    elif args.command == "seal-compensation":
+        _contained(args.input, args.state_root)
+        _contained(args.output, args.state_root)
+        result = seal_compensation(args.input, args.output, args.state_root)
     elif args.command == "seal":
         _contained(args.input, args.state_root)
         _contained(args.output, args.state_root)
