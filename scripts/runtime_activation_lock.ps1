@@ -335,9 +335,13 @@ function Set-DawnstrikeRuntimeOperationJournalPhase {
     if($sequence-lt 0){throw 'Journal phase is invalid for the operation.'}
     $empty=Get-DawnstrikeSharedLockSha256Text ''
     $priorHash=$empty
+    $initOwnerProcessId=[int]$current.payload.process_id
+    $initOwnerStartedAtUtc=[string]$current.payload.process_started_at_utc
     if($Phase-ne'INIT'){
         $prior=Get-DawnstrikeStrictRuntimeOperationJournal $journalFull $PythonPath $PythonSha256
         $priorHash=[string]$prior.raw_file_sha256
+        $initOwnerProcessId=[int]$prior.payload.init_owner_process_id
+        $initOwnerStartedAtUtc=[string]$prior.payload.init_owner_started_at_utc
     }elseif(Test-Path -LiteralPath $journalFull){throw 'INIT journal already exists.'}
     $payload=[ordered]@{
         schema_version='dawnstrike.runtime_operation_journal.v1';operation=$Operation;phase=$Phase;sequence=$sequence
@@ -355,7 +359,7 @@ function Set-DawnstrikeRuntimeOperationJournalPhase {
         old_lock_token=[string]$current.payload.lock_token;old_lock_file_sha256=[string]$current.raw_file_sha256
         next_lock_token=[string]$current.payload.lock_token;next_lock_file_sha256=[string]$current.raw_file_sha256
         old_lock_archive_relative_path='NONE';next_lock_relative_path='NONE'
-        init_owner_process_id=[int]$current.payload.process_id;init_owner_started_at_utc=[string]$current.payload.process_started_at_utc
+        init_owner_process_id=$initOwnerProcessId;init_owner_started_at_utc=$initOwnerStartedAtUtc
     }
     New-Item -ItemType Directory -Path (Split-Path $journalFull -Parent) -Force|Out-Null
     $input=Join-Path (Split-Path $journalFull -Parent) ('.journal-transition-'+[guid]::NewGuid().ToString('N')+'.json')
