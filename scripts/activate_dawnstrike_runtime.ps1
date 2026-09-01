@@ -29,6 +29,94 @@ param(
 
 $ErrorActionPreference = "Stop"
 $script:DawnstrikePowerShellExecutable = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+
+function Assert-DawnstrikeActivationSourceAdmission {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$CandidateRoot,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedSha
+    )
+    # This admission uses only the OS PowerShell/.NET primitives and a
+    # fixed, host-bound Git executable. Candidate helpers are deliberately
+    # not dot-sourced until every activation helper is bound to HEAD.
+    $root = [IO.Path]::GetFullPath($CandidateRoot).TrimEnd('\')
+    $git = 'C:\Program Files\Git\cmd\git.exe'
+    if (-not (Test-Path -LiteralPath $git -PathType Leaf)) {
+        throw 'Activation source admission cannot find the pinned Git executable.'
+    }
+    $gitDigest = [Security.Cryptography.SHA256]::Create()
+    try {
+        $gitBytes = [IO.File]::ReadAllBytes($git)
+        $gitHash = ([BitConverter]::ToString($gitDigest.ComputeHash($gitBytes))).Replace('-', '').ToLowerInvariant()
+    }
+    finally { $gitDigest.Dispose() }
+    if ($gitHash -cne '37c5725818d602e951ba2563b870d62763322956b73373da4c33a0b566a80bc9') {
+        throw 'Activation source admission rejected an unapproved Git executable.'
+    }
+    $safeEnvironment = @{}
+    foreach ($entry in @(Get-ChildItem Env:)) {
+        if ($entry.Name -notlike 'GIT_*') { $safeEnvironment[$entry.Name] = [string]$entry.Value }
+    }
+    $safeEnvironment.GIT_CONFIG_NOSYSTEM = '1'
+    $safeEnvironment.GIT_CONFIG_GLOBAL = 'NUL'
+    $safeEnvironment.GIT_NO_REPLACE_OBJECTS = '1'
+    $safeEnvironment.GIT_TERMINAL_PROMPT = '0'
+    $safeEnvironment.GIT_OPTIONAL_LOCKS = '0'
+    $originalGitEnvironment = @{}
+    foreach ($entry in @(Get-ChildItem Env: | Where-Object { $_.Name -like 'GIT_*' })) {
+        $originalGitEnvironment[[string]$entry.Name] = [string]$entry.Value
+    }
+    $gitArgs = @('-c', 'core.autocrlf=true', '-c', 'core.fsmonitor=false', '-C', $root)
+    $relativeFiles = @(
+        'scripts/activate_dawnstrike_runtime.ps1',
+        'scripts/dawnstrike_process_runner.ps1',
+        'scripts/dawnstrike_job_process.ps1',
+        'scripts/runtime_activation_lock.ps1',
+        'scripts/capture_task_safety.ps1',
+        'scripts/invoke_dawnstrike_stage.ps1'
+    )
+    $locks = @()
+    try {
+        foreach ($entry in @(Get-ChildItem Env: | Where-Object { $_.Name -like 'GIT_*' })) {
+            Remove-Item -LiteralPath ("Env:" + [string]$entry.Name) -ErrorAction SilentlyContinue
+        }
+        foreach ($name in $safeEnvironment.Keys | Where-Object { $_ -like 'GIT_*' }) {
+            Set-Item -LiteralPath ("Env:" + $name) -Value $safeEnvironment[$name]
+        }
+        $head = ((& $git @gitArgs rev-parse HEAD 2>$null) -join '').Trim().ToLowerInvariant()
+        if ($LASTEXITCODE -ne 0 -or $head -cne $ExpectedSha.ToLowerInvariant()) {
+            throw 'Activation source admission rejected a candidate with the wrong HEAD.'
+        }
+        foreach ($relative in $relativeFiles) {
+            $full = Join-Path $root ($relative.Replace('/', '\'))
+            $item = Get-Item -LiteralPath $full -Force -ErrorAction Stop
+            if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Activation helper is not a regular non-reparse file: $relative"
+            }
+            $stream = [IO.File]::Open($full, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+            $locks += $stream
+            $headBlob = ((& $git @gitArgs rev-parse ("HEAD:" + $relative) 2>$null) -join '').Trim().ToLowerInvariant()
+            $worktreeBlob = ((& $git @gitArgs hash-object ("--path=" + $relative) -- $full 2>$null) -join '').Trim().ToLowerInvariant()
+            if ($LASTEXITCODE -ne 0 -or $headBlob -notmatch '^[0-9a-f]{40}$' -or $worktreeBlob -cne $headBlob) {
+                throw "Activation helper is not byte-bound to candidate HEAD: $relative"
+            }
+        }
+        return $locks
+    }
+    catch {
+        foreach ($stream in $locks) { $stream.Dispose() }
+        throw
+    }
+    finally {
+        foreach ($entry in @(Get-ChildItem Env: | Where-Object { $_.Name -like 'GIT_*' })) {
+            Remove-Item -LiteralPath ("Env:" + [string]$entry.Name) -ErrorAction SilentlyContinue
+        }
+        foreach ($name in $originalGitEnvironment.Keys) {
+            Set-Item -LiteralPath ("Env:" + $name) -Value $originalGitEnvironment[$name]
+        }
+    }
+}
+
 if ($InjectCrashBetweenRuntimeRenames -and $env:DAWNSTRIKE_TEST_LOCK_JOURNAL -ne "1") {
     throw "Activation runtime-rename crash injection is test-only."
 }
@@ -574,7 +662,9 @@ function Get-DawnstrikeCanonicalTaskPolicy {
         [Parameter(Mandatory = $true)][string]$TaskName,
         [Parameter(Mandatory = $true)][string]$RuntimeRoot,
         [Parameter(Mandatory = $true)][string]$StateRoot,
-        [ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedSha = ""
+        [ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedSha = "",
+        [string]$LaunchManifestPath = "",
+        [ValidatePattern('^[0-9a-f]{64}$')][string]$LaunchManifestSha256 = ""
     )
 
     $runners = @{
@@ -590,10 +680,26 @@ function Get-DawnstrikeCanonicalTaskPolicy {
     $runtime = [System.IO.Path]::GetFullPath($RuntimeRoot).TrimEnd('\')
     $state = [System.IO.Path]::GetFullPath($StateRoot).TrimEnd('\')
     $runner = Join-Path $runtime ("scripts\" + [string]$runners[$TaskName])
-    $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$runner`" -RuntimeRoot `"$runtime`" -StateRoot `"$state`""
-    if ($ExpectedSha) { $arguments += " -ExpectedSha `"$ExpectedSha`"" }
-    if ($TaskName -eq "Dawnstrike 10of10 Daily Finalize") {
-        $arguments += " -PublicationMode Production -VercelProjectId `"prj_5pef3EZF1u5YadebEz3dFjnkWOXy`""
+    if ($ExpectedSha -and -not $LaunchManifestPath) {
+        $safeTask = [IO.Path]::GetFileName($runner)
+        $LaunchManifestPath = Join-Path $state ("receipts\scheduler-launch\" + $ExpectedSha.ToLowerInvariant() + "-" + $safeTask + ".json")
+        if (Test-Path -LiteralPath $LaunchManifestPath -PathType Leaf) {
+            $LaunchManifestSha256 = (Get-FileHash -LiteralPath $LaunchManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+    }
+    if ($ExpectedSha -and $LaunchManifestPath -and $LaunchManifestSha256) {
+        $arguments = "-NoProfile -ExecutionPolicy Bypass -Command `"" + (Get-DawnstrikeScheduledLaunchCommand `
+            -Runner $runner -RuntimeRoot $runtime -StateRoot $state -ExpectedSha $ExpectedSha `
+            -ManifestPath $LaunchManifestPath -ManifestSha256 $LaunchManifestSha256 `
+            -PublicationMode $(if ($TaskName -eq "Dawnstrike 10of10 Daily Finalize") { "Production" } else { "" }) `
+            -VercelProjectId $(if ($TaskName -eq "Dawnstrike 10of10 Daily Finalize") { "prj_5pef3EZF1u5YadebEz3dFjnkWOXy" } else { "" })) + "`""
+    }
+    else {
+        $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$runner`" -RuntimeRoot `"$runtime`" -StateRoot `"$state`""
+        if ($ExpectedSha) { $arguments += " -ExpectedSha `"$ExpectedSha`"" }
+        if ($TaskName -eq "Dawnstrike 10of10 Daily Finalize") {
+            $arguments += " -PublicationMode Production -VercelProjectId `"prj_5pef3EZF1u5YadebEz3dFjnkWOXy`""
+        }
     }
     $weekly = $TaskName -ne "Dawnstrike 10of10 Daily Finalize"
     $days = if ($TaskName -eq "Dawnstrike AlphaOps V6 Weekly Training") { 2 } elseif ($weekly) { 62 } else { $null }
@@ -673,6 +779,19 @@ function Assert-DawnstrikeCanonicalTaskSemantics {
             # pre-rebind boundary; the caller must immediately replace it and
             # perform a second exact-SHA assertion before enabling the task.
             $argumentsMatch = $argumentsMatch -or ($actualArguments -cmatch ([regex]::Escape([string]$policy.arguments) + ' -ExpectedSha "[0-9a-f]{40}"$'))
+            if (-not $argumentsMatch) {
+                # A task already rebound to the guarded inline action carries
+                # its own exact release SHA.  Reconstruct the expected action
+                # from that SHA and the independently hashed state manifest;
+                # never accept the inline text merely because it contains a
+                # plausible SHA.
+                $bound = [regex]::Match($actualArguments, '-ExpectedSha\s+["'']?([0-9a-f]{40})')
+                if ($bound.Success) {
+                    $boundPolicy = Get-DawnstrikeCanonicalTaskPolicy `
+                        $taskName $RuntimeRoot $StateRoot $bound.Groups[1].Value
+                    $argumentsMatch = $actualArguments -ceq [string]$boundPolicy.arguments
+                }
+            }
         }
         if (-not $argumentsMatch) {
             throw "Canonical task arguments are not the exact governed action: $taskName"
@@ -1912,7 +2031,15 @@ function Set-DawnstrikeCanonicalTaskExpectedSha {
         if ($matches.Count -ne 1 -or [string]$matches[0].State -ne "Disabled") {
             throw "Canonical task must be uniquely Disabled before SHA rebind: $taskName"
         }
-        $policy = Get-DawnstrikeCanonicalTaskPolicy $taskName $RuntimeRoot $StateRoot $ExpectedSha
+        $runnerName = @{
+            "Dawnstrike AlphaOps Morning" = "run_alphaops_morning.ps1"
+            "Dawnstrike AlphaOps Monitor 5m" = "run_alphaops_monitor.ps1"
+            "Dawnstrike AlphaOps EOD Full Report" = "run_alphaops_eod.ps1"
+            "Dawnstrike AlphaOps V6 Weekly Training" = "run_alphaops_weekly_training.ps1"
+            "Dawnstrike 10of10 Daily Finalize" = "run_daily_finalize.ps1"
+        }[$taskName]
+        $manifest = New-DawnstrikeScheduledLaunchManifest -RuntimeRoot $RuntimeRoot -StateRoot $StateRoot -ExpectedSha $ExpectedSha -TaskScript $runnerName
+        $policy = Get-DawnstrikeCanonicalTaskPolicy $taskName $RuntimeRoot $StateRoot $ExpectedSha $manifest.path $manifest.sha256
         $action = New-ScheduledTaskAction -Execute $script:DawnstrikePowerShellExecutable -Argument ([string]$policy.arguments) -WorkingDirectory $RuntimeRoot
         Set-ScheduledTask -TaskName $taskName -TaskPath ([string]$matches[0].TaskPath) -Action $action -ErrorAction Stop | Out-Null
     }
@@ -2650,9 +2777,6 @@ function Assert-DawnstrikeSameVolume {
     }
 }
 
-# Override the legacy per-script implementation before any operation runs.
-. (Join-Path $PSScriptRoot "runtime_activation_lock.ps1")
-
 function Invoke-DawnstrikeRuntimeActivation {
     [CmdletBinding()]
     param(
@@ -2680,6 +2804,12 @@ function Invoke-DawnstrikeRuntimeActivation {
         throw "Activation runtime-rename crash injection is test-only."
     }
 
+    # Admit the checkout before invoking any helper defined by this candidate.
+    # The admission path uses only the inline OS/.NET verifier above and keeps
+    # the verified helper handles open for the remainder of activation.
+    $preAdmissionRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+    $script:DawnstrikeActivationAdmissionLocks = Assert-DawnstrikeActivationSourceAdmission `
+        -CandidateRoot $preAdmissionRoot -ExpectedSha $ExpectedSha
     $candidate = Resolve-DawnstrikeActivationRoot $CandidateRoot "CandidateRoot"
     $runtime = Resolve-DawnstrikeActivationRoot $RuntimeRoot "RuntimeRoot"
     $state = Resolve-DawnstrikeActivationRoot $StateRoot "StateRoot"
@@ -2698,6 +2828,10 @@ function Invoke-DawnstrikeRuntimeActivation {
     )) {
         throw "CandidateRoot must be the exact checkout containing the activation tool."
     }
+    if (-not [string]::Equals($candidate, $preAdmissionRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "CandidateRoot changed after external activation source admission."
+    }
+    . (Join-Path $PSScriptRoot "runtime_activation_lock.ps1")
     foreach ($pair in @(@($candidate, $runtime), @($candidate, $state), @($runtime, $state))) {
         if ([string]::Equals($pair[0], $pair[1], [System.StringComparison]::OrdinalIgnoreCase)) {
             throw "Candidate, runtime, and state roots must be distinct."
@@ -2705,7 +2839,7 @@ function Invoke-DawnstrikeRuntimeActivation {
     }
     $gitPath = (Get-DawnstrikeApprovedGit).path
     $pythonPath = (Get-DawnstrikeApprovedLockInterpreter).path
-    . (Join-Path $PSScriptRoot "dawnstrike_job_process.ps1")
+    . (Join-Path $PSScriptRoot "dawnstrike_process_runner.ps1")
     $activationNowUtc = Get-DawnstrikeActivationNowUtc -TestNowUtc $TestNowUtc
 
     $null = Invoke-DawnstrikeActivationProcess `
