@@ -62,6 +62,8 @@ function Get-HardeningSha256File {
     }
 }
 
+. (Join-Path $PSScriptRoot "capture_task_hardening_recovery.ps1")
+
 function Get-HardeningInterpreterDeclaration {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string]$CandidateRoot)
@@ -769,6 +771,8 @@ try {
     $beforeInfo = Get-HardeningTaskInfo -TaskPath $before.task_path
     $receiptOldResult = $beforeInfo.last_task_result
     $receiptOldTime = $beforeInfo.last_run_time
+    $receiptOriginalState = $before.state
+    $recoveringPrepared = $false
     $candidateReceiptPath = Join-Path $StateRoot ("receipts\capture-task\capture-task-hardening-" + $CandidateSha + ".json")
     if (-not [string]::IsNullOrWhiteSpace($ReceiptPath) -and
         [System.IO.Path]::GetFullPath($ReceiptPath) -cne [System.IO.Path]::GetFullPath($candidateReceiptPath)) {
@@ -800,15 +804,13 @@ try {
     # immutable PREPARED after-state, then continue to COMPLETE sealing.
     if ($null -ne $prepared -and $before.state -eq "Disabled" -and
         $before.xml_sha256 -ceq $prepared.xml_after_sha256) {
+        $null = Assert-HardeningPreparedRecoveryState `
+            -Prepared $prepared -CurrentTask $before -PreparedPath $preparedPath `
+            -ExpectedTaskName $script:HardeningTaskName -ExpectedTaskPath $before.task_path `
+            -ExpectedCandidateSha $CandidateSha -ExpectedCandidateTree $CandidateTree `
+            -RuntimeIdentity $runtimeIdentity -InterpreterIdentity $interpreterIdentity `
+            -ExpectedReceiptPath $ReceiptPath
         $backupXmlPath = [string]$prepared.backup_path
-        if (-not (Test-Path -LiteralPath $backupXmlPath -PathType Leaf) -or
-            (Get-HardeningSha256File $backupXmlPath) -cne $prepared.backup_xml_file_sha256) {
-            throw "PREPARED recovery backup is missing or tampered."
-        }
-        $backupXmlSha = Get-HardeningSha256Text ([System.IO.File]::ReadAllText($backupXmlPath, [System.Text.UTF8Encoding]::new($false)))
-        if ($backupXmlSha -cne $prepared.backup_xml_sha256 -or $backupXmlSha -cne $prepared.xml_before_sha256) {
-            throw "PREPARED recovery backup content does not match the source identity."
-        }
         $backupRoot = Split-Path -Parent $backupXmlPath
         $backupName = Split-Path -Leaf $backupXmlPath
         $bytecodePrefix = Join-Path $StateRoot ("capture-bytecode\" + $CandidateSha)
@@ -828,6 +830,7 @@ try {
         $replacementInfo = Get-HardeningTaskInfo -TaskPath $before.task_path
         $receiptOldResult = $prepared.old_last_task_result
         $receiptOldTime = $prepared.old_last_run_time
+        $receiptOriginalState = [string]$prepared.original_state
         $runtimeIdentityAfter = $runtimeIdentity
         $receiptBeforeXmlSha = [string]$prepared.xml_before_sha256
         $receiptBeforeActionHash = [string]$prepared.action_before_sha256
@@ -840,8 +843,9 @@ try {
         $backupRelativePath = (([System.IO.Path]::GetFullPath($backupXmlPath).Substring($statePrefix.Length)) -replace '\\','/')
         $preparedRelativePath = (([System.IO.Path]::GetFullPath($preparedPath).Substring($statePrefix.Length)) -replace '\\','/')
         $receiptRelativePath = (([System.IO.Path]::GetFullPath($ReceiptPath).Substring($statePrefix.Length)) -replace '\\','/')
-        goto hardening_payload
+        $recoveringPrepared = $true
     }
+    if (-not $recoveringPrepared) {
     # This is the migration boundary.  It is deliberately before the XML
     # backup and before any scheduler mutation; a malformed or credential-
     # mismatched legacy task cannot be preserved or replaced.
@@ -1003,7 +1007,7 @@ $statePrefix = $stateRootFull + '\'
         throw "Live RuntimeRoot identity changed during task hardening."
     }
 
-hardening_payload:
+    }
     $replacementExec = @($verified.actions.ChildNodes | Where-Object { $_.LocalName -eq "Exec" })[0]
     $replacementTokens = @([regex]::Matches([string](@($replacementExec.ChildNodes | Where-Object { $_.LocalName -eq "Arguments" })[0].InnerText), '"(?<value>[^"\r\n]*)"') | ForEach-Object { [string]$_.Groups["value"].Value })
     if ($replacementTokens.Count -lt 3) { throw "Replacement capture action bindings are incomplete." }
@@ -1022,7 +1026,7 @@ hardening_payload:
         task_path = $before.task_path
         candidate_sha = $CandidateSha
         candidate_tree = $CandidateTree
-        original_state = $before.state
+        original_state = $receiptOriginalState
         final_state = "Disabled"
         backup_name = $backupName
         backup_relative_path = $backupRelativePath

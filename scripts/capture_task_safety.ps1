@@ -56,6 +56,28 @@ function Assert-DawnstrikeCaptureRegularPath {
     return $full
 }
 
+function Assert-DawnstrikeCaptureBytecodePrefix {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $full = [System.IO.Path]::GetFullPath($Path)
+    $item = Get-Item -LiteralPath $full -Force -ErrorAction Stop
+    if (-not $item.PSIsContainer -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Capture action bytecode prefix must be a regular non-reparse directory."
+    }
+    $cursor = $item
+    while ($null -ne $cursor) {
+        if (($cursor.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Capture action bytecode prefix contains a reparse-point component."
+        }
+        if ([string]::Equals($cursor.FullName.TrimEnd('\'), $cursor.Root.FullName.TrimEnd('\'), [System.StringComparison]::OrdinalIgnoreCase)) { break }
+        $cursor = $cursor.Parent
+    }
+    if (@(Get-ChildItem -LiteralPath $full -Force -Recurse -ErrorAction Stop).Count -ne 0) {
+        throw "Capture action bytecode prefix must remain empty before enablement."
+    }
+    return $full
+}
+
 function Get-DawnstrikeCaptureQuotedTokens {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string]$Arguments)
@@ -460,13 +482,7 @@ function Assert-DawnstrikeCaptureTaskSafety {
         if ([System.IO.Path]::GetFullPath($tokens[3].Substring(15)) -ine $expectedPrefix -or $tokens[4] -ne "-u") {
             throw "Capture action bytecode prefix is not the exact candidate-bound path."
         }
-        $prefixItem = Get-Item -LiteralPath $expectedPrefix -Force -ErrorAction Stop
-        if (-not $prefixItem.PSIsContainer -or ($prefixItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw "Capture action bytecode prefix must be a regular non-reparse directory."
-        }
-        if (@(Get-ChildItem -LiteralPath $expectedPrefix -Force -Recurse -ErrorAction Stop).Count -ne 0) {
-            throw "Capture action bytecode prefix must remain empty before enablement."
-        }
+        $null = Assert-DawnstrikeCaptureBytecodePrefix $expectedPrefix
     }
     $runner = [System.IO.Path]::GetFullPath($tokens[$prefixLength])
     $expectedRunner = [System.IO.Path]::GetFullPath((Join-Path $runtime "scripts\run_daily_intraday_capture.py"))
