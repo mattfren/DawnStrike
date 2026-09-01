@@ -188,6 +188,35 @@ def test_transition_requires_adjacent_phase_and_exact_prior_raw_hash(tmp_path: P
         transition(source, journal, journal)
 
 
+def test_capture_rebind_journal_cannot_skip_enablement_phases(tmp_path: Path) -> None:
+    source = tmp_path / "input.json"
+    journal = tmp_path / "journal.json"
+    source.write_text(json.dumps(_payload("capture_task_rebind", "INIT")), encoding="utf-8")
+    initial = transition(source, journal, None)
+
+    prepared = _payload("capture_task_rebind", "PRE_ENABLE")
+    prepared["prior_journal_file_sha256"] = initial["raw_file_sha256"]
+    source.write_text(json.dumps(prepared), encoding="utf-8")
+    pre_enable = transition(source, journal, journal)
+
+    skipped = _payload("capture_task_rebind", "COMPLETE")
+    skipped["prior_journal_file_sha256"] = pre_enable["raw_file_sha256"]
+    source.write_text(json.dumps(skipped), encoding="utf-8")
+    with pytest.raises(ValueError, match="not adjacent"):
+        transition(source, journal, journal)
+
+    post_enable = _payload("capture_task_rebind", "POST_ENABLE")
+    post_enable["prior_journal_file_sha256"] = pre_enable["raw_file_sha256"]
+    source.write_text(json.dumps(post_enable), encoding="utf-8")
+    post = transition(source, journal, journal)
+
+    complete = _payload("capture_task_rebind", "COMPLETE")
+    complete["prior_journal_file_sha256"] = post["raw_file_sha256"]
+    source.write_text(json.dumps(complete), encoding="utf-8")
+    sealed = transition(source, journal, journal)
+    assert sealed["payload"]["phase"] == "COMPLETE"
+
+
 @pytest.mark.parametrize(
     ("operation", "phase", "bad_sha", "bad_tree"),
     [

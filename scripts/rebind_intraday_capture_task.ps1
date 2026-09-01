@@ -877,9 +877,22 @@ $hardeningContract = Join-Path $PSScriptRoot "capture_task_hardening_contract.py
 $hardeningReceipt = $null
 $preparedPath = Join-Path $state ("receipts\capture-task\capture-task-rebind-" + $CandidateSha + ".prepared.json")
 $failurePath = Join-Path $state ("receipts\capture-task\capture-task-rebind-" + $CandidateSha + ".failed.json")
+$operationJournalPath = Join-Path $state ("receipts\runtime-operation\capture-task-rebind-" + $CandidateSha + ".json")
+$journalPreparedRelativePath = "receipts/capture-task/capture-task-rebind-$CandidateSha.prepared.json"
+$journalCompleteRelativePath = "receipts/capture-task/capture-task-rebind-$CandidateSha.json"
+$journalTaskContractSha256 = Get-DawnstrikeSha256File $captureContract
+$journalEmptySha256 = Get-DawnstrikeSha256Text ""
 Assert-DawnstrikeNoReparseComponents $preparedPath "Capture-task prepared record"
 Assert-DawnstrikeNoReparseComponents $failurePath "Capture-task failure record"
+Assert-DawnstrikeNoReparseComponents $operationJournalPath "Capture-task operation journal"
 $original = Get-DawnstrikeCaptureOriginalFromActivationBackup $state $activationReceipt.payload
+$previousCandidates = @(
+    (Get-DawnstrikeCaptureActionRecords ([string]$original.xml)) | ForEach-Object {
+        Get-DawnstrikeCaptureBindingValue ([string]$_.arguments) "candidate-sha"
+    } | Where-Object { $null -ne $_ -and $_ -match '^[0-9a-f]{40}$' }
+)
+if ($previousCandidates.Count -ne 1) { throw "Activation-bound auxiliary action candidate SHA pin is missing or ambiguous." }
+$previousSha = [string]$previousCandidates[0]
 
 if (Test-Path -LiteralPath $receiptFull -PathType Leaf) {
     $existingReceipt = Invoke-DawnstrikeActivationProcess $python @(
@@ -915,10 +928,24 @@ if (Test-Path -LiteralPath $receiptFull -PathType Leaf) {
 
 $lockOrigin = Convert-DawnstrikeCanonicalOriginIdentity $origin
 $lockInterpreter = Get-DawnstrikeApprovedLockInterpreter
-$rebindLock = Enter-DawnstrikeGovernedRuntimeLock -StateRoot $state -Operation capture_task_rebind `
-    -CandidateSha $CandidateSha -CandidateTree ([string]$runtimeContract.tree) `
-    -OriginIdentity $lockOrigin -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
+if (Test-Path -LiteralPath (Join-Path $state "locks\dawnstrike-runtime-activation.lock") -PathType Leaf) {
+    $rebindLock = Adopt-DawnstrikeGovernedRuntimeLockWithJournal -StateRoot $state `
+        -JournalPath $operationJournalPath -CandidateSha $CandidateSha -CandidateTree ([string]$runtimeContract.tree) `
+        -OriginIdentity $lockOrigin -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
+}
+else {
+    $rebindLock = Enter-DawnstrikeGovernedRuntimeLockWithJournal -StateRoot $state `
+        -JournalPath $operationJournalPath -Operation capture_task_rebind `
+        -CandidateSha $CandidateSha -CandidateTree ([string]$runtimeContract.tree) `
+        -CurrentSha $CandidateSha -CurrentTree ([string]$runtimeContract.tree) `
+        -PreviousSha ([string]$previousSha) -PreviousTree ([string]$runtimeContract.tree) `
+        -OriginIdentity $lockOrigin -PreparedReceiptRelativePath $journalPreparedRelativePath `
+        -CompleteReceiptRelativePath $journalCompleteRelativePath -TaskContractSha256 $journalTaskContractSha256 `
+        -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
+}
 try {
+    $operationJournal = Get-DawnstrikeStrictRuntimeOperationJournal $operationJournalPath $lockInterpreter.path $lockInterpreter.sha256
+    $journalPhase = [string]$operationJournal.payload.phase
     $lockedAuxiliary = Get-DawnstrikeAuxiliaryCaptureTask $runtime $state
     if (
         -not $lockedAuxiliary.present -or
@@ -1011,6 +1038,18 @@ try {
                 $sealed = Invoke-DawnstrikeActivationProcess $python @(
                     $captureContract, "seal-receipt", "--input", $recoveryInput, "--output", $receiptFull
                 ) $PSScriptRoot "Recovered capture-task receipt sealing" $ProcessTimeoutSeconds
+                $recoveryReceiptHash = Get-DawnstrikeSha256File $receiptFull
+                $recoveryPreparedHash = Get-DawnstrikeSha256File $preparedPath
+                $operationJournal = Set-DawnstrikeRuntimeOperationJournalPhase -StateRoot $state -JournalPath $operationJournalPath `
+                    -Lock $rebindLock -Operation capture_task_rebind -Phase COMPLETE `
+                    -CandidateSha $CandidateSha -CandidateTree ([string]$runtimeContract.tree) `
+                    -CurrentSha $CandidateSha -CurrentTree ([string]$runtimeContract.tree) `
+                    -PreviousSha ([string]$preparedRecord.previous_candidate_sha) -PreviousTree ([string]$runtimeContract.tree) `
+                    -OriginIdentity $lockOrigin -PreparedReceiptRelativePath $journalPreparedRelativePath `
+                    -PreparedReceiptSha256 $recoveryPreparedHash -CompleteReceiptRelativePath $journalCompleteRelativePath `
+                    -CompleteReceiptSha256 $recoveryReceiptHash -BackupContractSha256 $recoveryPreparedHash `
+                    -TaskContractSha256 $journalTaskContractSha256 -RuntimeStageContractSha256 $journalEmptySha256 `
+                    -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
                 Remove-DawnstrikeCapturePrepared $preparedPath
                 [string]$sealed.Stdout | ConvertFrom-Json | ConvertTo-Json -Depth 8 -Compress
                 return
@@ -1147,6 +1186,23 @@ try {
     $inputReceipt = ""
     $receiptSealed = $false
     try {
+        if ($journalPhase -eq "INIT") {
+            $preparedHash = Get-DawnstrikeSha256File $preparedPath
+            $operationJournal = Set-DawnstrikeRuntimeOperationJournalPhase -StateRoot $state -JournalPath $operationJournalPath `
+                -Lock $rebindLock -Operation capture_task_rebind -Phase PRE_ENABLE `
+                -CandidateSha $CandidateSha -CandidateTree ([string]$runtimeContract.tree) `
+                -CurrentSha $CandidateSha -CurrentTree ([string]$runtimeContract.tree) `
+                -PreviousSha ([string]$previousSha) -PreviousTree ([string]$runtimeContract.tree) `
+                -OriginIdentity $lockOrigin -PreparedReceiptRelativePath $journalPreparedRelativePath `
+                -PreparedReceiptSha256 $preparedHash -CompleteReceiptRelativePath $journalCompleteRelativePath `
+                -CompleteReceiptSha256 $journalEmptySha256 -BackupContractSha256 $preparedHash `
+                -TaskContractSha256 $journalTaskContractSha256 -RuntimeStageContractSha256 $journalEmptySha256 `
+                -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
+            $journalPhase = "PRE_ENABLE"
+        }
+        elseif ($journalPhase -notin @("PRE_ENABLE", "POST_ENABLE")) {
+            throw "Capture-task rebind journal is not at a recoverable enablement phase."
+        }
         $newActions = New-DawnstrikeCaptureReboundActions `
             -Actions $actions -CandidateSha $CandidateSha `
             -SymbolsManifest $SymbolsManifest -SymbolsManifestSha256 $SymbolsManifestSha256 `
@@ -1198,6 +1254,18 @@ try {
             $captureContract, "seal-receipt", "--input", $inputReceipt, "--output", $receiptFull
         ) $PSScriptRoot "Capture-task rebind receipt sealing" $ProcessTimeoutSeconds
         $receiptSealed = $true
+        $completeReceiptHash = Get-DawnstrikeSha256File $receiptFull
+        $preparedHash = Get-DawnstrikeSha256File $preparedPath
+        $operationJournal = Set-DawnstrikeRuntimeOperationJournalPhase -StateRoot $state -JournalPath $operationJournalPath `
+            -Lock $rebindLock -Operation capture_task_rebind -Phase COMPLETE `
+            -CandidateSha $CandidateSha -CandidateTree ([string]$runtimeContract.tree) `
+            -CurrentSha $CandidateSha -CurrentTree ([string]$runtimeContract.tree) `
+            -PreviousSha ([string]$previousSha) -PreviousTree ([string]$runtimeContract.tree) `
+            -OriginIdentity $lockOrigin -PreparedReceiptRelativePath $journalPreparedRelativePath `
+            -PreparedReceiptSha256 $preparedHash -CompleteReceiptRelativePath $journalCompleteRelativePath `
+            -CompleteReceiptSha256 $completeReceiptHash -BackupContractSha256 $preparedHash `
+            -TaskContractSha256 $journalTaskContractSha256 -RuntimeStageContractSha256 $journalEmptySha256 `
+            -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
         Remove-DawnstrikeCapturePrepared $preparedPath
         [string]$result.Stdout | ConvertFrom-Json | ConvertTo-Json -Depth 8 -Compress
     }
@@ -1232,6 +1300,12 @@ try {
                 broker_execution_enabled = $false
             }
             Write-DawnstrikeActivationJson $failureEvidence $failurePath
+            if (Test-Path -LiteralPath $operationJournalPath -PathType Leaf) {
+                $failedJournal = Get-DawnstrikeStrictRuntimeOperationJournal $operationJournalPath $lockInterpreter.path $lockInterpreter.sha256
+                if ([string]$failedJournal.payload.phase -ne "COMPLETE") {
+                    Remove-Item -LiteralPath $operationJournalPath -Force
+                }
+            }
         }
         catch {
             throw "Capture-task rebind failed and exact disabled XML compensation could not be proven; operator recovery is required."
