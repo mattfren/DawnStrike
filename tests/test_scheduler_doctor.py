@@ -63,6 +63,50 @@ def test_runtime_git_contract_requires_stable_clean_identity(
     assert _REAL_RUNTIME_GIT_CONTRACT(tmp_path) is None
 
 
+def _runtime_clean_result(monkeypatch, tracked_flags: bytes) -> bool:
+    def fake_run(command, **_kwargs):
+        arguments = [str(value) for value in command]
+        if "status" in arguments:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if "ls-files" in arguments and "--others" in arguments:
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        if "ls-files" in arguments and "-v" in arguments:
+            return SimpleNamespace(returncode=0, stdout=tracked_flags, stderr=b"")
+        if "diff-index" in arguments:
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        if "replace" in arguments:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if "config" in arguments:
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        raise AssertionError(f"unexpected Git command: {arguments}")
+
+    monkeypatch.setattr(
+        scheduler_service,
+        "_approved_git",
+        lambda: (Path("git.exe"), "0" * 64),
+    )
+    monkeypatch.setattr(scheduler_service.subprocess, "run", fake_run)
+    return scheduler_service._runtime_git_clean(Path(r"C:\r\runtime"))
+
+
+def test_runtime_git_clean_allows_normal_uppercase_h_entries(monkeypatch) -> None:
+    assert _runtime_clean_result(monkeypatch, b"H tracked.py\0H scripts/run.ps1\0") is True
+
+
+@pytest.mark.parametrize("flag", [b"h", b"s", b"S"])
+def test_runtime_git_clean_rejects_index_bypass_flags(monkeypatch, flag: bytes) -> None:
+    assert _runtime_clean_result(monkeypatch, flag + b" tracked.py\0") is False
+
+
+def test_runtime_git_snapshot_rejects_origin_main_mismatch(monkeypatch) -> None:
+    monkeypatch.setattr(scheduler_service, "_runtime_git_sha", lambda _root: "a" * 40)
+    monkeypatch.setattr(scheduler_service, "_runtime_git_tree", lambda _root: "b" * 40)
+    monkeypatch.setattr(scheduler_service, "_runtime_git_origin_sha", lambda _root: "e" * 64)
+    monkeypatch.setattr(scheduler_service, "_runtime_git_origin_main", lambda _root: "c" * 40)
+
+    assert scheduler_service._runtime_git_snapshot(Path(r"C:\r\runtime")) is None
+
+
 def test_scheduler_query_uses_bounded_provider_side_dawnstrike_filter(
     monkeypatch,
 ) -> None:
@@ -590,6 +634,76 @@ def _activation_history_payload(activation_id: str) -> dict[str, object]:
         "runtime_origin_sha256": "e" * 64,
         "completed_at_utc": "2026-08-31T03:00:00+00:00",
     }
+
+
+def _auxiliary_activation_payload(activation_id: str) -> dict[str, object]:
+    return {
+        "schema_version": "dawnstrike.runtime_activation_receipt.v2",
+        "status": "COMPLETE",
+        "activation_id": activation_id,
+        "candidate_sha": "a" * 40,
+        "candidate_tree": "b" * 40,
+        "runtime_origin_sha256": "e" * 64,
+        "state_preparation_contract": scheduler_service.AUXILIARY_SIDECAR_CONTRACT,
+        "auxiliary_capture_present": True,
+    }
+
+
+def _prepare_valid_auxiliary_contract(
+    runtime: Path, state: Path, monkeypatch
+) -> dict[str, object]:
+    capture, activation = _prepare_auxiliary_loader_inputs(runtime, state)
+    activation.update(_auxiliary_activation_payload(str(capture["activation_id"])))
+    hardening_relative = "receipts/capture-task/capture-task-hardening.json"
+    hardening_path = state / hardening_relative
+    hardening_raw = b"hardening"
+    hardening_path.write_bytes(hardening_raw)
+    hardening = {
+        "schema_version": "dawnstrike.capture_task_hardening_receipt.v2",
+        "receipt_relative_path": hardening_relative,
+        "receipt_sha256": "a" * 64,
+        "xml_after_sha256": "b" * 64,
+        "action_after_sha256": "c" * 64,
+        "principal_after_sha256": "d" * 64,
+        "trigger_sha256": "e" * 64,
+        "settings_after_sha256": "f" * 64,
+    }
+    hardening_raw_sha = hashlib.sha256(hardening_raw).hexdigest()
+    activation.update(
+        {
+            "capture_hardening_receipt_relative_path": hardening_relative,
+            "capture_hardening_receipt_raw_sha256": hardening_raw_sha,
+            "capture_hardening_receipt_sha256": hardening["receipt_sha256"],
+            "capture_hardening_xml_sha256": hardening["xml_after_sha256"],
+            "capture_hardening_action_sha256": hardening["action_after_sha256"],
+            "capture_hardening_principal_sha256": hardening["principal_after_sha256"],
+            "capture_hardening_trigger_sha256": hardening["trigger_sha256"],
+            "capture_hardening_settings_sha256": hardening["settings_after_sha256"],
+        }
+    )
+    capture.update(
+        {
+            "hardening_receipt_relative_path": hardening_relative,
+            "hardening_receipt_raw_sha256": hardening_raw_sha,
+            "hardening_receipt_sha256": hardening["receipt_sha256"],
+        }
+    )
+    import scripts.capture_task_contract as capture_contract
+    import scripts.capture_task_hardening_contract as hardening_contract
+    import scripts.runtime_activation_contract as activation_contract
+
+    monkeypatch.setattr(capture_contract, "load_receipt", lambda *_args, **_kwargs: capture)
+    monkeypatch.setattr(
+        activation_contract,
+        "load_receipt",
+        lambda *_args, **_kwargs: activation,
+    )
+    monkeypatch.setattr(
+        hardening_contract,
+        "load_receipt",
+        lambda *_args, **_kwargs: hardening,
+    )
+    return activation
 
 
 def test_scheduler_doctor_rejects_runtime_identity_change_during_query(
@@ -1263,6 +1377,105 @@ def test_scheduler_doctor_accepts_disabled_governed_auxiliary(
     assert result["status"] == "LOCAL_VERIFIED"
     assert result["unexpected_enabled_tasks"] == []
     assert result["governed_auxiliary_task"]["definition_status"] == "DISABLED"
+
+
+def test_scheduler_doctor_rejects_missing_auxiliary_from_valid_declaration_and_activation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    _write_required_scripts(runtime)
+    _prepare_valid_auxiliary_contract(runtime, state, monkeypatch)
+    rows = _healthy_tasks(runtime, state)
+    monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
+
+    contract = scheduler_service._load_auxiliary_contract(runtime, state)
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    assert contract["declared"] is True
+    assert contract["valid"] is True
+    assert result["status"] == "BLOCKED_EXTERNAL"
+    checked = result["governed_auxiliary_task"]
+    assert checked["status"] == "FAILED"
+    assert checked["definition_status"] == "MISSING"
+    assert checked["failure_reason"] == "governed auxiliary task is missing"
+    assert result["expected_task_names"] == list(scheduler_service.EXPECTED_TASKS)
+    assert len(result["expected_task_names"]) == 5
+
+
+def test_scheduler_doctor_rejects_missing_auxiliary_from_activation_after_declaration_removed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    _write_required_scripts(runtime)
+    rows = _healthy_tasks(runtime, state)
+    activation_id = "1" * 24
+    receipt_root = state / "receipts" / "runtime-activation"
+    receipt_root.mkdir(parents=True)
+    (receipt_root / f"runtime-activation-{activation_id}.json").write_text(
+        "{}", encoding="utf-8"
+    )
+    import scripts.runtime_activation_contract as activation_contract
+
+    monkeypatch.setattr(
+        activation_contract,
+        "load_receipt",
+        lambda _path: _auxiliary_activation_payload(activation_id),
+    )
+    monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    assert not (runtime / scheduler_service.AUXILIARY_DECLARATION_FILE).exists()
+    assert result["status"] == "BLOCKED_EXTERNAL"
+    checked = result["governed_auxiliary_task"]
+    assert checked["status"] == "FAILED"
+    assert checked["activation_evidence_present"] is True
+    assert checked["failure_reason"] == "governed auxiliary task is missing"
+    assert result["expected_task_names"] == list(scheduler_service.EXPECTED_TASKS)
+    assert len(result["expected_task_names"]) == 5
+
+
+def test_scheduler_doctor_fails_closed_on_unsafe_auxiliary_activation_evidence(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    _write_required_scripts(runtime)
+    rows = _healthy_tasks(runtime, state)
+    activation_id = "1" * 24
+    receipt_root = state / "receipts" / "runtime-activation"
+    receipt_root.mkdir(parents=True)
+    receipt_path = receipt_root / f"runtime-activation-{activation_id}.json"
+    receipt_path.write_text("{}", encoding="utf-8")
+    import scripts.runtime_activation_contract as activation_contract
+
+    def reject_receipt_path(path: Path) -> Path:
+        if Path(path) == receipt_root or Path(path) == receipt_path:
+            raise ValueError("unsafe test path")
+        return Path(path)
+
+    monkeypatch.setattr(
+        activation_contract,
+        "_assert_no_reparse_components",
+        reject_receipt_path,
+    )
+    monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    assert result["status"] == "BLOCKED_EXTERNAL"
+    checked = result["governed_auxiliary_task"]
+    assert checked["status"] == "FAILED"
+    assert checked["activation_evidence_present"] is False
+    assert checked["failure_reason"] == "auxiliary activation evidence is invalid"
 
 
 def test_scheduler_doctor_rejects_missing_receipt_governed_auxiliary(
