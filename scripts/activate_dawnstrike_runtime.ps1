@@ -12,7 +12,8 @@ param(
     [ValidateRange(30, 1800)][int]$ProcessTimeoutSeconds = 300,
     [pscredential]$RunAsCredential,
     [switch]$PreflightOnly,
-    [switch]$InjectCrashBetweenRuntimeRenames
+    [switch]$InjectCrashBetweenRuntimeRenames,
+    [ValidateSet("", "after_stage_directory", "after_stage_checkout")][string]$TestStageCrashPoint = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -1861,8 +1862,13 @@ function Invoke-DawnstrikeRuntimeActivation {
         [Parameter(Mandatory = $true)][int]$ProcessTimeoutSeconds,
         [pscredential]$RunAsCredential,
         [switch]$PreflightOnly,
-        [switch]$InjectCrashBetweenRuntimeRenames
+        [switch]$InjectCrashBetweenRuntimeRenames,
+        [ValidateSet("", "after_stage_directory", "after_stage_checkout")][string]$TestStageCrashPoint = ""
     )
+
+    if ($TestStageCrashPoint -ne "" -and $env:DAWNSTRIKE_TEST_ACTIVATION_STAGE_CRASH -ne "1") {
+        throw "Activation stage crash injection is test-only."
+    }
 
     $candidate = Resolve-DawnstrikeActivationRoot $CandidateRoot "CandidateRoot"
     $runtime = Resolve-DawnstrikeActivationRoot $RuntimeRoot "RuntimeRoot"
@@ -2245,11 +2251,24 @@ function Invoke-DawnstrikeRuntimeActivation {
                 if ($initRuntime.tree -ne [string]$journal.payload.previous_tree) {
                     throw "INIT recovery found runtime drift before activation mutation."
                 }
-                if (Test-Path -LiteralPath $stage -PathType Container) {
-                    $initStage = Get-DawnstrikeGitContract $gitPath $stage $ProcessTimeoutSeconds $ExpectedSha
-                    if ($initStage.tree -ne [string]$candidateContract.tree) { throw "INIT recovery stage identity is invalid." }
-                    Remove-Item -LiteralPath $stage -Recurse -Force
-                    if (Test-Path -LiteralPath $stage) { throw "INIT recovery could not remove the exact staged checkout." }
+                if (Test-Path -LiteralPath $stage) {
+                    Assert-DawnstrikeNoReparseComponents $stage "INIT recovery stage"
+                    $initStageItem = Get-Item -LiteralPath $stage -Force -ErrorAction Stop
+                    if (-not $initStageItem.PSIsContainer -or ($initStageItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                        throw "INIT recovery stage is not a safe directory."
+                    }
+                    # Clone may have died before a readable Git contract
+                    # existed.  The deterministic stage path is nevertheless
+                    # bound by the exact dead-owner INIT journal and unchanged
+                    # runtime/task contracts.  Preserve its bytes in quarantine
+                    # rather than accepting or deleting an incomplete checkout.
+                    $initQuarantineRoot = Join-Path $state "recovery-quarantine"
+                    Assert-DawnstrikeNoReparseComponents $initQuarantineRoot "INIT recovery quarantine"
+                    New-Item -ItemType Directory -Path $initQuarantineRoot -Force | Out-Null
+                    $initQuarantine = Join-Path $initQuarantineRoot ("runtime-activation-$activationId-init-$([DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ'))")
+                    Assert-DawnstrikeNoReparseComponents $initQuarantine "INIT recovery quarantine destination"
+                    Move-Item -LiteralPath $stage -Destination $initQuarantine -ErrorAction Stop
+                    if (Test-Path -LiteralPath $stage) { throw "INIT recovery could not quarantine the exact staged path." }
                 }
                 $recoveredDaily = Enter-DawnstrikeDailyRunLock -StateRoot $state -MarketDate $MarketDate -Owner "runtime_activation"
                 if ($recoveredDaily.acquired) { Exit-DawnstrikeDailyRunLock $recoveredDaily }
@@ -2394,14 +2413,42 @@ function Invoke-DawnstrikeRuntimeActivation {
         } finally { Exit-DawnstrikeGovernedRuntimeLock $activationLock }
     }
 
-    $null = Invoke-DawnstrikeActivationProcess `
-        -FilePath $gitPath `
-        -ArgumentList @("clone", "--no-local", "--no-hardlinks", "--no-checkout", "--quiet", $candidate, $stage) `
-        -WorkingDirectory (Split-Path -Parent $runtime) `
-        -Label "Candidate runtime staging" `
-        -TimeoutSeconds $ProcessTimeoutSeconds
+    $activationLock = $null
+    $dailyLock = $null
+    $swapStarted = $false
+    $candidateInstalled = $false
+    $tasksDisabled = $false
+    $auxiliaryDisabled = $false
+    $preserveLocks = $false
+    $activationBodyStarted = $false
+    $lockOrigin = Convert-DawnstrikeCanonicalOriginIdentity $origin
+    $lockInterpreter = Get-DawnstrikeApprovedLockInterpreter
+    $emptyJournalHash = Get-DawnstrikeSha256Text ""
+    # INIT and its exact runtime lock must exist before clone can create even
+    # the stage directory.  Daily stages observe the activation lock and fail
+    # closed throughout clone/checkout, eliminating the no-journal stage gap.
+    $activationLock = Enter-DawnstrikeGovernedRuntimeLockWithJournal `
+        -StateRoot $state -JournalPath $operationJournal -Operation runtime_activation `
+        -CandidateSha $ExpectedSha -CandidateTree ([string]$candidateContract.tree) `
+        -CurrentSha ([string]$runtimeContract.head) -CurrentTree ([string]$runtimeContract.tree) `
+        -PreviousSha ([string]$runtimeContract.head) -PreviousTree ([string]$runtimeContract.tree) `
+        -OriginIdentity $lockOrigin -PreparedReceiptRelativePath $preparedReceiptRelative `
+        -CompleteReceiptRelativePath $completeReceiptRelative `
+        -TaskContractSha256 ([string]$taskBefore.task_contract_sha256) `
+        -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
     try {
+        if ($TestStageCrashPoint -eq "after_stage_directory") {
+            New-Item -ItemType Directory -Path $stage -ErrorAction Stop | Out-Null
+            Stop-Process -Id $PID -Force
+        }
+        $null = Invoke-DawnstrikeActivationProcess `
+            -FilePath $gitPath `
+            -ArgumentList @("clone", "--no-local", "--no-hardlinks", "--no-checkout", "--quiet", $candidate, $stage) `
+            -WorkingDirectory (Split-Path -Parent $runtime) `
+            -Label "Candidate runtime staging" `
+            -TimeoutSeconds $ProcessTimeoutSeconds
         $null = Invoke-DawnstrikeActivationProcess $gitPath @("-C", $stage, "checkout", "--detach", "--quiet", $ExpectedSha) $stage "Candidate checkout staging" $ProcessTimeoutSeconds
+        if ($TestStageCrashPoint -eq "after_stage_checkout") { Stop-Process -Id $PID -Force }
         $null = Invoke-DawnstrikeActivationProcess $gitPath @("-C", $stage, "remote", "set-url", "origin", $origin) $stage "Candidate origin binding" $ProcessTimeoutSeconds
         $stagedContract = Get-DawnstrikeGitContract $gitPath $stage $ProcessTimeoutSeconds $ExpectedSha
         if ($stagedContract.tree -ne $candidateContract.tree) {
@@ -2412,29 +2459,8 @@ function Invoke-DawnstrikeRuntimeActivation {
             throw "Staged runtime origin does not match the accepted candidate origin."
         }
 
-        $activationLock = $null
-        $dailyLock = $null
-        $swapStarted = $false
-        $candidateInstalled = $false
-        $tasksDisabled = $false
-        $auxiliaryDisabled = $false
-        $preserveLocks = $false
+        $activationBodyStarted = $true
         try {
-            $lockOrigin = Convert-DawnstrikeCanonicalOriginIdentity $origin
-            $lockInterpreter = Get-DawnstrikeApprovedLockInterpreter
-            $emptyJournalHash = Get-DawnstrikeSha256Text ""
-            # Seal INIT before the lock file and before any later scheduler
-            # mutation.  The journal-aware primitive also performs exact stale
-            # INIT/lock recovery and preserves the immutable owner identity.
-            $activationLock = Enter-DawnstrikeGovernedRuntimeLockWithJournal `
-                -StateRoot $state -JournalPath $operationJournal -Operation runtime_activation `
-                -CandidateSha $ExpectedSha -CandidateTree ([string]$candidateContract.tree) `
-                -CurrentSha ([string]$runtimeContract.head) -CurrentTree ([string]$runtimeContract.tree) `
-                -PreviousSha ([string]$runtimeContract.head) -PreviousTree ([string]$runtimeContract.tree) `
-                -OriginIdentity $lockOrigin -PreparedReceiptRelativePath $preparedReceiptRelative `
-                -CompleteReceiptRelativePath $completeReceiptRelative `
-                -TaskContractSha256 ([string]$taskBefore.task_contract_sha256) `
-                -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
             Assert-DawnstrikeNoDailyLocks $state
             $dailyLock = Enter-DawnstrikeDailyRunLock -StateRoot $state -MarketDate $MarketDate -Owner "runtime_activation"
             if (-not $dailyLock.acquired) {
@@ -3019,9 +3045,49 @@ function Invoke-DawnstrikeRuntimeActivation {
         }
     }
     catch {
-        # Before the swap, a staged exact checkout is diagnostic evidence and
-        # is intentionally retained. It is never promoted implicitly.
-        throw
+        $stagingFailure = $_
+        if (-not $activationBodyStarted -and $null -ne $activationLock) {
+            try {
+                $stagingJournal = Get-DawnstrikeStrictRuntimeOperationJournal `
+                    $operationJournal $lockInterpreter.path $lockInterpreter.sha256
+                if (
+                    [string]$stagingJournal.payload.operation -ne "runtime_activation" -or
+                    [string]$stagingJournal.payload.phase -ne "INIT" -or
+                    [string]$stagingJournal.payload.candidate_sha -ne $ExpectedSha -or
+                    [string]$stagingJournal.payload.candidate_tree -ne [string]$candidateContract.tree -or
+                    [string]$stagingJournal.payload.lock_token -ne [string]$activationLock.token -or
+                    [string]$stagingJournal.payload.lock_file_sha256 -ne [string]$activationLock.bytes_sha256
+                ) { throw "Staging failure journal identity is invalid." }
+                $stagingRuntime = Get-DawnstrikeGitContract $gitPath $runtime $ProcessTimeoutSeconds ([string]$runtimeContract.head)
+                $stagingTasks = Get-DawnstrikeTaskContract $runtime $state
+                if (
+                    $stagingRuntime.tree -ne [string]$runtimeContract.tree -or
+                    $stagingTasks.task_contract_sha256 -ne [string]$taskBefore.task_contract_sha256
+                ) { throw "Runtime or task state changed during failed staging." }
+                if (Test-Path -LiteralPath $stage) {
+                    Assert-DawnstrikeNoReparseComponents $stage "Failed activation stage"
+                    $failedStageItem = Get-Item -LiteralPath $stage -Force -ErrorAction Stop
+                    if (-not $failedStageItem.PSIsContainer -or ($failedStageItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                        throw "Failed activation stage is not a safe directory."
+                    }
+                    $failedStageQuarantineRoot = Join-Path $state "recovery-quarantine"
+                    Assert-DawnstrikeNoReparseComponents $failedStageQuarantineRoot "Failed stage quarantine"
+                    New-Item -ItemType Directory -Path $failedStageQuarantineRoot -Force | Out-Null
+                    $failedStageQuarantine = Join-Path $failedStageQuarantineRoot ("runtime-activation-$activationId-stage-failure-$([DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ'))")
+                    Assert-DawnstrikeNoReparseComponents $failedStageQuarantine "Failed stage quarantine destination"
+                    Move-Item -LiteralPath $stage -Destination $failedStageQuarantine -ErrorAction Stop
+                    if (Test-Path -LiteralPath $stage) { throw "Failed activation stage quarantine did not complete." }
+                }
+                Exit-DawnstrikeGovernedRuntimeLock $activationLock
+                $activationLock = $null
+                Remove-Item -LiteralPath $operationJournal -Force
+                if (Test-Path -LiteralPath $operationJournal) { throw "Failed staging INIT journal cleanup did not complete." }
+            }
+            catch {
+                throw "Candidate staging failed and its exact INIT recovery cleanup also failed; governed evidence was preserved. Original failure: $($stagingFailure.Exception.Message) Cleanup failure: $($_.Exception.Message)"
+            }
+        }
+        throw $stagingFailure
     }
 }
 
@@ -3050,6 +3116,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         -ProcessTimeoutSeconds $ProcessTimeoutSeconds `
         -RunAsCredential $RunAsCredential `
         -PreflightOnly:$PreflightOnly `
-        -InjectCrashBetweenRuntimeRenames:$InjectCrashBetweenRuntimeRenames
+        -InjectCrashBetweenRuntimeRenames:$InjectCrashBetweenRuntimeRenames `
+        -TestStageCrashPoint $TestStageCrashPoint
     $result | ConvertTo-Json -Depth 12
 }
