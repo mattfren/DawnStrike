@@ -30,6 +30,7 @@ from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 from scripts.publication_boundary import prepublication_authorization_id
 from scripts.verify_public_artifact import (
     public_artifact_identity,
+    validate_opportunity_projection_rows,
 )
 from scripts.verify_public_artifact import (
     verify as verify_public_artifact,
@@ -118,6 +119,8 @@ def verify(
         errors.append("research_only_required")
     if readiness.get("broker_execution_enabled") is not False:
         errors.append("broker_execution_must_be_disabled")
+    opportunity = _read_object(root / "data" / "opportunity-projection.json")
+    errors.extend(validate_opportunity_projection_rows(opportunity.get("rows", [])))
     build_manifest = _read_object(root / "build-manifest.json")
     release_manifest = _read_object(root / "release-manifest.json")
     if build_manifest.get("market_date") != normalized_date:
