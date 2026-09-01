@@ -1343,7 +1343,7 @@ catch {
             $priorReceiptArchive = Join-Path $StateRoot ($priorReceiptRelative.Replace('/', '\'))
             if (Test-Path -LiteralPath $priorReceiptArchive) { throw "Partial hardening receipt archive already exists." }
             [IO.File]::Move($ReceiptPath, $priorReceiptArchive)
-            if (Test-Path -LiteralPath $ReceiptPath -or (Get-HardeningSha256File $priorReceiptArchive) -ne $priorReceiptHash) { throw "Partial hardening receipt archive was not proven." }
+            if ((Test-Path -LiteralPath $ReceiptPath) -or (Get-HardeningSha256File $priorReceiptArchive) -ne $priorReceiptHash) { throw "Partial hardening receipt archive was not proven." }
         }
         $compensationPayload = [ordered]@{
             schema_version = "dawnstrike.runtime_compensation_receipt.v1"

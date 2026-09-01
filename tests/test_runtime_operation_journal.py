@@ -390,5 +390,8 @@ def test_consumers_keep_nonterminal_journal_until_compensation_or_completion() -
         assert "-Phase COMPENSATED" in script
         assert "retained for governed recovery" in script
         assert script.index(crash_marker) < script.rindex(complete_marker)
+        complete_transition = script.rindex(complete_marker)
+        local_terminal = script.index('$journalPhase = "COMPLETE"', complete_transition)
+        assert complete_transition < local_terminal
         compensated = script.index("after_compensated_before_release")
         assert compensated < script.index("Exit-DawnstrikeGovernedRuntimeLock", compensated)

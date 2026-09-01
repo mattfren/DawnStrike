@@ -422,7 +422,7 @@ function Clear-DawnstrikeCompensatedJournalTombstone {
         Assert-DawnstrikeSharedLockNoReparse $archive 'Compensated journal archive'
         if(Test-Path -LiteralPath $archive){throw 'Compensated journal archive already exists; tombstone cleanup is ambiguous.'}
         [IO.File]::Move($journalFull,$archive)
-        if(Test-Path -LiteralPath $journalFull -or -not(Test-Path -LiteralPath $archive) -or (Get-DawnstrikeRuntimeLockHash $archive) -ne [string]$journal.raw_file_sha256){throw 'Compensated journal archive was not proven.'}
+        if((Test-Path -LiteralPath $journalFull) -or -not(Test-Path -LiteralPath $archive) -or (Get-DawnstrikeRuntimeLockHash $archive) -ne [string]$journal.raw_file_sha256){throw 'Compensated journal archive was not proven.'}
         return [pscustomobject]@{archived_path=$archive;raw_file_sha256=[string]$journal.raw_file_sha256}
     } finally { Exit-DawnstrikeRuntimeLockMutex $mutex }
 }

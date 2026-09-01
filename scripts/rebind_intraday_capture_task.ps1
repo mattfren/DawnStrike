@@ -983,7 +983,7 @@ if (Test-Path -LiteralPath $receiptFull -PathType Leaf) {
             $existingReceiptArchive = Join-Path $existingReceiptArchiveRoot ("partial-rebind-" + $existingReceiptHash + ".json")
             if (Test-Path -LiteralPath $existingReceiptArchive) { throw "Partial capture receipt archive already exists." }
             [IO.File]::Move($receiptFull, $existingReceiptArchive)
-            if (Test-Path -LiteralPath $receiptFull -or (Get-DawnstrikeSha256File $existingReceiptArchive) -ne $existingReceiptHash) { throw "Partial capture receipt archive was not proven." }
+            if ((Test-Path -LiteralPath $receiptFull) -or (Get-DawnstrikeSha256File $existingReceiptArchive) -ne $existingReceiptHash) { throw "Partial capture receipt archive was not proven." }
             Clear-DawnstrikeCompensatedJournalTombstone -StateRoot $state -JournalPath $operationJournalPath `
                 -Operation capture_task_rebind -CandidateSha $CandidateSha -CandidateTree ([string]$runtimeContract.tree) `
                 -OriginIdentity (Convert-DawnstrikeCanonicalOriginIdentity $origin) -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
@@ -1498,6 +1498,7 @@ try {
             -CompleteReceiptSha256 $completeReceiptHash -BackupContractSha256 $preparedHash `
             -TaskContractSha256 $journalTaskContractSha256 -RuntimeStageContractSha256 $journalEmptySha256 `
             -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
+        $journalPhase = "COMPLETE"
         if ($env:DAWNSTRIKE_TEST_REBIND_CRASH_POINT -eq "after_complete") {
             if ($env:DAWNSTRIKE_TEST_LOCK_JOURNAL -ne "1") { throw "Rebind crash injection is test-only." }
             Stop-Process -Id $PID -Force
@@ -1518,6 +1519,23 @@ try {
             ) { throw "Capture-task compensation did not restore the exact disabled task." }
             $runtimeRestored = Get-DawnstrikeGitContract $git $runtime $ProcessTimeoutSeconds
             if ($runtimeRestored.head -ne $CandidateSha -or $runtimeRestored.tree -ne [string]$runtimeContract.tree) { throw "Compensation runtime identity changed." }
+            $failureEvidence = [ordered]@{
+                schema_version = "dawnstrike.capture_task_rebind_failure.v1"
+                status = "FAILED_RESTORED_EXACT_DISABLED"
+                task_name = $script:DawnstrikeAuxiliaryCaptureTaskName
+                candidate_sha = $CandidateSha
+                candidate_tree = [string]$runtimeContract.tree
+                activation_id = $activationId
+                activation_receipt_name = $activationReceiptName
+                activation_receipt_sha256 = $activationReceiptSha256
+                original_xml_sha256 = [string]$original.xml_sha256
+                original_action_sha256 = [string]$original.action_contract_sha256
+                recovery_evidence = "EXACT_XML_RESTORED_AND_DISABLED"
+                error_type = $failure.Exception.GetType().Name
+                research_only = $true
+                broker_execution_enabled = $false
+            }
+            Write-DawnstrikeActivationJson $failureEvidence $failurePath
             $journalBefore = Get-DawnstrikeStrictRuntimeOperationJournal $operationJournalPath $lockInterpreter.path $lockInterpreter.sha256
             if ([string]$journalBefore.payload.phase -in @("COMPLETE", "COMPENSATED")) { throw "Compensation cannot replace a terminal operation journal." }
             $empty = Get-DawnstrikeSha256Text ""
@@ -1533,7 +1551,7 @@ try {
                 $priorReceiptArchive = Join-Path $state ($priorReceiptRelative.Replace('/', '\'))
                 if (Test-Path -LiteralPath $priorReceiptArchive) { throw "Partial capture receipt archive already exists." }
                 [IO.File]::Move($receiptFull, $priorReceiptArchive)
-                if (Test-Path -LiteralPath $receiptFull -or (Get-DawnstrikeSha256File $priorReceiptArchive) -ne $priorReceiptHash) { throw "Partial capture receipt archive was not proven." }
+                if ((Test-Path -LiteralPath $receiptFull) -or (Get-DawnstrikeSha256File $priorReceiptArchive) -ne $priorReceiptHash) { throw "Partial capture receipt archive was not proven." }
             }
             $compensationPayload = [ordered]@{
                 schema_version = "dawnstrike.runtime_compensation_receipt.v1"
