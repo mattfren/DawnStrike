@@ -118,6 +118,8 @@ def validate(raw: bytes) -> dict[str, Any]:
     if current_pair != expected_current:
         raise ValueError("current runtime identity is invalid for the phase")
     empty = hashlib.sha256(b"").hexdigest()
+    if value["task_contract_sha256"] == empty:
+        raise ValueError("journal lacks exact task contract proof")
     prepared_receipt = value["prepared_receipt_sha256"]
     complete_receipt = value["complete_receipt_sha256"]
     backup = value["backup_contract_sha256"]

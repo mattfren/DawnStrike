@@ -390,24 +390,32 @@ function Enter-DawnstrikeGovernedRuntimeLockWithJournal {
         [ValidatePattern('^[0-9a-f]{64}$')][string]$TaskContractSha256,
         [Parameter(Mandatory=$true)][string]$PythonPath,
         [Parameter(Mandatory=$true)][ValidatePattern('^[0-9a-f]{64}$')][string]$PythonSha256,
-        [ValidateSet('after_init','after_lock')][string]$TestCrashPoint=''
+        [ValidateSet('after_init','after_lock')][string]$TestCrashPoint='',
+        [switch]$TestInjectDailyLockRace
     )
     if($TestCrashPoint-and$env:DAWNSTRIKE_TEST_LOCK_JOURNAL-ne'1'){throw 'Journal acquisition crash injection is test-only.'}
     $state=Assert-DawnstrikeRuntimeLockStateRoot $StateRoot
     $journalFull=[IO.Path]::GetFullPath($JournalPath)
     $journalRoot=[IO.Path]::GetFullPath((Join-Path $state 'receipts\runtime-operation')).TrimEnd('\')+'\'
     if(-not$journalFull.StartsWith($journalRoot,[StringComparison]::OrdinalIgnoreCase)){throw 'Runtime operation journal must be inside its governed receipt root.'}
+    if($TaskContractSha256-eq(Get-DawnstrikeSharedLockSha256Text '')){throw 'Journal acquisition requires a nonempty task contract hash.'}
+    Assert-DawnstrikeSharedLockNoReparse $journalFull 'Runtime operation journal'
     $lockRoot=Join-Path $state 'locks';New-Item -ItemType Directory -Path $lockRoot -Force|Out-Null
+    Assert-DawnstrikeSharedLockNoReparse $lockRoot 'Runtime activation lock root'
+    $lockRootItem=Get-Item -LiteralPath $lockRoot -Force
+    if($lockRootItem.Attributes-band[IO.FileAttributes]::ReparsePoint){throw 'Runtime activation lock root is unsafe.'}
     $lockPath=Join-Path $lockRoot 'dawnstrike-runtime-activation.lock'
     $mutex=Enter-DawnstrikeRuntimeLockMutex
     try{
         $abandoned=[bool]$script:DawnstrikeLockMutexAbandoned
         $script:DawnstrikeLockMutexAbandoned=$false
+        $dailyBefore=@(Get-ChildItem -LiteralPath $lockRoot -Filter 'dawnstrike-daily-*.lock' -File -Force -ErrorAction SilentlyContinue)
+        if($dailyBefore.Count){throw 'A daily run lock exists; runtime lock initialization is not permitted.'}
         $hasJournal=Test-Path -LiteralPath $journalFull -PathType Leaf
         $hasLock=Test-Path -LiteralPath $lockPath -PathType Leaf
         if($hasJournal){
             $journal=Get-DawnstrikeStrictRuntimeOperationJournal $journalFull $PythonPath $PythonSha256
-            if([string]$journal.payload.phase-ne'INIT'-or[string]$journal.payload.operation-ne$Operation-or[string]$journal.payload.candidate_sha-ne$CandidateSha-or[string]$journal.payload.candidate_tree-ne$CandidateTree-or[string]$journal.payload.origin_identity-ne$OriginIdentity-or[string]$journal.payload.task_contract_sha256-ne$TaskContractSha256){throw 'Existing INIT journal identity is invalid.'}
+            if([string]$journal.payload.phase-ne'INIT'-or[string]$journal.payload.operation-ne$Operation-or[string]$journal.payload.candidate_sha-ne$CandidateSha-or[string]$journal.payload.candidate_tree-ne$CandidateTree-or[string]$journal.payload.current_sha-ne$CurrentSha-or[string]$journal.payload.current_tree-ne$CurrentTree-or[string]$journal.payload.previous_sha-ne$PreviousSha-or[string]$journal.payload.previous_tree-ne$PreviousTree-or[string]$journal.payload.origin_identity-ne$OriginIdentity-or[string]$journal.payload.prepared_receipt_relative_path-ne$PreparedReceiptRelativePath-or[string]$journal.payload.complete_receipt_relative_path-ne$CompleteReceiptRelativePath-or[string]$journal.payload.task_contract_sha256-ne$TaskContractSha256){throw 'Existing INIT journal identity is invalid.'}
             if(-not$hasLock){
                 $initOwner=[pscustomobject]@{process_id=[int]$journal.payload.init_owner_process_id;process_started_at_utc=[string]$journal.payload.init_owner_started_at_utc}
                 if(-not$abandoned-and-not(Test-DawnstrikeRuntimeLockOwnerDead $initOwner)){throw 'Orphan INIT journal owner is still active.'}
@@ -459,6 +467,20 @@ function Enter-DawnstrikeGovernedRuntimeLockWithJournal {
         $strict=Get-DawnstrikeStrictRuntimeLock $lockPath $PythonPath $PythonSha256
         if($strict.raw_file_sha256-ne$lockHash-or$strict.payload.lock_token-ne$token){throw 'Created lock does not match INIT journal.'}
         if($TestCrashPoint-eq'after_lock'){Stop-Process -Id $PID -Force}
+        if($TestInjectDailyLockRace){
+            if($env:DAWNSTRIKE_TEST_LOCK_JOURNAL-ne'1'){throw 'Daily-lock race injection is test-only.'}
+            [IO.File]::WriteAllText((Join-Path $lockRoot 'dawnstrike-daily-injected.lock'),'test')
+        }
+        $dailyAfter=@(Get-ChildItem -LiteralPath $lockRoot -Filter 'dawnstrike-daily-*.lock' -File -Force -ErrorAction SilentlyContinue)
+        if($dailyAfter.Count){
+            $ownedLock=Get-DawnstrikeStrictRuntimeLock $lockPath $PythonPath $PythonSha256
+            $ownedJournal=Get-DawnstrikeStrictRuntimeOperationJournal $journalFull $PythonPath $PythonSha256
+            if($ownedLock.payload.lock_token-ne$token-or$ownedLock.raw_file_sha256-ne$lockHash-or$ownedJournal.payload.lock_token-ne$token-or$ownedJournal.payload.lock_file_sha256-ne$lockHash){throw 'Initialized lock or journal changed during daily-lock race; evidence retained.'}
+            Remove-Item -LiteralPath $lockPath -Force
+            Remove-Item -LiteralPath $journalFull -Force
+            if((Test-Path $lockPath)-or(Test-Path $journalFull)){throw 'Owned initialization evidence could not be cleaned after daily-lock race.'}
+            throw 'A daily run lock appeared during runtime lock initialization.'
+        }
         return [pscustomobject]@{path=$lockPath;token=$token;bytes_sha256=$lockHash;operation=$Operation;python_path=$PythonPath;python_sha256=$PythonSha256;acquired=$true;journal_path=$journalFull}
     }finally{Exit-DawnstrikeRuntimeLockMutex $mutex}
 }

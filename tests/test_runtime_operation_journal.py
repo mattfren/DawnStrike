@@ -111,6 +111,7 @@ def test_journal_seals_and_validates_exact_phase(
         {"prepared_receipt_relative_path": "../escape.json"},
         {"research_only": False},
         {"broker_execution_enabled": True},
+        {"task_contract_sha256": EMPTY},
     ],
 )
 def test_journal_rejects_hostile_payload(tmp_path: Path, mutation: dict) -> None:
