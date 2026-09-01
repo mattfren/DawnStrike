@@ -1315,6 +1315,7 @@ def test_disposable_activation_and_rollback_preserve_exact_runtime_and_state(
     }
     command = rf"""
 . '{activation_script}'
+$env:DAWNSTRIKE_TEST_ACTIVATION_CLOCK = '1'
 $global:MockRuntime = '{values["runtime"]}'
 $global:MockState = '{values["state"]}'
 $global:MockTaskStates = @{{}}
@@ -1359,7 +1360,7 @@ $activated = Invoke-DawnstrikeRuntimeActivation `
   -CiEvidencePath '{values["ci"]}' -SolEvidencePath '{values["sol"]}' `
   -CandidateRoot '{values["candidate"]}' -RuntimeRoot '{values["runtime"]}' `
   -StateRoot '{values["state"]}' -BackupRoot '{values["backup"]}' `
-  -BackupRetention 5 -ProcessTimeoutSeconds 120
+  -BackupRetention 5 -ProcessTimeoutSeconds 120 -TestNowUtc '2026-08-30T14:00:00Z'
 $bundlePath = Join-Path `
     '{values["state"]}' `
     ('runtime-rollbacks\' + $activated.activation_id + '\previous-runtime.bundle')
@@ -1372,7 +1373,7 @@ try {{
       -CiEvidencePath '{values["ci"]}' -SolEvidencePath '{values["sol"]}' `
       -CandidateRoot '{values["candidate"]}' -RuntimeRoot '{values["runtime"]}' `
       -StateRoot '{values["state"]}' -BackupRoot '{values["backup"]}' `
-      -BackupRetention 5 -ProcessTimeoutSeconds 120
+      -BackupRetention 5 -ProcessTimeoutSeconds 120 -TestNowUtc '2026-08-30T14:00:00Z'
 }}
 catch {{ $activationMissingBundleBlocked = $true }}
 finally {{ [System.IO.File]::Move($heldBundlePath, $bundlePath) }}
@@ -1381,7 +1382,7 @@ $activatedAgain = Invoke-DawnstrikeRuntimeActivation `
   -CiEvidencePath '{values["ci"]}' -SolEvidencePath '{values["sol"]}' `
   -CandidateRoot '{values["candidate"]}' -RuntimeRoot '{values["runtime"]}' `
   -StateRoot '{values["state"]}' -BackupRoot '{values["backup"]}' `
-  -BackupRetention 5 -ProcessTimeoutSeconds 120
+  -BackupRetention 5 -ProcessTimeoutSeconds 120 -TestNowUtc '2026-08-30T14:00:00Z'
 $receiptName = 'runtime-activation-' + $activated.activation_id + '.json'
 $receiptForRollback = Join-Path `
     '{values["state"]}' ('receipts\runtime-activation\' + $receiptName)

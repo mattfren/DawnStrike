@@ -1240,6 +1240,7 @@ def test_powershell_sidecar_activation_and_rollback_keep_auxiliary_disabled(
     prep_q = quote(candidate / "scripts" / "prepare_dawnstrike_state.ps1")
     command = rf"""
     . '{activation_q}'
+    $env:DAWNSTRIKE_TEST_ACTIVATION_CLOCK = '1'
     $global:MockRuntime = '{runtime_q}'
 $global:MockState = '{state_q}'
     $global:MockAuxState = 'Disabled'
@@ -1529,7 +1530,7 @@ if ($LASTEXITCODE -ne 0) {{ throw ('Test hardening COMPLETE sealing failed: ' + 
 Remove-Item -LiteralPath $hardeningInput -Force
 $hardeningReceipt = Get-Content -LiteralPath $hardeningReceiptPath -Raw | ConvertFrom-Json
 & '{prep_q}' -CandidateRoot '{candidate_q}' -RuntimeRoot '{runtime_q}' -StateRoot '{state_q}' -BackupRoot '{backup_q}' -CandidateSha '{candidate_sha}' -ProcessTimeoutSeconds 120 | Out-Null
-$activated = Invoke-DawnstrikeRuntimeActivation -ExpectedSha '{candidate_sha}' -MarketDate '2026-08-31' -CiEvidencePath '{ci_q}' -SolEvidencePath '{sol_q}' -CandidateRoot '{candidate_q}' -RuntimeRoot '{runtime_q}' -StateRoot '{state_q}' -BackupRoot '{backup_q}' -BackupRetention 5 -ProcessTimeoutSeconds 120 -RunAsCredential $global:TestCredential
+$activated = Invoke-DawnstrikeRuntimeActivation -ExpectedSha '{candidate_sha}' -MarketDate '2026-08-31' -CiEvidencePath '{ci_q}' -SolEvidencePath '{sol_q}' -CandidateRoot '{candidate_q}' -RuntimeRoot '{runtime_q}' -StateRoot '{state_q}' -BackupRoot '{backup_q}' -BackupRetention 5 -ProcessTimeoutSeconds 120 -RunAsCredential $global:TestCredential -TestNowUtc '2026-08-30T14:00:00Z'
 $activationAuxState = $global:MockAuxState
                 $rebindScript = '{quote(candidate / "scripts" / "rebind_intraday_capture_task.ps1")}'
             $rebindFailureCaught = $false

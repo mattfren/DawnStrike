@@ -13,7 +13,8 @@ param(
     [pscredential]$RunAsCredential,
     [switch]$PreflightOnly,
     [switch]$InjectCrashBetweenRuntimeRenames,
-    [ValidateSet("", "after_stage_directory", "after_stage_checkout", "after_init_recovery_lock_release", "after_pre_quiesce_recovery_lock_release", "after_candidate_runtime_rename", "after_complete_journal")][string]$TestStageCrashPoint = ""
+    [ValidateSet("", "after_stage_directory", "after_stage_checkout", "after_init_recovery_lock_release", "after_pre_quiesce_recovery_lock_release", "after_candidate_runtime_rename", "after_complete_journal")][string]$TestStageCrashPoint = "",
+    [string]$TestNowUtc = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -233,6 +234,74 @@ function Invoke-DawnstrikeActivationProcess {
         throw "$Label failed with exit code $($result.ExitCode)."
     }
     return $result
+}
+
+function Get-DawnstrikeActivationNowUtc {
+    [CmdletBinding()]
+    param([string]$TestNowUtc = "")
+
+    if (-not [string]::IsNullOrWhiteSpace($TestNowUtc)) {
+        if ($env:DAWNSTRIKE_TEST_ACTIVATION_CLOCK -ne "1") {
+            throw "Activation clock override is test-only."
+        }
+        try {
+            $parsed = [DateTimeOffset]::Parse(
+                $TestNowUtc,
+                [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::RoundtripKind
+            )
+        }
+        catch {
+            throw "Activation clock override is invalid."
+        }
+        if ($parsed.Offset -ne [TimeSpan]::Zero) {
+            throw "Activation clock override must be UTC."
+        }
+        return $parsed.ToUniversalTime()
+    }
+    return [DateTimeOffset]::UtcNow
+}
+
+function Invoke-DawnstrikeActivationBoundary {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$PythonPath,
+        [Parameter(Mandatory = $true)][string]$CandidateRoot,
+        [Parameter(Mandatory = $true)][string]$MarketDate,
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot,
+        [Parameter(Mandatory = $true)][string]$StateRoot,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$NowUtc,
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds
+    )
+
+    $contract = Join-Path $CandidateRoot "scripts\runtime_activation_contract.py"
+    if (-not (Test-Path -LiteralPath $contract -PathType Leaf)) {
+        throw "Activation boundary contract is missing."
+    }
+    $result = Invoke-DawnstrikeActivationProcess `
+        -FilePath $PythonPath `
+        -ArgumentList @(
+            $contract,
+            "validate-activation-boundary",
+            "--market-date", $MarketDate,
+            "--now-utc", $NowUtc.ToUniversalTime().ToString("o"),
+            "--state-root", $StateRoot,
+            "--runtime-root", $RuntimeRoot
+        ) `
+        -WorkingDirectory $CandidateRoot `
+        -Label "Runtime activation market boundary" `
+        -TimeoutSeconds $TimeoutSeconds
+    try {
+        $payload = $result.Stdout | ConvertFrom-Json
+    }
+    catch {
+        throw "Runtime activation market boundary returned invalid output."
+    }
+    if ($payload.status -ne "PASS" -or $payload.ready -ne $true) {
+        $reasons = @($payload.errors | ForEach-Object { [string]$_ }) -join ","
+        throw "Runtime activation market boundary is blocked: $reasons"
+    }
+    return $payload
 }
 
 function Get-DawnstrikeGitValue {
@@ -1871,7 +1940,8 @@ function Invoke-DawnstrikeRuntimeActivation {
         [pscredential]$RunAsCredential,
         [switch]$PreflightOnly,
         [switch]$InjectCrashBetweenRuntimeRenames,
-        [ValidateSet("", "after_stage_directory", "after_stage_checkout", "after_init_recovery_lock_release", "after_pre_quiesce_recovery_lock_release", "after_candidate_runtime_rename", "after_complete_journal")][string]$TestStageCrashPoint = ""
+        [ValidateSet("", "after_stage_directory", "after_stage_checkout", "after_init_recovery_lock_release", "after_pre_quiesce_recovery_lock_release", "after_candidate_runtime_rename", "after_complete_journal")][string]$TestStageCrashPoint = "",
+        [string]$TestNowUtc = ""
     )
 
     if ($TestStageCrashPoint -ne "" -and $env:DAWNSTRIKE_TEST_ACTIVATION_STAGE_CRASH -ne "1") {
@@ -1906,6 +1976,7 @@ function Invoke-DawnstrikeRuntimeActivation {
     $gitPath = $gitCommand.Source
     $pythonPath = $pythonCommand.Source
     . (Join-Path $PSScriptRoot "dawnstrike_job_process.ps1")
+    $activationNowUtc = Get-DawnstrikeActivationNowUtc -TestNowUtc $TestNowUtc
 
     $null = Invoke-DawnstrikeActivationProcess `
         -FilePath $gitPath `
@@ -2081,6 +2152,28 @@ function Invoke-DawnstrikeRuntimeActivation {
             -RuntimeRoot $runtime `
             -CandidateSha $ExpectedSha -CandidateTree $candidateContract.tree `
             -PythonPath $pythonPath -TimeoutSeconds $ProcessTimeoutSeconds
+    }
+
+    # Activation is only a pre-Morning boundary for the governed current or
+    # next open session.  Existing transaction artifacts are handled by the
+    # recovery branch below; recovery itself restores an already-started
+    # transaction and must not be blocked by a newly frozen public artifact.
+    $partialActivationPresent = (
+        (Test-Path -LiteralPath (Join-Path $state "receipts\runtime-operation") -PathType Container) -and
+        @(
+            Get-ChildItem -LiteralPath (Join-Path $state "receipts\runtime-operation") `
+                -Filter "runtime-activation-*.json" -File -ErrorAction SilentlyContinue
+        ).Count -gt 0
+    )
+    if (-not $partialActivationPresent) {
+        $null = Invoke-DawnstrikeActivationBoundary `
+            -PythonPath $pythonPath `
+            -CandidateRoot $candidate `
+            -MarketDate $MarketDate `
+            -RuntimeRoot $runtime `
+            -StateRoot $state `
+            -NowUtc $activationNowUtc `
+            -TimeoutSeconds $ProcessTimeoutSeconds
     }
 
     if ($PreflightOnly) {
@@ -2585,6 +2678,17 @@ function Invoke-DawnstrikeRuntimeActivation {
             if ($otherDailyLocks.Count -gt 0) {
                 throw "Another daily run lock appeared during runtime activation."
             }
+            # Re-read authoritative finalizer/public evidence after both
+            # operation locks are held, closing the final race before the
+            # first task disablement or runtime rename.
+            $null = Invoke-DawnstrikeActivationBoundary `
+                -PythonPath $pythonPath `
+                -CandidateRoot $candidate `
+                -MarketDate $MarketDate `
+                -RuntimeRoot $runtime `
+                -StateRoot $state `
+                -NowUtc $activationNowUtc `
+                -TimeoutSeconds $ProcessTimeoutSeconds
             $taskLocked = Get-DawnstrikeTaskContract $runtime $state
             if ($taskLocked.task_contract_sha256 -ne $taskBefore.task_contract_sha256) {
                 throw "Task definitions changed during activation preflight."
@@ -3342,6 +3446,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         -RunAsCredential $RunAsCredential `
         -PreflightOnly:$PreflightOnly `
         -InjectCrashBetweenRuntimeRenames:$InjectCrashBetweenRuntimeRenames `
-        -TestStageCrashPoint $TestStageCrashPoint
+        -TestStageCrashPoint $TestStageCrashPoint `
+        -TestNowUtc $TestNowUtc
     $result | ConvertTo-Json -Depth 12
 }

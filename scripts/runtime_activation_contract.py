@@ -18,7 +18,7 @@ import sqlite3
 import sys
 import tempfile
 from collections.abc import Mapping
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -29,6 +29,13 @@ if _REPO_ROOT_TEXT in sys.path:
     sys.path.remove(_REPO_ROOT_TEXT)
 sys.path.insert(0, _REPO_ROOT_TEXT)
 
+from intraday_scanner.market_calendar import (  # noqa: E402
+    MARKET_TIMEZONE,
+    MarketSessionStatus,
+    market_session,
+    next_market_day,
+    session_for_timestamp,
+)
 from intraday_scanner.storage import migrations as _storage_migrations  # noqa: E402
 
 _EXPECTED_MIGRATIONS = (_REPO_ROOT / "intraday_scanner" / "storage" / "migrations.py").resolve()
@@ -50,6 +57,21 @@ _GITHUB_RUN = re.compile(r"^https://github\.com/[^/?#]+/[^/?#]+/actions/runs/[1-
 _FORBIDDEN_KEY_PARTS = ("secret", "password", "credential", "private_key", "token")
 _MAX_EVIDENCE_AGE = timedelta(days=30)
 _REPARSE_POINT = 0x400
+_MORNING_START_ET = time(9, 0)
+_PUBLIC_BOUNDARY_FILES = (
+    "build-manifest.json",
+    "release-manifest.json",
+    "readiness.json",
+    "stage-manifest.json",
+    "data/calendar.json.manifest.json",
+    "data/performance.json.manifest.json",
+    "data/publication-set.json",
+)
+_FINALIZER_OUTPUT_FILES = (
+    "daily-finalize-result.json",
+    "non-session-terminal.json",
+)
+_DEPLOYMENT_OUTPUT_FILES = ("daily-deployment-result.json",)
 
 _CI_KEYS = frozenset(
     {
@@ -870,6 +892,235 @@ def _json_summary(value: Mapping[str, Any]) -> str:
     return json.dumps(dict(value), sort_keys=True, separators=(",", ":"))
 
 
+def activation_boundary(
+    market_date: str,
+    *,
+    now: datetime,
+    state_root: str | Path | None = None,
+    runtime_root: str | Path | None = None,
+) -> dict[str, Any]:
+    """Authorize a pre-Morning activation for exactly one governed session.
+
+    This is deliberately read-only.  Activation is a release-boundary
+    operation, so a caller may only name the session that is currently in the
+    overnight pre-Morning window (or the next session after a completed
+    session/closed day).  Existing authoritative finalizer/public evidence for
+    that target date is a hard stop: replacing the runtime after that evidence
+    exists would make the runtime SHA disagree with frozen daily artifacts.
+    """
+
+    errors: list[str] = []
+    normalized = str(market_date).strip()
+    try:
+        requested = date.fromisoformat(normalized)
+    except ValueError:
+        requested = None
+        errors.append("market_date_invalid")
+    if requested is not None and requested.isoformat() != normalized:
+        errors.append("market_date_invalid")
+
+    observed = now
+    if observed.tzinfo is None or observed.utcoffset() is None:
+        errors.append("activation_clock_must_include_timezone")
+        observed = observed.replace(tzinfo=UTC)
+    observed = observed.astimezone(UTC)
+    current: dict[str, Any] = {}
+    expected_date: date | None = None
+    if requested is not None and not errors:
+        try:
+            session = session_for_timestamp(observed)
+            current = session.to_dict()
+            market_day = date.fromisoformat(session.market_date)
+            local_et = observed.astimezone(MARKET_TIMEZONE)
+            morning = datetime.combine(
+                market_day,
+                _MORNING_START_ET,
+                tzinfo=MARKET_TIMEZONE,
+            )
+            if session.status != MarketSessionStatus.CLOSED and local_et < morning:
+                expected_date = market_day
+                window = "PRE_MORNING"
+            else:
+                anchor = market_day + timedelta(days=1)
+                expected_date = next_market_day(anchor)
+                window = "POST_MORNING_NEXT_SESSION"
+        except Exception as exc:
+            errors.append(f"calendar_unavailable:{type(exc).__name__}")
+            window = "UNAVAILABLE"
+    else:
+        window = "UNAVAILABLE"
+
+    if requested is not None and not errors:
+        try:
+            target = market_session(requested)
+            if not target.is_trading_day:
+                errors.append("activation_target_is_not_open_session")
+        except Exception as exc:
+            errors.append(f"calendar_target_unavailable:{type(exc).__name__}")
+        if expected_date is None or requested != expected_date:
+            errors.append("activation_target_is_not_governed_next_session")
+
+    artifacts: list[str] = []
+    artifact_errors: list[str] = []
+    if requested is not None and state_root is not None:
+        state = Path(state_root)
+        artifacts, artifact_errors = _existing_authoritative_activation_artifacts(
+            state,
+            runtime_root=Path(runtime_root) if runtime_root is not None else None,
+            market_date=normalized,
+        )
+        errors.extend(artifact_errors)
+        if artifacts:
+            errors.append("target_date_has_authoritative_finalizer_or_public_artifacts")
+
+    return {
+        "status": "PASS" if not errors else "BLOCKED",
+        "ready": not errors,
+        "market_date": normalized,
+        "current_market_date": current.get("market_date"),
+        "current_session_status": current.get("status"),
+        "current_session_reason": current.get("reason"),
+        "expected_market_date": expected_date.isoformat() if expected_date else None,
+        "window": window,
+        "calendar_id": current.get("calendar_id"),
+        "calendar_authority": current.get("calendar_authority"),
+        "authoritative_artifacts": artifacts,
+        "errors": list(dict.fromkeys(errors)),
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+
+
+def _existing_authoritative_activation_artifacts(
+    state_root: Path,
+    *,
+    runtime_root: Path | None,
+    market_date: str,
+) -> tuple[list[str], list[str]]:
+    """Read target-date finalizer/public evidence without changing state."""
+
+    artifacts: list[str] = []
+    errors: list[str] = []
+    output_root = state_root / "outputs" / "daily_finalize" / market_date
+    for name in _FINALIZER_OUTPUT_FILES:
+        path = output_root / name
+        if os.path.lexists(path):
+            if not path.is_file() or _is_reparse_point(path):
+                errors.append(f"unsafe_finalizer_artifact:{path.name}")
+            else:
+                artifacts.append(str(path))
+
+    database = state_root / "shadow_real.sqlite"
+    if database.exists():
+        try:
+            artifacts.extend(_target_database_artifacts(database, market_date))
+        except (OSError, sqlite3.Error):
+            errors.append("authoritative_state_unreadable")
+
+    if runtime_root is not None:
+        deployment_root = runtime_root / "build"
+        for name in _DEPLOYMENT_OUTPUT_FILES:
+            path = deployment_root / name
+            if not os.path.lexists(path):
+                continue
+            try:
+                deployment = _read_boundary_object(path)
+            except (ActivationContractError, OSError):
+                errors.append(f"unreadable_deployment_artifact:{name}")
+                artifacts.append(str(path))
+                continue
+            deployment_date = _artifact_market_date(deployment)
+            if not deployment_date:
+                errors.append("deployment_market_date_missing")
+                artifacts.append(str(path))
+            elif deployment_date == market_date:
+                artifacts.append(str(path))
+
+        public_root = runtime_root / "build" / "public"
+        parsed: dict[str, dict[str, Any]] = {}
+        for relative in _PUBLIC_BOUNDARY_FILES:
+            path = public_root / relative
+            if not os.path.lexists(path):
+                continue
+            try:
+                parsed[relative] = _read_boundary_object(path)
+            except (ActivationContractError, OSError):
+                errors.append(f"unreadable_public_artifact:{relative}")
+        build_date = str((parsed.get("build-manifest.json") or {}).get("market_date") or "")
+        if "build-manifest.json" in parsed and not build_date:
+            errors.append("public_build_market_date_missing")
+            artifacts.append(str(public_root / "build-manifest.json"))
+        for relative, payload in parsed.items():
+            if build_date == market_date or _artifact_market_date(payload) == market_date:
+                artifacts.append(str(public_root / relative))
+
+    return list(dict.fromkeys(artifacts)), list(dict.fromkeys(errors))
+
+
+def _target_database_artifacts(database: Path, market_date: str) -> list[str]:
+    path = _assert_no_reparse_components(database)
+    uri = "file:" + quote(str(path), safe="/\\:") + "?mode=ro"
+    found: list[str] = []
+    with sqlite3.connect(uri, uri=True) as connection:
+        connection.execute("PRAGMA query_only = ON")
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        queries = {
+            "daily_finalize_runs": (
+                "SELECT 1 FROM daily_finalize_runs WHERE market_date = ? LIMIT 1"
+            ),
+            "daily_runs": "SELECT 1 FROM daily_runs WHERE market_date = ? LIMIT 1",
+            "public_snapshot_manifests": (
+                "SELECT 1 FROM public_snapshot_manifests WHERE market_date = ? LIMIT 1"
+            ),
+            "public_snapshot_versions": (
+                "SELECT 1 FROM public_snapshot_versions WHERE market_date = ? LIMIT 1"
+            ),
+            "public_calendar_manifests": (
+                "SELECT 1 FROM public_calendar_manifests WHERE market_date = ? LIMIT 1"
+            ),
+            "public_calendar_versions": (
+                "SELECT 1 FROM public_calendar_versions WHERE market_date = ? LIMIT 1"
+            ),
+        }
+        for table, query in queries.items():
+            if table in tables and connection.execute(query, (market_date,)).fetchone():
+                found.append(f"sqlite:{table}:{market_date}")
+    return found
+
+
+def _read_boundary_object(path: Path) -> dict[str, Any]:
+    source = _assert_no_reparse_components(path)
+    before = source.stat()
+    if not source.is_file() or _is_reparse_point(source):
+        raise ActivationContractError("activation public artifact is unsafe")
+    try:
+        value = json.loads(
+            source.read_text(encoding="utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ActivationContractError) as exc:
+        raise ActivationContractError("activation public artifact is invalid") from exc
+    after = source.stat()
+    if before.st_size != after.st_size or before.st_mtime_ns != after.st_mtime_ns:
+        raise ActivationContractError("activation public artifact changed during read")
+    if not isinstance(value, dict):
+        raise ActivationContractError("activation public artifact must be an object")
+    return value
+
+
+def _artifact_market_date(payload: Mapping[str, Any]) -> str:
+    for field in ("market_date", "as_of_market_date", "date"):
+        value = payload.get(field)
+        if isinstance(value, str) and _MARKET_DATE.fullmatch(value):
+            return value
+    return ""
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -898,6 +1149,12 @@ def main(argv: list[str] | None = None) -> int:
     declaration = subparsers.add_parser("validate-state-preparation-declaration")
     declaration.add_argument("--input", required=True)
 
+    boundary = subparsers.add_parser("validate-activation-boundary")
+    boundary.add_argument("--market-date", required=True)
+    boundary.add_argument("--now-utc", required=True)
+    boundary.add_argument("--state-root", default=None)
+    boundary.add_argument("--runtime-root", default=None)
+
     args = parser.parse_args(argv)
     try:
         if args.command == "validate-evidence":
@@ -918,6 +1175,20 @@ def main(argv: list[str] | None = None) -> int:
             result = validate_state_preparation_declaration(
                 _load_object(args.input), require_interpreter_identity=True
             )
+        elif args.command == "validate-activation-boundary":
+            try:
+                observed = datetime.fromisoformat(args.now_utc.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise ActivationContractError("activation boundary clock is invalid") from exc
+            result = activation_boundary(
+                args.market_date,
+                now=observed,
+                state_root=args.state_root,
+                runtime_root=args.runtime_root,
+            )
+            if result["ready"] is not True:
+                print(_json_summary(result))
+                return 4
         else:
             result = load_receipt(args.receipt)
             if args.expected_status and result.get("status") != args.expected_status:
