@@ -51,6 +51,7 @@ SOL_SCHEMA = "dawnstrike.runtime_activation_sol_evidence.v1"
 ACTIVATION_SCHEMA = "dawnstrike.runtime_activation_receipt.v2"
 ACTIVATION_SCHEMA_LEGACY = "dawnstrike.runtime_activation_receipt.v1"
 ROLLBACK_SCHEMA = "dawnstrike.runtime_rollback_receipt.v1"
+ROLLBACK_READY_SCHEMA = "dawnstrike.runtime_rollback_receipt.v2"
 
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -818,7 +819,12 @@ def validate_receipt(payload: Mapping[str, Any]) -> dict[str, Any]:
 
     _reject_sensitive_keys(payload)
     schema = payload.get("schema_version")
-    if schema not in {ACTIVATION_SCHEMA, ACTIVATION_SCHEMA_LEGACY, ROLLBACK_SCHEMA}:
+    if schema not in {
+        ACTIVATION_SCHEMA,
+        ACTIVATION_SCHEMA_LEGACY,
+        ROLLBACK_SCHEMA,
+        ROLLBACK_READY_SCHEMA,
+    }:
         raise ActivationContractError("unsupported runtime receipt schema")
     extended = "state_preparation_contract" in payload
     authorization_present = any(
@@ -939,16 +945,33 @@ def validate_receipt(payload: Mapping[str, Any]) -> dict[str, Any]:
             if payload.get("task_enablement_restored") is not True:
                 raise ActivationContractError("complete activation did not restore task enablement")
     else:
-        if payload.get("status") != "ROLLED_BACK":
-            raise ActivationContractError("rollback receipt status is invalid")
+        if schema == ROLLBACK_READY_SCHEMA:
+            if payload.get("status") not in {"PREPARED", "ROLLED_BACK"}:
+                raise ActivationContractError("rollback receipt status is invalid")
+            if payload.get("status") == "PREPARED":
+                if (
+                    completed_at is not None
+                    or payload.get("task_enablement_restored") is not False
+                ):
+                    raise ActivationContractError(
+                        "prepared rollback receipt has invalid task state"
+                    )
+            else:
+                if payload.get("task_enablement_restored") is not True:
+                    raise ActivationContractError("rollback did not restore task enablement")
+                if _parse_utc(completed_at) < prepared_at:
+                    raise ActivationContractError("rollback completion predates preparation")
+        else:
+            if payload.get("status") != "ROLLED_BACK":
+                raise ActivationContractError("rollback receipt status is invalid")
+            if payload.get("task_enablement_restored") is not True:
+                raise ActivationContractError("rollback did not restore task enablement")
+            if _parse_utc(completed_at) < prepared_at:
+                raise ActivationContractError("rollback completion predates preparation")
         if payload.get("restored_sha") != payload.get("previous_sha"):
             raise ActivationContractError("rollback receipt restored SHA mismatch")
         if payload.get("swap_contract") != "same_volume_two_rename_with_immediate_restore":
             raise ActivationContractError("rollback swap contract is invalid")
-        if payload.get("task_enablement_restored") is not True:
-            raise ActivationContractError("rollback did not restore task enablement")
-        if _parse_utc(completed_at) < prepared_at:
-            raise ActivationContractError("rollback completion predates preparation")
     return dict(payload)
 
 
