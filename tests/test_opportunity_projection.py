@@ -8,6 +8,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -223,6 +224,70 @@ def test_market_date_uses_new_york_exchange_date_for_utc_cross_day_timestamp() -
     assert _market_date_for_timestamp(
         datetime(2026, 8, 12, 0, 30, tzinfo=timezone.utc)
     ) == "2026-08-11"
+
+
+def test_latest_run_scopes_by_exchange_date_and_orders_mixed_offsets_chronologically(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class _Connection:
+        def execute(self, query: str):
+            if query.startswith("PRAGMA query_only"):
+                return SimpleNamespace(fetchone=lambda: (1,))
+            if query.startswith("SELECT version"):
+                return SimpleNamespace(fetchone=lambda: (30,))
+            return SimpleNamespace(
+                fetchall=lambda: [
+                    (
+                        "older",
+                        "2026-08-12T00:30:00+00:00",
+                        "2026-08-12T00:31:00+00:00",
+                    ),
+                    (
+                        "newer",
+                        "2026-08-11T23:30:00-04:00",
+                        "2026-08-12T03:31:00+00:00",
+                    ),
+                ]
+            )
+
+        def close(self) -> None:
+            return None
+
+    class _Store:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def load_run(self, run_id: str) -> SimpleNamespace:
+            assert run_id == "newer"
+            return SimpleNamespace(
+                decision_at=datetime(2026, 8, 11, 23, 30, tzinfo=timezone(timedelta(hours=-4)))
+            )
+
+    sentinel = object()
+    monkeypatch.setattr(
+        "intraday_scanner.dashboard.opportunity_projection_store.connect_read_only",
+        lambda *_args, **_kwargs: _Connection(),
+    )
+    monkeypatch.setattr(
+        "intraday_scanner.dashboard.opportunity_projection_store.OpportunityStore",
+        _Store,
+    )
+    monkeypatch.setattr(
+        "intraday_scanner.dashboard.opportunity_projection_store.build_opportunity_projection",
+        lambda _result: sentinel,
+    )
+    database = tmp_path / "ignored.sqlite"
+    database.write_bytes(b"fixture")
+
+    assert (
+        load_latest_opportunity_projection(
+            database,
+            enabled=True,
+            expected_market_date="2026-08-11",
+        )
+        is sentinel
+    )
 
 
 def test_public_projection_manifest_binds_active_lineage(
