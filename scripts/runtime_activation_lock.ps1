@@ -290,6 +290,82 @@ function Adopt-DawnstrikeGovernedRuntimeLockWithJournal {
     }finally{Exit-DawnstrikeRuntimeLockMutex $mutex}
 }
 
+function Set-DawnstrikeRuntimeOperationJournalPhase {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)][string]$StateRoot,
+        [Parameter(Mandatory=$true)][string]$JournalPath,
+        [Parameter(Mandatory=$true)][object]$Lock,
+        [ValidateSet('runtime_activation','runtime_rollback','capture_task_rebind','capture_task_hardening')][string]$Operation,
+        [ValidateSet('INIT','PRE_SWAP','POST_SWAP','PRE_ENABLE','POST_ENABLE','PRE_TASK_UPDATE','POST_TASK_UPDATE','COMPLETE')][string]$Phase,
+        [ValidatePattern('^[0-9a-f]{40}$')][string]$CandidateSha,
+        [ValidatePattern('^[0-9a-f]{40}$')][string]$CandidateTree,
+        [ValidatePattern('^[0-9a-f]{40}$')][string]$CurrentSha,
+        [ValidatePattern('^[0-9a-f]{40}$')][string]$CurrentTree,
+        [ValidatePattern('^[0-9a-f]{40}$')][string]$PreviousSha,
+        [ValidatePattern('^[0-9a-f]{40}$')][string]$PreviousTree,
+        [Parameter(Mandatory=$true)][string]$OriginIdentity,
+        [Parameter(Mandatory=$true)][string]$ReceiptRelativePath,
+        [ValidatePattern('^[0-9a-f]{64}$')][string]$ReceiptSha256,
+        [ValidatePattern('^[0-9a-f]{64}$')][string]$BackupContractSha256,
+        [ValidatePattern('^[0-9a-f]{64}$')][string]$TaskContractSha256,
+        [ValidatePattern('^[0-9a-f]{64}$')][string]$RuntimeStageContractSha256,
+        [Parameter(Mandatory=$true)][string]$PythonPath,
+        [Parameter(Mandatory=$true)][ValidatePattern('^[0-9a-f]{64}$')][string]$PythonSha256
+    )
+    $state=Assert-DawnstrikeRuntimeLockStateRoot $StateRoot
+    $journalFull=[IO.Path]::GetFullPath($JournalPath)
+    $journalRoot=[IO.Path]::GetFullPath((Join-Path $state 'receipts\runtime-operation')).TrimEnd('\')+'\'
+    if(-not$journalFull.StartsWith($journalRoot,[StringComparison]::OrdinalIgnoreCase)){throw 'Runtime operation journal must be inside its governed receipt root.'}
+    Assert-DawnstrikeSharedLockNoReparse $journalFull 'Runtime operation journal'
+    $current=Get-DawnstrikeStrictRuntimeLock $Lock.path $PythonPath $PythonSha256
+    $processStart=(Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ')
+    if($current.payload.lock_token-ne$Lock.token-or$current.raw_file_sha256-ne$Lock.bytes_sha256-or[int]$current.payload.process_id-ne[int]$PID-or[string]$current.payload.process_started_at_utc-ne$processStart){throw 'Journal transition requires the exact live lock owned by this process.'}
+    if($current.payload.operation-ne$Operation-or$current.payload.candidate_sha-ne$CandidateSha-or$current.payload.candidate_tree-ne$CandidateTree-or$current.payload.origin_identity-ne$OriginIdentity){throw 'Journal transition lock identity does not match the operation.'}
+    $phases=@{
+        runtime_activation=@('INIT','PRE_SWAP','POST_SWAP','COMPLETE')
+        runtime_rollback=@('INIT','PRE_SWAP','POST_SWAP','COMPLETE')
+        capture_task_rebind=@('INIT','PRE_ENABLE','POST_ENABLE','COMPLETE')
+        capture_task_hardening=@('INIT','PRE_TASK_UPDATE','POST_TASK_UPDATE','COMPLETE')
+    }
+    $sequence=[array]::IndexOf([object[]]$phases[$Operation],$Phase)
+    if($sequence-lt 0){throw 'Journal phase is invalid for the operation.'}
+    $empty=Get-DawnstrikeSharedLockSha256Text ''
+    $priorHash=$empty
+    if($Phase-ne'INIT'){
+        $prior=Get-DawnstrikeStrictRuntimeOperationJournal $journalFull $PythonPath $PythonSha256
+        $priorHash=[string]$prior.raw_file_sha256
+    }elseif(Test-Path -LiteralPath $journalFull){throw 'INIT journal already exists.'}
+    $payload=[ordered]@{
+        schema_version='dawnstrike.runtime_operation_journal.v1';operation=$Operation;phase=$Phase;sequence=$sequence
+        candidate_sha=$CandidateSha;candidate_tree=$CandidateTree;current_sha=$CurrentSha;current_tree=$CurrentTree
+        previous_sha=$PreviousSha;previous_tree=$PreviousTree;origin_identity=$OriginIdentity
+        origin_identity_sha256=Get-DawnstrikeSharedLockSha256Text $OriginIdentity
+        state_root_sha256=Get-DawnstrikeSharedLockSha256Text $state.ToLowerInvariant()
+        lock_token=[string]$current.payload.lock_token;lock_file_sha256=[string]$current.raw_file_sha256
+        prior_journal_file_sha256=$priorHash;receipt_relative_path=$ReceiptRelativePath;receipt_sha256=$ReceiptSha256
+        backup_contract_sha256=$BackupContractSha256;task_contract_sha256=$TaskContractSha256
+        runtime_stage_contract_sha256=$RuntimeStageContractSha256;recorded_at_utc=[DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ')
+        research_only=$true;broker_execution_enabled=$false;adoption_state='NONE'
+        old_lock_token=[string]$current.payload.lock_token;old_lock_file_sha256=[string]$current.raw_file_sha256
+        next_lock_token=[string]$current.payload.lock_token;next_lock_file_sha256=[string]$current.raw_file_sha256
+        old_lock_archive_relative_path='NONE';next_lock_relative_path='NONE'
+    }
+    New-Item -ItemType Directory -Path (Split-Path $journalFull -Parent) -Force|Out-Null
+    $input=Join-Path (Split-Path $journalFull -Parent) ('.journal-transition-'+[guid]::NewGuid().ToString('N')+'.json')
+    $bytes=[Text.UTF8Encoding]::new($false).GetBytes(($payload|ConvertTo-Json -Depth 8 -Compress))
+    $stream=[IO.File]::Open($input,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+    try{$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)}finally{$stream.Dispose()}
+    try{
+        $contract=Join-Path $PSScriptRoot 'runtime_operation_journal.py'
+        $arguments=@('-I','-B',$contract,'transition',$input,$journalFull,'--state-root',$state)
+        if($Phase-ne'INIT'){$arguments+=@('--previous',$journalFull)}
+        $output=& $PythonPath @arguments 2>$null
+        if($LASTEXITCODE-ne 0){throw 'Runtime operation journal phase transition failed.'}
+        try{return ([string]($output-join''))|ConvertFrom-Json}catch{throw 'Journal transition returned invalid output.'}
+    }finally{if(Test-Path -LiteralPath $input){Remove-Item -LiteralPath $input -Force}}
+}
+
 function Exit-DawnstrikeGovernedRuntimeLock {
     param([AllowNull()][object]$Lock)
     if ($null -eq $Lock) { return }

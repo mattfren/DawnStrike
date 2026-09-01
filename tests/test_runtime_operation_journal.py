@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.runtime_operation_journal import seal, validate
+from scripts.runtime_operation_journal import seal, transition, validate
 
 EMPTY = hashlib.sha256(b"").hexdigest()
 
@@ -40,10 +40,14 @@ def _payload(operation: str = "runtime_activation", phase: str = "INIT") -> dict
         "lock_file_sha256": "3" * 64,
         "prior_journal_file_sha256": EMPTY,
         "receipt_relative_path": "receipts/runtime-activation/example.json",
-        "receipt_sha256": EMPTY,
+        "receipt_sha256": EMPTY if phase == "INIT" else "9" * 64,
         "backup_contract_sha256": EMPTY if phase == "INIT" else "4" * 64,
         "task_contract_sha256": "5" * 64,
-        "runtime_stage_contract_sha256": EMPTY if phase == "INIT" else "6" * 64,
+        "runtime_stage_contract_sha256": (
+            "6" * 64
+            if phase != "INIT" and operation.startswith("runtime_")
+            else EMPTY
+        ),
         "adoption_state": "NONE",
         "old_lock_token": "2" * 32,
         "old_lock_file_sha256": "3" * 64,
@@ -137,3 +141,27 @@ def test_prepared_adoption_rejects_same_old_and_next_identity(tmp_path: Path) ->
     source.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ValueError, match="prepared adoption identities"):
         seal(source, tmp_path / "journal.json")
+
+
+def test_transition_requires_adjacent_phase_and_exact_prior_raw_hash(tmp_path: Path) -> None:
+    source = tmp_path / "input.json"
+    journal = tmp_path / "journal.json"
+    source.write_text(json.dumps(_payload()), encoding="utf-8")
+    initial = transition(source, journal, None)
+    next_payload = _payload(phase="PRE_SWAP")
+    next_payload["prior_journal_file_sha256"] = initial["raw_file_sha256"]
+    source.write_text(json.dumps(next_payload), encoding="utf-8")
+    prepared = transition(source, journal, journal)
+    assert prepared["payload"]["phase"] == "PRE_SWAP"
+
+    skipped = _payload(phase="COMPLETE")
+    skipped["prior_journal_file_sha256"] = prepared["raw_file_sha256"]
+    source.write_text(json.dumps(skipped), encoding="utf-8")
+    with pytest.raises(ValueError, match="not adjacent"):
+        transition(source, journal, journal)
+
+    wrong_operation = _payload("runtime_rollback", "POST_SWAP")
+    wrong_operation["prior_journal_file_sha256"] = prepared["raw_file_sha256"]
+    source.write_text(json.dumps(wrong_operation), encoding="utf-8")
+    with pytest.raises(ValueError, match="not adjacent|immutable"):
+        transition(source, journal, journal)
