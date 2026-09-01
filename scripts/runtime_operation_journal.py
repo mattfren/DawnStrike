@@ -111,8 +111,10 @@ def validate(raw: bytes) -> dict[str, Any]:
         expected_current = (
             candidate_pair if value["phase"] in {"INIT", "PRE_SWAP"} else previous_pair
         )
-    else:
+    elif operation == "capture_task_rebind":
         expected_current = candidate_pair
+    else:
+        expected_current = previous_pair
     if current_pair != expected_current:
         raise ValueError("current runtime identity is invalid for the phase")
     empty = hashlib.sha256(b"").hexdigest()
@@ -277,7 +279,7 @@ def transition(source: Path, target: Path, previous: Path | None) -> dict[str, A
         if candidate.get("prior_journal_file_sha256") != hashlib.sha256(prior_raw).hexdigest():
             raise ValueError("journal prior raw hash mismatch")
         immutable = {
-            "operation", "candidate_sha", "candidate_tree", "current_sha",
+            "operation", "candidate_sha", "candidate_tree",
             "previous_sha", "previous_tree", "origin_identity",
             "origin_identity_sha256", "state_root_sha256",
             "prepared_receipt_relative_path", "complete_receipt_relative_path",
@@ -293,8 +295,10 @@ def transition(source: Path, target: Path, previous: Path | None) -> dict[str, A
             expected = previous_pair if phase == "PRE_SWAP" else candidate_pair
         elif operation == "runtime_rollback":
             expected = candidate_pair if phase == "PRE_SWAP" else previous_pair
-        else:
+        elif operation == "capture_task_rebind":
             expected = (prior["current_sha"], prior["current_tree"])
+        else:
+            expected = previous_pair
         if current_pair != expected:
             raise ValueError("current runtime identity is invalid for the phase")
     return seal(source, target)

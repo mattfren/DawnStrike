@@ -30,6 +30,8 @@ def _payload(operation: str = "runtime_activation", phase: str = "INIT") -> dict
         "current_sha": (
             "e" * 40
             if operation == "runtime_activation" and phase in {"INIT", "PRE_SWAP"}
+            else "e" * 40
+            if operation == "capture_task_hardening"
             else "a" * 40
             if operation != "runtime_rollback" or phase in {"INIT", "PRE_SWAP"}
             else "e" * 40
@@ -37,6 +39,8 @@ def _payload(operation: str = "runtime_activation", phase: str = "INIT") -> dict
         "current_tree": (
             "f" * 40
             if operation == "runtime_activation" and phase in {"INIT", "PRE_SWAP"}
+            else "f" * 40
+            if operation == "capture_task_hardening"
             else "b" * 40
             if operation != "runtime_rollback" or phase in {"INIT", "PRE_SWAP"}
             else "f" * 40
@@ -187,7 +191,7 @@ def test_transition_requires_adjacent_phase_and_exact_prior_raw_hash(tmp_path: P
         ("runtime_activation", "POST_SWAP", "e" * 40, "f" * 40),
         ("runtime_rollback", "POST_SWAP", "a" * 40, "b" * 40),
         ("capture_task_rebind", "PRE_ENABLE", "e" * 40, "f" * 40),
-        ("capture_task_hardening", "PRE_TASK_UPDATE", "e" * 40, "f" * 40),
+        ("capture_task_hardening", "PRE_TASK_UPDATE", "a" * 40, "b" * 40),
     ],
 )
 def test_phase_rejects_wrong_current_runtime_identity(
@@ -199,3 +203,23 @@ def test_phase_rejects_wrong_current_runtime_identity(
     payload["journal_self_sha256"] = "0" * 64
     with pytest.raises(ValueError, match="current runtime identity"):
         validate(json.dumps(payload).encode())
+
+
+@pytest.mark.parametrize("operation", ["runtime_activation", "runtime_rollback"])
+def test_runtime_transition_allows_exact_pre_to_post_identity_change(
+    tmp_path: Path, operation: str
+) -> None:
+    source = tmp_path / "input.json"
+    journal = tmp_path / "journal.json"
+    initial_payload = _payload(operation, "INIT")
+    source.write_text(json.dumps(initial_payload), encoding="utf-8")
+    initial = transition(source, journal, None)
+    pre_payload = _payload(operation, "PRE_SWAP")
+    pre_payload["prior_journal_file_sha256"] = initial["raw_file_sha256"]
+    source.write_text(json.dumps(pre_payload), encoding="utf-8")
+    prepared = transition(source, journal, journal)
+    post_payload = _payload(operation, "POST_SWAP")
+    post_payload["prior_journal_file_sha256"] = prepared["raw_file_sha256"]
+    source.write_text(json.dumps(post_payload), encoding="utf-8")
+    post = transition(source, journal, journal)
+    assert post["payload"]["current_sha"] != prepared["payload"]["current_sha"]
