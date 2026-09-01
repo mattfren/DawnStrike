@@ -13,7 +13,7 @@ param(
     [pscredential]$RunAsCredential,
     [switch]$PreflightOnly,
     [switch]$InjectCrashBetweenRuntimeRenames,
-    [ValidateSet("", "after_stage_directory", "after_stage_checkout", "after_init_recovery_lock_release", "after_pre_quiesce_recovery_lock_release", "after_candidate_runtime_rename")][string]$TestStageCrashPoint = ""
+    [ValidateSet("", "after_stage_directory", "after_stage_checkout", "after_init_recovery_lock_release", "after_pre_quiesce_recovery_lock_release", "after_candidate_runtime_rename", "after_complete_journal")][string]$TestStageCrashPoint = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -1871,7 +1871,7 @@ function Invoke-DawnstrikeRuntimeActivation {
         [pscredential]$RunAsCredential,
         [switch]$PreflightOnly,
         [switch]$InjectCrashBetweenRuntimeRenames,
-        [ValidateSet("", "after_stage_directory", "after_stage_checkout", "after_init_recovery_lock_release", "after_pre_quiesce_recovery_lock_release", "after_candidate_runtime_rename")][string]$TestStageCrashPoint = ""
+        [ValidateSet("", "after_stage_directory", "after_stage_checkout", "after_init_recovery_lock_release", "after_pre_quiesce_recovery_lock_release", "after_candidate_runtime_rename", "after_complete_journal")][string]$TestStageCrashPoint = ""
     )
 
     if ($TestStageCrashPoint -ne "" -and $env:DAWNSTRIKE_TEST_ACTIVATION_STAGE_CRASH -ne "1") {
@@ -2066,7 +2066,6 @@ function Invoke-DawnstrikeRuntimeActivation {
         -CandidateTree $candidateContract.tree `
         -Declaration $stateDeclaration `
         -TimeoutSeconds $ProcessTimeoutSeconds
-    Assert-DawnstrikeNoDailyLocks $state
     $taskBefore = Get-DawnstrikeTaskContract $runtime $state
     # Inventory the auxiliary independently of the candidate declaration.  A
     # present task without an explicit sidecar contract is an ungoverned task,
@@ -2085,6 +2084,7 @@ function Invoke-DawnstrikeRuntimeActivation {
     }
 
     if ($PreflightOnly) {
+        Assert-DawnstrikeNoDailyLocks $state
         return [pscustomobject]@{
             schema_version = "dawnstrike.runtime_activation_preflight.v1"
             status = "PASS"
@@ -2270,6 +2270,36 @@ function Invoke-DawnstrikeRuntimeActivation {
             -PythonPath $pythonPath `
             -TimeoutSeconds $ProcessTimeoutSeconds `
             -RequireRollbackCheckout
+        $completeRuntimeLockPath = Join-Path $state "locks\dawnstrike-runtime-activation.lock"
+        $completeDailyLocks = @(
+            Get-ChildItem -LiteralPath (Join-Path $state "locks") `
+                -Filter "dawnstrike-daily-*.lock" -File -Force -ErrorAction SilentlyContinue
+        )
+        if (Test-Path -LiteralPath $completeRuntimeLockPath -PathType Leaf) {
+            $completeLock = Adopt-DawnstrikeGovernedRuntimeLockWithJournal `
+                -StateRoot $state -JournalPath $operationJournal -CandidateSha $ExpectedSha `
+                -CandidateTree ([string]$candidateContract.tree) `
+                -OriginIdentity (Convert-DawnstrikeCanonicalOriginIdentity $origin) `
+                -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
+            $completeDailyLock = Enter-DawnstrikeDailyRunLock `
+                -StateRoot $state -MarketDate $MarketDate -Owner "runtime_activation"
+            if (-not $completeDailyLock.acquired) {
+                throw "Complete activation retry could not acquire its exact daily lock."
+            }
+            Confirm-DawnstrikeActivationDailyLockHandshake `
+                -StateRoot $state -ActivationLock $completeLock -DailyLock $completeDailyLock | Out-Null
+            Exit-DawnstrikeDailyRunLock $completeDailyLock
+            if (Test-Path -LiteralPath $completeDailyLock.lock_path) {
+                throw "Complete activation retry did not release its exact daily lock."
+            }
+            Exit-DawnstrikeGovernedRuntimeLock $completeLock
+            if (Test-Path -LiteralPath $completeRuntimeLockPath) {
+                throw "Complete activation retry did not release its exact runtime lock."
+            }
+        }
+        elseif ($completeDailyLocks.Count -ne 0) {
+            throw "Complete activation retry found a daily lock without its exact runtime lock."
+        }
         return $existing
     }
     if (
@@ -2491,6 +2521,7 @@ function Invoke-DawnstrikeRuntimeActivation {
                 -CompleteReceiptRelativePath $completeReceiptRelative -CompleteReceiptSha256 (Get-DawnstrikeSha256File $completeReceipt) `
                 -BackupContractSha256 ([string]$journal.payload.backup_contract_sha256) -TaskContractSha256 ([string]$taskAfter.task_contract_sha256) `
                 -RuntimeStageContractSha256 ([string]$journal.payload.runtime_stage_contract_sha256) -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
+            if ($TestStageCrashPoint -eq "after_complete_journal") { Stop-Process -Id $PID -Force }
             return $complete
         } finally { Exit-DawnstrikeGovernedRuntimeLock $activationLock }
     }
@@ -3036,6 +3067,7 @@ function Invoke-DawnstrikeRuntimeActivation {
                 -TaskContractSha256 ([string]$taskAfter.task_contract_sha256) `
                 -RuntimeStageContractSha256 $stageJournalHash `
                 -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
+            if ($TestStageCrashPoint -eq "after_complete_journal") { Stop-Process -Id $PID -Force }
             return $complete
         }
         catch {

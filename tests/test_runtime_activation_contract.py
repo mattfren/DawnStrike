@@ -897,6 +897,56 @@ def test_activation_pre_swap_recovers_exact_post_second_rename_state() -> None:
     assert "PRE_SWAP installed/previous runtime identity is invalid" in activation
 
 
+def test_complete_activation_retry_reconciles_only_exact_owned_locks() -> None:
+    activation = Path("scripts/activate_dawnstrike_runtime.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    complete = activation.index(
+        "if (Test-Path -LiteralPath $completeReceipt -PathType Leaf)"
+    )
+    artifact_proof = activation.index(
+        "$null = Assert-DawnstrikeReceiptRecoveryArtifacts", complete
+    )
+    lock_branch = activation.index(
+        "if (Test-Path -LiteralPath $completeRuntimeLockPath -PathType Leaf)",
+        artifact_proof,
+    )
+    adopt = activation.index(
+        "$completeLock = Adopt-DawnstrikeGovernedRuntimeLockWithJournal",
+        lock_branch,
+    )
+    daily = activation.index(
+        "$completeDailyLock = Enter-DawnstrikeDailyRunLock", adopt
+    )
+    handshake = activation.index(
+        "Confirm-DawnstrikeActivationDailyLockHandshake", daily
+    )
+    daily_release = activation.index(
+        "Exit-DawnstrikeDailyRunLock $completeDailyLock", handshake
+    )
+    runtime_release = activation.index(
+        "Exit-DawnstrikeGovernedRuntimeLock $completeLock", daily_release
+    )
+    returned = activation.index("return $existing", runtime_release)
+    assert (
+        artifact_proof
+        < lock_branch
+        < adopt
+        < daily
+        < handshake
+        < daily_release
+        < runtime_release
+        < returned
+    )
+    assert (
+        "Complete activation retry found a daily lock without its exact runtime lock"
+        in activation
+    )
+    assert 'if ($TestStageCrashPoint -eq "after_complete_journal")' in activation
+    assert "Stop-Process -Id $PID -Force" in activation
+
+
 @pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
 def test_task_contract_requires_exact_ready_or_explicit_disabled(tmp_path: Path) -> None:
     script = Path("scripts/activate_dawnstrike_runtime.ps1").resolve()
