@@ -1530,7 +1530,10 @@ function Assert-DawnstrikeCaptureHardeningAttestation {
     if ($argumentNode.Count -ne 1) { throw "Activation hardening action arguments are missing." }
     $tokens = @(Get-DawnstrikeCaptureQuotedTokens ([string]$argumentNode[0].InnerText))
     $actionValues = @{}
-    for ($index = 3; $index -lt ($tokens.Count - 1); $index += 2) { $actionValues[[string]$tokens[$index]] = [string]$tokens[$index + 1] }
+    $prefixLength = if ($tokens[0] -eq "-3.13") { 2 } else { 5 }
+    for ($index = $prefixLength + 1; $index -lt ($tokens.Count - 1); $index += 2) { $actionValues[[string]$tokens[$index]] = [string]$tokens[$index + 1] }
+    $expectedBytecodePrefix = [System.IO.Path]::GetFullPath((Join-Path $StateRoot ("capture-bytecode\" + $CandidateSha)))
+    if ($prefixLength -ne 5 -or $tokens[2] -ne "-X" -or $tokens[3] -ne ("pycache_prefix=" + $expectedBytecodePrefix) -or $tokens[4] -ne "-u") { throw "Activation hardening bytecode isolation prefix is not exact." }
     foreach ($binding in @(
         @("--candidate-sha", "candidate_sha"), @("--symbols-manifest", "symbols_manifest_path"),
         @("--symbols-manifest-sha256", "symbols_manifest_sha256"), @("--entitlement-receipt", "entitlement_receipt_path"),

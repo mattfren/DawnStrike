@@ -241,7 +241,8 @@ function Write-HardeningPreparedRecord {
         [Parameter(Mandatory = $true)][object]$InterpreterIdentity,
         [Parameter(Mandatory = $true)][string]$RunnerBeforeSha256,
         [Parameter(Mandatory = $true)][string]$RunnerTargetSha256,
-        [Parameter(Mandatory = $true)][string]$ContractScript
+        [Parameter(Mandatory = $true)][string]$ContractScript,
+        [Parameter(Mandatory = $true)][ValidateSet("LEGACY_MIGRATION", "CANONICAL_REPIN")][string]$InputStage
     )
     if (Test-Path -LiteralPath $Path -PathType Leaf) {
         $preparedOutput = & $InterpreterIdentity.path -I -B $ContractScript verify-prepared --prepared $Path 2>$null
@@ -301,6 +302,7 @@ function Write-HardeningPreparedRecord {
         research_only = $true
         broker_execution_enabled = $false
         prepared_at_utc = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ")
+        input_stage = $InputStage
     }
     $inputPath = Join-Path (Split-Path -Parent $Path) (".prepared-input-" + [Guid]::NewGuid().ToString("N") + ".json")
     try {
@@ -503,7 +505,8 @@ function Set-HardeningDirectCaptureAction {
         [Parameter(Mandatory = $true)][System.Xml.XmlDocument]$Document,
         [Parameter(Mandatory = $true)][System.Xml.XmlNode]$Actions,
         [Parameter(Mandatory = $true)][string]$InterpreterPath,
-        [Parameter(Mandatory = $true)][string]$CandidateSha
+        [Parameter(Mandatory = $true)][string]$CandidateSha,
+        [Parameter(Mandatory = $true)][string]$BytecodePrefix
     )
     $exec = @(Get-HardeningDirectNodes $Actions "Exec")
     if ($exec.Count -ne 1) { throw "Capture task must contain exactly one Exec action." }
@@ -512,11 +515,20 @@ function Set-HardeningDirectCaptureAction {
     if ($command.Count -ne 1 -or $arguments.Count -ne 1) { throw "Capture action command contract is incomplete." }
     $tokens = @([regex]::Matches([string]$arguments[0].InnerText, '"(?<value>[^"\r\n]*)"') | ForEach-Object { [string]$_.Groups["value"].Value })
     if ($tokens.Count -eq 0 -or (($tokens | ForEach-Object { '"' + $_ + '"' }) -join ' ') -ne [string]$arguments[0].InnerText) { throw "Capture action arguments are not in canonical quoted form." }
-    if ($tokens.Count -lt 3 -or $tokens[2] -notmatch 'run_daily_intraday_capture\.py$') { throw "Capture action runner binding is invalid." }
-    if ($tokens[0] -eq "-3.13") { $tokens[0] = "-I" } elseif ($tokens[0] -ne "-I") { throw "Capture migration action has an unsafe interpreter prefix." }
-    if ($tokens[1] -ne "-u") { throw "Capture action must use the exact -I -u prefix." }
-    if ($tokens.Count -lt 5 -or $tokens[3] -ne "--candidate-sha" -or $tokens[4] -notmatch '^[0-9a-f]{40}$') { throw "Capture migration action candidate binding is invalid." }
-    $tokens[4] = $CandidateSha
+    $initialRunnerIndex = if ($tokens[0] -eq "-I" -and $tokens.Count -ge 6 -and $tokens[1] -eq "-B") { 5 } else { 2 }
+    if ($tokens.Count -le $initialRunnerIndex -or $tokens[$initialRunnerIndex] -notmatch 'run_daily_intraday_capture\.py$') { throw "Capture action runner binding is invalid." }
+    if ($tokens[0] -eq "-3.13") {
+        $tokens = @("-I", "-B", "-X", ("pycache_prefix=" + [System.IO.Path]::GetFullPath($BytecodePrefix)), "-u") + $tokens[2..($tokens.Count - 1)]
+    }
+    elseif ($tokens[0] -eq "-I" -and $tokens.Count -ge 5 -and $tokens[1] -eq "-B" -and $tokens[2] -eq "-X" -and $tokens[3] -like "pycache_prefix=*") {
+        if ([System.IO.Path]::GetFullPath($tokens[3].Substring(15)) -ine [System.IO.Path]::GetFullPath($BytecodePrefix) -or $tokens[4] -ne "-u") { throw "Capture action bytecode prefix is not candidate-bound." }
+    }
+    elseif ($tokens[0] -eq "-I" -and $tokens[1] -eq "-u") {
+        $tokens = @("-I", "-B", "-X", ("pycache_prefix=" + [System.IO.Path]::GetFullPath($BytecodePrefix)), "-u") + $tokens[2..($tokens.Count - 1)]
+    }
+    else { throw "Capture action has an unsafe interpreter prefix." }
+    if ($tokens.Count -lt 8 -or $tokens[6] -ne "--candidate-sha" -or $tokens[7] -notmatch '^[0-9a-f]{40}$') { throw "Capture migration action candidate binding is invalid." }
+    $tokens[7] = $CandidateSha
     $command[0].InnerText = $InterpreterPath
     $arguments[0].InnerText = (($tokens | ForEach-Object { '"' + $_ + '"' }) -join ' ')
     return [string]$Actions.OuterXml
@@ -732,6 +744,9 @@ if (Test-Path -LiteralPath $lockPath -PathType Leaf) {
         -ExpectedToken $prepared.lock_token -ExpectedFileSha256 $prepared.lock_bytes_sha256 `
         -ExpectedOperation capture_task_hardening -CandidateSha $CandidateSha -CandidateTree $CandidateTree `
         -OriginIdentity $lockOrigin -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
+    & $interpreterIdentity.path -I -B $contractScript reseal-prepared-lock --prepared $preparedPath `
+        --lock-token $hardeningLock.token --lock-bytes-sha256 $hardeningLock.bytes_sha256 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Adopted hardening lock could not be resealed into PREPARED." }
 }
 else {
     $hardeningLock = Enter-DawnstrikeGovernedRuntimeLock -StateRoot $StateRoot -Operation capture_task_hardening `
@@ -752,6 +767,8 @@ try {
     $runtimeIdentity = $runtimeIdentityLocked
     $before = Get-HardeningTaskRecord
     $beforeInfo = Get-HardeningTaskInfo -TaskPath $before.task_path
+    $receiptOldResult = $beforeInfo.last_task_result
+    $receiptOldTime = $beforeInfo.last_run_time
     $candidateReceiptPath = Join-Path $StateRoot ("receipts\capture-task\capture-task-hardening-" + $CandidateSha + ".json")
     if (-not [string]::IsNullOrWhiteSpace($ReceiptPath) -and
         [System.IO.Path]::GetFullPath($ReceiptPath) -cne [System.IO.Path]::GetFullPath($candidateReceiptPath)) {
@@ -777,6 +794,53 @@ try {
             -ExpectedEnabled "false" -RequirePasswordPrincipal -RequireRunner
         Write-Output ([System.IO.File]::ReadAllText($ReceiptPath, [System.Text.UTF8Encoding]::new($false)).Trim())
         return
+    }
+    # Crash recovery boundary: Register-ScheduledTask may have committed the
+    # Disabled replacement before receipt sealing.  Recognize only the exact
+    # immutable PREPARED after-state, then continue to COMPLETE sealing.
+    if ($null -ne $prepared -and $before.state -eq "Disabled" -and
+        $before.xml_sha256 -ceq $prepared.xml_after_sha256) {
+        $backupXmlPath = [string]$prepared.backup_path
+        if (-not (Test-Path -LiteralPath $backupXmlPath -PathType Leaf) -or
+            (Get-HardeningSha256File $backupXmlPath) -cne $prepared.backup_xml_file_sha256) {
+            throw "PREPARED recovery backup is missing or tampered."
+        }
+        $backupXmlSha = Get-HardeningSha256Text ([System.IO.File]::ReadAllText($backupXmlPath, [System.Text.UTF8Encoding]::new($false)))
+        if ($backupXmlSha -cne $prepared.backup_xml_sha256 -or $backupXmlSha -cne $prepared.xml_before_sha256) {
+            throw "PREPARED recovery backup content does not match the source identity."
+        }
+        $backupRoot = Split-Path -Parent $backupXmlPath
+        $backupName = Split-Path -Leaf $backupXmlPath
+        $bytecodePrefix = Join-Path $StateRoot ("capture-bytecode\" + $CandidateSha)
+        $null = Assert-DawnstrikeCaptureTaskSafety -Xml $before.xml -RuntimeRoot $runtimeRootResolved -StateRoot $StateRoot `
+            -ExpectedPrincipal $taskPrincipal -ExpectedCandidateSha $CandidateSha `
+            -ExpectedInterpreterPath ([string]$interpreterIdentity.path) -ExpectedInterpreterSha256 ([string]$interpreterIdentity.sha256) `
+            -ExpectedEnabled "false" -RequirePasswordPrincipal -RequireRunner
+        $hardeningInputStage = [string]$prepared.input_stage
+        $beforeActionHash = [string]$prepared.action_before_sha256
+        $beforeActionXml = [string]$prepared.action_sha256
+        $runnerBeforeSha256 = [string]$prepared.runner_before_sha256
+        $runnerTargetPath = Join-Path $hardeningCandidateRoot "scripts\run_daily_intraday_capture.py"
+        $runnerTargetSha256 = Get-HardeningSha256File $runnerTargetPath
+        if ($runnerTargetSha256 -cne $prepared.runner_target_sha256) { throw "PREPARED target runner identity changed." }
+        $currentTask = $before
+        $verified = $before
+        $replacementInfo = Get-HardeningTaskInfo -TaskPath $before.task_path
+        $receiptOldResult = $prepared.old_last_task_result
+        $receiptOldTime = $prepared.old_last_run_time
+        $runtimeIdentityAfter = $runtimeIdentity
+        $receiptBeforeXmlSha = [string]$prepared.xml_before_sha256
+        $receiptBeforeActionHash = [string]$prepared.action_before_sha256
+        $receiptBeforeTriggerHash = [string]$prepared.trigger_sha256
+        $receiptBeforePrincipalHash = [string]$prepared.principal_sha256
+        $receiptBeforeSettingsHash = [string]$prepared.settings_sha256
+        $preparedRecordSha = Get-HardeningSha256File $preparedPath
+        $stateRootFull = ([System.IO.Path]::GetFullPath($StateRoot)).TrimEnd('\')
+        $statePrefix = $stateRootFull + '\'
+        $backupRelativePath = (([System.IO.Path]::GetFullPath($backupXmlPath).Substring($statePrefix.Length)) -replace '\\','/')
+        $preparedRelativePath = (([System.IO.Path]::GetFullPath($preparedPath).Substring($statePrefix.Length)) -replace '\\','/')
+        $receiptRelativePath = (([System.IO.Path]::GetFullPath($ReceiptPath).Substring($statePrefix.Length)) -replace '\\','/')
+        goto hardening_payload
     }
     # This is the migration boundary.  It is deliberately before the XML
     # backup and before any scheduler mutation; a malformed or credential-
@@ -820,10 +884,20 @@ try {
     $beforeActionArguments = @($beforeActionExec[0].ChildNodes | Where-Object { $_.LocalName -eq "Arguments" })
     $beforeActionTokens = @([regex]::Matches([string]$beforeActionArguments[0].InnerText, '"(?<value>[^"\r\n]*)"') | ForEach-Object { [string]$_.Groups["value"].Value })
     if ($beforeActionTokens.Count -lt 3) { throw "Existing capture action bindings are incomplete." }
-    $runnerBeforePath = Assert-DawnstrikeCaptureRegularPath ([string]$beforeActionTokens[2]) "Existing capture runner"
+    $beforeRunnerIndex = if ($beforeActionTokens[0] -eq "-I" -and $beforeActionTokens.Count -ge 6 -and $beforeActionTokens[1] -eq "-B") { 5 } else { 2 }
+    $runnerBeforePath = Assert-DawnstrikeCaptureRegularPath ([string]$beforeActionTokens[$beforeRunnerIndex]) "Existing capture runner"
     $runnerBeforeSha256 = Get-HardeningSha256File $runnerBeforePath
     $beforeActionXml = [string]$beforeActionExec[0].ParentNode.OuterXml
     $beforeActionHash = Get-HardeningSha256Text $beforeActionXml
+    $receiptBeforeXmlSha = [string]$before.xml_sha256
+    $receiptBeforeActionHash = $beforeActionHash
+    $receiptBeforeTriggerHash = [string]$before.trigger_contract_sha256
+    $receiptBeforePrincipalHash = [string]$before.principal_contract_sha256
+    $receiptBeforeSettingsHash = [string]$before.settings_contract_sha256
+    $bytecodePrefix = Join-Path $StateRoot ("capture-bytecode\" + $CandidateSha)
+    New-Item -ItemType Directory -Path $bytecodePrefix -Force -ErrorAction Stop | Out-Null
+    Assert-HardeningNoReparseComponents $bytecodePrefix "Capture bytecode prefix"
+    if (@(Get-ChildItem -LiteralPath $bytecodePrefix -Force -Recurse -ErrorAction Stop).Count -ne 0) { throw "Capture bytecode prefix is not empty." }
 if ([string]::IsNullOrWhiteSpace($BackupRoot)) {
     # The candidate-bound backup is the only recoverable PREPARED target;
     # historical copies may be retained separately but are never scanned.
@@ -849,7 +923,8 @@ Set-HardeningTaskDefinition -Document $before.document -Principal $before.princi
 # retained only after the full migration-input safety check above.
 $replacementActionXml = Set-HardeningDirectCaptureAction `
     -Document $before.document -Actions (Get-HardeningSingleSection $before.document "Actions") `
-    -InterpreterPath ([string]$interpreterIdentity.path) -CandidateSha $CandidateSha
+    -InterpreterPath ([string]$interpreterIdentity.path) -CandidateSha $CandidateSha `
+    -BytecodePrefix (Join-Path $StateRoot ("capture-bytecode\" + $CandidateSha))
 $previewDocument = [System.Xml.XmlDocument]::new()
 $previewDocument.LoadXml('<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">' + $replacementActionXml + '</Task>')
 $previewArguments = @($previewDocument.SelectNodes("//*[local-name()='Arguments']"))
@@ -884,7 +959,8 @@ $receiptRelativePath = ([System.IO.Path]::GetFullPath($ReceiptPath).Substring($s
         -AfterSha256 $after.xml_sha256 `
         -AfterActionSha256 (Get-HardeningSha256Text ([string]$replacementActionXml)) `
         -Lock $hardeningLock -RuntimeIdentity $runtimeIdentity -InterpreterIdentity $interpreterIdentity `
-        -RunnerBeforeSha256 $runnerBeforeSha256 -RunnerTargetSha256 $runnerTargetSha256 -ContractScript $contractScript
+        -RunnerBeforeSha256 $runnerBeforeSha256 -RunnerTargetSha256 $runnerTargetSha256 -ContractScript $contractScript `
+        -InputStage $hardeningInputStage
     $stateRootFull = ([System.IO.Path]::GetFullPath($StateRoot)).TrimEnd('\')
 $statePrefix = $stateRootFull + '\'
     $backupFull = [System.IO.Path]::GetFullPath($backupXmlPath)
@@ -927,17 +1003,18 @@ $statePrefix = $stateRootFull + '\'
         throw "Live RuntimeRoot identity changed during task hardening."
     }
 
+hardening_payload:
     $replacementExec = @($verified.actions.ChildNodes | Where-Object { $_.LocalName -eq "Exec" })[0]
     $replacementTokens = @([regex]::Matches([string](@($replacementExec.ChildNodes | Where-Object { $_.LocalName -eq "Arguments" })[0].InnerText), '"(?<value>[^"\r\n]*)"') | ForEach-Object { [string]$_.Groups["value"].Value })
     if ($replacementTokens.Count -lt 3) { throw "Replacement capture action bindings are incomplete." }
-    $runnerBeforePath = [string]$replacementTokens[2]
+    $runnerBeforePath = [string]$replacementTokens[5]
     $bindingValues = @{}
-    for ($bindingIndex = 3; $bindingIndex -lt ($replacementTokens.Count - 1); $bindingIndex += 2) { $bindingValues[[string]$replacementTokens[$bindingIndex]] = [string]$replacementTokens[$bindingIndex + 1] }
+    for ($bindingIndex = 6; $bindingIndex -lt ($replacementTokens.Count - 1); $bindingIndex += 2) { $bindingValues[[string]$replacementTokens[$bindingIndex]] = [string]$replacementTokens[$bindingIndex + 1] }
     $changedFields = @()
-    if ($before.principal_contract_sha256 -ne $verified.principal_contract_sha256) { $changedFields += "principal" }
-    if ($before.settings_contract_sha256 -ne $verified.settings_contract_sha256) { $changedFields += "settings" }
-    if ($before.action_contract_sha256 -ne $verified.action_contract_sha256) { $changedFields += "action" }
-    $actionMigrated = ($before.action_contract_sha256 -ne $verified.action_contract_sha256)
+    if ($receiptBeforePrincipalHash -ne $verified.principal_contract_sha256) { $changedFields += "principal" }
+    if ($receiptBeforeSettingsHash -ne $verified.settings_contract_sha256) { $changedFields += "settings" }
+    if ($receiptBeforeActionHash -ne $verified.action_contract_sha256) { $changedFields += "action" }
+    $actionMigrated = ($receiptBeforeActionHash -ne $verified.action_contract_sha256)
     $payload = [ordered]@{
         schema_version = "dawnstrike.capture_task_hardening_receipt.v2"
         status = "COMPLETE"
@@ -952,20 +1029,20 @@ $statePrefix = $stateRootFull + '\'
         prepared_relative_path = $preparedRelativePath
         backup_xml_sha256 = $backupXmlSha
         backup_xml_file_sha256 = $backupXmlFileSha
-        xml_before_sha256 = $before.xml_sha256
+        xml_before_sha256 = $receiptBeforeXmlSha
         xml_after_sha256 = $currentTask.xml_sha256
-        action_sha256 = $beforeActionHash
-        trigger_sha256 = $before.trigger_contract_sha256
-        principal_before_sha256 = $before.principal_contract_sha256
+        action_sha256 = $receiptBeforeActionHash
+        trigger_sha256 = $receiptBeforeTriggerHash
+        principal_before_sha256 = $receiptBeforePrincipalHash
         principal_after_sha256 = $verified.principal_contract_sha256
-        settings_before_sha256 = $before.settings_contract_sha256
+        settings_before_sha256 = $receiptBeforeSettingsHash
         settings_after_sha256 = $verified.settings_contract_sha256
         prepared_record_sha256 = $preparedRecordSha
         origin_main_refreshed_at_utc = $script:HardeningOriginRefreshUtc
         origin_url = $script:HardeningOriginUrl
         origin_url_sha256 = $script:HardeningOriginUrlSha256
-        old_last_task_result = $beforeInfo.last_task_result
-        old_last_run_time = $beforeInfo.last_run_time
+        old_last_task_result = $receiptOldResult
+        old_last_run_time = $receiptOldTime
         new_last_task_result = $replacementInfo.last_task_result
         new_last_run_time = $replacementInfo.last_run_time
         history_reset_proven = ($null -eq $replacementInfo.last_run_time -and $replacementInfo.last_task_result -in @(0, 267011))
@@ -995,12 +1072,13 @@ $statePrefix = $stateRootFull + '\'
         interpreter_version = [string]$interpreterIdentity.version
         interpreter_signer_subject = [string]$interpreterIdentity.signer_subject
         interpreter_signer_thumbprint = [string]$interpreterIdentity.signer_thumbprint
-        runner_path = [string]$replacementTokens[2]
+        runner_path = [string]$replacementTokens[5]
         runner_before_sha256 = $runnerBeforeSha256
         runner_sha256 = $runnerTargetSha256
         action_bindings = [ordered]@{
             candidate_sha = [string]$bindingValues["--candidate-sha"]
-            runner_path = [string]$replacementTokens[2]
+            bytecode_prefix = $bytecodePrefix
+            runner_path = [string]$replacementTokens[5]
             runner_sha256 = $runnerTargetSha256
             symbols_manifest_path = [string]$bindingValues["--symbols-manifest"]
             symbols_manifest_sha256 = [string]$bindingValues["--symbols-manifest-sha256"]
@@ -1010,7 +1088,7 @@ $statePrefix = $stateRootFull + '\'
             source_config_sha256 = [string]$bindingValues["--source-config-sha256"]
         }
         previous_candidate_sha = $runtimeIdentity.head
-        action_before_sha256 = $beforeActionHash
+        action_before_sha256 = $receiptBeforeActionHash
         action_after_sha256 = Get-HardeningSha256Text ([string]$verified.actions.OuterXml)
         input_stage = $hardeningInputStage
     }

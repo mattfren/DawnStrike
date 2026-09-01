@@ -447,12 +447,28 @@ function Assert-DawnstrikeCaptureTaskSafety {
         "--entitlement-receipt", "--entitlement-receipt-sha256", "--source-config",
         "--source-config-sha256", "--env-file", "--max-pages", "--retries"
     )
-    if ($tokens.Count -ne (3 + ($optionOrder.Count * 2) + 1)) { throw "Capture action token count is not exact." }
+    $prefixLength = if ($legacyLauncher) { 2 } else { 5 }
+    if ($tokens.Count -ne ($prefixLength + 1 + ($optionOrder.Count * 2) + 1)) { throw "Capture action token count is not exact." }
     if ($legacyLauncher) {
         if ($tokens[0] -ne "-3.13" -or $tokens[1] -ne "-u") { throw "Legacy capture launcher prefix is invalid." }
     }
-    elseif ($tokens[0] -ne "-I" -or $tokens[1] -ne "-u") { throw "Capture action Python isolation prefix is invalid." }
-    $runner = [System.IO.Path]::GetFullPath($tokens[2])
+    else {
+        if ($tokens[0] -ne "-I" -or $tokens[1] -ne "-B" -or $tokens[2] -ne "-X" -or
+            $tokens[3] -notmatch '^pycache_prefix=') { throw "Capture action Python isolation prefix is invalid." }
+        $candidateForPrefix = if ($ExpectedCandidateSha) { $ExpectedCandidateSha } else { $tokens[3].Substring(15) }
+        $expectedPrefix = [System.IO.Path]::GetFullPath((Join-Path $state ("capture-bytecode\" + $candidateForPrefix)))
+        if ([System.IO.Path]::GetFullPath($tokens[3].Substring(15)) -ine $expectedPrefix -or $tokens[4] -ne "-u") {
+            throw "Capture action bytecode prefix is not the exact candidate-bound path."
+        }
+        $prefixItem = Get-Item -LiteralPath $expectedPrefix -Force -ErrorAction Stop
+        if (-not $prefixItem.PSIsContainer -or ($prefixItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Capture action bytecode prefix must be a regular non-reparse directory."
+        }
+        if (@(Get-ChildItem -LiteralPath $expectedPrefix -Force -Recurse -ErrorAction Stop).Count -ne 0) {
+            throw "Capture action bytecode prefix must remain empty before enablement."
+        }
+    }
+    $runner = [System.IO.Path]::GetFullPath($tokens[$prefixLength])
     $expectedRunner = [System.IO.Path]::GetFullPath((Join-Path $runtime "scripts\run_daily_intraday_capture.py"))
     if (-not [string]::Equals($runner, $expectedRunner, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "Capture action runner is outside the exact RuntimeRoot contract."
@@ -461,7 +477,7 @@ function Assert-DawnstrikeCaptureTaskSafety {
         $null = Assert-DawnstrikeCaptureRegularPath $runner "Capture action runner"
     }
     $values = @{}
-    $cursor = 3
+    $cursor = $prefixLength + 1
     foreach ($option in $optionOrder) {
         if ($tokens[$cursor] -ne $option) { throw "Capture action option order or name is invalid at $option." }
         $values[$option] = [string]$tokens[$cursor + 1]
@@ -554,7 +570,8 @@ function Assert-DawnstrikeCaptureTaskSafety {
         group_id_absent = $true
         required_privileges_absent = $true
         execute = [string]$record.Command
-        python_prefix = if ($legacyLauncher) { "-3.13 -u" } else { "-I -u" }
+        python_prefix = if ($legacyLauncher) { "-3.13 -u" } else { "-I -B -X pycache_prefix=$expectedPrefix -u" }
+        bytecode_prefix = if ($legacyLauncher) { $null } else { $expectedPrefix }
         runner_path = $runner
         working_directory = $runtime
         candidate_sha = [string]$values["--candidate-sha"]
