@@ -450,10 +450,12 @@ def test_git_contract_rejects_combined_hidden_index_flags(tmp_path: Path) -> Non
 
     activation = str(Path("scripts/activate_dawnstrike_runtime.ps1").resolve()).replace("'", "''")
     runner = str(Path("scripts/dawnstrike_job_process.ps1").resolve()).replace("'", "''")
+    lock = str(Path("scripts/runtime_activation_lock.ps1").resolve()).replace("'", "''")
     root = str(checkout).replace("'", "''")
     command = rf"""
 . '{activation}'
 . '{runner}'
+. '{lock}'
 $gitPath = (Get-DawnstrikeApprovedGit).path
 $blocked = $false
 try {{ $null = Get-DawnstrikeGitContract -GitPath $gitPath -Root '{root}' -TimeoutSeconds 30 }}
@@ -2124,6 +2126,14 @@ def test_disposable_activation_and_rollback_preserve_exact_runtime_and_state(
         "dawnstrike_python_bootstrap.py",
         "invoke_dawnstrike_stage.ps1",
         "state_disaster_recovery.py",
+        "run_alphaops_morning.ps1",
+        "run_alphaops_monitor.ps1",
+        "run_alphaops_eod.ps1",
+        "run_alphaops_weekly_training.ps1",
+        "run_daily_finalize.ps1",
+        "import_dawnstrike_environment.ps1",
+        "alpha_cycle_artifact.ps1",
+        "monitor_schedule_helper.ps1",
     ):
         shutil.copy2(source / "scripts" / name, candidate / "scripts" / name)
     _install_local_origin_fixture_seam(candidate / "scripts" / "runtime_activation_lock.ps1")
@@ -2296,7 +2306,10 @@ function New-ScheduledTaskAction {{
 }}
 function Set-ScheduledTask {{
     [CmdletBinding()] param([string]$TaskName,[string]$TaskPath,$Action)
-    $match = [regex]::Match([string](@($Action)[0].Arguments), '-ExpectedSha "([0-9a-f]{{40}})"')
+        $match = [regex]::Match(
+            [string](@($Action)[0].Arguments),
+            '-ExpectedSha\s+["'']?([0-9a-f]{{40}})'
+        )
     if (-not $match.Success) {{ throw 'mock task action did not carry an exact expected SHA' }}
     $global:MockTaskExpectedSha[$TaskName] = $match.Groups[1].Value
     [pscustomobject]@{{ TaskName=$TaskName }}
