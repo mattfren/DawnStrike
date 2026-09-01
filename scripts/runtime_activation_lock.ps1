@@ -213,6 +213,12 @@ function Set-DawnstrikeRuntimeOperationJournalAdoption {
     foreach($property in $Journal.payload.PSObject.Properties){
         if($property.Name-ne'journal_self_sha256'){$payload[$property.Name]=$property.Value}
     }
+    # Adoption is also the compatibility boundary for journals written by
+    # older candidates.  New terminal recovery always uses the v2 exact key
+    # set, while ordinary v1 journals remain readable until adopted.
+    if(-not $payload.Contains('compensation_receipt_relative_path')){$payload.compensation_receipt_relative_path='NONE'}
+    if(-not $payload.Contains('compensation_receipt_sha256')){$payload.compensation_receipt_sha256=(Get-DawnstrikeSharedLockSha256Text '')}
+    $payload.schema_version='dawnstrike.runtime_operation_journal.v2'
     $payload.adoption_state=$State;$payload.lock_token=$CurrentToken
     $payload.lock_file_sha256=$CurrentHash;$payload.old_lock_token=$OldToken
     $payload.old_lock_file_sha256=$OldHash;$payload.next_lock_token=$NextToken
@@ -298,7 +304,7 @@ function Set-DawnstrikeRuntimeOperationJournalPhase {
         [Parameter(Mandatory=$true)][string]$JournalPath,
         [Parameter(Mandatory=$true)][object]$Lock,
         [ValidateSet('runtime_activation','runtime_rollback','capture_task_rebind','capture_task_hardening')][string]$Operation,
-        [ValidateSet('INIT','PRE_QUIESCE','PRE_SWAP','POST_SWAP','PRE_ENABLE','POST_ENABLE','PRE_TASK_UPDATE','POST_TASK_UPDATE','COMPLETE')][string]$Phase,
+        [ValidateSet('INIT','PRE_QUIESCE','PRE_SWAP','POST_SWAP','PRE_ENABLE','POST_ENABLE','PRE_TASK_UPDATE','POST_TASK_UPDATE','COMPLETE','COMPENSATED')][string]$Phase,
         [ValidatePattern('^[0-9a-f]{40}$')][string]$CandidateSha,
         [ValidatePattern('^[0-9a-f]{40}$')][string]$CandidateTree,
         [ValidatePattern('^[0-9a-f]{40}$')][string]$CurrentSha,
@@ -313,6 +319,8 @@ function Set-DawnstrikeRuntimeOperationJournalPhase {
         [ValidatePattern('^[0-9a-f]{64}$')][string]$BackupContractSha256,
         [ValidatePattern('^[0-9a-f]{64}$')][string]$TaskContractSha256,
         [ValidatePattern('^[0-9a-f]{64}$')][string]$RuntimeStageContractSha256,
+        [string]$CompensationReceiptRelativePath='NONE',
+        [string]$CompensationReceiptSha256='',
         [Parameter(Mandatory=$true)][string]$PythonPath,
         [Parameter(Mandatory=$true)][ValidatePattern('^[0-9a-f]{64}$')][string]$PythonSha256
     )
@@ -328,8 +336,8 @@ function Set-DawnstrikeRuntimeOperationJournalPhase {
     $phases=@{
         runtime_activation=@('INIT','PRE_QUIESCE','PRE_SWAP','POST_SWAP','COMPLETE')
         runtime_rollback=@('INIT','PRE_SWAP','POST_SWAP','COMPLETE')
-        capture_task_rebind=@('INIT','PRE_ENABLE','POST_ENABLE','COMPLETE')
-        capture_task_hardening=@('INIT','PRE_TASK_UPDATE','POST_TASK_UPDATE','COMPLETE')
+        capture_task_rebind=@('INIT','PRE_ENABLE','POST_ENABLE','COMPLETE','COMPENSATED')
+        capture_task_hardening=@('INIT','PRE_TASK_UPDATE','POST_TASK_UPDATE','COMPLETE','COMPENSATED')
     }
     $sequence=[array]::IndexOf([object[]]$phases[$Operation],$Phase)
     if($sequence-lt 0){throw 'Journal phase is invalid for the operation.'}
@@ -343,8 +351,11 @@ function Set-DawnstrikeRuntimeOperationJournalPhase {
         $initOwnerProcessId=[int]$prior.payload.init_owner_process_id
         $initOwnerStartedAtUtc=[string]$prior.payload.init_owner_started_at_utc
     }elseif(Test-Path -LiteralPath $journalFull){throw 'INIT journal already exists.'}
+    if($Phase -eq 'COMPENSATED'){
+        if($CompensationReceiptRelativePath -eq 'NONE' -or $CompensationReceiptSha256 -notmatch '^[0-9a-f]{64}$' -or $CompensationReceiptSha256 -eq $empty){throw 'Compensated journal requires an exact compensation receipt.'}
+    }elseif($CompensationReceiptRelativePath -ne 'NONE' -or $CompensationReceiptSha256 -ne ''){throw 'Non-compensated journal cannot carry compensation proof.'}
     $payload=[ordered]@{
-        schema_version='dawnstrike.runtime_operation_journal.v1';operation=$Operation;phase=$Phase;sequence=$sequence
+        schema_version='dawnstrike.runtime_operation_journal.v2';operation=$Operation;phase=$Phase;sequence=$sequence
         candidate_sha=$CandidateSha;candidate_tree=$CandidateTree;current_sha=$CurrentSha;current_tree=$CurrentTree
         previous_sha=$PreviousSha;previous_tree=$PreviousTree;origin_identity=$OriginIdentity
         origin_identity_sha256=Get-DawnstrikeSharedLockSha256Text $OriginIdentity
@@ -355,6 +366,7 @@ function Set-DawnstrikeRuntimeOperationJournalPhase {
         complete_receipt_relative_path=$CompleteReceiptRelativePath;complete_receipt_sha256=$CompleteReceiptSha256
         backup_contract_sha256=$BackupContractSha256;task_contract_sha256=$TaskContractSha256
         runtime_stage_contract_sha256=$RuntimeStageContractSha256;recorded_at_utc=[DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ')
+        compensation_receipt_relative_path=$CompensationReceiptRelativePath;compensation_receipt_sha256=$(if($Phase -eq 'COMPENSATED'){$CompensationReceiptSha256}else{$empty})
         research_only=$true;broker_execution_enabled=$false;adoption_state='NONE'
         old_lock_token=[string]$current.payload.lock_token;old_lock_file_sha256=[string]$current.raw_file_sha256
         next_lock_token=[string]$current.payload.lock_token;next_lock_file_sha256=[string]$current.raw_file_sha256
@@ -374,6 +386,45 @@ function Set-DawnstrikeRuntimeOperationJournalPhase {
         if($LASTEXITCODE-ne 0){throw 'Runtime operation journal phase transition failed.'}
         try{return ([string]($output-join''))|ConvertFrom-Json}catch{throw 'Journal transition returned invalid output.'}
     }finally{if(Test-Path -LiteralPath $input){Remove-Item -LiteralPath $input -Force}}
+}
+
+function Clear-DawnstrikeCompensatedJournalTombstone {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)][string]$StateRoot,
+        [Parameter(Mandatory=$true)][string]$JournalPath,
+        [Parameter(Mandatory=$true)][ValidateSet('capture_task_rebind','capture_task_hardening')][string]$Operation,
+        [Parameter(Mandatory=$true)][ValidatePattern('^[0-9a-f]{40}$')][string]$CandidateSha,
+        [Parameter(Mandatory=$true)][ValidatePattern('^[0-9a-f]{40}$')][string]$CandidateTree,
+        [Parameter(Mandatory=$true)][string]$OriginIdentity,
+        [Parameter(Mandatory=$true)][string]$PythonPath,
+        [Parameter(Mandatory=$true)][ValidatePattern('^[0-9a-f]{64}$')][string]$PythonSha256
+    )
+    $state=Assert-DawnstrikeRuntimeLockStateRoot $StateRoot
+    $journalFull=[IO.Path]::GetFullPath($JournalPath)
+    Assert-DawnstrikeSharedLockNoReparse $journalFull 'Compensated journal tombstone'
+    $lockPath=Join-Path $state 'locks\dawnstrike-runtime-activation.lock'
+    $mutex=Enter-DawnstrikeRuntimeLockMutex
+    try {
+        if(Test-Path -LiteralPath $lockPath -PathType Leaf){throw 'Cannot clear a compensated journal while its runtime lock exists.'}
+        $journal=Get-DawnstrikeStrictRuntimeOperationJournal $journalFull $PythonPath $PythonSha256
+        if([string]$journal.payload.operation -ne $Operation -or [string]$journal.payload.phase -ne 'COMPENSATED' -or
+            [string]$journal.payload.candidate_sha -ne $CandidateSha -or [string]$journal.payload.candidate_tree -ne $CandidateTree -or
+            [string]$journal.payload.origin_identity -ne $OriginIdentity){throw 'Compensated journal tombstone identity is invalid.'}
+        $relative=[string]$journal.payload.compensation_receipt_relative_path
+        $receipt=Join-Path $state ($relative.Replace('/','\'))
+        Assert-DawnstrikeSharedLockNoReparse $receipt 'Compensation receipt'
+        if(-not(Test-Path -LiteralPath $receipt -PathType Leaf) -or (Get-DawnstrikeRuntimeLockHash $receipt) -ne [string]$journal.payload.compensation_receipt_sha256){throw 'Compensation receipt changed or is missing.'}
+        $archiveRoot=Join-Path $state 'receipts\runtime-operation\archive'
+        New-Item -ItemType Directory -Path $archiveRoot -Force|Out-Null
+        Assert-DawnstrikeSharedLockNoReparse $archiveRoot 'Compensated journal archive root'
+        $archive=Join-Path $archiveRoot ('compensated-'+[string]$journal.raw_file_sha256+'.json')
+        Assert-DawnstrikeSharedLockNoReparse $archive 'Compensated journal archive'
+        if(Test-Path -LiteralPath $archive){throw 'Compensated journal archive already exists; tombstone cleanup is ambiguous.'}
+        [IO.File]::Move($journalFull,$archive)
+        if(Test-Path -LiteralPath $journalFull -or -not(Test-Path -LiteralPath $archive) -or (Get-DawnstrikeRuntimeLockHash $archive) -ne [string]$journal.raw_file_sha256){throw 'Compensated journal archive was not proven.'}
+        return [pscustomobject]@{archived_path=$archive;raw_file_sha256=[string]$journal.raw_file_sha256}
+    } finally { Exit-DawnstrikeRuntimeLockMutex $mutex }
 }
 
 function Enter-DawnstrikeGovernedRuntimeLockWithJournal {
@@ -419,7 +470,17 @@ function Enter-DawnstrikeGovernedRuntimeLockWithJournal {
         $hasLock=Test-Path -LiteralPath $lockPath -PathType Leaf
         if($hasJournal){
             $journal=Get-DawnstrikeStrictRuntimeOperationJournal $journalFull $PythonPath $PythonSha256
-            if([string]$journal.payload.phase-ne'INIT'-or[string]$journal.payload.operation-ne$Operation-or[string]$journal.payload.candidate_sha-ne$CandidateSha-or[string]$journal.payload.candidate_tree-ne$CandidateTree-or[string]$journal.payload.current_sha-ne$CurrentSha-or[string]$journal.payload.current_tree-ne$CurrentTree-or[string]$journal.payload.previous_sha-ne$PreviousSha-or[string]$journal.payload.previous_tree-ne$PreviousTree-or[string]$journal.payload.origin_identity-ne$OriginIdentity-or[string]$journal.payload.prepared_receipt_relative_path-ne$PreparedReceiptRelativePath-or[string]$journal.payload.complete_receipt_relative_path-ne$CompleteReceiptRelativePath-or[string]$journal.payload.task_contract_sha256-ne$TaskContractSha256){throw 'Existing INIT journal identity is invalid.'}
+            if([string]$journal.payload.operation-ne$Operation-or[string]$journal.payload.candidate_sha-ne$CandidateSha-or[string]$journal.payload.candidate_tree-ne$CandidateTree-or[string]$journal.payload.origin_identity-ne$OriginIdentity-or[string]$journal.payload.prepared_receipt_relative_path-ne$PreparedReceiptRelativePath-or[string]$journal.payload.complete_receipt_relative_path-ne$CompleteReceiptRelativePath-or[string]$journal.payload.task_contract_sha256-ne$TaskContractSha256){throw 'Existing journal identity is invalid.'}
+            if([string]$journal.payload.phase -eq 'COMPENSATED'){
+                if($hasLock){
+                    $lock=Get-DawnstrikeStrictRuntimeLock $lockPath $PythonPath $PythonSha256
+                    if($journal.payload.lock_token-ne$lock.payload.lock_token-or$journal.payload.lock_file_sha256-ne$lock.raw_file_sha256){throw 'Compensated journal and lock do not match.'}
+                    if(-not(Test-DawnstrikeRuntimeLockOwnerDead $lock.payload)){throw 'Runtime activation lock owner is still active.'}
+                    return Adopt-DawnstrikeGovernedRuntimeLockWithJournal -StateRoot $state -JournalPath $journalFull -CandidateSha $CandidateSha -CandidateTree $CandidateTree -OriginIdentity $OriginIdentity -PythonPath $PythonPath -PythonSha256 $PythonSha256
+                }
+                return [pscustomobject]@{path=$lockPath;token='';bytes_sha256='';operation=$Operation;python_path=$PythonPath;python_sha256=$PythonSha256;acquired=$false;terminal_tombstone=$true;journal_path=$journalFull;journal_sha256=[string]$journal.raw_file_sha256}
+            }
+            if([string]$journal.payload.phase-ne'INIT'-or[string]$journal.payload.current_sha-ne$CurrentSha-or[string]$journal.payload.current_tree-ne$CurrentTree-or[string]$journal.payload.previous_sha-ne$PreviousSha-or[string]$journal.payload.previous_tree-ne$PreviousTree){throw 'Existing INIT journal identity is invalid.'}
             if(-not$hasLock){
                 $initOwner=[pscustomobject]@{process_id=[int]$journal.payload.init_owner_process_id;process_started_at_utc=[string]$journal.payload.init_owner_started_at_utc}
                 if(-not$abandoned-and-not(Test-DawnstrikeRuntimeLockOwnerDead $initOwner)){throw 'Orphan INIT journal owner is still active.'}
@@ -441,7 +502,7 @@ function Enter-DawnstrikeGovernedRuntimeLockWithJournal {
         $lockHash=Get-DawnstrikeSharedLockSha256Text $lockJson
         $empty=Get-DawnstrikeSharedLockSha256Text ''
         $payload=[ordered]@{
-            schema_version='dawnstrike.runtime_operation_journal.v1';operation=$Operation;phase='INIT';sequence=0
+            schema_version='dawnstrike.runtime_operation_journal.v2';operation=$Operation;phase='INIT';sequence=0
             candidate_sha=$CandidateSha;candidate_tree=$CandidateTree;current_sha=$CurrentSha;current_tree=$CurrentTree
             previous_sha=$PreviousSha;previous_tree=$PreviousTree;origin_identity=$OriginIdentity
             origin_identity_sha256=Get-DawnstrikeSharedLockSha256Text $OriginIdentity
@@ -450,6 +511,7 @@ function Enter-DawnstrikeGovernedRuntimeLockWithJournal {
             prepared_receipt_relative_path=$PreparedReceiptRelativePath;prepared_receipt_sha256=$empty
             complete_receipt_relative_path=$CompleteReceiptRelativePath;complete_receipt_sha256=$empty
             backup_contract_sha256=$empty;task_contract_sha256=$TaskContractSha256;runtime_stage_contract_sha256=$empty
+            compensation_receipt_relative_path='NONE';compensation_receipt_sha256=$empty
             recorded_at_utc=[DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ');research_only=$true;broker_execution_enabled=$false
             adoption_state='NONE';old_lock_token=$token;old_lock_file_sha256=$lockHash;next_lock_token=$token;next_lock_file_sha256=$lockHash
             old_lock_archive_relative_path='NONE';next_lock_relative_path='NONE'
