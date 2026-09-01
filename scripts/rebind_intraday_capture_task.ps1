@@ -893,6 +893,7 @@ $previousCandidates = @(
 )
 if ($previousCandidates.Count -ne 1) { throw "Activation-bound auxiliary action candidate SHA pin is missing or ambiguous." }
 $previousSha = [string]$previousCandidates[0]
+$lockInterpreter = Get-DawnstrikeApprovedLockInterpreter
 
 if (Test-Path -LiteralPath $receiptFull -PathType Leaf) {
     $existingReceipt = Invoke-DawnstrikeActivationProcess $python @(
@@ -919,6 +920,18 @@ if (Test-Path -LiteralPath $receiptFull -PathType Leaf) {
             -SymbolsManifest $SymbolsManifest -SymbolsManifestSha256 $SymbolsManifestSha256 `
             -EntitlementReceipt $EntitlementReceipt -EntitlementReceiptSha256 $EntitlementReceiptSha256 `
             -SourceConfig $SourceConfig -SourceConfigSha256 $SourceConfigSha256 | Out-Null
+        if (-not (Test-Path -LiteralPath $operationJournalPath -PathType Leaf)) {
+            throw "Existing COMPLETE capture-task receipt has no durable operation journal."
+        }
+        $existingJournal = Get-DawnstrikeStrictRuntimeOperationJournal $operationJournalPath $lockInterpreter.path $lockInterpreter.sha256
+        if (
+            [string]$existingJournal.payload.operation -ne "capture_task_rebind" -or
+            [string]$existingJournal.payload.phase -ne "COMPLETE" -or
+            [string]$existingJournal.payload.candidate_sha -ne $CandidateSha -or
+            [string]$existingJournal.payload.candidate_tree -ne [string]$runtimeContract.tree -or
+            [string]$existingJournal.payload.complete_receipt_relative_path -ne $journalCompleteRelativePath -or
+            [string]$existingJournal.payload.complete_receipt_sha256 -ne (Get-DawnstrikeSha256File $receiptFull)
+        ) { throw "Existing capture-task receipt is not bound to a COMPLETE operation journal." }
         if (Test-Path -LiteralPath $preparedPath -PathType Leaf) { Remove-DawnstrikeCapturePrepared $preparedPath }
         Write-Output ([string]$existingReceipt.Stdout).Trim()
         return
@@ -927,7 +940,6 @@ if (Test-Path -LiteralPath $receiptFull -PathType Leaf) {
 }
 
 $lockOrigin = Convert-DawnstrikeCanonicalOriginIdentity $origin
-$lockInterpreter = Get-DawnstrikeApprovedLockInterpreter
 if (Test-Path -LiteralPath (Join-Path $state "locks\dawnstrike-runtime-activation.lock") -PathType Leaf) {
     $rebindLock = Adopt-DawnstrikeGovernedRuntimeLockWithJournal -StateRoot $state `
         -JournalPath $operationJournalPath -CandidateSha $CandidateSha -CandidateTree ([string]$runtimeContract.tree) `
