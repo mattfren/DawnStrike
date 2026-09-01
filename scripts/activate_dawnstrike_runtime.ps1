@@ -1825,11 +1825,22 @@ function Write-DawnstrikeActivationJson {
     Assert-DawnstrikeNoReparseComponents $temporary "Temporary receipt output"
     try {
         $json = $Payload | ConvertTo-Json -Depth 12
-        [System.IO.File]::WriteAllText(
+        $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($json)
+        $stream = [System.IO.FileStream]::new(
             $temporary,
-            $json,
-            [System.Text.UTF8Encoding]::new($false)
+            [System.IO.FileMode]::CreateNew,
+            [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::None,
+            4096,
+            [System.IO.FileOptions]::WriteThrough
         )
+        try {
+            $stream.Write($bytes, 0, $bytes.Length)
+            $stream.Flush($true)
+        }
+        finally {
+            $stream.Dispose()
+        }
         Assert-DawnstrikeNoReparseComponents $temporary "Temporary receipt output"
         $temporaryItem = Get-Item -LiteralPath $temporary -Force -ErrorAction Stop
         if ($temporaryItem.PSIsContainer -or ($temporaryItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -2522,7 +2533,7 @@ function Invoke-DawnstrikeRuntimeActivation {
         [pscredential]$RunAsCredential,
         [switch]$PreflightOnly,
         [switch]$InjectCrashBetweenRuntimeRenames,
-        [ValidateSet("", "after_stage_directory", "after_stage_checkout", "after_init_recovery_lock_release", "after_pre_quiesce_recovery_lock_release", "after_candidate_runtime_rename", "after_complete_journal")][string]$TestStageCrashPoint = "",
+        [ValidateSet("", "after_stage_directory", "after_stage_checkout", "after_init_recovery_lock_release", "after_pre_quiesce_recovery_lock_release", "after_candidate_runtime_rename", "after_ready_journal", "after_enable_before_complete", "after_complete_journal")][string]$TestStageCrashPoint = "",
         [string]$TestNowUtc = ""
     )
 
@@ -2914,6 +2925,14 @@ function Invoke-DawnstrikeRuntimeActivation {
     # Accept that tombstone only after proving the owner dead, every candidate
     # artifact absent, and the exact previous runtime/task contracts unchanged.
     $activationLockPath = Join-Path $state "locks\dawnstrike-runtime-activation.lock"
+    $pendingCompleteReceipt = $false
+    if (Test-Path -LiteralPath $completeReceipt -PathType Leaf -and Test-Path -LiteralPath $operationJournal -PathType Leaf) {
+        try {
+            $pendingJournalProbe = Get-DawnstrikeStrictRuntimeOperationJournal $operationJournal $lockInterpreter.path $lockInterpreter.sha256
+            $pendingCompleteReceipt = [string]$pendingJournalProbe.payload.phase -eq "POST_SWAP_READY"
+        }
+        catch { $pendingCompleteReceipt = $false }
+    }
     if (
         (Test-Path -LiteralPath $operationJournal -PathType Leaf) -and
         -not (Test-Path -LiteralPath $preparedReceipt) -and
@@ -3042,6 +3061,13 @@ function Invoke-DawnstrikeRuntimeActivation {
                 [IO.File]::Move($preparedReceipt, $preparedArchive)
                 if ((Test-Path -LiteralPath $preparedReceipt) -or (Get-DawnstrikeSha256File $preparedArchive) -ne $preparedHash) { throw "Compensated activation prepared receipt archive was not proven." }
             }
+            if (Test-Path -LiteralPath $completeReceipt -PathType Leaf) {
+                $completeHash = Get-DawnstrikeSha256File $completeReceipt
+                $completeArchive = Join-Path $archiveRoot "compensated-$activationId-$compensationAttemptKey-$completeHash.complete.json"
+                if (Test-Path -LiteralPath $completeArchive) { throw "Compensated activation complete receipt archive already exists." }
+                [IO.File]::Move($completeReceipt, $completeArchive)
+                if ((Test-Path -LiteralPath $completeReceipt) -or (Get-DawnstrikeSha256File $completeArchive) -ne $completeHash) { throw "Compensated activation complete receipt archive was not proven." }
+            }
             foreach ($candidateArtifact in @(
                 [pscustomobject]@{ path = $rollbackRoot; name = "rollback" },
                 [pscustomobject]@{ path = $schedulerBackupPath; name = "scheduler-backup" },
@@ -3075,7 +3101,7 @@ function Invoke-DawnstrikeRuntimeActivation {
         }
     }
 
-    if (Test-Path -LiteralPath $completeReceipt -PathType Leaf) {
+    if ((Test-Path -LiteralPath $completeReceipt -PathType Leaf) -and -not $pendingCompleteReceipt) {
         $existing = Invoke-DawnstrikeContractCli $pythonPath $candidate @("verify-receipt", "--receipt", $completeReceipt, "--expected-status", "COMPLETE") "Existing activation receipt verification" $ProcessTimeoutSeconds
         if (-not (Test-Path -LiteralPath $operationJournal -PathType Leaf)) {
             throw "Complete activation receipt is missing its durable operation journal."
@@ -3365,7 +3391,7 @@ function Invoke-DawnstrikeRuntimeActivation {
             }
             $prepared = Invoke-DawnstrikeContractCli $pythonPath $candidate @("verify-receipt", "--receipt", $preparedReceipt, "--expected-status", "PREPARED") "Prepared activation recovery receipt" $ProcessTimeoutSeconds
             $taskRecovery = Get-DawnstrikeTaskContract $runtime $state -AllowDisabled
-            if ($taskRecovery.disabled_count -ne 5 -or $taskRecovery.enabled_count -ne 0 -or $taskRecovery.task_contract_sha256 -ne [string]$journal.payload.task_contract_sha256) {
+            if ([string]$journal.payload.phase -in @("PRE_SWAP", "POST_SWAP") -and ($taskRecovery.disabled_count -ne 5 -or $taskRecovery.enabled_count -ne 0 -or $taskRecovery.task_contract_sha256 -ne [string]$journal.payload.task_contract_sha256)) {
                 throw "Activation recovery tasks are not the exact journaled Disabled contract."
             }
             if ([string]$journal.payload.phase -eq "PRE_SWAP") {
@@ -3408,6 +3434,37 @@ function Invoke-DawnstrikeRuntimeActivation {
                     -BackupContractSha256 ([string]$journal.payload.backup_contract_sha256) -TaskContractSha256 ([string]$taskRecovery.task_contract_sha256) `
                     -RuntimeStageContractSha256 ([string]$journal.payload.runtime_stage_contract_sha256) `
                     -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
+            } elseif ([string]$journal.payload.phase -eq "POST_SWAP_READY") {
+                # The complete receipt and this phase are durably sealed before
+                # any canonical task is enabled.  A kill during enablement can
+                # therefore resume from this explicit boundary, even when the
+                # task set is already Ready (or only partially enabled).
+                if (-not (Test-Path -LiteralPath $completeReceipt -PathType Leaf)) { throw "POST_SWAP_READY recovery has no exact complete receipt." }
+                $readyReceipt = Invoke-DawnstrikeContractCli $pythonPath $runtime @("verify-receipt", "--receipt", $completeReceipt, "--expected-status", "COMPLETE") "POST_SWAP_READY complete receipt verification" $ProcessTimeoutSeconds
+                $readyRuntime = Get-DawnstrikeGitContract $gitPath $runtime $ProcessTimeoutSeconds $ExpectedSha
+                if ([string]$readyReceipt.candidate_sha -ne $ExpectedSha -or [string]$readyReceipt.candidate_tree -ne [string]$candidateContract.tree -or $readyRuntime.tree -ne [string]$candidateContract.tree -or [string]$readyReceipt.task_enablement_restored -ne "True" -or -not (Test-Path -LiteralPath $rollbackCheckout -PathType Container) -or (Test-Path -LiteralPath $stage)) { throw "POST_SWAP_READY receipt or runtime identity is invalid." }
+                $null = Assert-DawnstrikeReceiptRecoveryArtifacts -Receipt $readyReceipt -StateRoot $state -BackupRoot $backupRoot -ToolRoot $candidate -GitPath $gitPath -PythonPath $pythonPath -TimeoutSeconds $ProcessTimeoutSeconds -RequireRollbackCheckout
+                $readyTasks = Get-DawnstrikeTaskContract $runtime $state -AllowDisabled
+                if ($readyTasks.enabled_count -ne 5) {
+                    $null = Set-DawnstrikeTasksFailClosedDisabled $runtime $state
+                    Enable-DawnstrikeCanonicalTasks
+                }
+                $readyTasks = Get-DawnstrikeTaskContract $runtime $state
+                if ($readyTasks.enabled_count -ne 5 -or [string]$readyTasks.task_contract_sha256 -ne [string]$readyReceipt.task_contract_sha256) { throw "POST_SWAP_READY recovery could not prove exact Ready tasks." }
+                $null = Set-DawnstrikeRuntimeOperationJournalPhase `
+                    -StateRoot $state -JournalPath $operationJournal -Lock $activationLock -Operation runtime_activation -Phase COMPLETE `
+                    -CandidateSha $ExpectedSha -CandidateTree ([string]$candidateContract.tree) -CurrentSha $ExpectedSha -CurrentTree ([string]$candidateContract.tree) `
+                    -PreviousSha ([string]$journal.payload.previous_sha) -PreviousTree ([string]$journal.payload.previous_tree) -OriginIdentity $lockOrigin `
+                    -PreparedReceiptRelativePath $preparedReceiptRelative -PreparedReceiptSha256 (Get-DawnstrikeSha256File $preparedReceipt) `
+                    -CompleteReceiptRelativePath $completeReceiptRelative -CompleteReceiptSha256 (Get-DawnstrikeSha256File $completeReceipt) `
+                    -BackupContractSha256 ([string]$journal.payload.backup_contract_sha256) -TaskContractSha256 ([string]$readyTasks.task_contract_sha256) `
+                    -RuntimeStageContractSha256 ([string]$journal.payload.runtime_stage_contract_sha256) -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
+                $journal = Get-DawnstrikeStrictRuntimeOperationJournal $operationJournal $lockInterpreter.path $lockInterpreter.sha256
+                $null = Assert-DawnstrikeActivationCompleteTerminal `
+                    -Journal $journal -Receipt $readyReceipt -ReceiptPath $completeReceipt -CandidateRoot $candidate -RuntimeRoot $runtime -StateRoot $state -BackupRoot $backupRoot `
+                    -GitPath $gitPath -PythonPath $pythonPath -TimeoutSeconds $ProcessTimeoutSeconds -ExpectedSha $ExpectedSha -ExpectedTree ([string]$candidateContract.tree) `
+                    -OriginIdentity $lockOrigin -MarketDate $MarketDate -StateDeclaration $stateDeclaration -ExpectedTask $readyTasks
+                return $readyReceipt
             } elseif ([string]$journal.payload.phase -ne "POST_SWAP") { throw "Activation journal phase is not recoverable." }
             $installed = Get-DawnstrikeGitContract $gitPath $runtime $ProcessTimeoutSeconds $ExpectedSha
             if ($installed.tree -ne [string]$candidateContract.tree -or -not (Test-Path -LiteralPath $rollbackCheckout -PathType Container) -or (Test-Path -LiteralPath $stage)) { throw "POST_SWAP recovery filesystem state is invalid." }
@@ -3985,6 +4042,35 @@ function Invoke-DawnstrikeRuntimeActivation {
                 -TimeoutSeconds $ProcessTimeoutSeconds `
                 -RequireRollbackCheckout
             $null = Assert-DawnstrikeCanonicalTaskSemantics -RuntimeRoot $runtime -StateRoot $state -AllowDisabled
+            # Seal terminal evidence and advance the journal before enabling
+            # any canonical task. POST_SWAP_READY is the durable power-loss
+            # boundary for the enablement sequence.
+            $receiptPayload.status = "COMPLETE"
+            $receiptPayload.task_enablement_restored = $true
+            $receiptPayload.completed_at_utc = [DateTime]::UtcNow.ToString("o")
+            Write-DawnstrikeActivationJson $receiptPayload $inputReceipt
+            try {
+                $complete = Invoke-DawnstrikeContractCli $pythonPath $runtime @("seal-receipt", "--input", $inputReceipt, "--output", $completeReceipt) "Complete activation receipt sealing" $ProcessTimeoutSeconds
+            }
+            finally {
+                if (Test-Path -LiteralPath $inputReceipt -PathType Leaf) { Remove-Item -LiteralPath $inputReceipt -Force }
+            }
+            $null = Set-DawnstrikeRuntimeOperationJournalPhase `
+                -StateRoot $state -JournalPath $operationJournal -Lock $activationLock `
+                -Operation runtime_activation -Phase POST_SWAP_READY -CandidateSha $ExpectedSha `
+                -CandidateTree ([string]$candidateContract.tree) -CurrentSha $ExpectedSha `
+                -CurrentTree ([string]$candidateContract.tree) `
+                -PreviousSha ([string]$runtimeContract.head) -PreviousTree ([string]$runtimeContract.tree) `
+                -OriginIdentity $lockOrigin -PreparedReceiptRelativePath $preparedReceiptRelative `
+                -PreparedReceiptSha256 (Get-DawnstrikeSha256File $preparedReceipt) `
+                -CompleteReceiptRelativePath $completeReceiptRelative `
+                -CompleteReceiptSha256 (Get-DawnstrikeSha256File $completeReceipt) `
+                -BackupContractSha256 ([string]$taskBackup.manifest_sha256) `
+                -TaskContractSha256 ([string]$taskAfter.task_contract_sha256) `
+                -RuntimeStageContractSha256 $stageJournalHash `
+                -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
+            $journalPhase = "POST_SWAP_READY"
+            if ($TestStageCrashPoint -eq "after_ready_journal") { Stop-Process -Id $PID -Force }
             Enable-DawnstrikeCanonicalTasks
             $taskAfter = Get-DawnstrikeTaskContract $runtime $state
             if ($taskAfter.task_contract_sha256 -ne $taskLocked.task_contract_sha256) {
@@ -4005,16 +4091,7 @@ function Invoke-DawnstrikeRuntimeActivation {
                 throw "An auxiliary capture task appeared after activation."
             }
             $tasksDisabled = $false
-            $receiptPayload.status = "COMPLETE"
-            $receiptPayload.task_enablement_restored = $true
-            $receiptPayload.completed_at_utc = [DateTime]::UtcNow.ToString("o")
-            Write-DawnstrikeActivationJson $receiptPayload $inputReceipt
-            try {
-                $complete = Invoke-DawnstrikeContractCli $pythonPath $runtime @("seal-receipt", "--input", $inputReceipt, "--output", $completeReceipt) "Complete activation receipt sealing" $ProcessTimeoutSeconds
-            }
-            finally {
-                if (Test-Path -LiteralPath $inputReceipt -PathType Leaf) { Remove-Item -LiteralPath $inputReceipt -Force }
-            }
+            if ($TestStageCrashPoint -eq "after_enable_before_complete") { Stop-Process -Id $PID -Force }
             $null = Set-DawnstrikeRuntimeOperationJournalPhase `
                 -StateRoot $state -JournalPath $operationJournal -Lock $activationLock `
                 -Operation runtime_activation -Phase COMPLETE -CandidateSha $ExpectedSha `
@@ -4178,7 +4255,7 @@ function Invoke-DawnstrikeRuntimeActivation {
             # restored, finish the transaction as an immutable compensation.
             # Do not leave PRE_SWAP/POST_SWAP evidence behind: those phases
             # require Disabled tasks and candidate/rollback checkout shape.
-            if ($journalPhase -in @("PRE_SWAP", "POST_SWAP") -and -not $tasksDisabled) {
+            if ($journalPhase -in @("PRE_SWAP", "POST_SWAP", "POST_SWAP_READY") -and -not $tasksDisabled) {
                 try {
                     $compensatedRuntime = Get-DawnstrikeGitContract $gitPath $runtime $ProcessTimeoutSeconds $runtimeContract.head
                     $compensatedTasks = Get-DawnstrikeTaskContract $runtime $state
@@ -4267,7 +4344,7 @@ function Invoke-DawnstrikeRuntimeActivation {
                     throw "Runtime activation compensation could not be sealed after exact restore; operator recovery is required."
                 }
             }
-            if ($journalPhase -in @("PRE_QUIESCE", "PRE_SWAP", "POST_SWAP")) {
+            if ($journalPhase -in @("PRE_QUIESCE", "PRE_SWAP", "POST_SWAP", "POST_SWAP_READY")) {
                 if ($null -eq $activationLock -or $null -eq $dailyLock) {
                     throw "Nonterminal activation recovery lacks its adoptable lock pair."
                 }
