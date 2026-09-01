@@ -27,8 +27,20 @@ def _payload(operation: str = "runtime_activation", phase: str = "INIT") -> dict
         "sequence": phases[operation].index(phase),
         "candidate_sha": "a" * 40,
         "candidate_tree": "b" * 40,
-        "current_sha": "c" * 40,
-        "current_tree": "d" * 40,
+        "current_sha": (
+            "e" * 40
+            if operation == "runtime_activation" and phase in {"INIT", "PRE_SWAP"}
+            else "a" * 40
+            if operation != "runtime_rollback" or phase in {"INIT", "PRE_SWAP"}
+            else "e" * 40
+        ),
+        "current_tree": (
+            "f" * 40
+            if operation == "runtime_activation" and phase in {"INIT", "PRE_SWAP"}
+            else "b" * 40
+            if operation != "runtime_rollback" or phase in {"INIT", "PRE_SWAP"}
+            else "f" * 40
+        ),
         "previous_sha": "e" * 40,
         "previous_tree": "f" * 40,
         "origin_identity": "github.com/mattfren/dawnstrike",
@@ -39,8 +51,10 @@ def _payload(operation: str = "runtime_activation", phase: str = "INIT") -> dict
         "lock_token": "2" * 32,
         "lock_file_sha256": "3" * 64,
         "prior_journal_file_sha256": EMPTY,
-        "receipt_relative_path": "receipts/runtime-activation/example.json",
-        "receipt_sha256": EMPTY if phase == "INIT" else "9" * 64,
+        "prepared_receipt_relative_path": "receipts/runtime-activation/prepared.json",
+        "prepared_receipt_sha256": EMPTY if phase == "INIT" else "9" * 64,
+        "complete_receipt_relative_path": "receipts/runtime-activation/complete.json",
+        "complete_receipt_sha256": "8" * 64 if phase == "COMPLETE" else EMPTY,
         "backup_contract_sha256": EMPTY if phase == "INIT" else "4" * 64,
         "task_contract_sha256": "5" * 64,
         "runtime_stage_contract_sha256": (
@@ -88,7 +102,7 @@ def test_journal_seals_and_validates_exact_phase(
         {"sequence": 2},
         {"origin_identity": "evil.invalid/repo"},
         {"lock_token": "0" * 31},
-        {"receipt_relative_path": "../escape.json"},
+        {"prepared_receipt_relative_path": "../escape.json"},
         {"research_only": False},
         {"broker_execution_enabled": True},
     ],
@@ -165,3 +179,23 @@ def test_transition_requires_adjacent_phase_and_exact_prior_raw_hash(tmp_path: P
     source.write_text(json.dumps(wrong_operation), encoding="utf-8")
     with pytest.raises(ValueError, match="not adjacent|immutable"):
         transition(source, journal, journal)
+
+
+@pytest.mark.parametrize(
+    ("operation", "phase", "bad_sha", "bad_tree"),
+    [
+        ("runtime_activation", "POST_SWAP", "e" * 40, "f" * 40),
+        ("runtime_rollback", "POST_SWAP", "a" * 40, "b" * 40),
+        ("capture_task_rebind", "PRE_ENABLE", "e" * 40, "f" * 40),
+        ("capture_task_hardening", "PRE_TASK_UPDATE", "e" * 40, "f" * 40),
+    ],
+)
+def test_phase_rejects_wrong_current_runtime_identity(
+    operation: str, phase: str, bad_sha: str, bad_tree: str
+) -> None:
+    payload = _payload(operation, phase)
+    payload["current_sha"] = bad_sha
+    payload["current_tree"] = bad_tree
+    payload["journal_self_sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="current runtime identity"):
+        validate(json.dumps(payload).encode())

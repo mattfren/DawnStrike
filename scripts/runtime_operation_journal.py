@@ -31,8 +31,9 @@ KEYS = {
     "candidate_tree", "current_sha", "current_tree", "previous_sha",
     "previous_tree", "origin_identity", "origin_identity_sha256",
     "state_root_sha256", "lock_token", "lock_file_sha256",
-    "prior_journal_file_sha256", "receipt_relative_path",
-    "receipt_sha256", "backup_contract_sha256", "task_contract_sha256",
+    "prior_journal_file_sha256", "prepared_receipt_relative_path",
+    "prepared_receipt_sha256", "complete_receipt_relative_path",
+    "complete_receipt_sha256", "backup_contract_sha256", "task_contract_sha256",
     "runtime_stage_contract_sha256", "recorded_at_utc", "research_only",
     "broker_execution_enabled", "adoption_state", "old_lock_token",
     "old_lock_file_sha256", "next_lock_token", "next_lock_file_sha256",
@@ -99,16 +100,34 @@ def validate(raw: bytes) -> dict[str, Any]:
         raise ValueError("journal phase or sequence is invalid")
     if value["sequence"] != phases.index(value["phase"]):
         raise ValueError("journal phase sequence is invalid")
+    candidate_pair = (value["candidate_sha"], value["candidate_tree"])
+    previous_pair = (value["previous_sha"], value["previous_tree"])
+    current_pair = (value["current_sha"], value["current_tree"])
+    if operation == "runtime_activation":
+        expected_current = (
+            previous_pair if value["phase"] in {"INIT", "PRE_SWAP"} else candidate_pair
+        )
+    elif operation == "runtime_rollback":
+        expected_current = (
+            candidate_pair if value["phase"] in {"INIT", "PRE_SWAP"} else previous_pair
+        )
+    else:
+        expected_current = candidate_pair
+    if current_pair != expected_current:
+        raise ValueError("current runtime identity is invalid for the phase")
     empty = hashlib.sha256(b"").hexdigest()
-    receipt = value["receipt_sha256"]
+    prepared_receipt = value["prepared_receipt_sha256"]
+    complete_receipt = value["complete_receipt_sha256"]
     backup = value["backup_contract_sha256"]
     stage = value["runtime_stage_contract_sha256"]
     if value["phase"] == "INIT":
-        if any(item != empty for item in (receipt, backup, stage)):
+        if any(item != empty for item in (prepared_receipt, complete_receipt, backup, stage)):
             raise ValueError("INIT journal carries non-sentinel artifact hashes")
     else:
-        if receipt == empty or backup == empty:
-            raise ValueError("mutation phase lacks receipt or backup proof")
+        if prepared_receipt == empty or backup == empty:
+            raise ValueError("mutation phase lacks prepared receipt or backup proof")
+        if (value["phase"] == "COMPLETE") != (complete_receipt != empty):
+            raise ValueError("complete receipt proof sentinel is invalid")
         runtime_operation = operation in {"runtime_activation", "runtime_rollback"}
         if runtime_operation != (stage != empty):
             raise ValueError("runtime stage proof sentinel is invalid")
@@ -124,7 +143,8 @@ def validate(raw: bytes) -> dict[str, Any]:
         raise ValueError("origin identity hash mismatch")
     for key in (
         "state_root_sha256", "lock_file_sha256", "prior_journal_file_sha256",
-        "receipt_sha256", "backup_contract_sha256", "task_contract_sha256",
+        "prepared_receipt_sha256", "complete_receipt_sha256",
+        "backup_contract_sha256", "task_contract_sha256",
         "runtime_stage_contract_sha256", "journal_self_sha256",
     ):
         if not isinstance(value[key], str) or not HEX64.fullmatch(value[key]):
@@ -170,7 +190,8 @@ def validate(raw: bytes) -> dict[str, Any]:
         and value["next_lock_relative_path"] == "NONE"
     ):
         raise ValueError("adopted journal identities are inconsistent")
-    _safe_relative(value["receipt_relative_path"])
+    _safe_relative(value["prepared_receipt_relative_path"])
+    _safe_relative(value["complete_receipt_relative_path"])
     _utc(value["recorded_at_utc"])
     if value["research_only"] is not True or value["broker_execution_enabled"] is not False:
         raise ValueError("journal safety flags are invalid")
@@ -257,13 +278,25 @@ def transition(source: Path, target: Path, previous: Path | None) -> dict[str, A
             raise ValueError("journal prior raw hash mismatch")
         immutable = {
             "operation", "candidate_sha", "candidate_tree", "current_sha",
-            "current_tree", "previous_sha", "previous_tree", "origin_identity",
+            "previous_sha", "previous_tree", "origin_identity",
             "origin_identity_sha256", "state_root_sha256",
-            "receipt_relative_path", "research_only", "broker_execution_enabled",
+            "prepared_receipt_relative_path", "complete_receipt_relative_path",
+            "research_only", "broker_execution_enabled",
         }
         for key in immutable:
             if candidate.get(key) != prior[key]:
                 raise ValueError(f"journal immutable field changed: {key}")
+        candidate_pair = (candidate["candidate_sha"], candidate["candidate_tree"])
+        previous_pair = (candidate["previous_sha"], candidate["previous_tree"])
+        current_pair = (candidate["current_sha"], candidate["current_tree"])
+        if operation == "runtime_activation":
+            expected = previous_pair if phase == "PRE_SWAP" else candidate_pair
+        elif operation == "runtime_rollback":
+            expected = candidate_pair if phase == "PRE_SWAP" else previous_pair
+        else:
+            expected = (prior["current_sha"], prior["current_tree"])
+        if current_pair != expected:
+            raise ValueError("current runtime identity is invalid for the phase")
     return seal(source, target)
 
 

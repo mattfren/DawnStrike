@@ -270,7 +270,7 @@ exit 137
         "schema_version": "dawnstrike.runtime_operation_journal.v1",
         "operation": "runtime_activation", "phase": "INIT", "sequence": 0,
         "candidate_sha": "a" * 40, "candidate_tree": "b" * 40,
-        "current_sha": "c" * 40, "current_tree": "d" * 40,
+        "current_sha": "e" * 40, "current_tree": "f" * 40,
         "previous_sha": "e" * 40, "previous_tree": "f" * 40,
         "origin_identity": origin,
         "origin_identity_sha256": hashlib.sha256(origin.encode()).hexdigest(),
@@ -280,8 +280,10 @@ exit 137
         "lock_token": handle["token"],
         "lock_file_sha256": handle["bytes_sha256"],
         "prior_journal_file_sha256": empty,
-        "receipt_relative_path": "receipts/runtime-activation/result.json",
-        "receipt_sha256": empty, "backup_contract_sha256": empty,
+        "prepared_receipt_relative_path": "receipts/runtime-activation/prepared.json",
+        "prepared_receipt_sha256": empty,
+        "complete_receipt_relative_path": "receipts/runtime-activation/complete.json",
+        "complete_receipt_sha256": empty, "backup_contract_sha256": empty,
         "task_contract_sha256": "5" * 64,
         "runtime_stage_contract_sha256": empty,
         "recorded_at_utc": "2026-08-31T23:01:02.1234567Z",
@@ -348,32 +350,39 @@ $lock=Enter-DawnstrikeGovernedRuntimeLock -StateRoot '{state_q}' `
  -OriginIdentity $origin -PythonPath $approved.path -PythonSha256 $approved.sha256
 $journal=Join-Path '{state_q}' 'receipts\runtime-operation\activation.json'
 $common=@{{StateRoot='{state_q}';JournalPath=$journal;Lock=$lock;Operation='runtime_activation';
- CandidateSha=('a'*40);CandidateTree=('b'*40);CurrentSha=('c'*40);CurrentTree=('d'*40);
+ CandidateSha=('a'*40);CandidateTree=('b'*40);CurrentSha=('e'*40);CurrentTree=('f'*40);
  PreviousSha=('e'*40);PreviousTree=('f'*40);OriginIdentity=$origin;
- ReceiptRelativePath='receipts/runtime-activation/result.json';TaskContractSha256=('5'*64);
+ PreparedReceiptRelativePath='receipts/runtime-activation/prepared.json';
+ CompleteReceiptRelativePath='receipts/runtime-activation/complete.json';TaskContractSha256=('5'*64);
  PythonPath=$approved.path;PythonSha256=$approved.sha256}}
 $null=Set-DawnstrikeRuntimeOperationJournalPhase @common -Phase INIT `
- -ReceiptSha256 $empty -BackupContractSha256 $empty -RuntimeStageContractSha256 $empty
+ -PreparedReceiptSha256 $empty -CompleteReceiptSha256 $empty `
+ -BackupContractSha256 $empty -RuntimeStageContractSha256 $empty
 $skip=$false
 try{{$null=Set-DawnstrikeRuntimeOperationJournalPhase @common -Phase POST_SWAP `
- -ReceiptSha256 ('1'*64) -BackupContractSha256 ('2'*64) `
+ -PreparedReceiptSha256 ('1'*64) -CompleteReceiptSha256 $empty `
+ -BackupContractSha256 ('2'*64) `
  -RuntimeStageContractSha256 ('3'*64)}}catch{{$skip=$true}}
 $cross=$false;$bad=@{{}}+$common;$bad.Operation='runtime_rollback'
 try{{$null=Set-DawnstrikeRuntimeOperationJournalPhase @bad -Phase PRE_SWAP `
- -ReceiptSha256 ('1'*64) -BackupContractSha256 ('2'*64) `
+ -PreparedReceiptSha256 ('1'*64) -CompleteReceiptSha256 $empty `
+ -BackupContractSha256 ('2'*64) `
  -RuntimeStageContractSha256 ('3'*64)}}catch{{$cross=$true}}
 $fake=[pscustomobject]@{{path=$lock.path;token=('0'*32);bytes_sha256=$lock.bytes_sha256}}
 $mismatch=$false;$badLock=@{{}}+$common;$badLock.Lock=$fake
 try{{$null=Set-DawnstrikeRuntimeOperationJournalPhase @badLock -Phase PRE_SWAP `
- -ReceiptSha256 ('1'*64) -BackupContractSha256 ('2'*64) `
+ -PreparedReceiptSha256 ('1'*64) -CompleteReceiptSha256 $empty `
+ -BackupContractSha256 ('2'*64) `
  -RuntimeStageContractSha256 ('3'*64)}}catch{{$mismatch=$true}}
 $null=Set-DawnstrikeRuntimeOperationJournalPhase @common -Phase PRE_SWAP `
- -ReceiptSha256 ('1'*64) -BackupContractSha256 ('2'*64) -RuntimeStageContractSha256 ('3'*64)
+ -PreparedReceiptSha256 ('1'*64) -CompleteReceiptSha256 $empty `
+ -BackupContractSha256 ('2'*64) -RuntimeStageContractSha256 ('3'*64)
 $raw=[IO.File]::ReadAllText($journal)
 [IO.File]::WriteAllText($journal,$raw.Replace(('1'*64),('9'*64)))
 $tamper=$false
 try{{$null=Set-DawnstrikeRuntimeOperationJournalPhase @common -Phase POST_SWAP `
- -ReceiptSha256 ('1'*64) -BackupContractSha256 ('2'*64) `
+ -PreparedReceiptSha256 ('1'*64) -CompleteReceiptSha256 $empty `
+ -BackupContractSha256 ('2'*64) `
  -RuntimeStageContractSha256 ('3'*64)}}catch{{$tamper=$true}}
 if(-not($skip-and$cross-and$mismatch-and$tamper)){{throw 'hostile transition accepted'}}
 Exit-DawnstrikeGovernedRuntimeLock $lock
