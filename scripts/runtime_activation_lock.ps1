@@ -334,8 +334,8 @@ function Set-DawnstrikeRuntimeOperationJournalPhase {
     if($current.payload.lock_token-ne$Lock.token-or$current.raw_file_sha256-ne$Lock.bytes_sha256-or[int]$current.payload.process_id-ne[int]$PID-or[string]$current.payload.process_started_at_utc-ne$processStart){throw 'Journal transition requires the exact live lock owned by this process.'}
     if($current.payload.operation-ne$Operation-or$current.payload.candidate_sha-ne$CandidateSha-or$current.payload.candidate_tree-ne$CandidateTree-or$current.payload.origin_identity-ne$OriginIdentity){throw 'Journal transition lock identity does not match the operation.'}
     $phases=@{
-        runtime_activation=@('INIT','PRE_QUIESCE','PRE_SWAP','POST_SWAP','COMPLETE')
-        runtime_rollback=@('INIT','PRE_SWAP','POST_SWAP','COMPLETE')
+        runtime_activation=@('INIT','PRE_QUIESCE','PRE_SWAP','POST_SWAP','COMPLETE','COMPENSATED')
+        runtime_rollback=@('INIT','PRE_SWAP','POST_SWAP','COMPLETE','COMPENSATED')
         capture_task_rebind=@('INIT','PRE_ENABLE','POST_ENABLE','COMPLETE','COMPENSATED')
         capture_task_hardening=@('INIT','PRE_TASK_UPDATE','POST_TASK_UPDATE','COMPLETE','COMPENSATED')
     }
@@ -393,7 +393,7 @@ function Clear-DawnstrikeCompensatedJournalTombstone {
     param(
         [Parameter(Mandatory=$true)][string]$StateRoot,
         [Parameter(Mandatory=$true)][string]$JournalPath,
-        [Parameter(Mandatory=$true)][ValidateSet('capture_task_rebind','capture_task_hardening')][string]$Operation,
+        [Parameter(Mandatory=$true)][ValidateSet('capture_task_rebind','capture_task_hardening','runtime_activation','runtime_rollback')][string]$Operation,
         [Parameter(Mandatory=$true)][ValidatePattern('^[0-9a-f]{40}$')][string]$CandidateSha,
         [Parameter(Mandatory=$true)][ValidatePattern('^[0-9a-f]{40}$')][string]$CandidateTree,
         [Parameter(Mandatory=$true)][string]$OriginIdentity,

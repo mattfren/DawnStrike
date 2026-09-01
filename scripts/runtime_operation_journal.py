@@ -23,9 +23,11 @@ PHASES = {
     # PRE_QUIESCE is a durable intent written before the first scheduler
     # mutation.  It lets activation recovery distinguish an interrupted
     # quiescence operation from an unstarted activation.
-    "runtime_activation": ("INIT", "PRE_QUIESCE", "PRE_SWAP", "POST_SWAP", "COMPLETE"),
+    "runtime_activation": (
+        "INIT", "PRE_QUIESCE", "PRE_SWAP", "POST_SWAP", "COMPLETE", "COMPENSATED"
+    ),
     "capture_task_rebind": ("INIT", "PRE_ENABLE", "POST_ENABLE", "COMPLETE", "COMPENSATED"),
-    "runtime_rollback": ("INIT", "PRE_SWAP", "POST_SWAP", "COMPLETE"),
+    "runtime_rollback": ("INIT", "PRE_SWAP", "POST_SWAP", "COMPLETE", "COMPENSATED"),
     "capture_task_hardening": (
         "INIT", "PRE_TASK_UPDATE", "POST_TASK_UPDATE", "COMPLETE", "COMPENSATED"
     ),
@@ -117,12 +119,14 @@ def validate(raw: bytes) -> dict[str, Any]:
     if operation == "runtime_activation":
         expected_current = (
             previous_pair
-            if value["phase"] in {"INIT", "PRE_QUIESCE", "PRE_SWAP"}
+            if value["phase"] in {"INIT", "PRE_QUIESCE", "PRE_SWAP", "COMPENSATED"}
             else candidate_pair
         )
     elif operation == "runtime_rollback":
         expected_current = (
-            candidate_pair if value["phase"] in {"INIT", "PRE_SWAP"} else previous_pair
+            candidate_pair
+            if value["phase"] in {"INIT", "PRE_SWAP", "COMPENSATED"}
+            else previous_pair
         )
     elif operation == "capture_task_rebind":
         expected_current = candidate_pair
@@ -351,9 +355,17 @@ def transition(source: Path, target: Path, previous: Path | None) -> dict[str, A
         previous_pair = (candidate["previous_sha"], candidate["previous_tree"])
         current_pair = (candidate["current_sha"], candidate["current_tree"])
         if operation == "runtime_activation":
-            expected = previous_pair if phase in {"PRE_QUIESCE", "PRE_SWAP"} else candidate_pair
+            expected = (
+                previous_pair
+                if phase in {"PRE_QUIESCE", "PRE_SWAP", "COMPENSATED"}
+                else candidate_pair
+            )
         elif operation == "runtime_rollback":
-            expected = candidate_pair if phase == "PRE_SWAP" else previous_pair
+            expected = (
+                candidate_pair
+                if phase in {"PRE_SWAP", "COMPENSATED"}
+                else previous_pair
+            )
         elif operation == "capture_task_rebind":
             expected = (prior["current_sha"], prior["current_tree"])
         else:
@@ -387,7 +399,8 @@ def _validate_compensation(raw: bytes) -> dict[str, Any]:
     if value["schema_version"] != "dawnstrike.runtime_compensation_receipt.v1":
         raise ValueError("compensation receipt schema is invalid")
     if value["status"] != "COMPENSATED" or value["operation"] not in {
-        "capture_task_rebind", "capture_task_hardening"
+        "capture_task_rebind", "capture_task_hardening",
+        "runtime_activation", "runtime_rollback",
     }:
         raise ValueError("compensation receipt status or operation is invalid")
     for key in ("candidate_sha", "candidate_tree"):
