@@ -33,7 +33,7 @@ _APPROVED_GIT_SHA256 = (
     "37c5725818d602e951ba2563b870d62763322956b73373da4c33a0b566a80bc9"  # pragma: allowlist secret
 )
 _APPROVED_DISTRIBUTION_RECORD_SET_SHA256 = (
-    "447a0d12feffcfd6c353d9acb4cfd1e5cc1b35e3548cd7e9ad58666516b4b3af"
+    "447a0d12feffcfd6c353d9acb4cfd1e5cc1b35e3548cd7e9ad58666516b4b3af"  # pragma: allowlist secret
 )
 _FORBIDDEN_IGNORED_SUFFIXES = {
     ".bat",

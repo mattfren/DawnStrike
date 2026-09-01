@@ -14,10 +14,10 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE_BOOTSTRAP = ROOT / "scripts" / "dawnstrike_python_bootstrap.py"
 PRODUCTION_GIT_PATH = r"C:\Program Files\Git\cmd\git.exe"
 PRODUCTION_GIT_SHA256 = (
-    "37c5725818d602e951ba2563b870d62763322956b73373da4c33a0b566a80bc9"
+    "37c5725818d602e951ba2563b870d62763322956b73373da4c33a0b566a80bc9"  # pragma: allowlist secret
 )
 PRODUCTION_RECORD_SET_SHA256 = (
-    "447a0d12feffcfd6c353d9acb4cfd1e5cc1b35e3548cd7e9ad58666516b4b3af"
+    "447a0d12feffcfd6c353d9acb4cfd1e5cc1b35e3548cd7e9ad58666516b4b3af"  # pragma: allowlist secret
 )
 BOOTSTRAP_PRELOADER = (
     "import hashlib,sys; p=sys.argv[1]; e=sys.argv[2]; b=open(p,'rb').read(); "

@@ -50,7 +50,7 @@ function Assert-DawnstrikeActivationSourceAdmission {
         $gitHash = ([BitConverter]::ToString($gitDigest.ComputeHash($gitBytes))).Replace('-', '').ToLowerInvariant()
     }
     finally { $gitDigest.Dispose() }
-    if ($gitHash -cne '37c5725818d602e951ba2563b870d62763322956b73373da4c33a0b566a80bc9') {
+    if ($gitHash -cne '37c5725818d602e951ba2563b870d62763322956b73373da4c33a0b566a80bc9') { # pragma: allowlist secret
         throw 'Activation source admission rejected an unapproved Git executable.'
     }
     # Inspect the repository-local configuration before invoking Git at all.
