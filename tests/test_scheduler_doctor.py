@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,6 +30,17 @@ def _stable_runtime_contract() -> dict[str, str]:
 
 @pytest.fixture(autouse=True)
 def _stub_stable_runtime_contract(monkeypatch) -> None:
+    host_interpreter = Path(sys.executable).resolve()
+    monkeypatch.setattr(
+        scheduler_service,
+        "AUXILIARY_INTERPRETER",
+        host_interpreter,
+    )
+    monkeypatch.setattr(
+        scheduler_service,
+        "AUXILIARY_INTERPRETER_SHA256",
+        hashlib.sha256(host_interpreter.read_bytes()).hexdigest(),
+    )
     monkeypatch.setattr(
         scheduler_service,
         "_runtime_git_contract",
