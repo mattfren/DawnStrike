@@ -600,3 +600,70 @@ $null=Enter-DawnstrikeGovernedRuntimeLockWithJournal -StateRoot '{state_q}' `
     )
     assert result.returncode != 0
     assert "reparse" in result.stderr.lower() or "governed receipt root" in result.stderr
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="PowerShell unavailable")
+def test_adopted_lock_transitions_preserve_original_init_owner(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    module = str(PS.resolve()).replace("'", "''")
+    state_q = str(state).replace("'", "''")
+    journal = state / "receipts" / "runtime-operation" / "activation.json"
+    journal_q = str(journal).replace("'", "''")
+    acquire = rf"""
+. '{module}'
+$approved=Get-DawnstrikeApprovedLockInterpreter
+$lock=Enter-DawnstrikeGovernedRuntimeLockWithJournal -StateRoot '{state_q}' `
+ -JournalPath '{journal_q}' -Operation runtime_activation `
+ -CandidateSha ('a'*40) -CandidateTree ('b'*40) `
+ -CurrentSha ('e'*40) -CurrentTree ('f'*40) `
+ -PreviousSha ('e'*40) -PreviousTree ('f'*40) `
+ -OriginIdentity 'github.com/mattfren/dawnstrike' `
+ -PreparedReceiptRelativePath 'receipts/runtime-activation/prepared.json' `
+ -CompleteReceiptRelativePath 'receipts/runtime-activation/complete.json' `
+ -TaskContractSha256 ('5'*64) -PythonPath $approved.path `
+ -PythonSha256 $approved.sha256
+"""
+    environment = dict(os.environ)
+    environment["DAWNSTRIKE_TEST_LOCK_JOURNAL"] = "1"
+    crashed = subprocess.run(
+        [
+            "powershell", "-NoProfile", "-NonInteractive", "-Command",
+            acquire.replace("-PythonSha256 $approved.sha256", (
+                "-PythonSha256 $approved.sha256 -TestCrashPoint after_lock"
+            )),
+        ],
+        text=True, capture_output=True, check=False, env=environment,
+    )
+    assert crashed.returncode != 0
+    initial = json.loads(journal.read_text())
+    original_pid = initial["init_owner_process_id"]
+    recovery = acquire + rf"""
+$empty=Get-DawnstrikeSharedLockSha256Text ''
+$null=Set-DawnstrikeRuntimeOperationJournalPhase -StateRoot '{state_q}' `
+ -JournalPath '{journal_q}' -Lock $lock -Operation runtime_activation -Phase PRE_SWAP `
+ -CandidateSha ('a'*40) -CandidateTree ('b'*40) `
+ -CurrentSha ('e'*40) -CurrentTree ('f'*40) `
+ -PreviousSha ('e'*40) -PreviousTree ('f'*40) `
+ -OriginIdentity 'github.com/mattfren/dawnstrike' `
+ -PreparedReceiptRelativePath 'receipts/runtime-activation/prepared.json' `
+ -PreparedReceiptSha256 ('1'*64) `
+ -CompleteReceiptRelativePath 'receipts/runtime-activation/complete.json' `
+ -CompleteReceiptSha256 $empty -BackupContractSha256 ('2'*64) `
+ -TaskContractSha256 ('5'*64) -RuntimeStageContractSha256 ('3'*64) `
+ -PythonPath $approved.path -PythonSha256 $approved.sha256
+$phase=Get-DawnstrikeStrictRuntimeOperationJournal `
+ '{journal_q}' $approved.path $approved.sha256
+[pscustomobject]@{{init_pid=$phase.payload.init_owner_process_id;lock_pid=$PID}} `
+ | ConvertTo-Json -Compress
+Exit-DawnstrikeGovernedRuntimeLock $lock
+Remove-Item '{journal_q}' -Force
+"""
+    recovered = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", recovery],
+        text=True, capture_output=True, check=False, env=environment,
+    )
+    assert recovered.returncode == 0, (recovered.stdout, recovered.stderr)
+    result = json.loads(recovered.stdout.strip().splitlines()[-1])
+    assert result["init_pid"] == original_pid
+    assert result["lock_pid"] != original_pid
