@@ -61,6 +61,8 @@ AUXILIARY_REQUIRED_OPTION_ORDER = (
 AUXILIARY_REQUIRED_OPTIONS = frozenset(AUXILIARY_REQUIRED_OPTION_ORDER)
 GIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+MAX_AUXILIARY_ACTIVATION_RECEIPTS = 64
+MAX_AUXILIARY_ACTIVATION_RECEIPT_BYTES = 1024 * 1024
 PUBLICATION_CONTRACT = {
     "schema_version": "dawnstrike.publication_schedule.v1",
     "timezone": "America/Chicago",
@@ -558,7 +560,19 @@ def _auxiliary_task_check(
     if not rows:
         contract = _load_auxiliary_contract(runtime, state)
         if not contract["declared"]:
-            return None
+            activation_evidence = _load_auxiliary_activation_presence(runtime, state)
+            if activation_evidence["valid"] and not activation_evidence["present"]:
+                return None
+            failure_reason = (
+                "governed auxiliary task is missing"
+                if activation_evidence["present"]
+                else activation_evidence["reason"]
+            )
+        else:
+            activation_evidence = {"present": False, "valid": True, "reason": ""}
+            failure_reason = (
+                "governed auxiliary task is missing" if contract["valid"] else contract["reason"]
+            )
         return {
             "name": AUXILIARY_TASK_NAME,
             "task_path": "\\",
@@ -569,9 +583,8 @@ def _auxiliary_task_check(
             "definition_status": "MISSING",
             "operational_ready": False,
             "operational_status": "DISABLED",
-            "failure_reason": (
-                "governed auxiliary task is missing" if contract["valid"] else contract["reason"]
-            ),
+            "activation_evidence_present": activation_evidence["present"],
+            "failure_reason": failure_reason,
             "last_task_result": None,
         }
     if len(rows) != 1:
@@ -831,6 +844,80 @@ def _load_auxiliary_contract(runtime: Path, state: Path) -> dict[str, Any]:
     }
 
 
+def _load_auxiliary_activation_presence(runtime: Path, state: Path) -> dict[str, Any]:
+    """Detect an exact-runtime activation that governed the auxiliary task.
+
+    This is deliberately independent of the runtime declaration.  Otherwise,
+    deleting that declaration and the scheduled task together would erase the
+    evidence that the task must still exist.  Receipt enumeration and file size
+    are bounded, every path is reparse-checked, and receipt contents are exposed
+    only through the strict activation-contract loader.
+    """
+
+    absent = {"present": False, "valid": True, "reason": ""}
+    invalid = {
+        "present": False,
+        "valid": False,
+        "reason": "auxiliary activation evidence is invalid",
+    }
+    receipt_root = state / "receipts" / "runtime-activation"
+    try:
+        from scripts.runtime_activation_contract import (
+            _assert_no_reparse_components,
+            load_receipt,
+        )
+
+        safe_root = _assert_no_reparse_components(receipt_root)
+        if not safe_root.exists():
+            return absent
+        if not safe_root.is_dir():
+            return invalid
+        paths: list[tuple[Path, str]] = []
+        for path in safe_root.iterdir():
+            match = re.fullmatch(r"runtime-activation-([0-9a-f]{24})\.json", path.name)
+            if match is None:
+                continue
+            paths.append((path, match.group(1)))
+            if len(paths) > MAX_AUXILIARY_ACTIVATION_RECEIPTS:
+                return invalid
+        if not paths:
+            return absent
+        runtime_contract = _runtime_git_contract(runtime)
+        if runtime_contract is None:
+            return invalid
+        present = False
+        for path, activation_id in sorted(paths, key=lambda item: item[0].name):
+            safe_path = _assert_no_reparse_components(path)
+            details = safe_path.lstat()
+            if (
+                safe_path.parent != safe_root
+                or not stat.S_ISREG(details.st_mode)
+                or details.st_size > MAX_AUXILIARY_ACTIVATION_RECEIPT_BYTES
+            ):
+                return invalid
+            payload = load_receipt(safe_path)
+            if not isinstance(payload, dict) or payload.get("activation_id") != activation_id:
+                return invalid
+            exact_runtime = (
+                payload.get("schema_version") == "dawnstrike.runtime_activation_receipt.v2"
+                and payload.get("status") == "COMPLETE"
+                and payload.get("candidate_sha") == runtime_contract["candidate_sha"]
+                and payload.get("candidate_tree") == runtime_contract["candidate_tree"]
+                and payload.get("runtime_origin_sha256")
+                == runtime_contract["runtime_origin_sha256"]
+            )
+            if exact_runtime and (
+                payload.get("state_preparation_contract") == AUXILIARY_SIDECAR_CONTRACT
+                and payload.get("auxiliary_capture_present") is True
+            ):
+                present = True
+        if _runtime_git_contract(runtime) != runtime_contract:
+            return invalid
+        return {"present": present, "valid": True, "reason": ""}
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError):
+        return invalid
+
+
 def _runtime_git_sha(runtime: Path) -> str | None:
     return _runtime_git_value(runtime, "HEAD")
 
@@ -965,8 +1052,11 @@ def _runtime_git_clean(runtime: Path) -> bool:
             env=_governed_git_environment(),
             timeout=SCHEDULER_QUERY_TIMEOUT_SECONDS,
         )
+        # ``git ls-files -v`` reports ordinary tracked files with an uppercase
+        # ``H``.  Only the lowercase assume-unchanged form and either
+        # skip-worktree form weaken the clean-check contract.
         if any(
-            entry and entry[:1] in {b"h", b"H", b"s", b"S"}
+            entry and entry[:1] in {b"h", b"s", b"S"}
             for entry in flags.stdout.split(b"\0")
         ):
             return False
