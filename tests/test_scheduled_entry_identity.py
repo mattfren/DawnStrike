@@ -119,7 +119,7 @@ def test_bootstrap_rejects_replace_refs_filters_and_dependency_reparse_points() 
     text = (ROOT / "scripts" / "dawnstrike_python_bootstrap.py").read_text(encoding="utf-8")
     assert '"GIT_NO_REPLACE_OBJECTS": "1"' in text
     assert '"replace", "-l"' in text
-    assert "contains a Git execution/filter configuration" in text
+    assert "contains a Git execution or transport configuration" in text
     assert "FILE_ATTRIBUTE_REPARSE_POINT" in text
 
     dependency = ROOT / "tests" / "_identity_dependency_target"

@@ -53,30 +53,115 @@ function Assert-DawnstrikeActivationSourceAdmission {
     if ($gitHash -cne '37c5725818d602e951ba2563b870d62763322956b73373da4c33a0b566a80bc9') {
         throw 'Activation source admission rejected an unapproved Git executable.'
     }
+    # Inspect the repository-local configuration before invoking Git at all.
+    # A candidate-controlled filter, attributes file, or hook path must never
+    # participate in the identity proof (including fetch).
+    $gitMetadata = Join-Path $root '.git'
+    $gitPointerPath = $null
+    if (Test-Path -LiteralPath $gitMetadata -PathType Leaf) {
+        $gitPointerPath = $gitMetadata
+        $gitPointer = Get-Content -Raw -LiteralPath $gitMetadata -ErrorAction Stop
+        if ($gitPointer -notmatch '(?s)^\s*gitdir:\s*([^\r\n]+?)\s*$') {
+            throw 'Activation source admission found an invalid Git worktree pointer.'
+        }
+        $gitPointerValue = $Matches[1].Trim()
+        $gitMetadata = if ([IO.Path]::IsPathRooted($gitPointerValue)) {
+            [IO.Path]::GetFullPath($gitPointerValue)
+        }
+        else { [IO.Path]::GetFullPath((Join-Path $root $gitPointerValue)) }
+    }
+    if (-not (Test-Path -LiteralPath $gitMetadata -PathType Container)) {
+        throw 'Activation source admission cannot resolve the Git metadata directory.'
+    }
+    $gitCommonDirectory = $gitMetadata
+    $commonDirPath = Join-Path $gitMetadata 'commondir'
+    if (Test-Path -LiteralPath $commonDirPath -PathType Leaf) {
+        $commonDir = Get-Content -Raw -LiteralPath $commonDirPath -ErrorAction Stop
+        if ($commonDir -notmatch '(?s)^\s*([^\r\n]+?)\s*$') {
+            throw 'Activation source admission found an invalid Git common-dir pointer.'
+        }
+        $commonDirValue = $Matches[1].Trim()
+        $gitCommonDirectory = if ([IO.Path]::IsPathRooted($commonDirValue)) {
+            [IO.Path]::GetFullPath($commonDirValue)
+        }
+        else { [IO.Path]::GetFullPath((Join-Path $gitMetadata $commonDirValue)) }
+    }
+    if (-not (Test-Path -LiteralPath $gitCommonDirectory -PathType Container)) {
+        throw 'Activation source admission cannot resolve the Git common directory.'
+    }
+    foreach ($attributesPath in @(
+        (Join-Path $gitMetadata 'info\attributes'),
+        (Join-Path $gitCommonDirectory 'info\attributes')
+    ) | Select-Object -Unique) {
+        if (Test-Path -LiteralPath $attributesPath) {
+            throw 'Activation source admission rejected an ungoverned Git attributes file.'
+        }
+    }
+    $configPath = Join-Path $gitCommonDirectory 'config'
+    if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
+        throw 'Activation source admission cannot read the local Git configuration.'
+    }
+    $configPaths = @($configPath)
+    $configTexts = @(Get-Content -Raw -LiteralPath $configPath -ErrorAction Stop)
+    foreach ($configDirectory in @(@($gitMetadata, $gitCommonDirectory) | Select-Object -Unique)) {
+        $worktreeConfigPath = Join-Path $configDirectory 'config.worktree'
+        if (Test-Path -LiteralPath $worktreeConfigPath -PathType Leaf) {
+            $configPaths += $worktreeConfigPath
+            $configTexts += Get-Content -Raw -LiteralPath $worktreeConfigPath -ErrorAction Stop
+        }
+    }
+    $localConfig = $configTexts -join "`n"
+    if ($localConfig -match '(?im)^\s*\[\s*(?:filter|url|protocol|include|credential|http)(?:\s|\])|^\s*(?:attributesfile|hookspath|path|sshcommand|proxy|helper|command)\s*=') {
+        throw 'Activation source admission rejected a local Git execution/filter configuration.'
+    }
     $safeEnvironment = @{}
     foreach ($entry in @(Get-ChildItem Env:)) {
         if ($entry.Name -notlike 'GIT_*') { $safeEnvironment[$entry.Name] = [string]$entry.Value }
     }
     $safeEnvironment.GIT_CONFIG_NOSYSTEM = '1'
+    $safeEnvironment.GIT_CONFIG_SYSTEM = 'NUL'
     $safeEnvironment.GIT_CONFIG_GLOBAL = 'NUL'
     $safeEnvironment.GIT_NO_REPLACE_OBJECTS = '1'
     $safeEnvironment.GIT_TERMINAL_PROMPT = '0'
     $safeEnvironment.GIT_OPTIONAL_LOCKS = '0'
+    $safeEnvironment.GIT_ATTR_NOSYSTEM = '1'
     $originalGitEnvironment = @{}
     foreach ($entry in @(Get-ChildItem Env: | Where-Object { $_.Name -like 'GIT_*' })) {
         $originalGitEnvironment[[string]$entry.Name] = [string]$entry.Value
     }
-    $gitArgs = @('-c', 'core.autocrlf=true', '-c', 'core.fsmonitor=false', '-C', $root)
+    $gitArgs = @(
+        '-c', 'core.autocrlf=true', '-c', 'core.fsmonitor=false',
+        '-c', 'core.hooksPath=NUL', '-c', 'core.attributesFile=NUL',
+        '-C', $root
+    )
     $relativeFiles = @(
+        '.gitattributes',
         'scripts/activate_dawnstrike_runtime.ps1',
         'scripts/dawnstrike_process_runner.ps1',
         'scripts/dawnstrike_job_process.ps1',
         'scripts/runtime_activation_lock.ps1',
+        'scripts/runtime_activation_lock_contract.py',
+        'scripts/runtime_operation_journal.py',
+        'scripts/runtime_activation_contract.py',
+        'scripts/dawnstrike_python_bootstrap.py',
+        'scripts/state_disaster_recovery.py',
         'scripts/capture_task_safety.ps1',
         'scripts/invoke_dawnstrike_stage.ps1'
     )
     $locks = @()
     try {
+        $metadataFiles = @($configPaths)
+        if ($null -ne $gitPointerPath) { $metadataFiles += $gitPointerPath }
+        if (Test-Path -LiteralPath $commonDirPath -PathType Leaf) { $metadataFiles += $commonDirPath }
+        foreach ($metadataPath in @($metadataFiles | Select-Object -Unique)) {
+            $metadataItem = Get-Item -LiteralPath $metadataPath -Force -ErrorAction Stop
+            if ($metadataItem.PSIsContainer -or ($metadataItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'Activation Git metadata contains a non-regular file.'
+            }
+            $locks += [IO.File]::Open(
+                $metadataPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read
+            )
+        }
         foreach ($entry in @(Get-ChildItem Env: | Where-Object { $_.Name -like 'GIT_*' })) {
             Remove-Item -LiteralPath ("Env:" + [string]$entry.Name) -ErrorAction SilentlyContinue
         }
@@ -96,10 +181,12 @@ function Assert-DawnstrikeActivationSourceAdmission {
             $stream = [IO.File]::Open($full, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
             $locks += $stream
             $headBlob = ((& $git @gitArgs rev-parse ("HEAD:" + $relative) 2>$null) -join '').Trim().ToLowerInvariant()
-            $worktreeBlob = ((& $git @gitArgs hash-object ("--path=" + $relative) -- $full 2>$null) -join '').Trim().ToLowerInvariant()
+            $rawBlob = ((& $git @gitArgs hash-object --no-filters -- $full 2>$null) -join '').Trim().ToLowerInvariant()
+            $worktreeBlob = Get-DawnstrikeGitBlobSha1 $full
             if ($LASTEXITCODE -ne 0 -or $headBlob -notmatch '^[0-9a-f]{40}$' -or $worktreeBlob -cne $headBlob) {
                 throw "Activation helper is not byte-bound to candidate HEAD: $relative"
             }
+            if ($rawBlob -notmatch '^[0-9a-f]{40}$') { throw "Activation helper raw bytes could not be hashed: $relative" }
         }
         return $locks
     }
@@ -398,10 +485,12 @@ function Invoke-DawnstrikeActivationProcess {
         $environment = @{ PYTHONDONTWRITEBYTECODE = "1" }
         if ($isGitProcess) {
             $environment.GIT_CONFIG_NOSYSTEM = "1"
+            $environment.GIT_CONFIG_SYSTEM = "NUL"
             $environment.GIT_CONFIG_GLOBAL = "NUL"
             $environment.GIT_TERMINAL_PROMPT = "0"
             $environment.GIT_OPTIONAL_LOCKS = "0"
             $environment.GIT_NO_REPLACE_OBJECTS = "1"
+            $environment.GIT_ATTR_NOSYSTEM = "1"
         }
         $result = Invoke-DawnstrikeJobProcess `
             -FilePath $FilePath `
@@ -508,9 +597,20 @@ function Get-DawnstrikeGitValue {
         [Parameter(Mandatory = $true)][int]$TimeoutSeconds
     )
 
+    $safeArguments = @(
+        '-c', 'core.autocrlf=true', '-c', 'core.hooksPath=NUL',
+        '-c', 'core.attributesFile=NUL', '-c', 'core.fsmonitor=false',
+        '-c', 'core.untrackedCache=false', '-C', $Root
+    ) + @($Arguments)
+    if ($Arguments.Count -ge 1 -and $Arguments[0] -eq 'hash-object' -and
+        $safeArguments -notcontains '--no-filters') {
+        $safeArguments = @($safeArguments[0..($safeArguments.Count - 1)])
+        $hashIndex = [array]::IndexOf([object[]]$safeArguments, 'hash-object')
+        $safeArguments = @($safeArguments[0..$hashIndex]) + @('--no-filters') + @($safeArguments | Select-Object -Skip ($hashIndex + 1))
+    }
     $result = Invoke-DawnstrikeActivationProcess `
         -FilePath $GitPath `
-        -ArgumentList (@("-c", "core.autocrlf=true", "-C", $Root) + $Arguments) `
+        -ArgumentList $safeArguments `
         -WorkingDirectory $Root `
         -Label $Label `
         -TimeoutSeconds $TimeoutSeconds
@@ -527,8 +627,50 @@ function Get-DawnstrikeGitContract {
     )
 
     $gitDirectory = Join-Path $Root ".git"
+    if (Test-Path -LiteralPath $gitDirectory -PathType Leaf) {
+        $pointer = Get-Content -Raw -LiteralPath $gitDirectory -ErrorAction Stop
+        if ($pointer -notmatch '(?s)^\s*gitdir:\s*([^\r\n]+?)\s*$') {
+            throw "Runtime activation found an invalid Git worktree pointer."
+        }
+        $gitPointerValue = $Matches[1].Trim()
+        $gitDirectory = if ([IO.Path]::IsPathRooted($gitPointerValue)) {
+            [IO.Path]::GetFullPath($gitPointerValue)
+        }
+        else { [IO.Path]::GetFullPath((Join-Path $Root $gitPointerValue)) }
+    }
     if (-not (Test-Path -LiteralPath $gitDirectory -PathType Container)) {
         throw "Runtime activation accepts only a self-contained Git checkout."
+    }
+    $gitCommonDirectory = $gitDirectory
+    $commonDirPath = Join-Path $gitDirectory "commondir"
+    if (Test-Path -LiteralPath $commonDirPath -PathType Leaf) {
+        $commonDir = Get-Content -Raw -LiteralPath $commonDirPath -ErrorAction Stop
+        if ($commonDir -notmatch '(?s)^\s*([^\r\n]+?)\s*$') {
+            throw "Runtime activation found an invalid Git common-dir pointer."
+        }
+        $commonDirValue = $Matches[1].Trim()
+        $gitCommonDirectory = if ([IO.Path]::IsPathRooted($commonDirValue)) {
+            [IO.Path]::GetFullPath($commonDirValue)
+        }
+        else { [IO.Path]::GetFullPath((Join-Path $gitDirectory $commonDirValue)) }
+    }
+    if (-not (Test-Path -LiteralPath $gitCommonDirectory -PathType Container)) {
+        throw "Git checkout common directory is missing."
+    }
+    $localConfigPath = Join-Path $gitCommonDirectory "config"
+    if (-not (Test-Path -LiteralPath $localConfigPath -PathType Leaf)) {
+        throw "Git checkout local configuration is missing."
+    }
+    $configTexts = @(Get-Content -Raw -LiteralPath $localConfigPath)
+    foreach ($configDirectory in @(@($gitDirectory, $gitCommonDirectory) | Select-Object -Unique)) {
+        $worktreeConfigPath = Join-Path $configDirectory "config.worktree"
+        if (Test-Path -LiteralPath $worktreeConfigPath -PathType Leaf) {
+            $configTexts += Get-Content -Raw -LiteralPath $worktreeConfigPath
+        }
+    }
+    $localConfig = $configTexts -join "`n"
+    if ($localConfig -match "(?im)^\s*\[\s*(?:filter|url|protocol|include|credential|http)(?:\s|\])|^\s*(?:attributesfile|hookspath|path|sshcommand|proxy|helper|command)\s*=") {
+        throw "Git checkout contains a local execution or transport configuration."
     }
     $top = Get-DawnstrikeGitValue $GitPath $Root @("rev-parse", "--show-toplevel") "Git root verification" $TimeoutSeconds
     if (-not [string]::Equals(
@@ -572,14 +714,6 @@ function Get-DawnstrikeGitContract {
     $replacements = Get-DawnstrikeGitValue $GitPath $Root @("replace", "-l") "Git replace-ref verification" $TimeoutSeconds
     if ($replacements) {
         throw "Git checkout contains replace refs; activation cannot trust the object identity."
-    }
-    $localConfigPath = Join-Path $gitDirectory "config"
-    if (-not (Test-Path -LiteralPath $localConfigPath -PathType Leaf)) {
-        throw "Git checkout local configuration is missing."
-    }
-    $localConfig = Get-Content -Raw -LiteralPath $localConfigPath
-    if ($localConfig -match "(?im)^\s*\[\s*filter(?:\s|\])|^\s*(?:attributesfile|hookspath|path)\s*=") {
-        throw "Git checkout contains a local execution/filter configuration."
     }
     $ignored = Get-DawnstrikeGitValue $GitPath $Root @("ls-files", "--others", "--ignored", "--exclude-standard", "-z") "Ignored runtime artifact verification" $TimeoutSeconds
     $forbiddenIgnored = @(
@@ -636,7 +770,8 @@ function Assert-DawnstrikeHelpersBoundToHead {
         if ($headBlob -notmatch "^[0-9a-f]{40}$") {
             throw "Release helper is not tracked by the exact HEAD: $relative"
         }
-        $worktreeBlob = Get-DawnstrikeGitValue $GitPath $Root @("hash-object", ("--path=" + $relative), "--", $path) "Release helper worktree binding" $TimeoutSeconds
+        $null = Get-DawnstrikeGitValue $GitPath $Root @("hash-object", "--no-filters", "--", $path) "Release helper raw worktree binding" $TimeoutSeconds
+        $worktreeBlob = Get-DawnstrikeGitBlobSha1 $path
         if ($worktreeBlob -cne $headBlob) {
             throw "Release helper bytes do not match exact HEAD: $relative"
         }
@@ -684,7 +819,7 @@ function Get-DawnstrikeCanonicalTaskPolicy {
         $safeTask = [IO.Path]::GetFileName($runner)
         $LaunchManifestPath = Join-Path $state ("receipts\scheduler-launch\" + $ExpectedSha.ToLowerInvariant() + "-" + $safeTask + ".json")
         if (Test-Path -LiteralPath $LaunchManifestPath -PathType Leaf) {
-            $LaunchManifestSha256 = (Get-FileHash -LiteralPath $LaunchManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            $LaunchManifestSha256 = Get-DawnstrikeSha256File $LaunchManifestPath
         }
     }
     if ($ExpectedSha -and $LaunchManifestPath -and $LaunchManifestSha256) {
@@ -963,9 +1098,10 @@ function Get-DawnstrikeStatePreparationDeclaration {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         throw "State-preparation declaration is missing from the exact candidate checkout."
     }
-    $workingBlobSha = (Get-DawnstrikeGitValue $GitPath $CandidateRoot @(
-        "hash-object", ("--path={0}" -f $relativePath), "--", $path
-    ) "State-preparation declaration working-tree binding" $TimeoutSeconds).ToLowerInvariant()
+    $null = Get-DawnstrikeGitValue $GitPath $CandidateRoot @(
+        "hash-object", "--no-filters", "--", $path
+    ) "State-preparation declaration working-tree binding" $TimeoutSeconds
+    $workingBlobSha = Get-DawnstrikeGitBlobSha1 $path
     if ($workingBlobSha -ne $declarationBlobSha) {
         throw "State-preparation declaration bytes do not match the exact candidate commit."
     }
@@ -986,9 +1122,10 @@ function Get-DawnstrikeStatePreparationDeclaration {
     # reread the path with ConvertFrom-Json: a concurrent replacement between
     # reads would otherwise create a time-of-check/time-of-use gap.
     $declaration = $validated
-    $workingBlobAfterValidation = (Get-DawnstrikeGitValue $GitPath $CandidateRoot @(
-        "hash-object", ("--path={0}" -f $relativePath), "--", $path
-    ) "State-preparation declaration post-validation binding" $TimeoutSeconds).ToLowerInvariant()
+    $null = Get-DawnstrikeGitValue $GitPath $CandidateRoot @(
+        "hash-object", "--no-filters", "--", $path
+    ) "State-preparation declaration raw post-validation binding" $TimeoutSeconds
+    $workingBlobAfterValidation = Get-DawnstrikeGitBlobSha1 $path
     if ($workingBlobAfterValidation -ne $declarationBlobSha) {
         throw "State-preparation declaration changed during strict validation."
     }
@@ -1679,6 +1816,7 @@ function Assert-DawnstrikeTaskXmlBackup {
     }
     $records = @()
     $definitionRecords = @()
+    $actionRecords = @()
     for ($index = 0; $index -lt $entries.Count; $index += 1) {
         $entry = $entries[$index]
         $expectedName = $script:DawnstrikeCanonicalTaskNames[$index]
@@ -1714,6 +1852,29 @@ function Assert-DawnstrikeTaskXmlBackup {
         $records += "$expectedName`0$([string]$entry.xml_sha256)`n"
         $definition = Get-DawnstrikeTaskDefinitionText $xml
         $definitionRecords += "$expectedName`0$(Get-DawnstrikeSha256Text $definition)`n"
+        try {
+            $document = [System.Xml.XmlDocument]::new()
+            $document.PreserveWhitespace = $true
+            $document.LoadXml($xml)
+            $actions = @($document.SelectNodes("//*[local-name()='Actions']"))
+            if ($actions.Count -ne 1) { throw "expected exactly one Actions section" }
+            $exec = @($actions[0].ChildNodes | Where-Object { $_.LocalName -eq "Exec" })
+            if ($exec.Count -ne 1) { throw "expected exactly one Exec action" }
+            $command = @($exec[0].ChildNodes | Where-Object { $_.LocalName -eq "Command" })
+            $arguments = @($exec[0].ChildNodes | Where-Object { $_.LocalName -eq "Arguments" })
+            $working = @($exec[0].ChildNodes | Where-Object { $_.LocalName -eq "WorkingDirectory" })
+            if ($command.Count -ne 1 -or $arguments.Count -ne 1 -or $working.Count -ne 1) {
+                throw "Exec action is incomplete"
+            }
+            $backupActionText = "{0}|{1}|{2}" -f `
+                $command[0].InnerText, $arguments[0].InnerText, $working[0].InnerText
+            $backupTaskPath = [string]$entry.task_path
+            if ([string]::IsNullOrWhiteSpace($backupTaskPath)) { $backupTaskPath = "\" }
+            $actionRecords += "$expectedName`0$backupTaskPath`0$backupActionText`n"
+        }
+        catch {
+            throw "Scheduler XML backup task action is invalid: $expectedName"
+        }
     }
     if ((Get-DawnstrikeSha256Text ($records -join "")) -ne $ExpectedTaskContractSha256) {
         throw "Scheduler XML backup files do not reproduce the task contract hash."
@@ -1724,6 +1885,31 @@ function Assert-DawnstrikeTaskXmlBackup {
     ) {
         throw "Scheduler XML backup files do not reproduce the task definition hash."
     }
+    if ((Get-DawnstrikeSha256Text ($actionRecords -join "")) -ne $ExpectedTaskActionContractSha256) {
+        throw "Scheduler XML backup files do not reproduce the task action hash."
+    }
+}
+
+function Get-DawnstrikeGitBlobSha1 {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $raw = [IO.File]::ReadAllBytes($Path)
+    $normalized = New-Object byte[] $raw.Length
+    $count = 0
+    for ($index = 0; $index -lt $raw.Length; $index++) {
+        if ($raw[$index] -eq 13 -and $index + 1 -lt $raw.Length -and $raw[$index + 1] -eq 10) {
+            $normalized[$count] = 10; $count++; $index++
+        } else { $normalized[$count] = $raw[$index]; $count++ }
+    }
+    $body = New-Object byte[] $count
+    [Array]::Copy($normalized, $body, $count)
+    $header = [Text.Encoding]::ASCII.GetBytes("blob $count`0")
+    $payload = New-Object byte[] ($header.Length + $body.Length)
+    [Array]::Copy($header, 0, $payload, 0, $header.Length)
+    [Array]::Copy($body, 0, $payload, $header.Length, $body.Length)
+    $sha = [Security.Cryptography.SHA1]::Create()
+    try { return ([BitConverter]::ToString($sha.ComputeHash($payload))).Replace('-', '').ToLowerInvariant() }
+    finally { $sha.Dispose() }
 }
 
 function Assert-DawnstrikeReceiptRecoveryArtifacts {
@@ -2043,6 +2229,124 @@ function Set-DawnstrikeCanonicalTaskExpectedSha {
         $action = New-ScheduledTaskAction -Execute $script:DawnstrikePowerShellExecutable -Argument ([string]$policy.arguments) -WorkingDirectory $RuntimeRoot
         Set-ScheduledTask -TaskName $taskName -TaskPath ([string]$matches[0].TaskPath) -Action $action -ErrorAction Stop | Out-Null
     }
+}
+
+function Restore-DawnstrikeCanonicalTasksFromXmlBackup {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot,
+        [Parameter(Mandatory = $true)][string]$StateRoot,
+        [Parameter(Mandatory = $true)][string]$BackupName,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')][string]$ExpectedManifestSha256,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')][string]$ExpectedTaskContractSha256,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')][string]$ExpectedTaskDefinitionContractSha256,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')][string]$ExpectedTaskActionContractSha256,
+        [switch]$EnableAfterRestore
+    )
+
+    # The XML backup is the only compatible source for a previous runtime.  In
+    # particular, do not call Set-DawnstrikeCanonicalTaskExpectedSha here: a
+    # legacy runtime may not have the guarded runner/lock helpers that function
+    # requires.  Set-ScheduledTask -Action changes only the action, preserving
+    # the previously installed principal, triggers, and settings.
+    $manifest = Assert-DawnstrikeTaskXmlBackup `
+        -StateRoot $StateRoot -BackupName $BackupName `
+        -ExpectedManifestSha256 $ExpectedManifestSha256 `
+        -ExpectedTaskContractSha256 $ExpectedTaskContractSha256 `
+        -ExpectedTaskDefinitionContractSha256 $ExpectedTaskDefinitionContractSha256 `
+        -ExpectedTaskActionContractSha256 $ExpectedTaskActionContractSha256
+    $backupPath = Join-Path $StateRoot "scheduler-backups\$BackupName"
+    $entries = @($manifest.tasks)
+    foreach ($taskName in $script:DawnstrikeCanonicalTaskNames) {
+        $entry = @($entries | Where-Object { [string]$_.task_name -ceq $taskName })
+        if ($entry.Count -ne 1) { throw "Scheduler XML backup task entry is not unique: $taskName" }
+        $entry = $entry[0]
+        $taskPath = [string]$entry.task_path
+        if ([string]::IsNullOrWhiteSpace($taskPath)) { $taskPath = "\" }
+        $xmlPath = Join-Path $backupPath ([string]$entry.file_name)
+        Assert-DawnstrikeNoReparseComponents $xmlPath "Scheduler task XML backup"
+        $backupXml = [System.IO.File]::ReadAllText($xmlPath)
+        $backupDocument = [System.Xml.XmlDocument]::new()
+        $backupDocument.PreserveWhitespace = $true
+        $backupDocument.LoadXml($backupXml)
+        $backupSections = @{}
+        foreach ($sectionName in @("Principal", "Triggers", "Settings", "Actions")) {
+            $nodes = @($backupDocument.SelectNodes("//*[local-name()='$sectionName']"))
+            if ($nodes.Count -ne 1) { throw "Scheduler XML backup has an ambiguous $sectionName section: $taskName" }
+            $backupSections[$sectionName] = [string]$nodes[0].OuterXml
+        }
+        $exec = @($backupDocument.SelectNodes("//*[local-name()='Actions']")[0].ChildNodes | Where-Object { $_.LocalName -eq "Exec" })
+        if ($exec.Count -ne 1) { throw "Scheduler XML backup must contain exactly one Exec action: $taskName" }
+        $command = @($exec[0].ChildNodes | Where-Object { $_.LocalName -eq "Command" })
+        $arguments = @($exec[0].ChildNodes | Where-Object { $_.LocalName -eq "Arguments" })
+        $working = @($exec[0].ChildNodes | Where-Object { $_.LocalName -eq "WorkingDirectory" })
+        if ($command.Count -ne 1 -or $arguments.Count -ne 1 -or $working.Count -ne 1) {
+            throw "Scheduler XML backup Exec action is incomplete: $taskName"
+        }
+
+        $matches = @(Get-ScheduledTask -TaskName $taskName -ErrorAction Stop)
+        if ($matches.Count -ne 1 -or [string]$matches[0].State -ne "Disabled") {
+            throw "Canonical task must be uniquely Disabled before XML action restore: $taskName"
+        }
+        $currentPath = [string]$matches[0].TaskPath
+        if ([string]::IsNullOrWhiteSpace($currentPath)) { $currentPath = "\" }
+        if ($currentPath -cne $taskPath) { throw "Canonical task path changed before XML action restore: $taskName" }
+        $beforeXml = [string](Export-ScheduledTask -TaskName $taskName -TaskPath $currentPath -ErrorAction Stop)
+        $beforeDocument = [System.Xml.XmlDocument]::new()
+        $beforeDocument.PreserveWhitespace = $true
+        $beforeDocument.LoadXml($beforeXml)
+        $beforeSections = @{}
+        foreach ($sectionName in @("Principal", "Triggers", "Settings")) {
+            $nodes = @($beforeDocument.SelectNodes("//*[local-name()='$sectionName']"))
+            if ($nodes.Count -ne 1) { throw "Current task has an ambiguous $sectionName section: $taskName" }
+            $beforeSections[$sectionName] = [string]$nodes[0].OuterXml
+        }
+        $restoreAction = New-ScheduledTaskAction `
+            -Execute ([string]$command[0].InnerText) `
+            -Argument ([string]$arguments[0].InnerText) `
+            -WorkingDirectory ([string]$working[0].InnerText)
+        Set-ScheduledTask -TaskName $taskName -TaskPath $currentPath -Action @($restoreAction) -ErrorAction Stop | Out-Null
+        $afterXml = [string](Export-ScheduledTask -TaskName $taskName -TaskPath $currentPath -ErrorAction Stop)
+        $afterDocument = [System.Xml.XmlDocument]::new()
+        $afterDocument.PreserveWhitespace = $true
+        $afterDocument.LoadXml($afterXml)
+        foreach ($sectionName in @("Principal", "Triggers", "Settings")) {
+            $nodes = @($afterDocument.SelectNodes("//*[local-name()='$sectionName']"))
+            if ($nodes.Count -ne 1 -or [string]$nodes[0].OuterXml -cne [string]$beforeSections[$sectionName]) {
+                throw "Canonical task $sectionName changed during XML action restore: $taskName"
+            }
+        }
+        $afterActions = @($afterDocument.SelectNodes("//*[local-name()='Actions']"))
+        $afterExec = if ($afterActions.Count -eq 1) { @($afterActions[0].ChildNodes | Where-Object { $_.LocalName -eq "Exec" }) } else { @() }
+        if ($afterExec.Count -ne 1) { throw "Canonical task action restore is ambiguous: $taskName" }
+        $afterCommand = @($afterExec[0].ChildNodes | Where-Object { $_.LocalName -eq "Command" })
+        $afterArguments = @($afterExec[0].ChildNodes | Where-Object { $_.LocalName -eq "Arguments" })
+        $afterWorking = @($afterExec[0].ChildNodes | Where-Object { $_.LocalName -eq "WorkingDirectory" })
+        if ($afterCommand.Count -ne 1 -or $afterArguments.Count -ne 1 -or $afterWorking.Count -ne 1 -or
+            [string]$afterCommand[0].InnerText -cne [string]$command[0].InnerText -or
+            [string]$afterArguments[0].InnerText -cne [string]$arguments[0].InnerText -or
+            [string]$afterWorking[0].InnerText -cne [string]$working[0].InnerText) {
+            throw "Canonical task action did not restore the exact sealed XML action: $taskName"
+        }
+    }
+    $disabled = Get-DawnstrikeTaskContract $RuntimeRoot $StateRoot -AllowDisabled
+    if ($disabled.disabled_count -ne $script:DawnstrikeCanonicalTaskNames.Count -or
+        $disabled.enabled_count -ne 0 -or
+        $disabled.task_definition_contract_sha256 -cne $ExpectedTaskDefinitionContractSha256 -or
+        $disabled.task_action_contract_sha256 -cne $ExpectedTaskActionContractSha256) {
+        throw "Canonical tasks do not match the sealed XML backup at the Disabled boundary."
+    }
+    if (-not $EnableAfterRestore) { return $disabled }
+    Enable-DawnstrikeCanonicalTasks
+    $ready = Get-DawnstrikeTaskContract $RuntimeRoot $StateRoot
+    if ($ready.enabled_count -ne $script:DawnstrikeCanonicalTaskNames.Count -or
+        $ready.disabled_count -ne 0 -or
+        $ready.task_contract_sha256 -cne $ExpectedTaskContractSha256 -or
+        $ready.task_definition_contract_sha256 -cne $ExpectedTaskDefinitionContractSha256 -or
+        $ready.task_action_contract_sha256 -cne $ExpectedTaskActionContractSha256) {
+        throw "Canonical tasks do not match the sealed XML backup at the Ready boundary."
+    }
+    return $ready
 }
 
 function Set-DawnstrikeTasksFailClosedDisabled {
@@ -2415,9 +2719,10 @@ function Assert-DawnstrikeCaptureHardeningAttestation {
         $headBootstrap = Get-DawnstrikeGitValue $GitPath $CandidateRoot @(
             "rev-parse", ("{0}:{1}" -f $CandidateSha, $bootstrapRelative)
         ) "Candidate hardening bootstrap HEAD binding" $TimeoutSeconds
-        $workingBootstrap = Get-DawnstrikeGitValue $GitPath $CandidateRoot @(
-            "hash-object", ("--path={0}" -f $bootstrapRelative), "--", $candidateBootstrap
-        ) "Candidate hardening bootstrap working-tree binding" $TimeoutSeconds
+        $null = Get-DawnstrikeGitValue $GitPath $CandidateRoot @(
+            "hash-object", "--no-filters", "--", $candidateBootstrap
+        ) "Candidate hardening bootstrap raw worktree binding" $TimeoutSeconds
+        $workingBootstrap = Get-DawnstrikeGitBlobSha1 $candidateBootstrap
         if ($headBootstrap -notmatch '^[0-9a-f]{40}$' -or $workingBootstrap -cne $headBootstrap) {
             throw "Candidate hardening bootstrap does not match the exact candidate HEAD."
         }
@@ -2842,6 +3147,13 @@ function Invoke-DawnstrikeRuntimeActivation {
     . (Join-Path $PSScriptRoot "dawnstrike_process_runner.ps1")
     $activationNowUtc = Get-DawnstrikeActivationNowUtc -TestNowUtc $TestNowUtc
 
+    # Resolve and govern the exact origin before the first network operation.
+    # Repository-local transport rewrites/helpers were rejected by the inline
+    # admission gate, whose config handles remain read-locked for this process.
+    $origin = Get-DawnstrikeGitValue $gitPath $candidate @("remote", "get-url", "origin") `
+        "Candidate pre-fetch origin verification" $ProcessTimeoutSeconds
+    Assert-DawnstrikeSafeOrigin $origin
+    $originIdentity = Convert-DawnstrikeCanonicalOriginIdentity $origin
     $null = Invoke-DawnstrikeActivationProcess `
         -FilePath $gitPath `
         -ArgumentList @("-C", $candidate, "fetch", "--quiet", "--prune", "origin", "+refs/heads/main:refs/remotes/origin/main") `
@@ -2861,9 +3173,9 @@ function Invoke-DawnstrikeRuntimeActivation {
         -TimeoutSeconds $ProcessTimeoutSeconds
     . (Join-Path $PSScriptRoot "invoke_dawnstrike_stage.ps1")
     $remoteMain = (Get-DawnstrikeGitValue $gitPath $candidate @("rev-parse", "refs/remotes/origin/main") "origin/main verification" $ProcessTimeoutSeconds).ToLowerInvariant()
-    $origin = Get-DawnstrikeGitValue $gitPath $candidate @("remote", "get-url", "origin") "Candidate origin verification" $ProcessTimeoutSeconds
-    Assert-DawnstrikeSafeOrigin $origin
-    $originIdentity = Convert-DawnstrikeCanonicalOriginIdentity $origin
+    $originAfterFetch = Get-DawnstrikeGitValue $gitPath $candidate @("remote", "get-url", "origin") "Candidate post-fetch origin verification" $ProcessTimeoutSeconds
+    if ($originAfterFetch -cne $origin) { throw "Candidate origin changed across the governed fetch." }
+    Assert-DawnstrikeSafeOrigin $originAfterFetch
     $advancedOriginRecovery = $null
     if ($remoteMain -ne $ExpectedSha) {
         $recoveryInterpreter = Get-DawnstrikeApprovedLockInterpreter
@@ -4569,7 +4881,7 @@ function Invoke-DawnstrikeRuntimeActivation {
                 }
                 catch {
                     $preserveLocks = $true
-                    throw "Runtime activation failed and exact task quiescence could not be proven; runtime recovery was not attempted."
+                    throw "Runtime activation failed and exact task quiescence could not be proven; runtime recovery was not attempted. Cause: $($_.Exception.Message)"
                 }
             }
             if ($swapStarted -or $tasksDisabled) {
@@ -4616,11 +4928,14 @@ function Invoke-DawnstrikeRuntimeActivation {
                                 -RunAsCredential $RunAsCredential
                             $auxiliaryDisabled = $false
                         }
-                        $null = Assert-DawnstrikeCanonicalTaskSemantics -RuntimeRoot $runtime -StateRoot $state -AllowDisabled
-                        Set-DawnstrikeCanonicalTaskExpectedSha -RuntimeRoot $runtime -StateRoot $state -ExpectedSha ([string]$runtimeContract.head)
-                        Enable-DawnstrikeCanonicalTasks
-                        $restoredTasks = Get-DawnstrikeTaskContract $runtime $state
-                        $null = Assert-DawnstrikeCanonicalTaskSemantics -RuntimeRoot $runtime -StateRoot $state -ExpectedSha ([string]$runtimeContract.head)
+                        $restoredTasks = Restore-DawnstrikeCanonicalTasksFromXmlBackup `
+                            -RuntimeRoot $runtime -StateRoot $state `
+                            -BackupName $taskBackup.backup_name `
+                            -ExpectedManifestSha256 $taskBackup.manifest_sha256 `
+                            -ExpectedTaskContractSha256 ([string]$taskLocked.task_contract_sha256) `
+                            -ExpectedTaskDefinitionContractSha256 ([string]$taskLocked.task_definition_contract_sha256) `
+                            -ExpectedTaskActionContractSha256 ([string]$taskLocked.task_action_contract_sha256) `
+                            -EnableAfterRestore
                         $tasksDisabled = $false
                     }
                 }

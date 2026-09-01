@@ -1,16 +1,42 @@
 Set-StrictMode -Version Latest
 $script:DawnstrikeExpectedReleaseSha = ""
+$script:DawnstrikeScheduledSourceLocks = @()
 
 # Every scheduled child is launched through the native Job Object runner.  A
 # PowerShell process tree is not a sufficient ownership boundary on Windows:
 # detached Python/Node descendants can outlive the wrapper after a timeout.
 # Keep this import local so interactive callers get the same kill-on-close
 # contract without needing to know about the implementation helper.
-if (-not ("Dawnstrike.Native.JobProcessRunner" -as [type])) {
+if (
+    -not ("Dawnstrike.Native.JobProcessRunner" -as [type]) -or
+    -not (Get-Command Invoke-DawnstrikeJobProcess -ErrorAction SilentlyContinue)
+) {
     . (Join-Path $PSScriptRoot "dawnstrike_job_process.ps1")
 }
 if (-not (Get-Command Get-DawnstrikeApprovedLockInterpreter -ErrorAction SilentlyContinue)) {
     . (Join-Path $PSScriptRoot "runtime_activation_lock.ps1")
+}
+
+function Get-DawnstrikeGitBlobSha1 {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $raw = [IO.File]::ReadAllBytes($Path)
+    $normalized = New-Object byte[] $raw.Length
+    $count = 0
+    for ($index = 0; $index -lt $raw.Length; $index++) {
+        if ($raw[$index] -eq 13 -and $index + 1 -lt $raw.Length -and $raw[$index + 1] -eq 10) {
+            $normalized[$count] = 10; $count++; $index++
+        } else { $normalized[$count] = $raw[$index]; $count++ }
+    }
+    $body = New-Object byte[] $count
+    [Array]::Copy($normalized, $body, $count)
+    $header = [Text.Encoding]::ASCII.GetBytes("blob $count`0")
+    $payload = New-Object byte[] ($header.Length + $body.Length)
+    [Array]::Copy($header, 0, $payload, 0, $header.Length)
+    [Array]::Copy($body, 0, $payload, $header.Length, $body.Length)
+    $sha = [Security.Cryptography.SHA1]::Create()
+    try { return ([BitConverter]::ToString($sha.ComputeHash($payload))).Replace('-', '').ToLowerInvariant() }
+    finally { $sha.Dispose() }
 }
 
 function Assert-DawnstrikeProcessSourceBoundToHead {
@@ -23,26 +49,105 @@ function Assert-DawnstrikeProcessSourceBoundToHead {
 
     $root = [System.IO.Path]::GetFullPath($ReleaseRoot).TrimEnd('\')
     $gitDirectory = Join-Path $root ".git"
+    $gitPointerPath = $null
+    if (Test-Path -LiteralPath $gitDirectory -PathType Leaf) {
+        $gitPointerPath = $gitDirectory
+        $pointer = Get-Content -Raw -LiteralPath $gitDirectory -ErrorAction Stop
+        if ($pointer -notmatch '(?s)^\s*gitdir:\s*([^\r\n]+?)\s*$') {
+            throw "Scheduled Python release has an invalid Git worktree pointer."
+        }
+        $gitPointerValue = $Matches[1].Trim()
+        $gitDirectory = if ([System.IO.Path]::IsPathRooted($gitPointerValue)) {
+            [System.IO.Path]::GetFullPath($gitPointerValue)
+        }
+        else { [System.IO.Path]::GetFullPath((Join-Path $root $gitPointerValue)) }
+    }
     if (-not (Test-Path -LiteralPath $gitDirectory -PathType Container)) {
         throw "Scheduled Python release root is not a self-contained Git checkout."
+    }
+    # Read the repository-local configuration before invoking Git.  A
+    # candidate-controlled filter, attributes file, or hook path must not be
+    # allowed to influence the identity check.
+    $gitCommonDirectory = $gitDirectory
+    $commonDirPath = Join-Path $gitDirectory 'commondir'
+    if (Test-Path -LiteralPath $commonDirPath -PathType Leaf) {
+        $commonDir = Get-Content -Raw -LiteralPath $commonDirPath -ErrorAction Stop
+        if ($commonDir -notmatch '(?s)^\s*([^\r\n]+?)\s*$') {
+            throw "Scheduled Python release has an invalid Git common-dir pointer."
+        }
+        $commonDirValue = $Matches[1].Trim()
+        $gitCommonDirectory = if ([System.IO.Path]::IsPathRooted($commonDirValue)) {
+            [System.IO.Path]::GetFullPath($commonDirValue)
+        }
+        else { [System.IO.Path]::GetFullPath((Join-Path $gitDirectory $commonDirValue)) }
+    }
+    if (-not (Test-Path -LiteralPath $gitCommonDirectory -PathType Container)) {
+        throw "Scheduled Python release Git common directory is missing."
+    }
+    foreach ($attributesPath in @(
+        (Join-Path $gitDirectory 'info\attributes'),
+        (Join-Path $gitCommonDirectory 'info\attributes')
+    ) | Select-Object -Unique) {
+        if (Test-Path -LiteralPath $attributesPath) {
+            throw "Scheduled Python release contains an ungoverned Git attributes file."
+        }
+    }
+    $localConfigPath = Join-Path $gitCommonDirectory "config"
+    if (-not (Test-Path -LiteralPath $localConfigPath -PathType Leaf)) {
+        throw "Scheduled Python release local Git configuration is missing."
+    }
+    $configPaths = @($localConfigPath)
+    $configTexts = @(Get-Content -Raw -LiteralPath $localConfigPath -ErrorAction Stop)
+    foreach ($configDirectory in @(@($gitDirectory, $gitCommonDirectory) | Select-Object -Unique)) {
+        $worktreeConfigPath = Join-Path $configDirectory 'config.worktree'
+        if (Test-Path -LiteralPath $worktreeConfigPath -PathType Leaf) {
+            $configPaths += $worktreeConfigPath
+            $configTexts += Get-Content -Raw -LiteralPath $worktreeConfigPath -ErrorAction Stop
+        }
+    }
+    $localConfig = $configTexts -join "`n"
+    if ($localConfig -match "(?im)^\s*\[\s*(?:filter|url|protocol|include|credential|http)(?:\s|\])|^\s*(?:attributesfile|hookspath|path|sshcommand|proxy|helper|command)\s*=") {
+        throw "Scheduled Python release contains a Git execution/filter configuration."
     }
     $git = (Get-DawnstrikeApprovedGit).path
     # Windows checkouts may materialize committed LF blobs as CRLF.  Keep the
     # normal Git text normalization contract while disabling all external
     # filters/hooks; otherwise a clean, ordinary checkout is falsely rejected
     # as a byte-substituted release.
-    $gitArgs = @('-c', 'core.autocrlf=true', '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false', '-C', $root)
+    $gitArgs = @(
+        '-c', 'core.autocrlf=true', '-c', 'core.fsmonitor=false',
+        '-c', 'core.untrackedCache=false', '-c', 'core.hooksPath=NUL',
+        '-c', 'core.attributesFile=NUL', '-C', $root
+    )
     $savedGitEnvironment = @{}
     foreach ($entry in @(Get-ChildItem Env: | Where-Object { $_.Name -like 'GIT_*' })) {
         $savedGitEnvironment[[string]$entry.Name] = [string]$entry.Value
         Remove-Item -LiteralPath ("Env:" + [string]$entry.Name) -ErrorAction SilentlyContinue
     }
     try {
+        if ($null -eq $script:DawnstrikeScheduledSourceLocks) {
+            $script:DawnstrikeScheduledSourceLocks = @()
+        }
+        $metadataFiles = @($configPaths)
+        if ($null -ne $gitPointerPath) { $metadataFiles += $gitPointerPath }
+        if (Test-Path -LiteralPath $commonDirPath -PathType Leaf) { $metadataFiles += $commonDirPath }
+        foreach ($metadataPath in @($metadataFiles | Select-Object -Unique)) {
+            Assert-DawnstrikeSharedLockNoReparse $metadataPath "Scheduled Git metadata"
+            $metadataItem = Get-Item -LiteralPath $metadataPath -Force -ErrorAction Stop
+            if ($metadataItem.PSIsContainer -or ($metadataItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Scheduled Git metadata contains a non-regular file."
+            }
+            $script:DawnstrikeScheduledSourceLocks += [IO.File]::Open(
+                $metadataPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read
+            )
+        }
         $env:GIT_CONFIG_NOSYSTEM = '1'
+        $env:GIT_CONFIG_SYSTEM = 'NUL'
         $env:GIT_CONFIG_GLOBAL = 'NUL'
         $env:GIT_TERMINAL_PROMPT = '0'
         $env:GIT_OPTIONAL_LOCKS = '0'
         $env:GIT_NO_REPLACE_OBJECTS = '1'
+        $env:GIT_ATTR_NOSYSTEM = '1'
         $top = ((& $git @gitArgs rev-parse --show-toplevel 2>$null) -join '').Trim()
         if ($LASTEXITCODE -ne 0 -or [System.IO.Path]::GetFullPath($top).TrimEnd('\') -ine $root) {
             throw "Scheduled Python release root is not the exact Git root."
@@ -93,6 +198,7 @@ function Assert-DawnstrikeProcessSourceBoundToHead {
             throw "Scheduled Python release differs from exact HEAD."
         }
         foreach ($relative in @(
+            ".gitattributes",
             "scripts/dawnstrike_process_runner.ps1",
             "scripts/dawnstrike_job_process.ps1",
             "scripts/runtime_activation_lock.ps1",
@@ -100,15 +206,20 @@ function Assert-DawnstrikeProcessSourceBoundToHead {
         )) {
             $relative = $relative.Replace('\', '/')
             $path = Join-Path $root ($relative.Replace('/', '\'))
+            Assert-DawnstrikeSharedLockNoReparse $path "Scheduled Python helper"
             if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
                 throw "Scheduled Python helper is missing: $relative"
             }
+            $script:DawnstrikeScheduledSourceLocks += [IO.File]::Open(
+                $path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read
+            )
             $headBlob = ((& $git @gitArgs rev-parse ("HEAD:" + $relative) 2>$null) -join '').Trim().ToLowerInvariant()
             if ($LASTEXITCODE -ne 0 -or $headBlob -notmatch '^[0-9a-f]{40}$') {
                 throw "Scheduled Python helper is not tracked by exact HEAD: $relative"
             }
-            $worktree = ((& $git @gitArgs hash-object ("--path=" + $relative) -- $path 2>$null) -join '').Trim().ToLowerInvariant()
-            if ($LASTEXITCODE -ne 0 -or $worktree -cne $headBlob) {
+            $raw = ((& $git @gitArgs hash-object --no-filters -- $path 2>$null) -join '').Trim().ToLowerInvariant()
+            $worktree = Get-DawnstrikeGitBlobSha1 $path
+            if ($LASTEXITCODE -ne 0 -or $worktree -cne $headBlob -or $raw -notmatch '^[0-9a-f]{40}$') {
                 throw "Scheduled Python helper bytes changed from exact HEAD: $relative"
             }
         }
@@ -118,10 +229,12 @@ function Assert-DawnstrikeProcessSourceBoundToHead {
             if (-not $entryPath.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
                 throw "Scheduled entry script is outside the exact release root."
             }
+            Assert-DawnstrikeSharedLockNoReparse $entryPath "Scheduled entry script"
             $entryRelative = $entryPath.Substring($rootPrefix.Length).Replace('\', '/')
             $entryHeadBlob = ((& $git @gitArgs rev-parse ("HEAD:" + $entryRelative) 2>$null) -join '').Trim().ToLowerInvariant()
-            $entryWorktree = ((& $git @gitArgs hash-object ("--path=" + $entryRelative) -- $entryPath 2>$null) -join '').Trim().ToLowerInvariant()
-            if ($LASTEXITCODE -ne 0 -or $entryHeadBlob -notmatch '^[0-9a-f]{40}$' -or $entryWorktree -cne $entryHeadBlob) {
+            $entryRaw = ((& $git @gitArgs hash-object --no-filters -- $entryPath 2>$null) -join '').Trim().ToLowerInvariant()
+            $entryWorktree = Get-DawnstrikeGitBlobSha1 $entryPath
+            if ($LASTEXITCODE -ne 0 -or $entryHeadBlob -notmatch '^[0-9a-f]{40}$' -or $entryWorktree -cne $entryHeadBlob -or $entryRaw -notmatch '^[0-9a-f]{40}$') {
                 throw "Scheduled entry script bytes changed from exact HEAD."
             }
         }
@@ -137,7 +250,17 @@ function Assert-DawnstrikeProcessSourceBoundToHead {
 
 function Get-DawnstrikeScheduledLaunchFiles {
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][string]$TaskScript)
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet(
+            "run_alphaops_morning.ps1",
+            "run_alphaops_monitor.ps1",
+            "run_alphaops_eod.ps1",
+            "run_alphaops_weekly_training.ps1",
+            "run_daily_finalize.ps1"
+        )]
+        [string]$TaskScript
+    )
 
     $common = @(
         "scripts/$TaskScript",
@@ -145,6 +268,11 @@ function Get-DawnstrikeScheduledLaunchFiles {
         "scripts/dawnstrike_process_runner.ps1",
         "scripts/dawnstrike_job_process.ps1",
         "scripts/runtime_activation_lock.ps1",
+        "scripts/runtime_activation_lock_contract.py",
+        "scripts/runtime_operation_journal.py",
+        "scripts/runtime_activation_contract.py",
+        "scripts/dawnstrike_python_bootstrap.py",
+        "scripts/state_disaster_recovery.py",
         "scripts/invoke_dawnstrike_stage.ps1"
     )
     if ($TaskScript -in @("run_alphaops_morning.ps1", "run_alphaops_monitor.ps1")) {
@@ -152,6 +280,18 @@ function Get-DawnstrikeScheduledLaunchFiles {
     }
     if ($TaskScript -eq "run_alphaops_monitor.ps1") {
         $common += "scripts/monitor_schedule_helper.ps1"
+    }
+    if ($TaskScript -eq "run_daily_finalize.ps1") {
+        $common += @(
+            "scripts/publish_vercel_public.ps1",
+            "scripts/vercel_source_contract.ps1",
+            "scripts/vercel_toolchain_contract.py",
+            "scripts/vercel_publication_journal.py",
+            "scripts/publication_boundary.py",
+            "scripts/verify_daily_prepublication.py",
+            "scripts/build_vercel_public_stage.ps1",
+            "scripts/verify_vercel_candidate.ps1"
+        )
     }
     return @($common | Select-Object -Unique)
 }
@@ -173,7 +313,15 @@ function New-DawnstrikeScheduledLaunchManifest {
         [Parameter(Mandatory = $true)][string]$RuntimeRoot,
         [Parameter(Mandatory = $true)][string]$StateRoot,
         [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedSha,
-        [Parameter(Mandatory = $true)][string]$TaskScript
+        [Parameter(Mandatory = $true)]
+        [ValidateSet(
+            "run_alphaops_morning.ps1",
+            "run_alphaops_monitor.ps1",
+            "run_alphaops_eod.ps1",
+            "run_alphaops_weekly_training.ps1",
+            "run_daily_finalize.ps1"
+        )]
+        [string]$TaskScript
     )
 
     $runtime = [System.IO.Path]::GetFullPath($RuntimeRoot).TrimEnd('\')
@@ -183,8 +331,13 @@ function New-DawnstrikeScheduledLaunchManifest {
     New-Item -ItemType Directory -Path $root -Force | Out-Null
     $path = Join-Path $root ($ExpectedSha.ToLowerInvariant() + '-' + $safeTask + '.json')
     $entries = @()
+    $runtimePrefix = $runtime.TrimEnd('\') + '\'
     foreach ($relative in @(Get-DawnstrikeScheduledLaunchFiles -TaskScript $TaskScript)) {
-        $full = Join-Path $runtime ($relative.Replace('/', '\'))
+        $full = [IO.Path]::GetFullPath((Join-Path $runtime ($relative.Replace('/', '\'))))
+        if (-not $full.StartsWith($runtimePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Scheduled launch manifest entry escaped the runtime root: $relative"
+        }
+        Assert-DawnstrikeSharedLockNoReparse $full "Scheduled launch manifest entry"
         $item = Get-Item -LiteralPath $full -Force -ErrorAction Stop
         if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
             throw "Scheduled launch manifest entry is not a regular file: $relative"
@@ -220,7 +373,15 @@ function Assert-DawnstrikeScheduledLaunchManifest {
         [Parameter(Mandatory = $true)][string]$RuntimeRoot,
         [Parameter(Mandatory = $true)][string]$StateRoot,
         [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedSha,
-        [Parameter(Mandatory = $true)][string]$TaskScript,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet(
+            "run_alphaops_morning.ps1",
+            "run_alphaops_monitor.ps1",
+            "run_alphaops_eod.ps1",
+            "run_alphaops_weekly_training.ps1",
+            "run_daily_finalize.ps1"
+        )]
+        [string]$TaskScript,
         [Parameter(Mandatory = $true)][string]$ManifestPath,
         [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')][string]$ManifestSha256,
         [string]$EntryScript = ''
@@ -231,6 +392,7 @@ function Assert-DawnstrikeScheduledLaunchManifest {
     if (-not $manifest.StartsWith(([System.IO.Path]::GetFullPath($StateRoot).TrimEnd('\') + '\'), [StringComparison]::OrdinalIgnoreCase)) {
         throw 'Scheduled launch manifest is outside the approved state root.'
     }
+    Assert-DawnstrikeSharedLockNoReparse $manifest "Scheduled launch manifest"
     $locks = @()
     try {
         $manifestStream = [IO.File]::Open($manifest, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
@@ -255,7 +417,12 @@ function Assert-DawnstrikeScheduledLaunchManifest {
             if ($relative -notmatch '^scripts/[A-Za-z0-9._/-]+$' -or $expected.ContainsKey($relative)) {
                 throw 'Scheduled launch manifest contains an invalid or duplicate path.'
             }
-            $full = Join-Path $runtime ($relative.Replace('/', '\'))
+            $full = [IO.Path]::GetFullPath((Join-Path $runtime ($relative.Replace('/', '\'))))
+            $runtimePrefix = $runtime.TrimEnd('\') + '\'
+            if (-not $full.StartsWith($runtimePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                throw 'Scheduled launch manifest entry escaped the runtime root.'
+            }
+            Assert-DawnstrikeSharedLockNoReparse $full "Scheduled launch manifest entry"
             $stream = [IO.File]::Open($full, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
             $locks += $stream
             $stream.Position = 0
@@ -391,7 +558,7 @@ function ConvertTo-DawnstrikeIsolatedPythonArguments {
     if (-not (Test-Path -LiteralPath $bootstrap -PathType Leaf)) {
         throw "Scheduled Python release bootstrap is missing."
     }
-    $bootstrapSha256 = (Get-FileHash -LiteralPath $bootstrap -Algorithm SHA256).Hash.ToLowerInvariant()
+    $bootstrapSha256 = Get-DawnstrikeRuntimeLockHash $bootstrap
     $bootstrapLaunch = @(
         '-c', (Get-DawnstrikeProcessBootstrapPreloader), $bootstrap, $bootstrapSha256,
         '--release-root', $ReleaseRoot, '--expected-sha', $ExpectedSha
@@ -496,7 +663,7 @@ function Invoke-DawnstrikeNativeProcess {
                 -ArgumentList $effectiveArguments -ReleaseRoot $releaseRoot `
                 -ExpectedSha ([string]$sourceIdentity.head)
             $pythonBootstrapPath = Join-Path $releaseRoot "scripts\dawnstrike_python_bootstrap.py"
-            $pythonBootstrapSha256 = (Get-FileHash -LiteralPath $pythonBootstrapPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            $pythonBootstrapSha256 = Get-DawnstrikeRuntimeLockHash $pythonBootstrapPath
             $effectiveEnvironmentOverrides = @{
                 PYTHONHOME = $null
                 PYTHONPATH = $null
@@ -560,10 +727,10 @@ function Invoke-DawnstrikeNativeProcess {
 
     $completedAt = (Get-Date).ToUniversalTime()
     $stdoutHash = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) {
-        (Get-FileHash -LiteralPath $stdoutPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        Get-DawnstrikeRuntimeLockHash $stdoutPath
     } else { $null }
     $stderrHash = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
-        (Get-FileHash -LiteralPath $stderrPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        Get-DawnstrikeRuntimeLockHash $stderrPath
     } else { $null }
     $receipt = [ordered]@{
         schema_version = "dawnstrike.native_process_receipt.v1"

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
+import re
 import shutil
 import subprocess
 import sys
@@ -13,6 +15,9 @@ SOURCE_BOOTSTRAP = ROOT / "scripts" / "dawnstrike_python_bootstrap.py"
 PRODUCTION_GIT_PATH = r"C:\Program Files\Git\cmd\git.exe"
 PRODUCTION_GIT_SHA256 = (
     "37c5725818d602e951ba2563b870d62763322956b73373da4c33a0b566a80bc9"
+)
+PRODUCTION_RECORD_SET_SHA256 = (
+    "447a0d12feffcfd6c353d9acb4cfd1e5cc1b35e3548cd7e9ad58666516b4b3af"
 )
 BOOTSTRAP_PRELOADER = (
     "import hashlib,sys; p=sys.argv[1]; e=sys.argv[2]; b=open(p,'rb').read(); "
@@ -29,14 +34,39 @@ def _copy_bootstrap_for_host(destination: Path) -> None:
     assert discovered is not None
     git_path = Path(discovered).resolve()
     git_sha256 = hashlib.sha256(git_path.read_bytes()).hexdigest()
+    requirements: dict[str, str] = {}
+    for line in (ROOT / "requirements.lock").read_text(encoding="utf-8").splitlines():
+        match = re.match(
+            r"^([A-Za-z0-9_.-]+)(?:\[[A-Za-z0-9_,.-]+\])?==([^\s\\]+)",
+            line.strip(),
+        )
+        if match:
+            requirements[re.sub(r"[-_.]+", "-", match.group(1)).lower()] = match.group(2)
+    installed = {
+        re.sub(r"[-_.]+", "-", dist.metadata["Name"]).lower(): dist
+        for dist in importlib.metadata.distributions()
+        if dist.metadata.get("Name")
+    }
+    rows = []
+    for name, version in sorted(requirements.items()):
+        dist = installed[name]
+        assert dist.version == version
+        record = next(item for item in dist.files or () if str(item).endswith(".dist-info/RECORD"))
+        record_path = Path(dist.locate_file(record)).resolve(strict=True)
+        rows.append(f"{name}\0{version}\0{hashlib.sha256(record_path.read_bytes()).hexdigest()}\n")
+    host_record_set = hashlib.sha256("".join(rows).encode()).hexdigest()
+
     source = SOURCE_BOOTSTRAP.read_text(encoding="utf-8")
     source = source.replace(
         f'_APPROVED_GIT = Path(r"{PRODUCTION_GIT_PATH}")',
         f"_APPROVED_GIT = Path({str(git_path)!r})",
         1,
-    ).replace(PRODUCTION_GIT_SHA256, git_sha256, 1)
+    ).replace(PRODUCTION_GIT_SHA256, git_sha256, 1).replace(
+        PRODUCTION_RECORD_SET_SHA256, host_record_set, 1
+    )
     assert repr(str(git_path)) in source
     assert git_sha256 in source
+    assert host_record_set in source
     destination.write_text(source, encoding="utf-8")
 
 
@@ -57,6 +87,8 @@ def _release(tmp_path: Path) -> tuple[Path, str]:
     (root / "intraday_scanner" / "__init__.py").write_text("\n", encoding="utf-8")
     (root / "pyproject.toml").write_text("[project]\nname='fixture'\n", encoding="utf-8")
     (root / ".gitignore").write_text("*.pyc\n*.csv\n", encoding="utf-8")
+    shutil.copy2(ROOT / ".gitattributes", root / ".gitattributes")
+    shutil.copy2(ROOT / "requirements.lock", root / "requirements.lock")
     (root / "scripts" / "target.py").write_text("print('BOOTSTRAP_OK')\n", encoding="utf-8")
     subprocess.run(
         ["git", "init", "--initial-branch=main", str(root)],
@@ -65,7 +97,7 @@ def _release(tmp_path: Path) -> tuple[Path, str]:
     )
     _git(root, "config", "user.email", "bootstrap-test@example.invalid")
     _git(root, "config", "user.name", "Bootstrap Test")
-    _git(root, "config", "core.autocrlf", "false")
+    _git(root, "config", "core.autocrlf", "true")
     _git(root, "add", ".")
     _git(root, "commit", "-m", "fixture")
     # Settle the disposable index stat cache before the bootstrap performs its

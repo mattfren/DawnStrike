@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import json
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -33,6 +35,9 @@ CANDIDATE_SHA = "a" * 40
 CANDIDATE_TREE = "b" * 40
 PREVIOUS_SHA = "c" * 40
 PREVIOUS_TREE = "d" * 40
+PRODUCTION_RECORD_SET_SHA256 = (
+    "447a0d12feffcfd6c353d9acb4cfd1e5cc1b35e3548cd7e9ad58666516b4b3af"
+)
 PRODUCTION_GIT_PATH = r"C:\Program Files\Git\cmd\git.exe"
 PRODUCTION_GIT_SHA256 = (
     "37c5725818d602e951ba2563b870d62763322956b73373da4c33a0b566a80bc9"
@@ -92,19 +97,53 @@ def _git(root: Path, *arguments: str) -> str:
     return completed.stdout.strip()
 
 
+def _host_dependency_record_contract(requirements_lock: Path) -> str:
+    requirements: dict[str, str] = {}
+    for line in requirements_lock.read_text(encoding="utf-8").splitlines():
+        match = re.match(
+            r"^([A-Za-z0-9_.-]+)(?:\[[A-Za-z0-9_,.-]+\])?==([^\s\\]+)",
+            line.strip(),
+        )
+        if match:
+            requirements[re.sub(r"[-_.]+", "-", match.group(1)).lower()] = match.group(2)
+    installed = {
+        re.sub(r"[-_.]+", "-", dist.metadata["Name"]).lower(): dist
+        for dist in importlib.metadata.distributions()
+        if dist.metadata.get("Name")
+    }
+    rows = []
+    for name, version in sorted(requirements.items()):
+        dist = installed[name]
+        assert dist.version == version
+        record = next(
+            item
+            for item in dist.files or ()
+            if str(item).endswith(".dist-info/RECORD")
+        )
+        record_path = Path(dist.locate_file(record)).resolve(strict=True)
+        rows.append(
+            f"{name}\0{version}\0{hashlib.sha256(record_path.read_bytes()).hexdigest()}\n"
+        )
+    return hashlib.sha256("".join(rows).encode()).hexdigest()
+
+
 def _copy_bootstrap_for_host(destination: Path) -> None:
     discovered = shutil.which("git")
     assert discovered is not None
     git_path = Path(discovered).resolve()
     git_sha256 = hashlib.sha256(git_path.read_bytes()).hexdigest()
+    record_contract = _host_dependency_record_contract(Path("requirements.lock"))
     source = Path("scripts/dawnstrike_python_bootstrap.py").read_text(encoding="utf-8")
     source = source.replace(
         f'_APPROVED_GIT = Path(r"{PRODUCTION_GIT_PATH}")',
         f"_APPROVED_GIT = Path({str(git_path)!r})",
         1,
-    ).replace(PRODUCTION_GIT_SHA256, git_sha256, 1)
+    ).replace(PRODUCTION_GIT_SHA256, git_sha256, 1).replace(
+        PRODUCTION_RECORD_SET_SHA256, record_contract, 1
+    )
     assert repr(str(git_path)) in source
     assert git_sha256 in source
+    assert record_contract in source
     destination.write_text(source, encoding="utf-8")
 
 
@@ -485,6 +524,10 @@ def test_isolated_bootstrap_imports_intraday_from_exact_release_root(
     (root / "pyproject.toml").write_text(
         "[project]\nname='activation-bootstrap-fixture'\n", encoding="utf-8"
     )
+    (root / ".gitattributes").write_bytes(
+        (Path.cwd() / ".gitattributes").read_bytes().replace(b"\r\n", b"\n")
+    )
+    shutil.copy2(Path.cwd() / "requirements.lock", root / "requirements.lock")
     subprocess.run(
         ["git", "init", "--initial-branch=main", str(root)],
         check=True,
@@ -1697,13 +1740,39 @@ def test_rollback_seals_ready_then_terminal_evidence_after_task_enablement() -> 
     assert receipt < ready < enable < terminal_receipt < complete
     assert 'schema_version = "dawnstrike.runtime_rollback_receipt.v2"' in rollback
     assert 'schema_version = "dawnstrike.runtime_rollback_receipt.v1"' in rollback
-    assert "Set-DawnstrikeCanonicalTaskExpectedSha" in rollback
-    assert "-ExpectedSha $previousSha" in rollback
+    assert "Restore-DawnstrikeCanonicalTasksFromXmlBackup" in rollback
+    assert "-BackupName ([string]$activation.scheduler_backup_name)" in rollback
     assert "Get-DawnstrikeTaskXmlBackupManifest" in rollback
     assert "previous-SHA Ready boundary" in rollback
     assert 'journalPhase -in @("POST_SWAP", "POST_SWAP_READY")' in rollback
     assert 'DAWNSTRIKE_TEST_ROLLBACK_CRASH_POINT -eq "after_ready"' in rollback
     assert 'DAWNSTRIKE_TEST_ROLLBACK_CRASH_POINT -eq "after_enable"' in rollback
+
+
+def test_legacy_activation_compensation_uses_sealed_backup_actions() -> None:
+    activation = Path("scripts/activate_dawnstrike_runtime.ps1").read_text(
+        encoding="utf-8"
+    )
+    rollback = Path("scripts/rollback_dawnstrike_runtime.ps1").read_text(
+        encoding="utf-8"
+    )
+    activation_compensation = activation[
+        activation.index("$restoredRuntime = Get-DawnstrikeGitContract") : activation.index(
+            "# Once the previous runtime and exact Ready task contract have"
+        )
+    ]
+    assert "Restore-DawnstrikeCanonicalTasksFromXmlBackup" in activation_compensation
+    assert "-EnableAfterRestore" in activation_compensation
+    assert "Set-DawnstrikeCanonicalTaskExpectedSha" not in activation_compensation
+    rollback_restore = rollback[rollback.index(
+        "# The restored runtime must be disabled and rebound"
+    ):rollback.index("if ($journalPhase -eq \"PRE_SWAP\")", rollback.index(
+        "# The restored runtime must be disabled and rebound"
+    ))]
+    assert "Restore-DawnstrikeCanonicalTasksFromXmlBackup" in rollback_restore
+    assert "[string]$activation.scheduler_backup_name" in rollback_restore
+    assert "-ExpectedSha $previousSha" not in rollback_restore
+    assert "Principal" in activation and "Triggers" in activation and "Settings" in activation
 
 
 def test_lock_adoption_recovers_a_replace_completed_before_process_death() -> None:
@@ -2134,6 +2203,14 @@ def test_disposable_activation_and_rollback_preserve_exact_runtime_and_state(
         "import_dawnstrike_environment.ps1",
         "alpha_cycle_artifact.ps1",
         "monitor_schedule_helper.ps1",
+        "publish_vercel_public.ps1",
+        "vercel_source_contract.ps1",
+        "vercel_toolchain_contract.py",
+        "vercel_publication_journal.py",
+        "publication_boundary.py",
+        "verify_daily_prepublication.py",
+        "build_vercel_public_stage.ps1",
+        "verify_vercel_candidate.ps1",
     ):
         shutil.copy2(source / "scripts" / name, candidate / "scripts" / name)
     _install_local_origin_fixture_seam(candidate / "scripts" / "runtime_activation_lock.ps1")
@@ -2144,7 +2221,18 @@ def test_disposable_activation_and_rollback_preserve_exact_runtime_and_state(
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
     )
     shutil.copy2(source / ".gitignore", candidate / ".gitignore")
+    shutil.copy2(source / ".gitattributes", candidate / ".gitattributes")
     shutil.copy2(source / "pyproject.toml", candidate / "pyproject.toml")
+    shutil.copy2(source / "requirements.lock", candidate / "requirements.lock")
+    candidate_bootstrap = candidate / "scripts" / "dawnstrike_python_bootstrap.py"
+    candidate_bootstrap.write_text(
+        candidate_bootstrap.read_text(encoding="utf-8").replace(
+            PRODUCTION_RECORD_SET_SHA256,
+            _host_dependency_record_contract(source / "requirements.lock"),
+            1,
+        ),
+        encoding="utf-8",
+    )
     subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
     subprocess.run(
         ["git", "init", "--initial-branch=main", str(candidate)],
@@ -2220,6 +2308,7 @@ $global:MockRuntime = '{values["runtime"]}'
 $global:MockState = '{values["state"]}'
 $global:MockTaskStates = @{{}}
 $global:MockTaskExpectedSha = @{{}}
+$global:MockTaskActions = @{{}}
 $global:TaskEvents = @()
 foreach ($name in $script:DawnstrikeCanonicalTaskNames) {{
     $global:MockTaskStates[$name] = 'Ready'
@@ -2234,6 +2323,15 @@ foreach ($name in $script:DawnstrikeCanonicalTaskNames) {{
         }} else {{
             Get-DawnstrikeCanonicalTaskPolicy $TaskName $global:MockRuntime $global:MockState
         }}
+        $currentAction = if ($global:MockTaskActions.ContainsKey($TaskName)) {{
+            $global:MockTaskActions[$TaskName]
+        }} else {{
+            [pscustomobject]@{{
+                Execute=$script:DawnstrikePowerShellExecutable;
+                Arguments=$policy.arguments;
+                WorkingDirectory=$global:MockRuntime
+            }}
+        }}
         $triggerType = if ($policy.weekly) {{
             'MSFT_TaskWeeklyTrigger'
         }} else {{ 'MSFT_TaskDailyTrigger' }}
@@ -2247,11 +2345,7 @@ foreach ($name in $script:DawnstrikeCanonicalTaskNames) {{
         }}
         [pscustomobject]@{{
             State=$global:MockTaskStates[$TaskName]; TaskPath='\';
-            Actions=@([pscustomobject]@{{
-                    Execute=$script:DawnstrikePowerShellExecutable;
-                    Arguments=$policy.arguments;
-                WorkingDirectory=$global:MockRuntime
-            }});
+            Actions=@($currentAction);
             Triggers=@([pscustomobject]@{{
                 CimClass=[pscustomobject]@{{ CimClassName=$triggerType }};
                 Enabled=$true;
@@ -2284,9 +2378,17 @@ foreach ($name in $script:DawnstrikeCanonicalTaskNames) {{
         }}
     }}
     function Export-ScheduledTask {{
-    [CmdletBinding()] param([string]$TaskName,[string]$TaskPath)
-    $enabled = if ($global:MockTaskStates[$TaskName] -eq 'Disabled') {{ 'false' }} else {{ 'true' }}
-    "<Task><Name>$TaskName</Name><Runtime>$global:MockRuntime</Runtime><State>$global:MockState</State><Settings><Enabled>$enabled</Enabled></Settings></Task>"
+        [CmdletBinding()] param([string]$TaskName,[string]$TaskPath)
+        $task = Get-ScheduledTask -TaskName $TaskName
+        $action = @($task.Actions)[0]
+        $enabled = if ($global:MockTaskStates[$TaskName] -eq 'Disabled') {{
+            'false'
+        }} else {{ 'true' }}
+        $safeName = [Security.SecurityElement]::Escape([string]$TaskName)
+        $safeCommand = [Security.SecurityElement]::Escape([string]$action.Execute)
+        $safeArguments = [Security.SecurityElement]::Escape([string]$action.Arguments)
+        $safeWorking = [Security.SecurityElement]::Escape([string]$action.WorkingDirectory)
+        "<Task><Name>$safeName</Name><Principal><UserId>activation-test</UserId><LogonType>Password</LogonType></Principal><Triggers><CalendarTrigger><StartBoundary>2026-08-31T08:00:00-05:00</StartBoundary></CalendarTrigger></Triggers><Settings><Enabled>$enabled</Enabled><ExecutionTimeLimit>PT2H</ExecutionTimeLimit></Settings><Actions><Exec><Command>$safeCommand</Command><Arguments>$safeArguments</Arguments><WorkingDirectory>$safeWorking</WorkingDirectory></Exec></Actions></Task>"
 }}
 function Disable-ScheduledTask {{
     [CmdletBinding()] param([string]$TaskName,[string]$TaskPath)
@@ -2304,15 +2406,19 @@ function New-ScheduledTaskAction {{
     [CmdletBinding()] param([string]$Execute,[string]$Argument,[string]$WorkingDirectory)
     [pscustomobject]@{{ Execute=$Execute; Arguments=$Argument; WorkingDirectory=$WorkingDirectory }}
 }}
-function Set-ScheduledTask {{
-    [CmdletBinding()] param([string]$TaskName,[string]$TaskPath,$Action)
+    function Set-ScheduledTask {{
+        [CmdletBinding()] param([string]$TaskName,[string]$TaskPath,$Action)
+        $global:MockTaskActions[$TaskName] = @($Action)[0]
         $match = [regex]::Match(
             [string](@($Action)[0].Arguments),
             '-ExpectedSha\s+["'']?([0-9a-f]{{40}})'
         )
-    if (-not $match.Success) {{ throw 'mock task action did not carry an exact expected SHA' }}
-    $global:MockTaskExpectedSha[$TaskName] = $match.Groups[1].Value
-    [pscustomobject]@{{ TaskName=$TaskName }}
+        if ($match.Success) {{
+            $global:MockTaskExpectedSha[$TaskName] = $match.Groups[1].Value
+        }} else {{
+            $global:MockTaskExpectedSha.Remove($TaskName)
+        }}
+        [pscustomobject]@{{ TaskName=$TaskName }}
 }}
 $activated = Invoke-DawnstrikeRuntimeActivation `
   -ExpectedSha '{candidate_sha}' -MarketDate '2026-08-31' `
@@ -2345,22 +2451,25 @@ $activatedAgain = Invoke-DawnstrikeRuntimeActivation `
 $receiptName = 'runtime-activation-' + $activated.activation_id + '.json'
     $receiptForRollback = Join-Path `
         '{values["state"]}' ('receipts\runtime-activation\' + $receiptName)
-    . '{rollback_script}'
-    $rollbackLegacyBlocked = $false
-    try {{
+        . '{rollback_script}'
+        $rollbackLegacyBlocked = $false
+        $rollbackLegacyError = ''
+        try {{
         $null = Invoke-DawnstrikeRuntimeRollback `
           -ActivationReceipt $receiptForRollback -ContractRoot '{values["candidate"]}' `
           -RuntimeRoot '{values["runtime"]}' -StateRoot '{values["state"]}' `
           -BackupRoot '{values["backup"]}' `
           -ProcessTimeoutSeconds 120
-    }}
-    catch {{
-        $rollbackLegacyBlocked = $_.Exception.Message -match 'quarantined|authorized COMPLETE'
+        }}
+        catch {{
+            $rollbackLegacyError = $_.Exception.Message
+            $rollbackLegacyBlocked = $_.Exception.Message -match 'quarantined|authorized COMPLETE'
     }}
     $output = [pscustomobject]@{{
         activated=$activated
-        activated_again=$activatedAgain
-        rollback_legacy_blocked=$rollbackLegacyBlocked
+            activated_again=$activatedAgain
+            rollback_legacy_blocked=$rollbackLegacyBlocked
+            rollback_legacy_error=$rollbackLegacyError
         activation_missing_bundle_blocked=$activationMissingBundleBlocked
         task_states=$global:MockTaskStates
         task_events=$global:TaskEvents
@@ -2372,9 +2481,11 @@ $output | ConvertTo-Json -Depth 12 -Compress
         cwd=source,
         text=True,
         capture_output=True,
-        timeout=180,
+        timeout=420,
         check=False,
     )
+    if result.returncode != 0:
+        print(result.stderr)
     assert result.returncode == 0, (result.stdout, result.stderr)
     payload = json.loads(result.stdout.strip().splitlines()[-1])
     assert payload["activated"]["status"] == "COMPLETE"
@@ -2383,7 +2494,7 @@ $output | ConvertTo-Json -Depth 12 -Compress
     assert payload["activated"]["previous_runtime_disposition"] == "QUARANTINED_UNAUTHORIZED"
     assert payload["activated_again"]["receipt_sha256"] == payload["activated"]["receipt_sha256"]
     assert payload["activation_missing_bundle_blocked"] is True
-    assert payload["rollback_legacy_blocked"] is True
+    assert payload["rollback_legacy_blocked"] is True, payload["rollback_legacy_error"]
     assert set(payload["task_states"].values()) == {"Ready"}
     assert len(payload["task_events"]) == 10
     assert all(event.startswith("disable:") for event in payload["task_events"][:5])

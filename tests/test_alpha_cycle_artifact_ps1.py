@@ -41,6 +41,7 @@ def _initialize_git_runtime(runtime: Path) -> str:
         runtime / "scripts",
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
     )
+    shutil.copy2(ROOT / ".gitattributes", runtime / ".gitattributes")
     (runtime / "app.py").write_text("print('clean')\n", encoding="utf-8")
     subprocess.run(
         ["git", "-C", str(runtime), "add", "."],

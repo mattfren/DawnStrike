@@ -310,7 +310,10 @@ def _write_dynamic_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def _playwright_available() -> bool:
-    return importlib.util.find_spec("playwright") is not None
+    try:
+        return importlib.util.find_spec("playwright") is not None
+    except ModuleNotFoundError:
+        return False
 
 
 def _looks_blocked(html: str) -> bool:
