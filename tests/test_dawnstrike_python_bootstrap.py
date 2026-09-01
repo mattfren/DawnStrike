@@ -16,6 +16,10 @@ BOOTSTRAP_PRELOADER = (
     "RuntimeError('bootstrap hash mismatch')); r=sys.argv[3:]; sys.argv=[p,*r]; "
     "exec(compile(b,p,'exec'),{'__name__':'__main__','__file__':p})"
 )
+WINDOWS_PRODUCTION_BOOTSTRAP = pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="the governed production bootstrap pins the approved Windows Git binary",
+)
 
 
 def _git(root: Path, *args: str) -> str:
@@ -87,6 +91,7 @@ def _run(
 
 
 @pytest.mark.parametrize("preloaded", [False, True])
+@WINDOWS_PRODUCTION_BOOTSTRAP
 def test_bootstrap_runs_only_clean_exact_release(tmp_path: Path, preloaded: bool) -> None:
     root, sha = _release(tmp_path)
 
@@ -97,6 +102,7 @@ def test_bootstrap_runs_only_clean_exact_release(tmp_path: Path, preloaded: bool
 
 
 @pytest.mark.parametrize("mutation", ["tracked", "hidden", "ignored_python", "wrong_sha"])
+@WINDOWS_PRODUCTION_BOOTSTRAP
 def test_bootstrap_rejects_runtime_identity_tampering(
     tmp_path: Path, mutation: str
 ) -> None:
@@ -119,6 +125,7 @@ def test_bootstrap_rejects_runtime_identity_tampering(
     assert "TAMPERED" not in result.stdout
 
 
+@WINDOWS_PRODUCTION_BOOTSTRAP
 def test_bootstrap_allows_ignored_nonexecutable_research_data(tmp_path: Path) -> None:
     root, sha = _release(tmp_path)
     (root / "research.csv").write_text("symbol,value\nAAPL,1\n", encoding="utf-8")

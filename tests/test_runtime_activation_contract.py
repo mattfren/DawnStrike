@@ -448,6 +448,10 @@ $blocked | ConvertTo-Json -Compress
     assert json.loads(result.stdout.strip().splitlines()[-1]) is True
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="the governed production bootstrap pins the approved Windows Git binary",
+)
 def test_isolated_bootstrap_imports_intraday_from_exact_release_root(
     tmp_path: Path,
 ) -> None:
