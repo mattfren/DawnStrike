@@ -206,6 +206,7 @@ try {
         & (Join-Path $runtime "scripts\publish_vercel_public.ps1") `
             -ProjectRoot $runtime `
             -ProjectId $VercelProjectId `
+            -StateRoot $state `
             -Promote:($PublicationMode -eq "Production")
     }
     catch {
