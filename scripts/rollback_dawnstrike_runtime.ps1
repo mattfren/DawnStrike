@@ -670,6 +670,10 @@ function Invoke-DawnstrikeRuntimeRollback {
             if ($env:DAWNSTRIKE_TEST_LOCK_JOURNAL -ne "1") { throw "Rollback crash injection is test-only." }
             Stop-Process -Id $PID -Force
         }
+        if ($env:DAWNSTRIKE_TEST_ROLLBACK_THROW_POINT -eq "after_task_disable") {
+            if ($env:DAWNSTRIKE_TEST_LOCK_JOURNAL -ne "1") { throw "Rollback failure injection is test-only." }
+            throw "Injected ordinary rollback failure after PRE_SWAP task disable."
+        }
         $taskSwapBoundary = Get-DawnstrikeTaskContract $runtime $state -AllowDisabled
         if (
             $taskSwapBoundary.disabled_count -ne 5 -or
@@ -1015,6 +1019,16 @@ function Invoke-DawnstrikeRuntimeRollback {
                 throw "Runtime rollback and automatic candidate restore failed; exact task state is unverified and operator recovery is required."
             }
             throw "Runtime rollback failed and automatic candidate restore could not be completed; canonical tasks are proven Disabled and all rollback artifacts must be preserved. Original failure: $($failure.Exception.Message)"
+        }
+        # A caught failure after a nonterminal journal transition must leave
+        # both lock artifacts adoptable by the next invocation.  Releasing
+        # them here would strand PRE_SWAP/POST_SWAP evidence with no legal
+        # owner and make recovery permanently fail closed.
+        if ($journalPhase -in @("PRE_SWAP", "POST_SWAP")) {
+            if ($null -eq $activationLock -or $null -eq $dailyLock) {
+                throw "Nonterminal rollback recovery lacks its adoptable lock pair."
+            }
+            $preserveLocks = $true
         }
         throw $failure
     }
