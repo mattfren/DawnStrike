@@ -62,7 +62,14 @@ AUXILIARY_REQUIRED_OPTIONS = frozenset(AUXILIARY_REQUIRED_OPTION_ORDER)
 GIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 MAX_AUXILIARY_ACTIVATION_RECEIPTS = 64
+MAX_AUXILIARY_ACTIVATION_DIRECTORY_ENTRIES = 256
 MAX_AUXILIARY_ACTIVATION_RECEIPT_BYTES = 1024 * 1024
+APPROVED_RUNTIME_ORIGINS = frozenset(
+    {
+        "https://github.com/mattfren/DawnStrike.git",
+        "git@github.com:mattfren/DawnStrike.git",
+    }
+)
 PUBLICATION_CONTRACT = {
     "schema_version": "dawnstrike.publication_schedule.v1",
     "timezone": "America/Chicago",
@@ -561,11 +568,11 @@ def _auxiliary_task_check(
         contract = _load_auxiliary_contract(runtime, state)
         if not contract["declared"]:
             activation_evidence = _load_auxiliary_activation_presence(runtime, state)
-            if activation_evidence["valid"] and not activation_evidence["present"]:
-                return None
             failure_reason = (
                 "governed auxiliary task is missing"
                 if activation_evidence["present"]
+                else "auxiliary declaration and task are missing"
+                if activation_evidence["valid"]
                 else activation_evidence["reason"]
             )
         else:
@@ -864,7 +871,7 @@ def _load_auxiliary_activation_presence(runtime: Path, state: Path) -> dict[str,
     try:
         from scripts.runtime_activation_contract import (
             _assert_no_reparse_components,
-            load_receipt,
+            validate_receipt,
         )
 
         safe_root = _assert_no_reparse_components(receipt_root)
@@ -873,7 +880,11 @@ def _load_auxiliary_activation_presence(runtime: Path, state: Path) -> dict[str,
         if not safe_root.is_dir():
             return invalid
         paths: list[tuple[Path, str]] = []
+        directory_entries = 0
         for path in safe_root.iterdir():
+            directory_entries += 1
+            if directory_entries > MAX_AUXILIARY_ACTIVATION_DIRECTORY_ENTRIES:
+                return invalid
             match = re.fullmatch(r"runtime-activation-([0-9a-f]{24})\.json", path.name)
             if match is None:
                 continue
@@ -888,14 +899,42 @@ def _load_auxiliary_activation_presence(runtime: Path, state: Path) -> dict[str,
         present = False
         for path, activation_id in sorted(paths, key=lambda item: item[0].name):
             safe_path = _assert_no_reparse_components(path)
-            details = safe_path.lstat()
+            path_before = safe_path.lstat()
             if (
                 safe_path.parent != safe_root
-                or not stat.S_ISREG(details.st_mode)
-                or details.st_size > MAX_AUXILIARY_ACTIVATION_RECEIPT_BYTES
+                or not stat.S_ISREG(path_before.st_mode)
+                or path_before.st_size > MAX_AUXILIARY_ACTIVATION_RECEIPT_BYTES
             ):
                 return invalid
-            payload = load_receipt(safe_path)
+            with safe_path.open("rb") as handle:
+                handle_before = os.fstat(handle.fileno())
+                raw = handle.read(MAX_AUXILIARY_ACTIVATION_RECEIPT_BYTES + 1)
+                handle_after = os.fstat(handle.fileno())
+                checked_path = _assert_no_reparse_components(safe_path)
+                path_after = checked_path.lstat()
+            identities = {
+                (
+                    details.st_dev,
+                    details.st_ino,
+                    details.st_size,
+                    details.st_mtime_ns,
+                )
+                for details in (path_before, handle_before, handle_after, path_after)
+            }
+            if (
+                len(identities) != 1
+                or not stat.S_ISREG(handle_before.st_mode)
+                or len(raw) > MAX_AUXILIARY_ACTIVATION_RECEIPT_BYTES
+                or len(raw) != handle_before.st_size
+            ):
+                return invalid
+            decoded = json.loads(
+                raw.decode("utf-8"),
+                object_pairs_hook=_reject_duplicate_json_keys,
+            )
+            if not isinstance(decoded, dict):
+                return invalid
+            payload = validate_receipt(decoded)
             if not isinstance(payload, dict) or payload.get("activation_id") != activation_id:
                 return invalid
             exact_runtime = (
@@ -939,8 +978,14 @@ def _runtime_git_origin_sha(runtime: Path) -> str | None:
         )
     except (OSError, RuntimeError, subprocess.SubprocessError):
         return None
-    origin = completed.stdout.strip()
-    if not origin:
+    output = completed.stdout
+    if output.endswith("\r\n"):
+        origin = output[:-2]
+    elif output.endswith("\n"):
+        origin = output[:-1]
+    else:
+        origin = output
+    if origin not in APPROVED_RUNTIME_ORIGINS:
         return None
     return hashlib.sha256(origin.encode("utf-8")).hexdigest()
 

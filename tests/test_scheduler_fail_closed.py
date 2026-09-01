@@ -61,4 +61,4 @@ def test_scheduler_doctor_rejects_interactive_and_s4u_tasks(tmp_path: Path, monk
     result = scheduler.scheduler_doctor(runtime, state)
 
     assert result["status"] == "BLOCKED_EXTERNAL"
-    assert result["failed_task_count"] == len(scheduler.EXPECTED_TASKS)
+    assert result["failed_task_count"] == len(scheduler.EXPECTED_TASKS) + 1

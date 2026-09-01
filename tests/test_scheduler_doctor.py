@@ -107,6 +107,39 @@ def test_runtime_git_snapshot_rejects_origin_main_mismatch(monkeypatch) -> None:
     assert scheduler_service._runtime_git_snapshot(Path(r"C:\r\runtime")) is None
 
 
+@pytest.mark.parametrize(
+    ("origin", "accepted"),
+    [
+        ("https://github.com/mattfren/DawnStrike.git", True),
+        ("git@github.com:mattfren/DawnStrike.git", True),
+        ("https://github.com/attacker/DawnStrike.git", False),
+        (" https://github.com/mattfren/DawnStrike.git", False),
+    ],
+)
+def test_runtime_git_origin_sha_requires_canonical_governed_origin(
+    monkeypatch, origin: str, accepted: bool
+) -> None:
+    monkeypatch.setattr(
+        scheduler_service,
+        "_approved_git",
+        lambda: (Path("git.exe"), "0" * 64),
+    )
+    monkeypatch.setattr(
+        scheduler_service.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=origin + "\n",
+            stderr="",
+        ),
+    )
+
+    result = scheduler_service._runtime_git_origin_sha(Path(r"C:\r\runtime"))
+
+    expected = hashlib.sha256(origin.encode("utf-8")).hexdigest() if accepted else None
+    assert result == expected
+
+
 def test_scheduler_query_uses_bounded_provider_side_dawnstrike_filter(
     monkeypatch,
 ) -> None:
@@ -279,8 +312,13 @@ def test_scheduler_task_info_error_fails_closed(
     result = scheduler_service.scheduler_doctor(runtime, state)
 
     assert result["status"] == "BLOCKED_EXTERNAL"
-    assert result["failed_task_count"] == len(scheduler_service.EXPECTED_TASKS)
-    assert all(row["state"] == "unknown" for row in result["scheduled_tasks"])
+    assert result["failed_task_count"] == len(scheduler_service.EXPECTED_TASKS) + 1
+    assert all(
+        row["state"] == "unknown"
+        for row in result["scheduled_tasks"]
+        if row["name"] in scheduler_service.EXPECTED_TASKS
+    )
+    assert result["governed_auxiliary_task"]["state"] == "missing"
 
 
 def test_scheduler_task_query_timeout_fails_closed(
@@ -306,8 +344,13 @@ def test_scheduler_task_query_timeout_fails_closed(
     result = scheduler_service.scheduler_doctor(runtime, state)
 
     assert result["status"] == "BLOCKED_EXTERNAL"
-    assert result["failed_task_count"] == len(scheduler_service.EXPECTED_TASKS)
-    assert all(row["state"] == "unavailable" for row in result["scheduled_tasks"])
+    assert result["failed_task_count"] == len(scheduler_service.EXPECTED_TASKS) + 1
+    assert all(
+        row["state"] == "unavailable"
+        for row in result["scheduled_tasks"]
+        if row["name"] in scheduler_service.EXPECTED_TASKS
+    )
+    assert result["governed_auxiliary_task"]["state"] == "missing"
 
 
 def _write_required_scripts(root: Path) -> None:
@@ -343,9 +386,15 @@ def _write_required_state(state: Path) -> None:
     )
 
 
-def _healthy_tasks(runtime: Path, state: Path, *, last_result: int = 0):
+def _healthy_tasks(
+    runtime: Path,
+    state: Path,
+    *,
+    last_result: int = 0,
+    include_disabled_auxiliary: bool = True,
+):
     _write_required_state(state)
-    return [
+    rows = [
         {
             "name": name,
             "state": "Ready",
@@ -413,6 +462,17 @@ def _healthy_tasks(runtime: Path, state: Path, *, last_result: int = 0):
         }
         for name, script in scheduler_service.EXPECTED_TASKS.items()
     ]
+    if include_disabled_auxiliary:
+        rows.append(
+            {
+                "name": scheduler_service.AUXILIARY_TASK_NAME,
+                "task_path": "\\",
+                "state": "Disabled",
+                "enabled": False,
+                "last_task_result": None,
+            }
+        )
+    return rows
 
 
 def _auxiliary_task(runtime: Path, state: Path, *, candidate_sha: str = "a" * 40):
@@ -636,24 +696,121 @@ def _activation_history_payload(activation_id: str) -> dict[str, object]:
     }
 
 
-def _auxiliary_activation_payload(activation_id: str) -> dict[str, object]:
-    return {
+def _write_strict_auxiliary_activation_receipt(
+    state: Path,
+    *,
+    activation_id: str = "1" * 24,
+    candidate_sha: str = "a" * 40,
+    candidate_tree: str = "b" * 40,
+) -> tuple[Path, dict[str, object]]:
+    import scripts.runtime_activation_contract as activation_contract
+
+    state_preparation_id = "state-preparation-" + "a" * 16 + "-" + "b" * 16
+    state_backup_id = f"runtime-activation-{activation_id}"
+    hardening_relative = "receipts/capture-task/capture-task-hardening.json"
+    empty_hash = hashlib.sha256(b"").hexdigest()
+    payload: dict[str, object] = {
         "schema_version": "dawnstrike.runtime_activation_receipt.v2",
         "status": "COMPLETE",
         "activation_id": activation_id,
-        "candidate_sha": "a" * 40,
-        "candidate_tree": "b" * 40,
+        "market_date": "2026-08-31",
+        "candidate_sha": candidate_sha,
+        "candidate_tree": candidate_tree,
+        "previous_sha": "c" * 40,
+        "previous_tree": "d" * 40,
+        "ci_evidence_sha256": "1" * 64,
+        "sol_evidence_sha256": "2" * 64,
+        "state_backup_id": state_backup_id,
+        "state_backup_db_sha256": "3" * 64,
+        "state_schema_version": activation_contract.CURRENT_SCHEMA_VERSION,
+        "state_quick_check": "ok",
+        "rollback_bundle_sha256": "4" * 64,
+        "task_count": 5,
+        "task_contract_sha256": "5" * 64,
+        "task_definition_contract_sha256": "9" * 64,
+        "task_action_contract_sha256": "7" * 64,
+        "task_paths_unchanged": True,
+        "task_enablement_restored": True,
+        "scheduler_backup_name": state_backup_id,
+        "scheduler_backup_manifest_sha256": "8" * 64,
         "runtime_origin_sha256": "e" * 64,
+        "swap_contract": "same_volume_two_rename_with_immediate_restore",
+        "stage_name": f"dawnstrike-runtime.stage-{activation_id}",
+        "rollback_checkout_name": "previous-runtime",
+        "rollback_bundle_name": "previous-runtime.bundle",
+        "prepared_at_utc": "2026-08-30T16:00:00Z",
+        "completed_at_utc": "2026-08-30T16:01:00Z",
+        "research_only": True,
+        "broker_execution_enabled": False,
+        "state_preparation_required": True,
         "state_preparation_contract": scheduler_service.AUXILIARY_SIDECAR_CONTRACT,
+        "state_preparation_receipt_sha256": "a" * 64,
+        "state_preparation_after_db_sha256": "b" * 64,
+        "state_preparation_after_wal_sha256": "c" * 64,
+        "state_preparation_after_shm_sha256": "d" * 64,
+        "state_preparation_after_logical_snapshot_sha256": "e" * 64,
+        "state_preparation_inventory_sha256": "f" * 64,
+        "state_preparation_backup_id": state_preparation_id,
+        "state_preparation_backup_bundle_path": str(
+            (state / "backups" / state_preparation_id).resolve()
+        ),
+        "state_preparation_backup_db_sha256": "1" * 64,
+        "state_preparation_backup_manifest_sha256": "2" * 64,
+        "state_preparation_backup_manifest_file_sha256": "3" * 64,
+        "state_backup_bundle_path": str(
+            (state / "runtime-rollbacks" / state_backup_id).resolve()
+        ),
+        "state_backup_logical_snapshot_sha256": "4" * 64,
+        "state_backup_source_logical_snapshot_sha256": "5" * 64,
+        "state_backup_manifest_sha256": "6" * 64,
         "auxiliary_capture_present": True,
+        "auxiliary_capture_state_before": "Disabled",
+        "auxiliary_capture_state_after": "Disabled",
+        "auxiliary_capture_action": "DISABLED_UNTIL_EXACT_SHA_REBIND",
+        "auxiliary_capture_xml_sha256": "2" * 64,
+        "auxiliary_capture_xml_file_sha256": "8" * 64,
+        "auxiliary_capture_definition_contract_sha256": "1" * 64,
+        "auxiliary_capture_action_contract_sha256": "f" * 64,
+        "auxiliary_capture_backup_name": state_backup_id,
+        "auxiliary_capture_backup_manifest_sha256": "b" * 64,
+        "capture_hardening_receipt_relative_path": hardening_relative,
+        "capture_hardening_receipt_raw_sha256": hashlib.sha256(b"hardening").hexdigest(),
+        "capture_hardening_receipt_sha256": "a" * 64,
+        "capture_hardening_xml_sha256": "b" * 64,
+        "capture_hardening_action_sha256": "c" * 64,
+        "capture_hardening_principal_sha256": "d" * 64,
+        "capture_hardening_trigger_sha256": "e" * 64,
+        "capture_hardening_settings_sha256": "f" * 64,
+        "capture_hardening_runner_before_sha256": "4" * 64,
+        "capture_hardening_runner_target_sha256": "5" * 64,
+        "previous_runtime_rollback_authorized": False,
+        "previous_runtime_disposition": "QUARANTINED_UNAUTHORIZED",
+        "previous_runtime_authorization_receipt_sha256": empty_hash,
+        "previous_runtime_authorization_journal_sha256": empty_hash,
     }
+    receipt_root = state / "receipts" / "runtime-activation"
+    receipt_root.mkdir(parents=True, exist_ok=True)
+    path = receipt_root / f"runtime-activation-{activation_id}.json"
+    sealed = activation_contract.seal_receipt(payload, path)
+    return path, sealed
 
 
 def _prepare_valid_auxiliary_contract(
     runtime: Path, state: Path, monkeypatch
 ) -> dict[str, object]:
-    capture, activation = _prepare_auxiliary_loader_inputs(runtime, state)
-    activation.update(_auxiliary_activation_payload(str(capture["activation_id"])))
+    capture, _minimal_activation = _prepare_auxiliary_loader_inputs(runtime, state)
+    placeholder_activation = (
+        state
+        / "receipts"
+        / "runtime-activation"
+        / str(capture["activation_receipt_name"])
+    )
+    placeholder_activation.unlink()
+    activation_path, activation = _write_strict_auxiliary_activation_receipt(
+        state,
+        activation_id=str(capture["activation_id"]),
+    )
+    capture["activation_receipt_sha256"] = hashlib.sha256(activation_path.read_bytes()).hexdigest()
     hardening_relative = "receipts/capture-task/capture-task-hardening.json"
     hardening_path = state / hardening_relative
     hardening_raw = b"hardening"
@@ -669,18 +826,6 @@ def _prepare_valid_auxiliary_contract(
         "settings_after_sha256": "f" * 64,
     }
     hardening_raw_sha = hashlib.sha256(hardening_raw).hexdigest()
-    activation.update(
-        {
-            "capture_hardening_receipt_relative_path": hardening_relative,
-            "capture_hardening_receipt_raw_sha256": hardening_raw_sha,
-            "capture_hardening_receipt_sha256": hardening["receipt_sha256"],
-            "capture_hardening_xml_sha256": hardening["xml_after_sha256"],
-            "capture_hardening_action_sha256": hardening["action_after_sha256"],
-            "capture_hardening_principal_sha256": hardening["principal_after_sha256"],
-            "capture_hardening_trigger_sha256": hardening["trigger_sha256"],
-            "capture_hardening_settings_sha256": hardening["settings_after_sha256"],
-        }
-    )
     capture.update(
         {
             "hardening_receipt_relative_path": hardening_relative,
@@ -690,14 +835,8 @@ def _prepare_valid_auxiliary_contract(
     )
     import scripts.capture_task_contract as capture_contract
     import scripts.capture_task_hardening_contract as hardening_contract
-    import scripts.runtime_activation_contract as activation_contract
 
     monkeypatch.setattr(capture_contract, "load_receipt", lambda *_args, **_kwargs: capture)
-    monkeypatch.setattr(
-        activation_contract,
-        "load_receipt",
-        lambda *_args, **_kwargs: activation,
-    )
     monkeypatch.setattr(
         hardening_contract,
         "load_receipt",
@@ -746,7 +885,7 @@ def test_scheduler_doctor_accepts_valid_ready_governed_auxiliary(
     runtime.mkdir()
     state.mkdir()
     _write_required_scripts(runtime)
-    rows = _healthy_tasks(runtime, state)
+    rows = _healthy_tasks(runtime, state, include_disabled_auxiliary=False)
     auxiliary = _auxiliary_task(runtime, state)
     rows.append(auxiliary)
     monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
@@ -783,7 +922,7 @@ def test_scheduler_doctor_blocks_nonoperational_ready_auxiliary(
     runtime.mkdir()
     state.mkdir()
     _write_required_scripts(runtime)
-    rows = _healthy_tasks(runtime, state)
+    rows = _healthy_tasks(runtime, state, include_disabled_auxiliary=False)
     auxiliary = _auxiliary_task(runtime, state)
     auxiliary[field] = value
     rows.append(auxiliary)
@@ -911,7 +1050,7 @@ def test_scheduler_doctor_rejects_auxiliary_prefix_variants(
     runtime.mkdir()
     state.mkdir()
     _write_required_scripts(runtime)
-    rows = _healthy_tasks(runtime, state)
+    rows = _healthy_tasks(runtime, state, include_disabled_auxiliary=False)
     auxiliary = _auxiliary_task(runtime, state)
     auxiliary["arguments"] = arguments_mutator(auxiliary["arguments"])
     rows.append(auxiliary)
@@ -949,7 +1088,7 @@ def test_scheduler_doctor_rejects_unsafe_auxiliary_action_files(
     runtime.mkdir()
     state.mkdir()
     _write_required_scripts(runtime)
-    rows = _healthy_tasks(runtime, state)
+    rows = _healthy_tasks(runtime, state, include_disabled_auxiliary=False)
     auxiliary = _auxiliary_task(runtime, state)
     unsafe_path = runtime / relative_path
     unsafe_path.unlink()
@@ -979,7 +1118,7 @@ def test_scheduler_doctor_rejects_tampered_auxiliary_bootstrap(
     runtime.mkdir()
     state.mkdir()
     _write_required_scripts(runtime)
-    rows = _healthy_tasks(runtime, state)
+    rows = _healthy_tasks(runtime, state, include_disabled_auxiliary=False)
     auxiliary = _auxiliary_task(runtime, state)
     (runtime / scheduler_service.AUXILIARY_PYTHON_BOOTSTRAP).write_text(
         "tampered", encoding="utf-8"
@@ -1013,7 +1152,7 @@ def test_scheduler_doctor_rejects_duplicate_auxiliary_options(
     runtime.mkdir()
     state.mkdir()
     _write_required_scripts(runtime)
-    rows = _healthy_tasks(runtime, state)
+    rows = _healthy_tasks(runtime, state, include_disabled_auxiliary=False)
     auxiliary = _auxiliary_task(runtime, state)
     auxiliary["arguments"] = auxiliary["arguments"].replace(
         '"--execute"', f'"{duplicate_option}" "duplicate" "--execute"', 1
@@ -1041,7 +1180,7 @@ def test_scheduler_doctor_rejects_reordered_auxiliary_options(
     runtime.mkdir()
     state.mkdir()
     _write_required_scripts(runtime)
-    rows = _healthy_tasks(runtime, state)
+    rows = _healthy_tasks(runtime, state, include_disabled_auxiliary=False)
     auxiliary = _auxiliary_task(runtime, state)
     auxiliary["arguments"] = auxiliary["arguments"].replace(
         '"--candidate-sha" "' + "a" * 40 + '" "--repo-root"',
@@ -1215,7 +1354,7 @@ def test_scheduler_doctor_rejects_undeclared_enabled_auxiliary(
     runtime.mkdir()
     state.mkdir()
     _write_required_scripts(runtime)
-    rows = _healthy_tasks(runtime, state)
+    rows = _healthy_tasks(runtime, state, include_disabled_auxiliary=False)
     auxiliary = _auxiliary_task(runtime, state)
     rows.append(auxiliary)
     monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
@@ -1246,7 +1385,7 @@ def test_scheduler_doctor_rejects_missing_auxiliary_sidecar(
     runtime.mkdir()
     state.mkdir()
     _write_required_scripts(runtime)
-    rows = _healthy_tasks(runtime, state)
+    rows = _healthy_tasks(runtime, state, include_disabled_auxiliary=False)
     auxiliary = _auxiliary_task(runtime, state)
     rows.append(auxiliary)
     monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
@@ -1275,7 +1414,7 @@ def test_scheduler_doctor_rejects_auxiliary_contract_drift(
     runtime.mkdir()
     state.mkdir()
     _write_required_scripts(runtime)
-    rows = _healthy_tasks(runtime, state)
+    rows = _healthy_tasks(runtime, state, include_disabled_auxiliary=False)
     auxiliary = _auxiliary_task(runtime, state)
     contract = _auxiliary_contract(auxiliary)
     if drift == "root":
@@ -1307,7 +1446,7 @@ def test_scheduler_doctor_rejects_duplicate_auxiliary_definitions(
     runtime.mkdir()
     state.mkdir()
     _write_required_scripts(runtime)
-    rows = _healthy_tasks(runtime, state)
+    rows = _healthy_tasks(runtime, state, include_disabled_auxiliary=False)
     auxiliary = _auxiliary_task(runtime, state)
     rows.extend([auxiliary, {**auxiliary, "arguments": auxiliary["arguments"] + " "+'"duplicate"'}])
     monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
@@ -1329,7 +1468,7 @@ def test_scheduler_doctor_allows_disabled_undeclared_auxiliary(
     runtime.mkdir()
     state.mkdir()
     _write_required_scripts(runtime)
-    rows = _healthy_tasks(runtime, state)
+    rows = _healthy_tasks(runtime, state, include_disabled_auxiliary=False)
     auxiliary = _auxiliary_task(runtime, state)
     auxiliary.update(state="Disabled", enabled=False)
     rows.append(auxiliary)
@@ -1361,7 +1500,7 @@ def test_scheduler_doctor_accepts_disabled_governed_auxiliary(
     runtime.mkdir()
     state.mkdir()
     _write_required_scripts(runtime)
-    rows = _healthy_tasks(runtime, state)
+    rows = _healthy_tasks(runtime, state, include_disabled_auxiliary=False)
     auxiliary = _auxiliary_task(runtime, state)
     auxiliary.update(state="Disabled", enabled=False)
     rows.append(auxiliary)
@@ -1379,6 +1518,17 @@ def test_scheduler_doctor_accepts_disabled_governed_auxiliary(
     assert result["governed_auxiliary_task"]["definition_status"] == "DISABLED"
 
 
+def _prepare_missing_auxiliary_doctor(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    _write_required_scripts(runtime)
+    rows = _healthy_tasks(runtime, state, include_disabled_auxiliary=False)
+    monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
+    return runtime, state
+
+
 def test_scheduler_doctor_rejects_missing_auxiliary_from_valid_declaration_and_activation(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -1388,7 +1538,7 @@ def test_scheduler_doctor_rejects_missing_auxiliary_from_valid_declaration_and_a
     state.mkdir()
     _write_required_scripts(runtime)
     _prepare_valid_auxiliary_contract(runtime, state, monkeypatch)
-    rows = _healthy_tasks(runtime, state)
+    rows = _healthy_tasks(runtime, state, include_disabled_auxiliary=False)
     monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
 
     contract = scheduler_service._load_auxiliary_contract(runtime, state)
@@ -1408,29 +1558,14 @@ def test_scheduler_doctor_rejects_missing_auxiliary_from_valid_declaration_and_a
 def test_scheduler_doctor_rejects_missing_auxiliary_from_activation_after_declaration_removed(
     tmp_path: Path, monkeypatch
 ) -> None:
-    runtime = tmp_path / "runtime"
-    state = tmp_path / "state"
-    runtime.mkdir()
-    state.mkdir()
-    _write_required_scripts(runtime)
-    rows = _healthy_tasks(runtime, state)
-    activation_id = "1" * 24
-    receipt_root = state / "receipts" / "runtime-activation"
-    receipt_root.mkdir(parents=True)
-    (receipt_root / f"runtime-activation-{activation_id}.json").write_text(
-        "{}", encoding="utf-8"
-    )
+    runtime, state = _prepare_missing_auxiliary_doctor(tmp_path, monkeypatch)
     import scripts.runtime_activation_contract as activation_contract
 
-    monkeypatch.setattr(
-        activation_contract,
-        "load_receipt",
-        lambda _path: _auxiliary_activation_payload(activation_id),
-    )
-    monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
+    receipt_path, sealed = _write_strict_auxiliary_activation_receipt(state)
 
     result = scheduler_service.scheduler_doctor(runtime, state)
 
+    assert activation_contract.load_receipt(receipt_path) == sealed
     assert not (runtime / scheduler_service.AUXILIARY_DECLARATION_FILE).exists()
     assert result["status"] == "BLOCKED_EXTERNAL"
     checked = result["governed_auxiliary_task"]
@@ -1441,6 +1576,139 @@ def test_scheduler_doctor_rejects_missing_auxiliary_from_activation_after_declar
     assert len(result["expected_task_names"]) == 5
 
 
+@pytest.mark.parametrize("receipt_root_state", ["never-created", "deleted-empty"])
+def test_scheduler_doctor_rejects_missing_auxiliary_after_all_evidence_deleted(
+    tmp_path: Path, monkeypatch, receipt_root_state: str
+) -> None:
+    runtime, state = _prepare_missing_auxiliary_doctor(tmp_path, monkeypatch)
+    receipt_root = state / "receipts" / "runtime-activation"
+    if receipt_root_state == "deleted-empty":
+        receipt_root.mkdir(parents=True)
+        receipt_root.rmdir()
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    assert not receipt_root.exists()
+    assert result["status"] == "BLOCKED_EXTERNAL"
+    checked = result["governed_auxiliary_task"]
+    assert checked["status"] == "FAILED"
+    assert checked["activation_evidence_present"] is False
+    assert checked["failure_reason"] == "auxiliary declaration and task are missing"
+
+
+def test_scheduler_doctor_rejects_oversized_auxiliary_activation_receipt(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _runtime, state = _prepare_missing_auxiliary_doctor(tmp_path, monkeypatch)
+    receipt_root = state / "receipts" / "runtime-activation"
+    receipt_root.mkdir(parents=True)
+    receipt_path = receipt_root / f"runtime-activation-{'1' * 24}.json"
+    receipt_path.write_bytes(
+        b"x" * (scheduler_service.MAX_AUXILIARY_ACTIVATION_RECEIPT_BYTES + 1)
+    )
+
+    result = scheduler_service.scheduler_doctor(_runtime, state)
+
+    checked = result["governed_auxiliary_task"]
+    assert checked["status"] == "FAILED"
+    assert checked["failure_reason"] == "auxiliary activation evidence is invalid"
+
+
+def test_scheduler_doctor_bounds_unrelated_activation_directory_entries(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime, state = _prepare_missing_auxiliary_doctor(tmp_path, monkeypatch)
+    receipt_root = state / "receipts" / "runtime-activation"
+    receipt_root.mkdir(parents=True)
+    for index in range(scheduler_service.MAX_AUXILIARY_ACTIVATION_DIRECTORY_ENTRIES + 1):
+        (receipt_root / f"unrelated-{index:04d}.tmp").write_bytes(b"")
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    checked = result["governed_auxiliary_task"]
+    assert checked["status"] == "FAILED"
+    assert checked["failure_reason"] == "auxiliary activation evidence is invalid"
+
+
+@pytest.mark.parametrize("payload", [b"{", b'{"value":1,"value":2}'])
+def test_scheduler_doctor_rejects_malformed_auxiliary_activation_receipt(
+    tmp_path: Path, monkeypatch, payload: bytes
+) -> None:
+    runtime, state = _prepare_missing_auxiliary_doctor(tmp_path, monkeypatch)
+    receipt_root = state / "receipts" / "runtime-activation"
+    receipt_root.mkdir(parents=True)
+    receipt_path = receipt_root / f"runtime-activation-{'1' * 24}.json"
+    receipt_path.write_bytes(payload)
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    checked = result["governed_auxiliary_task"]
+    assert checked["status"] == "FAILED"
+    assert checked["failure_reason"] == "auxiliary activation evidence is invalid"
+
+
+def test_scheduler_doctor_rejects_tampered_auxiliary_activation_receipt_bytes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime, state = _prepare_missing_auxiliary_doctor(tmp_path, monkeypatch)
+    receipt_path, _sealed = _write_strict_auxiliary_activation_receipt(state)
+    payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+    payload["receipt_sha256"] = "0" * 64
+    receipt_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    checked = result["governed_auxiliary_task"]
+    assert checked["status"] == "FAILED"
+    assert checked["failure_reason"] == "auxiliary activation evidence is invalid"
+
+
+def test_scheduler_doctor_does_not_bind_unrelated_runtime_activation_receipt(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime, state = _prepare_missing_auxiliary_doctor(tmp_path, monkeypatch)
+    _write_strict_auxiliary_activation_receipt(
+        state,
+        candidate_sha="c" * 40,
+        candidate_tree="d" * 40,
+    )
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    checked = result["governed_auxiliary_task"]
+    assert checked["status"] == "FAILED"
+    assert checked["activation_evidence_present"] is False
+    assert checked["failure_reason"] == "auxiliary declaration and task are missing"
+
+
+@pytest.mark.parametrize(
+    ("field", "uppercase_value"),
+    [
+        ("activation_id", "A" * 24),
+        ("candidate_sha", "A" * 40),
+        ("runtime_origin_sha256", "A" * 64),
+    ],
+)
+def test_scheduler_doctor_rejects_uppercase_hex_activation_identity(
+    tmp_path: Path, monkeypatch, field: str, uppercase_value: str
+) -> None:
+    runtime, state = _prepare_missing_auxiliary_doctor(tmp_path, monkeypatch)
+    receipt_path, _sealed = _write_strict_auxiliary_activation_receipt(state)
+    import scripts.runtime_activation_contract as activation_contract
+
+    payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+    payload[field] = uppercase_value
+    payload["receipt_sha256"] = activation_contract.self_hash(payload, "receipt_sha256")
+    receipt_path.write_bytes(activation_contract.canonical_json(payload))
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    checked = result["governed_auxiliary_task"]
+    assert checked["status"] == "FAILED"
+    assert checked["activation_evidence_present"] is False
+    assert checked["failure_reason"] == "auxiliary activation evidence is invalid"
+
+
 def test_scheduler_doctor_fails_closed_on_unsafe_auxiliary_activation_evidence(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -1449,7 +1717,7 @@ def test_scheduler_doctor_fails_closed_on_unsafe_auxiliary_activation_evidence(
     runtime.mkdir()
     state.mkdir()
     _write_required_scripts(runtime)
-    rows = _healthy_tasks(runtime, state)
+    rows = _healthy_tasks(runtime, state, include_disabled_auxiliary=False)
     activation_id = "1" * 24
     receipt_root = state / "receipts" / "runtime-activation"
     receipt_root.mkdir(parents=True)
@@ -1486,7 +1754,7 @@ def test_scheduler_doctor_rejects_missing_receipt_governed_auxiliary(
     runtime.mkdir()
     state.mkdir()
     _write_required_scripts(runtime)
-    rows = _healthy_tasks(runtime, state)
+    rows = _healthy_tasks(runtime, state, include_disabled_auxiliary=False)
     monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
     monkeypatch.setattr(
         scheduler_service,
@@ -1524,7 +1792,7 @@ def test_scheduler_doctor_rejects_disabled_governed_auxiliary_definition_drift(
     runtime.mkdir()
     state.mkdir()
     _write_required_scripts(runtime)
-    rows = _healthy_tasks(runtime, state)
+    rows = _healthy_tasks(runtime, state, include_disabled_auxiliary=False)
     auxiliary = _auxiliary_task(runtime, state)
     contract = _auxiliary_contract(auxiliary)
     auxiliary.update(state="Disabled", enabled=False)
@@ -1594,7 +1862,11 @@ def test_scheduler_doctor_accepts_one_release_and_state_boundary(
     assert result["status"] == "LOCAL_VERIFIED"
     assert result["failed_task_count"] == 0
     assert result["durable_source_config"]["ready"] is True
-    assert all(row["legacy_root_absent"] for row in result["scheduled_tasks"])
+    assert all(
+        row["legacy_root_absent"]
+        for row in result["scheduled_tasks"]
+        if row["name"] in scheduler_service.EXPECTED_TASKS
+    )
 
 
 def test_scheduler_doctor_rejects_semantically_invalid_durable_config(
@@ -1661,6 +1933,7 @@ def test_scheduler_doctor_blocks_failed_or_stale_task_history(
     assert all(
         row["last_run_status"] == "STALE_OR_FAILED"
         for row in result["scheduled_tasks"]
+        if row["name"] in scheduler_service.EXPECTED_TASKS
     )
 
 
