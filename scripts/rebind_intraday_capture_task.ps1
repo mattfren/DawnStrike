@@ -1003,10 +1003,24 @@ try {
         throw "Post-lock capture-task receipt does not match the current task or supplied input bindings."
     }
     $original = Get-DawnstrikeCaptureOriginalFromActivationBackup $state $activationReceipt.payload
-    $hardeningReceipt = Assert-DawnstrikeCaptureHardeningBoundary `
-        -Current $auxiliary -ActivationReceipt $activationReceipt.payload -OriginalXml ([string]$original.xml) -StateRoot $state `
-        -PythonPath $python -ContractPath $hardeningContract -CandidateSha $CandidateSha `
-        -CandidateTree ([string]$runtimeContract.tree) -OriginUrl $origin -RuntimeRoot $runtime -TimeoutSeconds $ProcessTimeoutSeconds
+    if (Test-Path -LiteralPath $preparedPath -PathType Leaf) {
+        # A crash after Set-ScheduledTask leaves the candidate-bound action on
+        # the Disabled task. Validate the immutable hardening receipt itself
+        # here; the prepared-chain check below validates the original XML and
+        # all input bindings before any compensation or retry mutation.
+        $hardeningReceiptRecord = Get-DawnstrikeHardeningReceipt `
+            -StateRoot $state -PythonPath $python -ContractPath $hardeningContract `
+            -CandidateSha $CandidateSha -CandidateTree ([string]$runtimeContract.tree) `
+            -TimeoutSeconds $ProcessTimeoutSeconds
+        $hardeningReceipt = $hardeningReceiptRecord.payload
+        $hardeningReceipt | Add-Member -NotePropertyName __path -NotePropertyValue $hardeningReceiptRecord.path -Force
+    }
+    else {
+        $hardeningReceipt = Assert-DawnstrikeCaptureHardeningBoundary `
+            -Current $auxiliary -ActivationReceipt $activationReceipt.payload -OriginalXml ([string]$original.xml) -StateRoot $state `
+            -PythonPath $python -ContractPath $hardeningContract -CandidateSha $CandidateSha `
+            -CandidateTree ([string]$runtimeContract.tree) -OriginUrl $origin -RuntimeRoot $runtime -TimeoutSeconds $ProcessTimeoutSeconds
+    }
     $resolvedRebindPrincipal = Resolve-DawnstrikeTaskPrincipal -Credential $RunAsCredential
     $principalDocument = [System.Xml.XmlDocument]::new()
     $principalDocument.LoadXml([string]$auxiliary.xml)
