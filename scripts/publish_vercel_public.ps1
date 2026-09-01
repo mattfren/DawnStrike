@@ -12,6 +12,9 @@ param(
     [switch]$AllowDegraded,
     [switch]$Promote,
     [string]$StateRoot = "",
+    [string]$ExpectedMarketDate = "",
+    [ValidatePattern('^$|^[0-9a-f]{64}$')][string]$PrepublicationAuthorizationId = "",
+    [ValidatePattern('^$|^[0-9a-f]{64}$')][string]$DailyLedgerAuthorizationId = "",
     [ValidateSet("", "after_promote", "after_aliases", "after_production_verification", "after_result_write_before_complete")]
     [string]$TestCrashPoint = "",
     [ValidateSet("", "after_promote", "after_aliases", "after_production_verification", "result_write", "after_result_write_before_complete")]
@@ -35,6 +38,19 @@ if ($LASTEXITCODE -ne 0 -or $expectedSourceSha -notmatch '^[0-9a-f]{40}$') {
 if ($expectedSourceTree -notmatch '^[0-9a-f]{40}$') {
     throw "Could not resolve the exact Git tree before Vercel publication."
 }
+if ($ExpectedMarketDate -and $ExpectedMarketDate -notmatch '^\d{4}-\d{2}-\d{2}$') {
+    throw "ExpectedMarketDate must be an ISO calendar date."
+}
+if ($Promote -and [string]::IsNullOrWhiteSpace($PrepublicationAuthorizationId)) {
+    throw "Production promotion requires an explicit prepublication authorization identity."
+}
+if ($Promote -and [string]::IsNullOrWhiteSpace($DailyLedgerAuthorizationId)) {
+    throw "Production promotion requires an explicit daily-ledger authorization identity."
+}
+if ($PrepublicationAuthorizationId -and $DailyLedgerAuthorizationId -and
+    $PrepublicationAuthorizationId -cne $DailyLedgerAuthorizationId) {
+    throw "Prepublication and daily-ledger authorization identities must be identical."
+}
 $stage = Join-Path $resolvedRoot $StageRoot
 $resultPath = Join-Path $resolvedRoot "build\daily-deployment-result.json"
 $rollbackResultPath = Join-Path $resolvedRoot "build\daily-deployment-rollback-result.json"
@@ -47,6 +63,9 @@ else {
 }
 $journalRoot = Join-Path $resolvedStateRoot "outputs\daily_finalize\vercel-publication"
 $journalPath = Join-Path $journalRoot "vercel-publication-operation.json"
+$publicationLockPath = Join-Path $journalRoot "vercel-publication-operation.lock"
+$publicationLockOwner = [guid]::NewGuid().ToString("N")
+$publicationLockAcquired = $false
 $journalHelper = Join-Path $resolvedRoot "scripts\vercel_publication_journal.py"
 $resultRelativePath = "build/daily-deployment-result.json"
 $vercel = @("--yes", "vercel@58.4.0")
@@ -401,6 +420,64 @@ function Get-VercelPublicationJournal {
     return $verified.payload
 }
 
+function Acquire-VercelPublicationLock {
+    param(
+        [Parameter(Mandatory = $true)][string]$CandidateSourceSha,
+        [Parameter(Mandatory = $true)][string]$CandidateSourceTree,
+        [Parameter(Mandatory = $true)][string]$CandidateMarketDate
+    )
+    $relativeJournal = ([System.IO.Path]::GetRelativePath($resolvedStateRoot, $journalPath)) -replace '\\','/'
+    $null = Invoke-VercelJournalTool -Arguments @(
+        "acquire-lock", $publicationLockPath,
+        "--state-root", $resolvedStateRoot,
+        "--owner-id", $publicationLockOwner,
+        "--pid", [string]$PID,
+        "--candidate-source-sha", $CandidateSourceSha,
+        "--candidate-source-tree", $CandidateSourceTree,
+        "--candidate-market-date", $CandidateMarketDate,
+        "--journal-path", $relativeJournal
+    ) -Label "Vercel publication lock acquisition"
+    $script:publicationLockAcquired = $true
+}
+
+function Release-VercelPublicationLock {
+    if (-not $publicationLockAcquired) { return }
+    $null = Invoke-VercelJournalTool -Arguments @(
+        "release-lock", $publicationLockPath,
+        "--state-root", $resolvedStateRoot,
+        "--owner-id", $publicationLockOwner,
+        "--pid", [string]$PID
+    ) -Label "Vercel publication lock release"
+    $script:publicationLockAcquired = $false
+}
+
+function Assert-VercelJournalMatchesInvocation {
+    param([Parameter(Mandatory = $true)][object]$Journal)
+    if ([string]$Journal.candidate_source_sha -ne $expectedSourceSha -or
+        [string]$Journal.candidate_source_tree -ne $expectedSourceTree) {
+        throw "Complete Vercel publication journal does not match the current source SHA/tree."
+    }
+    if (-not $ExpectedMarketDate -or [string]$Journal.candidate_market_date -ne $ExpectedMarketDate) {
+        throw "Complete Vercel publication journal cannot be reused without an exact ExpectedMarketDate match."
+    }
+    if ([string]$Journal.project_id -ne $ProjectId -or [string]$Journal.project_name -ne $ProjectName) {
+        throw "Complete Vercel publication journal does not match the current Vercel project."
+    }
+    if ([string]$Journal.expected_market_date -ne $ExpectedMarketDate -or
+        [string]$Journal.prepublication_authorization_id -ne $PrepublicationAuthorizationId -or
+        [string]$Journal.daily_ledger_authorization_id -ne $DailyLedgerAuthorizationId) {
+        throw "Complete Vercel publication journal authorization does not match this invocation."
+    }
+    if ($Journal.result_payload.promoted -ne [bool]$Promote -or
+        $Journal.result_payload.allow_degraded -ne [bool]$AllowDegraded) {
+        throw "Complete Vercel publication journal deployment authorization does not match this invocation."
+    }
+    if ([string]$Journal.result_payload.promoted_deployment_id -ne [string]$Journal.promoted_deployment_id -or
+        [string]$Journal.result_payload.production_deployment_id -ne [string]$Journal.promoted_deployment_id) {
+        throw "Complete Vercel publication journal deployment identity is inconsistent."
+    }
+}
+
 function Write-VercelPublicationJournal {
     param(
         [Parameter(Mandatory = $true)][object]$Payload,
@@ -613,12 +690,15 @@ function New-VercelPublicationJournalPayload {
         [Parameter(Mandatory = $true)][object[]]$PriorAliases,
         [AllowNull()][object]$PromotedDeployment,
         [AllowNull()][object]$ResultPayload,
+        [string]$ExpectedPublicationMarketDate = "",
+        [string]$PrepublicationAuthorization = "",
+        [string]$DailyLedgerAuthorization = "",
         [string]$PriorJournalHash = $emptySha256,
         [string]$CompensationRelativePath = "NONE",
         [string]$CompensationSha256 = $emptySha256
     )
     $resultHash = if ($null -eq $ResultPayload) { $emptySha256 } else { Get-VercelResultSha256 $ResultPayload }
-    return [ordered]@{
+    $payload = [ordered]@{
         schema_version = if ($Phase -eq "COMPENSATED") { "dawnstrike.vercel_publication_journal.v2" } else { "dawnstrike.vercel_publication_journal.v1" }
         operation = "vercel_publication"
         phase = $Phase
@@ -650,6 +730,15 @@ function New-VercelPublicationJournalPayload {
         research_only = $true
         broker_execution_enabled = $false
     }
+    if ($ExpectedPublicationMarketDate -or $PrepublicationAuthorization -or $DailyLedgerAuthorization) {
+        if (-not $ExpectedPublicationMarketDate -or -not $PrepublicationAuthorization -or -not $DailyLedgerAuthorization) {
+            throw "Vercel publication journal authorization identity is incomplete."
+        }
+        $payload.expected_market_date = $ExpectedPublicationMarketDate
+        $payload.prepublication_authorization_id = $PrepublicationAuthorization
+        $payload.daily_ledger_authorization_id = $DailyLedgerAuthorization
+    }
+    return $payload
 }
 
 function Invoke-VercelPublicationCompensation {
@@ -658,6 +747,7 @@ function Invoke-VercelPublicationCompensation {
         [Parameter(Mandatory = $true)][string]$FailureType
     )
     $errors = @()
+    $rollbackEvidence = @()
     foreach ($alias in $allProductionAliases) {
         try {
             $prior = @($Journal.prior_aliases | Where-Object { [string]$_.alias -eq [string]$alias })[0]
@@ -667,6 +757,14 @@ function Invoke-VercelPublicationCompensation {
             if ([string]$after.id -ne [string]$prior.deployment_id -or
                 (Normalize-VercelDeploymentUrl $after.url) -ne (Normalize-VercelDeploymentUrl $prior.deployment_url)) {
                 throw "Compensation rollback resolved the wrong deployment for $alias."
+            }
+            $rollbackEvidence += [ordered]@{
+                alias = [string]$alias
+                expected_deployment_id = [string]$prior.deployment_id
+                expected_deployment_url = [string]$prior.deployment_url
+                observed_deployment_id = [string]$after.id
+                observed_deployment_url = [string]$after.url
+                restored = $true
             }
         }
         catch { $errors += "${alias}: $($_.Exception.Message)" }
@@ -679,7 +777,11 @@ function Invoke-VercelPublicationCompensation {
         candidate_source_sha = [string]$Journal.candidate_source_sha
         candidate_source_tree = [string]$Journal.candidate_source_tree
         candidate_preview_deployment_id = [string]$Journal.candidate_preview_deployment_id
+        promoted_deployment_id = if ($Journal.promoted_deployment_id) { [string]$Journal.promoted_deployment_id } else { $null }
+        promoted_deployment_url = if ($Journal.promoted_deployment_url) { [string]$Journal.promoted_deployment_url } else { $null }
         prior_aliases = @($Journal.prior_aliases)
+        rollback_evidence = @($rollbackEvidence | Sort-Object -Property alias)
+        rollback_status = "ROLLED_BACK"
         failure_type = $FailureType
         research_only = $true
         broker_execution_enabled = $false
@@ -702,6 +804,9 @@ function Invoke-VercelPublicationCompensation {
         -PriorAliases @($Journal.prior_aliases) `
         -PromotedDeployment (if ($Journal.promoted_deployment_id) { [pscustomobject]@{ id = $Journal.promoted_deployment_id; url = $Journal.promoted_deployment_url } } else { $null }) `
         -ResultPayload $Journal.result_payload `
+        -ExpectedPublicationMarketDate ([string]$Journal.expected_market_date) `
+        -PrepublicationAuthorization ([string]$Journal.prepublication_authorization_id) `
+        -DailyLedgerAuthorization ([string]$Journal.daily_ledger_authorization_id) `
         -PriorJournalHash (Get-Sha256Hex ([System.IO.File]::ReadAllText($journalPath))) `
         -CompensationRelativePath (([System.IO.Path]::GetRelativePath($resolvedStateRoot, $compensationPath)) -replace '\\','/') `
         -CompensationSha256 $compensationHash
@@ -769,6 +874,9 @@ function New-VercelRecoveredResultPayload {
         readiness_http_status = $Readiness.http_status
         allow_degraded = $false
         promoted = $true
+        expected_market_date = [string]$Journal.candidate_market_date
+        prepublication_authorization_id = [string]$Journal.prepublication_authorization_id
+        daily_ledger_authorization_id = [string]$Journal.daily_ledger_authorization_id
         prior_production_deployment_id = @($Journal.prior_aliases | Where-Object { [string]$_.alias -eq [string]$ProductionAlias })[0].deployment_id
         production_aliases = @($allProductionAliases)
         promoted_deployment_id = [string]$Live.id
@@ -805,12 +913,33 @@ function Complete-VercelJournalRecovery {
 }
 
 $recoveryRetry = $false
-$existingJournal = if ($Promote) { Get-VercelPublicationJournal } else { $null }
+$existingJournal = $null
+if ($Promote) {
+    if (-not $ExpectedMarketDate) {
+        throw "Production publication requires an exact ExpectedMarketDate for the operation lock."
+    }
+    Acquire-VercelPublicationLock `
+        -CandidateSourceSha $expectedSourceSha `
+        -CandidateSourceTree $expectedSourceTree `
+        -CandidateMarketDate $ExpectedMarketDate
+    # Read the journal only after taking the global lock. This closes the
+    # check-then-act window where two publishers could both observe no journal
+    # and proceed to mutate production aliases.
+    $existingJournal = Get-VercelPublicationJournal
+    if ($null -ne $existingJournal -and
+        ([string]$existingJournal.candidate_source_sha -ne $expectedSourceSha -or
+         [string]$existingJournal.candidate_source_tree -ne $expectedSourceTree -or
+         [string]$existingJournal.candidate_market_date -ne $ExpectedMarketDate)) {
+        throw "Existing Vercel publication journal does not match this exact invocation."
+    }
+}
+try {
 if ($null -ne $existingJournal) {
     if ([string]$existingJournal.phase -eq "COMPENSATED") {
         throw "A terminal compensated Vercel publication journal already exists; manual review is required."
     }
     if ([string]$existingJournal.phase -eq "COMPLETE") {
+        Assert-VercelJournalMatchesInvocation -Journal $existingJournal
         if (-not (Test-VercelAliasSetMatches -Journal $existingJournal -Kind candidate)) {
             throw "Complete Vercel publication journal does not match the live aliases."
         }
@@ -845,6 +974,9 @@ if ($null -ne $existingJournal) {
                 -PriorAliases @($existingJournal.prior_aliases) `
                 -PromotedDeployment $live `
                 -ResultPayload $recoveredResult `
+                -ExpectedPublicationMarketDate ([string]$existingJournal.expected_market_date) `
+                -PrepublicationAuthorization ([string]$existingJournal.prepublication_authorization_id) `
+                -DailyLedgerAuthorization ([string]$existingJournal.daily_ledger_authorization_id) `
                 -PriorJournalHash (Get-VercelFileSha256 -Path $journalPath)
             $null = Write-VercelPublicationJournal -Payload $postRecovery -Transition
             $existingJournal = Get-VercelPublicationJournal
@@ -1054,7 +1186,10 @@ if ($Promote) {
         -PreviewManifest $previewManifest `
         -PackageManifestSha256 $packageManifestSha256 `
         -CandidateManifestSha256 $candidateManifestSha256 `
-        -PriorAliases $journalPriorAliases
+        -PriorAliases $journalPriorAliases `
+        -ExpectedPublicationMarketDate $ExpectedMarketDate `
+        -PrepublicationAuthorization $PrepublicationAuthorizationId `
+        -DailyLedgerAuthorization $DailyLedgerAuthorizationId
     $null = Write-VercelPublicationJournal -Payload $preMutationJournal
 }
 
@@ -1298,6 +1433,9 @@ try {
         readiness_http_status = $previewReadiness.http_status
         allow_degraded = [bool]$AllowDegraded
         promoted = [bool]$Promote
+        expected_market_date = [string]$ExpectedMarketDate
+        prepublication_authorization_id = [string]$PrepublicationAuthorizationId
+        daily_ledger_authorization_id = [string]$DailyLedgerAuthorizationId
         prior_production_deployment_id = Get-OptionalJsonProperty -InputObject $priorProduction -Name "id"
         production_aliases = if ($Promote) { @($allProductionAliases) } else { @() }
         promoted_deployment_id = Get-OptionalJsonProperty -InputObject $promotedDeployment -Name "id"
@@ -1317,6 +1455,9 @@ try {
             -PriorAliases $journalPriorAliases `
             -PromotedDeployment ([pscustomobject]@{ id = [string]$promotedDeploymentId; url = [string]$promotedUrl }) `
             -ResultPayload $result `
+            -ExpectedPublicationMarketDate $ExpectedMarketDate `
+            -PrepublicationAuthorization $PrepublicationAuthorizationId `
+            -DailyLedgerAuthorization $DailyLedgerAuthorizationId `
             -PriorJournalHash (Get-VercelFileSha256 -Path $journalPath)
         $null = Write-VercelPublicationJournal -Payload $postJournal -Transition
     }
@@ -1333,6 +1474,9 @@ try {
             -PriorAliases $journalPriorAliases `
             -PromotedDeployment ([pscustomobject]@{ id = [string]$promotedDeploymentId; url = [string]$promotedUrl }) `
             -ResultPayload $result `
+            -ExpectedPublicationMarketDate $ExpectedMarketDate `
+            -PrepublicationAuthorization $PrepublicationAuthorizationId `
+            -DailyLedgerAuthorization $DailyLedgerAuthorizationId `
             -PriorJournalHash (Get-VercelFileSha256 -Path $journalPath)
         $null = Write-VercelPublicationJournal -Payload $completeJournal -Transition
     }
@@ -1448,4 +1592,8 @@ catch {
         throw "$publicationError Rollback blocked: a complete per-alias production snapshot was not captured."
     }
     throw $publicationError
+}
+}
+finally {
+    Release-VercelPublicationLock
 }
