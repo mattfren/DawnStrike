@@ -1,4 +1,5 @@
 Set-StrictMode -Version Latest
+$script:DawnstrikeExpectedReleaseSha = ""
 
 # Every scheduled child is launched through the native Job Object runner.  A
 # PowerShell process tree is not a sufficient ownership boundary on Windows:
@@ -14,7 +15,11 @@ if (-not (Get-Command Get-DawnstrikeApprovedLockInterpreter -ErrorAction Silentl
 
 function Assert-DawnstrikeProcessSourceBoundToHead {
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][string]$ReleaseRoot)
+    param(
+        [Parameter(Mandatory = $true)][string]$ReleaseRoot,
+        [string]$ExpectedSha = "",
+        [string]$EntryScript = ""
+    )
 
     $root = [System.IO.Path]::GetFullPath($ReleaseRoot).TrimEnd('\')
     $gitDirectory = Join-Path $root ".git"
@@ -22,7 +27,11 @@ function Assert-DawnstrikeProcessSourceBoundToHead {
         throw "Scheduled Python release root is not a self-contained Git checkout."
     }
     $git = (Get-DawnstrikeApprovedGit).path
-    $gitArgs = @('-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false', '-C', $root)
+    # Windows checkouts may materialize committed LF blobs as CRLF.  Keep the
+    # normal Git text normalization contract while disabling all external
+    # filters/hooks; otherwise a clean, ordinary checkout is falsely rejected
+    # as a byte-substituted release.
+    $gitArgs = @('-c', 'core.autocrlf=true', '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false', '-C', $root)
     $savedGitEnvironment = @{}
     foreach ($entry in @(Get-ChildItem Env: | Where-Object { $_.Name -like 'GIT_*' })) {
         $savedGitEnvironment[[string]$entry.Name] = [string]$entry.Value
@@ -33,6 +42,7 @@ function Assert-DawnstrikeProcessSourceBoundToHead {
         $env:GIT_CONFIG_GLOBAL = 'NUL'
         $env:GIT_TERMINAL_PROMPT = '0'
         $env:GIT_OPTIONAL_LOCKS = '0'
+        $env:GIT_NO_REPLACE_OBJECTS = '1'
         $top = ((& $git @gitArgs rev-parse --show-toplevel 2>$null) -join '').Trim()
         if ($LASTEXITCODE -ne 0 -or [System.IO.Path]::GetFullPath($top).TrimEnd('\') -ine $root) {
             throw "Scheduled Python release root is not the exact Git root."
@@ -40,6 +50,9 @@ function Assert-DawnstrikeProcessSourceBoundToHead {
         $releaseHead = ((& $git @gitArgs rev-parse HEAD 2>$null) -join '').Trim().ToLowerInvariant()
         if ($LASTEXITCODE -ne 0 -or $releaseHead -notmatch '^[0-9a-f]{40}$') {
             throw "Scheduled Python release HEAD is invalid."
+        }
+        if ($ExpectedSha -and $releaseHead -cne $ExpectedSha.ToLowerInvariant()) {
+            throw "Scheduled release HEAD does not match the externally activated SHA."
         }
         $status = ((& $git @gitArgs status --porcelain=v1 --untracked-files=all 2>$null) -join '')
         if ($LASTEXITCODE -ne 0 -or $status) {
@@ -65,6 +78,16 @@ function Assert-DawnstrikeProcessSourceBoundToHead {
         if ($forbiddenIgnored.Count -gt 0) {
             throw "Scheduled Python release contains ignored executable or startup artifacts."
         }
+        $replacements = ((& $git @gitArgs replace -l 2>$null) -join '').Trim()
+        if ($LASTEXITCODE -eq 0 -and $replacements) {
+            throw "Scheduled Python release contains Git replace refs."
+        }
+        foreach ($configPattern in @('filter.*', 'core.attributesfile', 'core.hooksPath')) {
+            $config = ((& $git @gitArgs config --local --get-regexp $configPattern 2>$null) -join '').Trim()
+            if ($LASTEXITCODE -eq 0 -and $config) {
+                throw "Scheduled Python release contains a Git execution/filter configuration."
+            }
+        }
         $null = & $git @gitArgs diff-index --quiet HEAD -- 2>$null
         if ($LASTEXITCODE -ne 0) {
             throw "Scheduled Python release differs from exact HEAD."
@@ -87,6 +110,19 @@ function Assert-DawnstrikeProcessSourceBoundToHead {
             $worktree = ((& $git @gitArgs hash-object ("--path=" + $relative) -- $path 2>$null) -join '').Trim().ToLowerInvariant()
             if ($LASTEXITCODE -ne 0 -or $worktree -cne $headBlob) {
                 throw "Scheduled Python helper bytes changed from exact HEAD: $relative"
+            }
+        }
+        if ($EntryScript) {
+            $entryPath = [System.IO.Path]::GetFullPath($EntryScript)
+            $rootPrefix = $root.TrimEnd('\') + '\'
+            if (-not $entryPath.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw "Scheduled entry script is outside the exact release root."
+            }
+            $entryRelative = $entryPath.Substring($rootPrefix.Length).Replace('\', '/')
+            $entryHeadBlob = ((& $git @gitArgs rev-parse ("HEAD:" + $entryRelative) 2>$null) -join '').Trim().ToLowerInvariant()
+            $entryWorktree = ((& $git @gitArgs hash-object ("--path=" + $entryRelative) -- $entryPath 2>$null) -join '').Trim().ToLowerInvariant()
+            if ($LASTEXITCODE -ne 0 -or $entryHeadBlob -notmatch '^[0-9a-f]{40}$' -or $entryWorktree -cne $entryHeadBlob) {
+                throw "Scheduled entry script bytes changed from exact HEAD."
             }
         }
         return [pscustomobject]@{ root = $root; head = $releaseHead }
@@ -242,7 +278,9 @@ function Invoke-DawnstrikeNativeProcess {
             $approved = Get-DawnstrikeApprovedLockInterpreter
             $resolved = [string]$approved.path
             $resolvedExecutableSha256 = [string]$approved.sha256
-            $sourceIdentity = Assert-DawnstrikeProcessSourceBoundToHead (Join-Path $PSScriptRoot "..")
+            $sourceIdentity = Assert-DawnstrikeProcessSourceBoundToHead `
+                (Join-Path $PSScriptRoot "..") `
+                -ExpectedSha ([string]$script:DawnstrikeExpectedReleaseSha)
             $releaseRoot = [string]$sourceIdentity.root
             $effectiveArguments = ConvertTo-DawnstrikeIsolatedPythonArguments `
                 -ArgumentList $effectiveArguments -ReleaseRoot $releaseRoot `
@@ -357,7 +395,8 @@ function Resolve-DawnstrikeReleaseSha {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$RuntimeRoot,
-        [Parameter(Mandatory = $true)][string]$LogRoot
+        [Parameter(Mandatory = $true)][string]$LogRoot,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedSha
     )
 
     $runtimePath = [System.IO.Path]::GetFullPath(
@@ -366,6 +405,7 @@ function Resolve-DawnstrikeReleaseSha {
         [System.IO.Path]::DirectorySeparatorChar,
         [System.IO.Path]::AltDirectorySeparatorChar
     )
+    $null = Assert-DawnstrikeProcessSourceBoundToHead -ReleaseRoot $runtimePath -ExpectedSha $ExpectedSha
     $rootReceipt = Invoke-DawnstrikeNativeProcess `
         -FilePath "git.exe" `
         -ArgumentList @("-C", $runtimePath, "rev-parse", "--show-toplevel") `
@@ -399,6 +439,9 @@ function Resolve-DawnstrikeReleaseSha {
     $shaBefore = (Get-Content -LiteralPath $beforeReceipt.stdout_path -Raw).Trim()
     if ($shaBefore -notmatch "^[0-9a-fA-F]{40}$") {
         throw "Runtime release SHA was not a full Git commit SHA."
+    }
+    if ($shaBefore -cne $ExpectedSha) {
+        throw "Runtime release SHA does not match the externally activated task SHA."
     }
 
     # A commit identity is truthful only when every executable byte in the
@@ -436,5 +479,6 @@ function Resolve-DawnstrikeReleaseSha {
     ) {
         throw "Runtime release SHA changed while verifying deployed bytes."
     }
-    return $shaAfter.ToLowerInvariant()
+    $script:DawnstrikeExpectedReleaseSha = $ExpectedSha.ToLowerInvariant()
+    return $script:DawnstrikeExpectedReleaseSha
 }

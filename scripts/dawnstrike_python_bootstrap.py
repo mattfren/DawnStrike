@@ -13,7 +13,9 @@ import argparse
 import hashlib
 import importlib.util
 import os
+import re
 import runpy
+import stat
 import subprocess
 import sys
 import sysconfig
@@ -41,6 +43,18 @@ _FORBIDDEN_IGNORED_SUFFIXES = {
 _FORBIDDEN_IGNORED_NAMES = {"sitecustomize.py", "usercustomize.py"}
 
 
+def _is_reparse(path: Path) -> bool:
+    """Reject Windows junctions/reparse points as well as POSIX symlinks."""
+
+    try:
+        attributes = getattr(path.lstat(), "st_file_attributes", 0)
+    except OSError:
+        return True
+    return path.is_symlink() or bool(
+        attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    )
+
+
 def _fail(message: str) -> NoReturn:
     raise RuntimeError(message)
 
@@ -60,6 +74,7 @@ def _isolated_git_env() -> dict[str, str]:
             "GIT_CONFIG_GLOBAL": os.devnull,
             "GIT_TERMINAL_PROMPT": "0",
             "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_NO_REPLACE_OBJECTS": "1",
         }
     )
     return env
@@ -101,7 +116,7 @@ def _assert_exact_source(root: Path, expected_sha: str) -> None:
     if len(expected_sha) != 40 or any(char not in "0123456789abcdef" for char in expected_sha):
         _fail("expected release SHA is invalid")
     git_dir = root / ".git"
-    if not git_dir.is_dir() or git_dir.is_symlink():
+    if not git_dir.is_dir() or _is_reparse(git_dir):
         _fail("release root is not a self-contained Git checkout")
     top = _git(root, "rev-parse", "--show-toplevel").strip()
     if Path(top).resolve(strict=True) != root:
@@ -127,6 +142,18 @@ def _assert_exact_source(root: Path, expected_sha: str) -> None:
     entries = flags.split("\0")
     if any(entry and entry[0] in "hSs" for entry in entries):
         _fail("release checkout contains hidden Git index entries")
+    if _git(root, "replace", "-l").strip():
+        _fail("release checkout contains Git replace refs")
+    config_path = root / ".git" / "config"
+    try:
+        local_config = config_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        _fail(f"release checkout Git config is unavailable: {exc}")
+    if re.search(
+        r"(?im)^\s*\[\s*filter(?:\s|\])|^\s*(?:attributesfile|hookspath|path)\s*=",
+        local_config,
+    ):
+        _fail("release checkout contains a Git execution/filter configuration")
     diff = subprocess.run(
         [
             str(_APPROVED_GIT),
@@ -156,7 +183,13 @@ def _release_root(raw: str) -> Path:
     if root != expected or not root.is_dir():
         raise RuntimeError("release bootstrap root is not the materialized bootstrap parent")
     package = root / "intraday_scanner"
-    if not (package / "__init__.py").is_file() or not (root / "pyproject.toml").is_file():
+    if (
+        _is_reparse(package)
+        or _is_reparse(package / "__init__.py")
+        or _is_reparse(root / "pyproject.toml")
+        or not (package / "__init__.py").is_file()
+        or not (root / "pyproject.toml").is_file()
+    ):
         raise RuntimeError("release bootstrap root is incomplete")
     return root
 
@@ -180,15 +213,31 @@ def _append_governed_dependencies() -> None:
     """
 
     paths = sysconfig.get_paths()
-    dependency_paths = {
-        Path(paths[name]).resolve(strict=True)
-        for name in ("purelib", "platlib")
-        if paths.get(name)
-    }
+    dependency_paths = set()
+    for name in ("purelib", "platlib"):
+        raw_dependency = Path(paths[name]) if paths.get(name) else None
+        if raw_dependency is None:
+            continue
+        if _is_reparse(raw_dependency) or any(
+            _is_reparse(parent) for parent in raw_dependency.parents
+        ):
+            raise RuntimeError("interpreter dependency path contains a reparse point")
+        dependency_paths.add(raw_dependency.resolve(strict=True))
     prefix = Path(sysconfig.get_config_var("prefix") or sys.prefix).resolve(strict=True)
     for dependency in sorted(dependency_paths, key=str):
-        if not dependency.is_dir() or prefix not in dependency.parents:
+        if (
+            not dependency.is_dir()
+            or _is_reparse(dependency)
+            or prefix not in dependency.parents
+            or any(_is_reparse(parent) for parent in dependency.parents)
+        ):
             raise RuntimeError("interpreter dependency path is outside the approved prefix")
+        # -S suppresses .pth execution, but a reparse point or startup file in
+        # the approved dependency directory would still let imports escape the
+        # pinned interpreter boundary.
+        for child in dependency.iterdir():
+            if _is_reparse(child) or child.name.lower() in {"sitecustomize.py", "usercustomize.py"}:
+                raise RuntimeError("interpreter dependency directory contains an unsafe startup link")
         text = str(dependency)
         if text not in sys.path:
             sys.path.append(text)

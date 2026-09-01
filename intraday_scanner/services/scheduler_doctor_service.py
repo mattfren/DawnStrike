@@ -97,7 +97,7 @@ EXPECTED_EXECUTION_LIMITS = {
 SCHED_S_TASK_RUNNING = 0x00041301
 SCHED_S_TASK_HAS_NOT_RUN = 0x00041303
 SCHEDULER_QUERY_TIMEOUT_SECONDS = 30
-EXPECTED_TASK_EXECUTABLE = "powershell.exe"
+EXPECTED_TASK_EXECUTABLE = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
 EXPECTED_WINDOWS_TIMEZONE_ID = "Central Standard Time"
 EXPECTED_VERCEL_PROJECT_ID = "prj_5pef3EZF1u5YadebEz3dFjnkWOXy"
 EXPECTED_MULTIPLE_INSTANCES = "IgnoreNew"
@@ -158,6 +158,11 @@ def scheduler_doctor(
     runtime = Path(root).resolve()
     state = Path(state_root).resolve()
     runtime_identity_before = _runtime_git_contract(runtime)
+    expected_runtime_sha = (
+        runtime_identity_before.get("candidate_sha", "")
+        if runtime_identity_before is not None
+        else ""
+    )
     required = {
         "morning_runner": runtime / "scripts" / "run_alphaops_morning.ps1",
         "monitor_runner": runtime / "scripts" / "run_alphaops_monitor.ps1",
@@ -190,6 +195,7 @@ def scheduler_doctor(
                 runtime_root=runtime,
                 state_root=state,
                 expected_start=EXPECTED_TASK_STARTS[name],
+                expected_sha=expected_runtime_sha,
                 expected_repetition=EXPECTED_TASK_REPETITIONS.get(name),
                 expected_execution_limit=EXPECTED_EXECUTION_LIMITS[name],
                 observation_date=observation_date,
@@ -330,6 +336,7 @@ def _task_check(
     runtime_root: Path,
     state_root: Path,
     expected_start: str,
+    expected_sha: str,
     expected_repetition: str | None,
     expected_execution_limit: str,
     observation_date: date,
@@ -348,12 +355,13 @@ def _task_check(
         )
     )
     runner_ok = str(expected_runner).lower() in arguments.lower()
-    executable_ok = execute.lower() == EXPECTED_TASK_EXECUTABLE
+    executable_ok = execute.casefold() == EXPECTED_TASK_EXECUTABLE.casefold()
     expected_arguments = _expected_action_arguments(
         task_name,
         expected_runner=expected_runner,
         runtime_root=runtime_root,
         state_root=state_root,
+        expected_sha=expected_sha,
     )
     action_arguments_match = arguments == expected_arguments
     action_count = task.get("action_count")
@@ -833,6 +841,7 @@ def _runtime_git_origin_sha(runtime: Path) -> str | None:
             capture_output=True,
             check=True,
             text=True,
+            env=_governed_git_environment(),
             timeout=SCHEDULER_QUERY_TIMEOUT_SECONDS,
         )
     except (OSError, RuntimeError, subprocess.SubprocessError):
@@ -899,6 +908,7 @@ def _runtime_git_clean(runtime: Path) -> bool:
             capture_output=True,
             check=True,
             text=True,
+            env=_governed_git_environment(),
             timeout=SCHEDULER_QUERY_TIMEOUT_SECONDS,
         )
         if status.stdout.strip():
@@ -917,6 +927,7 @@ def _runtime_git_clean(runtime: Path) -> bool:
             capture_output=True,
             check=True,
             text=False,
+            env=_governed_git_environment(),
             timeout=SCHEDULER_QUERY_TIMEOUT_SECONDS,
         )
     except (OSError, RuntimeError, subprocess.SubprocessError):
@@ -938,7 +949,68 @@ def _runtime_git_clean(runtime: Path) -> bool:
             ".pth",
         } or Path(name).name.lower() in {"sitecustomize.py", "usercustomize.py"}:
             return False
+    try:
+        git_path, _ = _approved_git()
+        flags = subprocess.run(
+            [str(git_path), "-C", str(runtime), "ls-files", "-v", "-z"],
+            capture_output=True,
+            check=True,
+            text=False,
+            env=_governed_git_environment(),
+            timeout=SCHEDULER_QUERY_TIMEOUT_SECONDS,
+        )
+        if any(
+            entry and entry[:1] in {b"h", b"H", b"s", b"S"}
+            for entry in flags.stdout.split(b"\0")
+        ):
+            return False
+        diff = subprocess.run(
+            [str(git_path), "-C", str(runtime), "diff-index", "--quiet", "HEAD", "--"],
+            capture_output=True,
+            check=False,
+            env=_governed_git_environment(),
+            timeout=SCHEDULER_QUERY_TIMEOUT_SECONDS,
+        )
+        if diff.returncode != 0:
+            return False
+        replacements = subprocess.run(
+            [str(git_path), "-C", str(runtime), "replace", "-l"],
+            capture_output=True,
+            check=True,
+            text=True,
+            env=_governed_git_environment(),
+            timeout=SCHEDULER_QUERY_TIMEOUT_SECONDS,
+        )
+        if replacements.stdout.strip():
+            return False
+        for pattern in ("filter.*", "core.attributesfile", "core.hooksPath"):
+            config = subprocess.run(
+                [str(git_path), "-C", str(runtime), "config", "--local", "--get-regexp", pattern],
+                capture_output=True,
+                check=False,
+                text=True,
+                env=_governed_git_environment(),
+                timeout=SCHEDULER_QUERY_TIMEOUT_SECONDS,
+            )
+            if config.returncode == 0 and config.stdout.strip():
+                return False
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        return False
     return True
+
+
+def _governed_git_environment() -> dict[str, str]:
+    env = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
+    env.update(
+        {
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+    )
+    return env
 
 
 def _runtime_git_value(runtime: Path, revision: str) -> str | None:
@@ -949,6 +1021,7 @@ def _runtime_git_value(runtime: Path, revision: str) -> str | None:
             capture_output=True,
             check=True,
             text=True,
+            env=_governed_git_environment(),
             timeout=SCHEDULER_QUERY_TIMEOUT_SECONDS,
         )
     except (OSError, RuntimeError, subprocess.SubprocessError):
@@ -1385,10 +1458,11 @@ def _expected_action_arguments(
     expected_runner: Path,
     runtime_root: Path,
     state_root: Path,
+    expected_sha: str = "",
 ) -> str:
     arguments = (
         f'-NoProfile -ExecutionPolicy Bypass -File "{expected_runner}" '
-        f'-RuntimeRoot "{runtime_root}" -StateRoot "{state_root}"'
+        f'-RuntimeRoot "{runtime_root}" -StateRoot "{state_root}" -ExpectedSha "{expected_sha}"'
     )
     if task_name == CANONICAL_TASK_NAME:
         arguments += f' -PublicationMode Production -VercelProjectId "{EXPECTED_VERCEL_PROJECT_ID}"'
@@ -1532,7 +1606,7 @@ def _query_scheduled_tasks() -> list[dict[str, Any]] | dict[str, Any]:
     script = _scheduler_query_script()
     try:
         completed = subprocess.run(  # nosec B603, B607
-            ["powershell.exe", "-NoProfile", "-Command", script],
+            [EXPECTED_TASK_EXECUTABLE, "-NoProfile", "-Command", script],
             capture_output=True,
             check=False,
             text=True,

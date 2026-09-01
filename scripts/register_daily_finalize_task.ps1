@@ -2,6 +2,7 @@
 param(
     [string]$RuntimeRoot = "C:\r\dawnstrike-runtime",
     [string]$StateRoot = "C:\r\dawnstrike-state",
+    [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedSha,
     [string]$TaskName = "Dawnstrike 10of10 Daily Finalize",
     [datetime]$StartTime = (Get-Date -Hour 17 -Minute 30 -Second 0),
     [ValidateSet("LocalOnly", "Preview", "Production")]
@@ -13,7 +14,13 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$powershellExecutable = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+if (-not (Test-Path -LiteralPath $powershellExecutable -PathType Leaf)) { throw "Pinned Windows PowerShell executable is missing." }
 $runtime = (Resolve-Path $RuntimeRoot).Path
+$processRunner = Join-Path $runtime "scripts\dawnstrike_process_runner.ps1"
+if (-not (Test-Path -LiteralPath $processRunner -PathType Leaf)) { throw "Runtime process runner is missing." }
+. $processRunner
+$null = Assert-DawnstrikeProcessSourceBoundToHead -ReleaseRoot $runtime -ExpectedSha $ExpectedSha -EntryScript $PSCommandPath
 . (Join-Path $runtime "scripts\resolve_dawnstrike_task_principal.ps1")
 New-Item -ItemType Directory -Path $StateRoot -Force | Out-Null
 $state = (Resolve-Path $StateRoot).Path
@@ -54,12 +61,12 @@ if ($existing) {
 $arguments = (
     "-NoProfile -ExecutionPolicy Bypass -File `"$runner`" " +
     "-RuntimeRoot `"$runtime`" " +
-    "-StateRoot `"$state`" " +
+        "-StateRoot `"$state`" -ExpectedSha `"$ExpectedSha`" " +
     "-PublicationMode $PublicationMode " +
     "-VercelProjectId `"$VercelProjectId`""
 )
 $action = New-ScheduledTaskAction `
-    -Execute "powershell.exe" `
+    -Execute $powershellExecutable `
     -Argument $arguments `
     -WorkingDirectory $runtime
 $trigger = New-ScheduledTaskTrigger -Daily -At $StartTime
