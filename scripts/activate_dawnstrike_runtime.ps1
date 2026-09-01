@@ -13,7 +13,17 @@ param(
     [pscredential]$RunAsCredential,
     [switch]$PreflightOnly,
     [switch]$InjectCrashBetweenRuntimeRenames,
-    [ValidateSet("", "after_stage_directory", "after_stage_checkout", "after_init_recovery_lock_release", "after_pre_quiesce_recovery_lock_release", "after_candidate_runtime_rename", "after_complete_journal")][string]$TestStageCrashPoint = "",
+    [ValidateSet(
+        "",
+        "after_stage_directory",
+        "after_stage_checkout",
+        "after_init_recovery_lock_release",
+        "after_pre_quiesce_recovery_lock_release",
+        "after_candidate_runtime_rename",
+        "after_ready_journal",
+        "after_enable_before_complete",
+        "after_complete_journal"
+    )][string]$TestStageCrashPoint = "",
     [string]$TestNowUtc = ""
 )
 
