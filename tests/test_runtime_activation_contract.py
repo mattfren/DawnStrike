@@ -205,6 +205,41 @@ def test_powershell_declaration_is_bound_to_exact_commit_and_rechecked() -> None
         ).read_text(encoding="utf-8")
 
 
+def test_powershell_receipt_paths_use_valid_backslash_regex() -> None:
+    scripts = tuple(Path("scripts").glob("*.ps1"))
+    source_by_script = {
+        script: script.read_text(encoding="utf-8") for script in scripts
+    }
+    assert source_by_script[Path("scripts/activate_dawnstrike_runtime.ps1")].count(
+        r"-replace '\\','/'"
+    ) >= 2
+    assert source_by_script[Path("scripts/harden_intraday_capture_task.ps1")].count(
+        r"-replace '\\','/'"
+    ) >= 1
+    assert source_by_script[Path("scripts/rebind_intraday_capture_task.ps1")].count(
+        r"-replace '\\','/'"
+    ) >= 1
+    assert all(r"-replace '\','/'" not in source for source in source_by_script.values())
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
+def test_powershell_backslash_regex_executes() -> None:
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            r"if (('receipts\capture-task\x.json' -replace '\\','/') -ne "
+            r"'receipts/capture-task/x.json') { exit 1 }",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 @pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
 def test_powershell_activation_script_has_valid_ast() -> None:
     script = str(Path("scripts/activate_dawnstrike_runtime.ps1").resolve()).replace("'", "''")
@@ -618,6 +653,73 @@ def test_activation_and_rollback_receipts_are_strict_self_hashed_and_atomic(
     assert load_receipt(rollback_path) == rollback
     assert rollback["restored_sha"] == PREVIOUS_SHA
     assert not list(activation_path.parent.glob("*.tmp"))
+
+
+def test_extended_rollback_requires_untampered_capture_hardening_chain(
+    tmp_path: Path,
+) -> None:
+    payload = _receipt_payload(schema=ROLLBACK_SCHEMA, status="ROLLED_BACK")
+    activation_id = str(payload["activation_id"])
+    state_preparation_id = "state-preparation-" + "a" * 16 + "-" + "b" * 16
+    payload.update(
+        {
+            "state_preparation_required": True,
+            "state_preparation_contract": "dawnstrike.account_capture_trial_sidecar.v1",
+            "state_preparation_receipt_sha256": "a" * 64,
+            "state_preparation_after_db_sha256": "b" * 64,
+            "state_preparation_after_wal_sha256": "c" * 64,
+            "state_preparation_after_shm_sha256": "d" * 64,
+            "state_preparation_after_logical_snapshot_sha256": "e" * 64,
+            "state_preparation_inventory_sha256": "f" * 64,
+            "state_preparation_backup_id": state_preparation_id,
+            "state_preparation_backup_bundle_path": str(
+                (tmp_path / state_preparation_id).resolve()
+            ),
+            "state_preparation_backup_db_sha256": "1" * 64,
+            "state_preparation_backup_manifest_sha256": "2" * 64,
+            "state_preparation_backup_manifest_file_sha256": "3" * 64,
+            "state_backup_bundle_path": str(
+                (tmp_path / f"runtime-activation-{activation_id}").resolve()
+            ),
+            "state_backup_logical_snapshot_sha256": "4" * 64,
+            "state_backup_source_logical_snapshot_sha256": "5" * 64,
+            "state_backup_manifest_sha256": "6" * 64,
+            "auxiliary_capture_present": True,
+            "auxiliary_capture_state_before": "Disabled",
+            "auxiliary_capture_state_after": "Disabled",
+            "auxiliary_capture_action": "RESTORED_EXACT",
+            "auxiliary_capture_xml_sha256": "7" * 64,
+            "auxiliary_capture_xml_file_sha256": "8" * 64,
+            "auxiliary_capture_definition_contract_sha256": "9" * 64,
+            "auxiliary_capture_action_contract_sha256": "a" * 64,
+            "auxiliary_capture_backup_name": f"runtime-activation-{activation_id}",
+            "auxiliary_capture_backup_manifest_sha256": "b" * 64,
+            "capture_hardening_receipt_relative_path": (
+                "receipts/capture-task/capture-task-hardening-" + CANDIDATE_SHA + ".json"
+            ),
+            "capture_hardening_receipt_raw_sha256": "c" * 64,
+            "capture_hardening_receipt_sha256": "d" * 64,
+            "capture_hardening_xml_sha256": "e" * 64,
+            "capture_hardening_action_sha256": "f" * 64,
+            "capture_hardening_principal_sha256": "1" * 64,
+            "capture_hardening_trigger_sha256": "2" * 64,
+            "capture_hardening_settings_sha256": "3" * 64,
+            "capture_hardening_runner_before_sha256": "4" * 64,
+            "capture_hardening_runner_target_sha256": "5" * 64,
+        }
+    )
+    sealed = seal_receipt(payload, tmp_path / "extended-rollback.json")
+    assert sealed["status"] == "ROLLED_BACK"
+
+    omitted = dict(payload)
+    omitted.pop("capture_hardening_receipt_sha256")
+    with pytest.raises(ActivationContractError, match="fields do not match"):
+        seal_receipt(omitted, tmp_path / "omitted.json")
+
+    tampered = dict(payload)
+    tampered["capture_hardening_runner_target_sha256"] = "not-a-hash"
+    with pytest.raises(ActivationContractError, match="runner_target_sha256 is invalid"):
+        seal_receipt(tampered, tmp_path / "tampered.json")
 
 
 @pytest.mark.parametrize(

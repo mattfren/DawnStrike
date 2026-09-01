@@ -545,7 +545,8 @@ function Get-DawnstrikeAuxiliarySectionHash {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$Xml,
-        [Parameter(Mandatory = $true)][ValidateSet("Principal", "Triggers", "Settings", "Actions")][string]$Name
+        [Parameter(Mandatory = $true)][ValidateSet("Principal", "Triggers", "Settings", "Actions")][string]$Name,
+        [ValidateSet("", "true", "false")][string]$NormalizeEnabledTo = ""
     )
     try {
         $document = [System.Xml.XmlDocument]::new()
@@ -553,6 +554,11 @@ function Get-DawnstrikeAuxiliarySectionHash {
         $document.LoadXml($Xml)
         $nodes = @($document.SelectNodes("//*[local-name()='$Name']"))
         if ($nodes.Count -ne 1) { throw "expected exactly one $Name section" }
+        if ($Name -eq "Settings" -and $NormalizeEnabledTo) {
+            $enabled = @($nodes[0].ChildNodes | Where-Object { $_.LocalName -eq "Enabled" })
+            if ($enabled.Count -gt 1) { throw "expected at most one Settings/Enabled node" }
+            if ($enabled.Count -eq 1) { $enabled[0].InnerText = $NormalizeEnabledTo }
+        }
         return Get-DawnstrikeSha256Text ([string]$nodes[0].OuterXml)
     }
     catch {
@@ -1514,7 +1520,7 @@ function Assert-DawnstrikeCaptureHardeningAttestation {
     ) $CandidateRoot "Activation hardening receipt verification" $TimeoutSeconds
     try { $receipt = [string]$result.Stdout | ConvertFrom-Json } catch { throw "Activation hardening receipt verification did not return valid JSON." }
     $stateFull = [System.IO.Path]::GetFullPath($StateRoot).TrimEnd('\') + '\'
-    $receiptRelative = ([System.IO.Path]::GetFullPath($paths[0].FullName).Substring($stateFull.Length) -replace '\','/')
+    $receiptRelative = ([System.IO.Path]::GetFullPath($paths[0].FullName).Substring($stateFull.Length) -replace '\\','/')
     if ([string]$receipt.status -ne "COMPLETE" -or [string]$receipt.schema_version -ne "dawnstrike.capture_task_hardening_receipt.v2" -or [string]$receipt.candidate_sha -ne $CandidateSha -or [string]$receipt.candidate_tree -ne $CandidateTree -or [string]$receipt.final_state -ne "Disabled" -or [string]$receipt.receipt_relative_path -ne $receiptRelative) { throw "Activation hardening receipt is not bound to the exact disabled candidate task." }
     $principalHash = Get-DawnstrikeAuxiliarySectionHash ([string]$Auxiliary.xml) "Principal"
     $triggerHash = Get-DawnstrikeAuxiliarySectionHash ([string]$Auxiliary.xml) "Triggers"
@@ -1604,7 +1610,7 @@ function Assert-DawnstrikeCaptureRebindChain {
         [string]$capture.definition_after_sha256 -ne [string]$Auxiliary.definition_contract_sha256 -or
         (Get-DawnstrikeAuxiliarySectionHash ([string]$Auxiliary.xml) "Principal") -ne [string]$capture.principal_sha256 -or
         (Get-DawnstrikeAuxiliarySectionHash ([string]$Auxiliary.xml) "Triggers") -ne [string]$capture.trigger_sha256 -or
-        (Get-DawnstrikeAuxiliarySectionHash ([string]$Auxiliary.xml) "Settings") -ne [string]$capture.settings_sha256
+        (Get-DawnstrikeAuxiliarySectionHash ([string]$Auxiliary.xml) "Settings" "false") -ne [string]$capture.settings_sha256
     ) { throw "Ready auxiliary task is not bound to the exact activation receipt chain." }
     $hardeningRelative = [string]$ActivationReceipt.capture_hardening_receipt_relative_path
     if ([string]::IsNullOrWhiteSpace($hardeningRelative) -or $hardeningRelative -eq "NONE" -or $hardeningRelative -match '(^|[\\/])\.\.?([\\/]|$)') {
@@ -1639,7 +1645,9 @@ function Assert-DawnstrikeCaptureRebindChain {
         @("entitlement-receipt-sha256", [string]$capture.entitlement_receipt_sha256),
         @("source-config-sha256", [string]$capture.source_config_sha256)
     )) {
-        $bindingPattern = '(?i)(?<![A-Za-z0-9_-])--' + [regex]::Escape($binding[0]) + '(?:=|\s+)(?:"' + [regex]::Escape($binding[1]) + '"|' + [regex]::Escape($binding[1]) + ')(?![A-Za-z0-9])'
+        $escapedName = [regex]::Escape($binding[0])
+        $bindingOption = "(?:`"--$escapedName`"|'--$escapedName'|--$escapedName)"
+        $bindingPattern = '(?i)(?<![A-Za-z0-9_-])' + $bindingOption + '(?:=|\s+)(?:"' + [regex]::Escape($binding[1]) + '"|' + [regex]::Escape($binding[1]) + ')(?![A-Za-z0-9])'
         if (@([regex]::Matches([string]$Auxiliary.xml, $bindingPattern)).Count -ne 1) {
             throw "Ready auxiliary task does not bind the supplied $($binding[0]) receipt hash."
         }
@@ -2775,7 +2783,7 @@ function Invoke-DawnstrikeRuntimeActivation {
                 $receiptPayload.capture_hardening_runner_before_sha256 = Get-DawnstrikeSha256Text ""
                 $receiptPayload.capture_hardening_runner_target_sha256 = Get-DawnstrikeSha256Text ""
                 if ($null -ne $hardeningAttestation) {
-                    $receiptPayload.capture_hardening_receipt_relative_path = ([System.IO.Path]::GetFullPath($hardeningAttestation.path).Substring(([System.IO.Path]::GetFullPath($state)).TrimEnd('\').Length + 1) -replace '\','/')
+                    $receiptPayload.capture_hardening_receipt_relative_path = ([System.IO.Path]::GetFullPath($hardeningAttestation.path).Substring(([System.IO.Path]::GetFullPath($state)).TrimEnd('\').Length + 1) -replace '\\','/')
                     $receiptPayload.capture_hardening_receipt_raw_sha256 = [string]$hardeningAttestation.raw_sha256
                     $receiptPayload.capture_hardening_receipt_sha256 = [string]$hardeningAttestation.payload.receipt_sha256
                     $receiptPayload.capture_hardening_xml_sha256 = [string]$hardeningAttestation.payload.xml_after_sha256

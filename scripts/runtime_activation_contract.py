@@ -648,29 +648,28 @@ def _validate_extended_receipt(payload: Mapping[str, Any]) -> None:
     after = payload.get("auxiliary_capture_state_after")
     action = payload.get("auxiliary_capture_action")
     if payload.get("auxiliary_capture_present") is True:
-        if payload.get("schema_version") == ACTIVATION_SCHEMA:
-            relative = payload.get("capture_hardening_receipt_relative_path")
-            if (
-                not isinstance(relative, str)
-                or not relative
-                or Path(relative).is_absolute()
-                or ".." in Path(relative).parts
-                or not relative.lower().endswith(".json")
-            ):
-                raise ActivationContractError("runtime receipt hardening receipt path is invalid")
-            for field in (
-                "capture_hardening_receipt_raw_sha256",
-                "capture_hardening_receipt_sha256",
-                "capture_hardening_xml_sha256",
-                "capture_hardening_action_sha256",
-                "capture_hardening_principal_sha256",
-                "capture_hardening_trigger_sha256",
-                "capture_hardening_settings_sha256",
-                "capture_hardening_runner_before_sha256",
-                "capture_hardening_runner_target_sha256",
-            ):
-                if not _SHA256.fullmatch(str(payload.get(field) or "")):
-                    raise ActivationContractError(f"runtime receipt {field} is invalid")
+        relative = payload.get("capture_hardening_receipt_relative_path")
+        if (
+            not isinstance(relative, str)
+            or not relative
+            or Path(relative).is_absolute()
+            or ".." in Path(relative).parts
+            or not relative.lower().endswith(".json")
+        ):
+            raise ActivationContractError("runtime receipt hardening receipt path is invalid")
+        for field in (
+            "capture_hardening_receipt_raw_sha256",
+            "capture_hardening_receipt_sha256",
+            "capture_hardening_xml_sha256",
+            "capture_hardening_action_sha256",
+            "capture_hardening_principal_sha256",
+            "capture_hardening_trigger_sha256",
+            "capture_hardening_settings_sha256",
+            "capture_hardening_runner_before_sha256",
+            "capture_hardening_runner_target_sha256",
+        ):
+            if not _SHA256.fullmatch(str(payload.get(field) or "")):
+                raise ActivationContractError(f"runtime receipt {field} is invalid")
         if before not in {"Ready", "Disabled"}:
             raise ActivationContractError("runtime receipt auxiliary capture state is invalid")
         if payload.get("schema_version") == ACTIVATION_SCHEMA:

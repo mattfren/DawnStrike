@@ -157,6 +157,7 @@ function Assert-DawnstrikeCaptureHardeningBoundary {
     if ([string]$receipt.task_name -ne $script:DawnstrikeAuxiliaryCaptureTaskName -or [string]$receipt.task_path -ne "\") {
         throw "Hardening receipt task identity is invalid."
     }
+    $hardeningBackupText = $null
     foreach ($field in @("backup_relative_path", "prepared_relative_path")) {
         $relative = [string]$receipt.$field
         if (
@@ -177,40 +178,62 @@ function Assert-DawnstrikeCaptureHardeningBoundary {
             throw "Hardening XML backup hash does not match the receipt."
         }
         if ($field -eq "backup_relative_path") {
-            $backupText = [System.IO.File]::ReadAllText($resolved, [System.Text.UTF8Encoding]::new($false))
+            $hardeningBackupText = [System.IO.File]::ReadAllText($resolved, [System.Text.UTF8Encoding]::new($false))
             if (
-                (Get-DawnstrikeSha256Text $backupText) -ne [string]$receipt.backup_xml_sha256 -or
-                (Get-DawnstrikeSha256Text $backupText) -ne [string]$receipt.xml_before_sha256
+                (Get-DawnstrikeSha256Text $hardeningBackupText) -ne [string]$receipt.backup_xml_sha256 -or
+                (Get-DawnstrikeSha256Text $hardeningBackupText) -ne [string]$receipt.xml_before_sha256
             ) { throw "Hardening XML backup content does not match the receipt." }
         }
         if ($field -eq "prepared_relative_path" -and (Get-DawnstrikeSha256File $resolved) -ne [string]$receipt.prepared_record_sha256) {
             throw "Hardening PREPARED record hash does not match the receipt."
         }
     }
-    $receiptRelative = ([System.IO.Path]::GetFullPath($receiptRecord.path).Substring(([System.IO.Path]::GetFullPath($StateRoot)).TrimEnd('\').Length + 1) -replace '\','/')
-    if ([string]$receipt.receipt_relative_path -ne $receiptRelative -or [string]$receipt.xml_before_sha256 -ne (Get-DawnstrikeSha256Text $OriginalXml) -or [string]$receipt.xml_after_sha256 -ne [string]$Current.xml_sha256) {
+$receiptRelative = ([System.IO.Path]::GetFullPath($receiptRecord.path).Substring(([System.IO.Path]::GetFullPath($StateRoot)).TrimEnd('\').Length + 1) -replace '\\','/')
+    if (
+        [string]::IsNullOrWhiteSpace($hardeningBackupText) -or
+        [string]$receipt.receipt_relative_path -ne $receiptRelative -or
+        [string]$receipt.xml_after_sha256 -ne (Get-DawnstrikeSha256Text $OriginalXml) -or
+        [string]$receipt.xml_after_sha256 -ne [string]$Current.xml_sha256
+    ) {
         throw "Hardening receipt is not bound to the exact migration and disabled replacement task XML."
     }
     if (
         [string]$receipt.origin_url_sha256 -ne (Get-DawnstrikeSha256Text $OriginUrl) -or
         [string]$receipt.origin_url -ne $OriginUrl
     ) { throw "Hardening receipt origin binding does not match the activation runtime origin." }
-    if ([string]$receipt.action_sha256 -ne (Get-DawnstrikeHardeningSectionHash $OriginalXml "Actions")) {
-        throw "Hardening receipt action binding does not match the activation-original task."
+    if (
+        [string]$receipt.action_sha256 -ne (Get-DawnstrikeHardeningSectionHash $hardeningBackupText "Actions") -or
+        [string]$receipt.principal_before_sha256 -ne (Get-DawnstrikeHardeningSectionHash $hardeningBackupText "Principal") -or
+        [string]$receipt.settings_before_sha256 -ne (Get-DawnstrikeHardeningSectionHash $hardeningBackupText "Settings") -or
+        [string]$receipt.trigger_sha256 -ne (Get-DawnstrikeHardeningSectionHash $hardeningBackupText "Triggers")
+    ) {
+        throw "Hardening receipt before-state bindings do not match the durable hardening backup."
     }
     if ([string]$receipt.schema_version -ne "dawnstrike.capture_task_hardening_receipt.v2") {
         throw "Only the attested v2 hardening receipt may authorize rebind."
     }
-    if ([string]$receipt.action_after_sha256 -ne (Get-DawnstrikeHardeningSectionHash $Current.xml "Actions")) {
+    if (
+        [string]$receipt.action_after_sha256 -ne (Get-DawnstrikeHardeningSectionHash $OriginalXml "Actions") -or
+        [string]$receipt.action_after_sha256 -ne (Get-DawnstrikeHardeningSectionHash $Current.xml "Actions")
+    ) {
         throw "Hardening receipt final action binding does not match the current task."
     }
-    if ([string]$receipt.trigger_sha256 -ne (Get-DawnstrikeHardeningSectionHash $Current.xml "Triggers")) {
+    if (
+        [string]$receipt.trigger_sha256 -ne (Get-DawnstrikeHardeningSectionHash $OriginalXml "Triggers") -or
+        [string]$receipt.trigger_sha256 -ne (Get-DawnstrikeHardeningSectionHash $Current.xml "Triggers")
+    ) {
         throw "Hardening receipt trigger binding does not match the current task."
     }
-    if ([string]$receipt.principal_after_sha256 -ne (Get-DawnstrikeHardeningSectionHash $Current.xml "Principal")) {
+    if (
+        [string]$receipt.principal_after_sha256 -ne (Get-DawnstrikeHardeningSectionHash $OriginalXml "Principal") -or
+        [string]$receipt.principal_after_sha256 -ne (Get-DawnstrikeHardeningSectionHash $Current.xml "Principal")
+    ) {
         throw "Hardening receipt principal binding does not match the current task."
     }
-    if ([string]$receipt.settings_after_sha256 -ne (Get-DawnstrikeHardeningSectionHash $Current.xml "Settings")) {
+    if (
+        [string]$receipt.settings_after_sha256 -ne (Get-DawnstrikeHardeningSectionHash $OriginalXml "Settings") -or
+        [string]$receipt.settings_after_sha256 -ne (Get-DawnstrikeHardeningSectionHash $Current.xml "Settings")
+    ) {
         throw "Hardening receipt settings binding does not match the current task."
     }
     $currentDocument = [System.Xml.XmlDocument]::new()
@@ -235,7 +258,7 @@ function Assert-DawnstrikeCaptureHardeningBoundary {
     )
     foreach ($pair in $bindingPairs) {
         if ([string](Get-DawnstrikeCaptureBindingValue ([string]$records[0].arguments) $pair[0]) -ne [string]$receipt.action_bindings.($pair[1])) {
-            throw "Hardening receipt action input binding does not match the current task."
+            throw "Hardening receipt action input binding does not match the current task: --$($pair[0])."
         }
     }
     if ((Get-DawnstrikeSha256File ([string]$receipt.runner_path)) -ne [string]$receipt.runner_sha256) {
@@ -311,7 +334,9 @@ function Get-DawnstrikeCaptureBindingPattern {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string]$Name)
 
-    return '(?i)(?<![A-Za-z0-9_-])--' + [regex]::Escape($Name) +
+    $escaped = [regex]::Escape($Name)
+    $option = "(?:`"--$escaped`"|'--$escaped'|--$escaped)"
+    return '(?i)(?<![A-Za-z0-9_-])' + $option +
         '(?:=|\s+)(?:"[^"]*"|''[^'']*''|[^\s]+)'
 }
 
@@ -333,7 +358,9 @@ function Get-DawnstrikeCaptureBindingValue {
         [Parameter(Mandatory = $true)][string]$Name
     )
 
-    $pattern = '(?i)(?<![A-Za-z0-9_-])--' + [regex]::Escape($Name) +
+    $escaped = [regex]::Escape($Name)
+    $option = "(?:`"--$escaped`"|'--$escaped'|--$escaped)"
+    $pattern = '(?i)(?<![A-Za-z0-9_-])' + $option +
         '(?:=|\s+)(?:(?<double>"[^"]*")|(?<single>''[^'']*'')|(?<bare>[^\s]+))'
     $matches = @([regex]::Matches($Arguments, $pattern))
     if ($matches.Count -gt 1) {
@@ -365,7 +392,9 @@ function Set-DawnstrikeCaptureBindingValue {
         [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value
     )
 
-    $pattern = '(?i)(?<prefix>(?<![A-Za-z0-9_-])--' + [regex]::Escape($Name) +
+    $escaped = [regex]::Escape($Name)
+    $option = "(?:`"--$escaped`"|'--$escaped'|--$escaped)"
+    $pattern = '(?i)(?<prefix>(?<![A-Za-z0-9_-])' + $option +
         '(?:=|\s+))(?:(?<double>"[^"]*")|(?<single>''[^'']*'')|(?<bare>[^\s]+))'
     $matches = @([regex]::Matches($Arguments, $pattern))
     if ($matches.Count -gt 1) {
@@ -427,6 +456,9 @@ function Get-DawnstrikeCaptureNormalizedDefinitionHash {
         foreach ($node in @($document.SelectNodes("//*[local-name()='Arguments']"))) {
             $node.InnerText = Get-DawnstrikeCaptureArgumentSkeleton ([string]$node.InnerText)
         }
+        $settingsEnabled = @($document.SelectNodes("/*[local-name()='Task']/*[local-name()='Settings']/*[local-name()='Enabled']"))
+        if ($settingsEnabled.Count -gt 1) { throw "duplicate Settings/Enabled node" }
+        if ($settingsEnabled.Count -eq 1) { $settingsEnabled[0].InnerText = "DAWNSTRIKE_CAPTURE_ENABLEMENT" }
         return Get-DawnstrikeSha256Text (Get-DawnstrikeTaskDefinitionText ([string]$document.OuterXml))
     }
     catch { throw "Auxiliary capture XML cannot produce a normalized definition contract." }
@@ -452,18 +484,24 @@ function Assert-DawnstrikeCaptureActionTransformation {
     if ($originalRecords.Count -ne 1 -or $currentRecords.Count -ne 1) {
         throw "Auxiliary capture task must contain exactly one governed action."
     }
-    if (@([regex]::Matches($OriginalXml, [regex]::Escape($PreviousSha))).Count -ne 1) {
-        throw "Auxiliary capture XML must contain exactly one original candidate SHA pin."
+    $originalCandidate = Get-DawnstrikeCaptureBindingValue ([string]$originalRecords[0].arguments) "candidate-sha"
+    if ($null -eq $originalCandidate -or $originalCandidate.ToLowerInvariant() -ne $PreviousSha.ToLowerInvariant()) {
+        throw "Auxiliary capture XML does not contain the exact original candidate SHA binding."
     }
-    if (@([regex]::Matches($CurrentXml, [regex]::Escape($CandidateSha))).Count -ne 1) {
-        throw "Auxiliary capture XML must contain exactly one replacement candidate SHA pin."
+    $currentCandidate = Get-DawnstrikeCaptureBindingValue ([string]$currentRecords[0].arguments) "candidate-sha"
+    if ($null -eq $currentCandidate -or $currentCandidate.ToLowerInvariant() -ne $CandidateSha.ToLowerInvariant()) {
+        throw "Auxiliary capture XML does not contain the exact replacement candidate SHA binding."
     }
-    foreach ($name in @("Principal", "Triggers", "Settings")) {
+    foreach ($name in @("Principal", "Triggers")) {
         if (
             (Get-DawnstrikeAuxiliarySectionHash $OriginalXml $name) -ne
                 (Get-DawnstrikeAuxiliarySectionHash $CurrentXml $name)
         ) { throw "Capture-task principal, triggers, or settings changed during rebind." }
     }
+    if (
+        (Get-DawnstrikeHardeningSectionHash $OriginalXml "Settings" "false") -ne
+            (Get-DawnstrikeHardeningSectionHash $CurrentXml "Settings" "false")
+    ) { throw "Capture-task settings changed outside the governed enablement transition." }
     if ((Get-DawnstrikeCaptureNormalizedDefinitionHash $OriginalXml) -ne
         (Get-DawnstrikeCaptureNormalizedDefinitionHash $CurrentXml)) {
         throw "Capture-task XML changed outside the permitted action bindings."
@@ -685,8 +723,13 @@ function Assert-DawnstrikeCapturePreparedChain {
         [string]$Prepared.settings_sha256 -ne (Get-DawnstrikeAuxiliarySectionHash ([string]$Original.xml) "Settings") -or
         [string]$Prepared.previous_candidate_sha -notmatch '^[0-9a-f]{40}$'
     ) { throw "Capture-task PREPARED record is not bound to the exact activation and original XML." }
-    if (@([regex]::Matches([string]$Original.xml, [regex]::Escape([string]$Prepared.previous_candidate_sha))).Count -ne 1) {
-        throw "Capture-task original XML does not contain exactly one original candidate SHA pin."
+    $preparedOriginalRecords = @(Get-DawnstrikeCaptureActionRecords ([string]$Original.xml))
+    if (
+        $preparedOriginalRecords.Count -ne 1 -or
+        [string](Get-DawnstrikeCaptureBindingValue ([string]$preparedOriginalRecords[0].arguments) "candidate-sha") -ne
+            [string]$Prepared.previous_candidate_sha
+    ) {
+        throw "Capture-task original XML does not contain the exact PREPARED candidate SHA binding."
     }
     foreach ($entry in @(
         @("symbols_manifest_path", $SymbolsManifest),
@@ -1257,8 +1300,11 @@ try {
             -SymbolsManifest $SymbolsManifest -SymbolsManifestSha256 $SymbolsManifestSha256 `
             -EntitlementReceipt $EntitlementReceipt -EntitlementReceiptSha256 $EntitlementReceiptSha256 `
             -SourceConfig $SourceConfig -SourceConfigSha256 $SourceConfigSha256 | Out-Null
-        if ($boundDisabled.action_contract_sha256 -eq [string]$preparedRecord.action_before_sha256) {
-            throw "Capture-task action SHA was not changed."
+        if (
+            $boundDisabled.action_contract_sha256 -eq [string]$preparedRecord.action_before_sha256 -and
+            [string]$preparedRecord.previous_candidate_sha -ne $CandidateSha
+        ) {
+            throw "Capture-task action SHA was not changed despite a candidate transition."
         }
         $null = Assert-DawnstrikeCaptureHardeningBoundary `
             -Current $boundDisabled -ActivationReceipt $activationReceipt.payload -OriginalXml ([string]$original.xml) -StateRoot $state `
