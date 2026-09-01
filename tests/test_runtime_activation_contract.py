@@ -887,6 +887,8 @@ def test_disposable_activation_and_rollback_preserve_exact_runtime_and_state(
         "activate_dawnstrike_runtime.ps1",
         "runtime_activation_lock.ps1",
         "runtime_activation_lock_contract.py",
+        "runtime_operation_journal.py",
+        "capture_task_safety.ps1",
         "rollback_dawnstrike_runtime.ps1",
         "runtime_activation_contract.py",
         "dawnstrike_job_process.ps1",

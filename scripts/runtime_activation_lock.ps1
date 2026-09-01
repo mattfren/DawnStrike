@@ -38,6 +38,7 @@ function Get-DawnstrikeRuntimeLockHash([string]$Path) {
 function Enter-DawnstrikeRuntimeLockMutex {
     $created = $false
     $mutex = [Threading.Mutex]::new($false, "Global\DawnstrikeRuntimeActivationLockV2", [ref]$created)
+    $script:DawnstrikeLockMutexAbandoned = $false
     try { $owned=$mutex.WaitOne([TimeSpan]::FromSeconds(30)) }
     catch [Threading.AbandonedMutexException] { $owned=$true; $script:DawnstrikeLockMutexAbandoned=$true }
     if (-not $owned) { $mutex.Dispose(); throw "Runtime activation lock mutex timed out." }

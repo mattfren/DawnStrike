@@ -988,6 +988,8 @@ def test_powershell_sidecar_activation_and_rollback_keep_auxiliary_disabled(
         "activate_dawnstrike_runtime.ps1",
         "runtime_activation_lock.ps1",
         "runtime_activation_lock_contract.py",
+        "runtime_operation_journal.py",
+        "capture_task_safety.ps1",
         "rollback_dawnstrike_runtime.ps1",
         "rebind_intraday_capture_task.ps1",
         "runtime_activation_contract.py",
