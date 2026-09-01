@@ -990,6 +990,60 @@ def test_complete_activation_retry_reconciles_only_exact_owned_locks() -> None:
     assert "Stop-Process -Id $PID -Force" in activation
 
 
+def test_activation_nonterminal_failure_preserves_adoptable_lock_pair() -> None:
+    activation = Path("scripts/activate_dawnstrike_runtime.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    pre_quiesce = activation.index(
+        "-Operation runtime_activation -Phase PRE_QUIESCE"
+    )
+    phase_mark = activation.index('$journalPhase = "PRE_QUIESCE"', pre_quiesce)
+    body_mark = activation.index("$activationBodyStarted = $true", phase_mark)
+    first_mutation = activation.index("Disable-DawnstrikeCanonicalTasks", body_mark)
+    assert pre_quiesce < phase_mark < body_mark < first_mutation
+
+    failure_reconcile = activation.index(
+        "$failureJournal = Get-DawnstrikeStrictRuntimeOperationJournal"
+    )
+    preserve = activation.index(
+        'if ($journalPhase -in @("PRE_QUIESCE", "PRE_SWAP", "POST_SWAP"))',
+        failure_reconcile,
+    )
+    preserve_assignment = activation.index("$preserveLocks = $true", preserve)
+    finally_block = activation.index("finally {", preserve)
+    finally_guard = activation.index("if (-not $preserveLocks)", finally_block)
+    assert failure_reconcile < preserve < preserve_assignment < finally_block < finally_guard
+    assert "Nonterminal activation recovery lacks its adoptable lock pair" in activation
+    assert "Nonterminal activation recovery lock pair was not preserved" in activation
+    assert "if (-not $activationBodyStarted -and -not $preserveLocks" in activation
+
+
+def test_activation_init_cleanup_quarantines_completed_scheduler_backup() -> None:
+    activation = Path("scripts/activate_dawnstrike_runtime.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    staging_cleanup = activation.index(
+        'if (-not $activationBodyStarted -and -not $preserveLocks'
+    )
+    scheduler_backup = activation.index(
+        'if (Test-Path -LiteralPath $schedulerBackupPath)', staging_cleanup
+    )
+    quarantine = activation.index(
+        'Move-Item -LiteralPath $schedulerBackupPath -Destination',
+        scheduler_backup,
+    )
+    release = activation.index(
+        "Exit-DawnstrikeGovernedRuntimeLock $activationLock", quarantine
+    )
+    remove_journal = activation.index(
+        "Remove-Item -LiteralPath $operationJournal -Force", release
+    )
+    assert staging_cleanup < scheduler_backup < quarantine < release < remove_journal
+    assert "Failed scheduler backup quarantine did not complete" in activation
+
+
 @pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
 def test_task_contract_requires_exact_ready_or_explicit_disabled(tmp_path: Path) -> None:
     script = Path("scripts/activate_dawnstrike_runtime.ps1").resolve()
