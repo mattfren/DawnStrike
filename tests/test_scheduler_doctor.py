@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import re
 import sys
 from datetime import datetime
@@ -9,6 +10,11 @@ from types import SimpleNamespace
 import pytest
 
 import intraday_scanner.services.scheduler_doctor_service as scheduler_service
+
+pytestmark = pytest.mark.skipif(
+    os.name != "nt",
+    reason="scheduler doctor validates Windows Task Scheduler semantics",
+)
 
 _REAL_RUNTIME_GIT_CONTRACT = scheduler_service._runtime_git_contract
 

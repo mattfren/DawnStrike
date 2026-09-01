@@ -296,7 +296,9 @@ def test_full_reconcile_clears_stale_canonical_rows(tmp_path: Path) -> None:
 
 def test_daily_finalize_degrades_without_a_recorded_upstream_chain(tmp_path: Path) -> None:
     result_root = tmp_path / "public"
-    service = DailyFinalizeService(tmp_path / "empty.sqlite", result_root)
+    service = DailyFinalizeService(
+        tmp_path / "empty.sqlite", result_root, release_sha="a" * 40
+    )
     first = service.run(market_date="2026-07-29", now="2026-07-29T21:00:00+00:00")
     second = service.run(market_date="2026-07-29", now="2026-07-29T21:00:00+00:00")
 
@@ -335,7 +337,9 @@ def test_daily_finalize_retains_prior_canonical_days(tmp_path: Path) -> None:
                 ),
             )
 
-    result = DailyFinalizeService(db_path, tmp_path / "public").run(
+    result = DailyFinalizeService(
+        db_path, tmp_path / "public", release_sha="a" * 40
+    ).run(
         market_date="2026-07-29",
         now="2026-07-29T21:00:00+00:00",
     )
@@ -368,7 +372,9 @@ def test_daily_finalize_records_retries_and_never_greens_missing_data(
 
     monkeypatch.setattr(CanonicalPerformanceService, "reconcile", flaky_reconcile)
     db_path = tmp_path / "retry.sqlite"
-    result = DailyFinalizeService(db_path, tmp_path / "public").run(
+    result = DailyFinalizeService(
+        db_path, tmp_path / "public", release_sha="a" * 40
+    ).run(
         market_date="2026-07-29",
         retry_limit=2,
     )

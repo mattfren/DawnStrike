@@ -126,6 +126,13 @@ jobs:
           python -m pip install --require-hashes -r requirements.lock
           python -m pip install --no-deps -e .
           python -m pip check
+      - name: Exercise Windows launch and scheduler contracts
+        shell: pwsh
+        run: |
+          python -m pytest -p no:cacheprovider -q `
+            tests/test_dawnstrike_python_bootstrap.py `
+            tests/test_capture_task_safety.py `
+            tests/test_scheduler_doctor.py
       - name: Parse every scheduled PowerShell entry point
         shell: pwsh
         run: |

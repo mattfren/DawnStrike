@@ -10,7 +10,9 @@ from intraday_scanner.services.daily_run_service import record_daily_stage
 
 
 def test_finalize_writes_stage_and_non_ready_empty_state(tmp_path: Path) -> None:
-    result = DailyFinalizeService(tmp_path / "daily.sqlite", tmp_path / "public").run(
+    result = DailyFinalizeService(
+        tmp_path / "daily.sqlite", tmp_path / "public", release_sha="a" * 40
+    ).run(
         market_date="2026-07-29", now="2026-07-29T21:00:00+00:00"
     )
     assert result["readiness"]["status"] == "not_ready"
@@ -140,7 +142,9 @@ def test_finalize_does_not_retry_terminal_configuration_failure(
         "intraday_scanner.services.daily_finalize_service.CanonicalPerformanceService.reconcile",
         invalid_configuration,
     )
-    result = DailyFinalizeService(tmp_path / "terminal.sqlite", tmp_path / "public").run(
+    result = DailyFinalizeService(
+        tmp_path / "terminal.sqlite", tmp_path / "public", release_sha="a" * 40
+    ).run(
         market_date="2026-07-29", retry_limit=5
     )
 

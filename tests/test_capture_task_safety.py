@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
+
+pytestmark = pytest.mark.skipif(
+    shutil.which("powershell.exe") is None,
+    reason="capture-task safety executes the governed Windows PowerShell contract",
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / "scripts" / "capture_task_safety.ps1"

@@ -10,16 +10,34 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_BOOTSTRAP = ROOT / "scripts" / "dawnstrike_python_bootstrap.py"
+PRODUCTION_GIT_PATH = r"C:\Program Files\Git\cmd\git.exe"
+PRODUCTION_GIT_SHA256 = (
+    "37c5725818d602e951ba2563b870d62763322956b73373da4c33a0b566a80bc9"
+)
 BOOTSTRAP_PRELOADER = (
     "import hashlib,sys; p=sys.argv[1]; e=sys.argv[2]; b=open(p,'rb').read(); "
     "a=hashlib.sha256(b).hexdigest(); a==e or (_ for _ in ()).throw("
     "RuntimeError('bootstrap hash mismatch')); r=sys.argv[3:]; sys.argv=[p,*r]; "
     "exec(compile(b,p,'exec'),{'__name__':'__main__','__file__':p})"
 )
-WINDOWS_PRODUCTION_BOOTSTRAP = pytest.mark.skipif(
-    sys.platform != "win32",
-    reason="the governed production bootstrap pins the approved Windows Git binary",
-)
+
+
+def _copy_bootstrap_for_host(destination: Path) -> None:
+    """Exercise the bootstrap on CI without weakening its production pin."""
+
+    discovered = shutil.which("git")
+    assert discovered is not None
+    git_path = Path(discovered).resolve()
+    git_sha256 = hashlib.sha256(git_path.read_bytes()).hexdigest()
+    source = SOURCE_BOOTSTRAP.read_text(encoding="utf-8")
+    source = source.replace(
+        f'_APPROVED_GIT = Path(r"{PRODUCTION_GIT_PATH}")',
+        f"_APPROVED_GIT = Path({str(git_path)!r})",
+        1,
+    ).replace(PRODUCTION_GIT_SHA256, git_sha256, 1)
+    assert repr(str(git_path)) in source
+    assert git_sha256 in source
+    destination.write_text(source, encoding="utf-8")
 
 
 def _git(root: Path, *args: str) -> str:
@@ -35,7 +53,7 @@ def _release(tmp_path: Path) -> tuple[Path, str]:
     root = tmp_path / "release"
     (root / "scripts").mkdir(parents=True)
     (root / "intraday_scanner").mkdir()
-    shutil.copy2(SOURCE_BOOTSTRAP, root / "scripts" / SOURCE_BOOTSTRAP.name)
+    _copy_bootstrap_for_host(root / "scripts" / SOURCE_BOOTSTRAP.name)
     (root / "intraday_scanner" / "__init__.py").write_text("\n", encoding="utf-8")
     (root / "pyproject.toml").write_text("[project]\nname='fixture'\n", encoding="utf-8")
     (root / ".gitignore").write_text("*.pyc\n*.csv\n", encoding="utf-8")
@@ -47,6 +65,7 @@ def _release(tmp_path: Path) -> tuple[Path, str]:
     )
     _git(root, "config", "user.email", "bootstrap-test@example.invalid")
     _git(root, "config", "user.name", "Bootstrap Test")
+    _git(root, "config", "core.autocrlf", "false")
     _git(root, "add", ".")
     _git(root, "commit", "-m", "fixture")
     # Settle the disposable index stat cache before the bootstrap performs its
@@ -91,7 +110,6 @@ def _run(
 
 
 @pytest.mark.parametrize("preloaded", [False, True])
-@WINDOWS_PRODUCTION_BOOTSTRAP
 def test_bootstrap_runs_only_clean_exact_release(tmp_path: Path, preloaded: bool) -> None:
     root, sha = _release(tmp_path)
 
@@ -102,7 +120,6 @@ def test_bootstrap_runs_only_clean_exact_release(tmp_path: Path, preloaded: bool
 
 
 @pytest.mark.parametrize("mutation", ["tracked", "hidden", "ignored_python", "wrong_sha"])
-@WINDOWS_PRODUCTION_BOOTSTRAP
 def test_bootstrap_rejects_runtime_identity_tampering(
     tmp_path: Path, mutation: str
 ) -> None:
@@ -125,7 +142,6 @@ def test_bootstrap_rejects_runtime_identity_tampering(
     assert "TAMPERED" not in result.stdout
 
 
-@WINDOWS_PRODUCTION_BOOTSTRAP
 def test_bootstrap_allows_ignored_nonexecutable_research_data(tmp_path: Path) -> None:
     root, sha = _release(tmp_path)
     (root / "research.csv").write_text("symbol,value\nAAPL,1\n", encoding="utf-8")
@@ -166,3 +182,10 @@ def test_preloader_rejects_changed_bootstrap_bytes(tmp_path: Path) -> None:
 
     assert result.returncode != 0
     assert "BYPASS" not in result.stdout
+
+
+def test_source_bootstrap_pins_production_windows_git() -> None:
+    source = SOURCE_BOOTSTRAP.read_text(encoding="utf-8")
+
+    assert f'_APPROVED_GIT = Path(r"{PRODUCTION_GIT_PATH}")' in source
+    assert PRODUCTION_GIT_SHA256 in source

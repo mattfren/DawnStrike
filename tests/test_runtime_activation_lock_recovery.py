@@ -4,7 +4,6 @@ import hashlib
 import importlib.util
 import json
 import os
-import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -14,6 +13,10 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = ROOT / "scripts" / "runtime_activation_lock_contract.py"
 PS = ROOT / "scripts" / "runtime_activation_lock.ps1"
+WINDOWS_RUNTIME = pytest.mark.skipif(
+    os.name != "nt",
+    reason="runtime lock execution requires the governed Windows interpreter",
+)
 
 
 def load_contract():
@@ -83,7 +86,7 @@ def test_shared_powershell_contract_has_guarded_atomic_adoption():
     assert "pscredential" not in source.lower()
 
 
-@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
+@WINDOWS_RUNTIME
 def test_executed_lock_acquire_and_release(tmp_path: Path):
     state = tmp_path / "state"
     state.mkdir()
@@ -132,7 +135,7 @@ def test_contract_rejects_non_dawnstrike_origin_even_with_matching_hash():
         load_contract().validate(json.dumps(value, separators=(",", ":")).encode())
 
 
-@pytest.mark.skipif(shutil.which("pwsh") is None, reason="PowerShell unavailable")
+@WINDOWS_RUNTIME
 def test_executed_huge_tampered_and_reparse_locks_are_preserved(tmp_path: Path):
     state = tmp_path / "state"
     locks = state / "locks"
@@ -183,7 +186,7 @@ if(-not ((Get-Item $path -Force).Attributes-band `
     assert "OK" in result.stdout or "SKIP_REPARSE" in result.stdout
 
 
-@pytest.mark.skipif(shutil.which("pwsh") is None, reason="PowerShell unavailable")
+@WINDOWS_RUNTIME
 def test_dead_child_lock_is_atomically_adopted_and_released(tmp_path: Path):
     state = tmp_path / "state"
     state.mkdir()
@@ -241,7 +244,7 @@ Exit-DawnstrikeGovernedRuntimeLock $lock
     assert "OK" in second.stdout
 
 
-@pytest.mark.skipif(shutil.which("powershell") is None, reason="PowerShell unavailable")
+@WINDOWS_RUNTIME
 def test_journal_adoption_survives_two_consecutive_crashes(tmp_path: Path) -> None:
     state = tmp_path / "state"
     state.mkdir()
@@ -340,7 +343,7 @@ $lock|ConvertTo-Json -Compress
     assert lock_payload["lock_token"] == recovered_handle["token"]
 
 
-@pytest.mark.skipif(shutil.which("powershell") is None, reason="PowerShell unavailable")
+@WINDOWS_RUNTIME
 def test_operation_journal_enforces_adjacent_owned_transitions(tmp_path: Path) -> None:
     state_q = str(tmp_path / "state").replace("'", "''")
     module = str(PS.resolve()).replace("'", "''")
@@ -402,7 +405,7 @@ Exit-DawnstrikeGovernedRuntimeLock $lock
     assert "OK" in result.stdout
 
 
-@pytest.mark.skipif(shutil.which("powershell") is None, reason="PowerShell unavailable")
+@WINDOWS_RUNTIME
 @pytest.mark.parametrize("crash", ["after_init", "after_lock"])
 def test_journal_aware_enter_recovers_acquisition_crashes(
     tmp_path: Path, crash: str
@@ -470,7 +473,7 @@ $lock=Enter-DawnstrikeGovernedRuntimeLockWithJournal -StateRoot '{state_q}' `
     assert not (state / "receipts" / "runtime-operation" / "activation.json").exists()
 
 
-@pytest.mark.skipif(shutil.which("powershell") is None, reason="PowerShell unavailable")
+@WINDOWS_RUNTIME
 def test_journal_aware_enter_rejects_live_owner(tmp_path: Path) -> None:
     state = tmp_path / "state"
     state.mkdir()
@@ -513,7 +516,7 @@ $lock=Enter-DawnstrikeGovernedRuntimeLockWithJournal -StateRoot '{state_q}' `
     owner.wait(timeout=10)
 
 
-@pytest.mark.skipif(shutil.which("powershell") is None, reason="PowerShell unavailable")
+@WINDOWS_RUNTIME
 def test_journal_aware_enter_enforces_daily_lock_and_task_hash(tmp_path: Path) -> None:
     state = tmp_path / "state"
     state.mkdir()
@@ -560,7 +563,7 @@ if((Test-Path $journal)-or(Test-Path $lockPath)){{
     assert "OK" in result.stdout
 
 
-@pytest.mark.skipif(shutil.which("powershell") is None, reason="PowerShell unavailable")
+@WINDOWS_RUNTIME
 @pytest.mark.parametrize("kind", ["journal", "lock"])
 def test_journal_aware_enter_rejects_reparse_components(
     tmp_path: Path, kind: str
@@ -625,7 +628,7 @@ $null=Enter-DawnstrikeGovernedRuntimeLockWithJournal -StateRoot '{state_q}' `
     assert "reparse" in result.stderr.lower() or "governed receipt root" in result.stderr
 
 
-@pytest.mark.skipif(shutil.which("powershell") is None, reason="PowerShell unavailable")
+@WINDOWS_RUNTIME
 def test_adopted_lock_transitions_preserve_original_init_owner(tmp_path: Path) -> None:
     state = tmp_path / "state"
     state.mkdir()

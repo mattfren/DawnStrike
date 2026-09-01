@@ -33,6 +33,10 @@ CANDIDATE_SHA = "a" * 40
 CANDIDATE_TREE = "b" * 40
 PREVIOUS_SHA = "c" * 40
 PREVIOUS_TREE = "d" * 40
+PRODUCTION_GIT_PATH = r"C:\Program Files\Git\cmd\git.exe"
+PRODUCTION_GIT_SHA256 = (
+    "37c5725818d602e951ba2563b870d62763322956b73373da4c33a0b566a80bc9"
+)
 
 
 def _now() -> datetime:
@@ -86,6 +90,22 @@ def _git(root: Path, *arguments: str) -> str:
         timeout=30,
     )
     return completed.stdout.strip()
+
+
+def _copy_bootstrap_for_host(destination: Path) -> None:
+    discovered = shutil.which("git")
+    assert discovered is not None
+    git_path = Path(discovered).resolve()
+    git_sha256 = hashlib.sha256(git_path.read_bytes()).hexdigest()
+    source = Path("scripts/dawnstrike_python_bootstrap.py").read_text(encoding="utf-8")
+    source = source.replace(
+        f'_APPROVED_GIT = Path(r"{PRODUCTION_GIT_PATH}")',
+        f"_APPROVED_GIT = Path({str(git_path)!r})",
+        1,
+    ).replace(PRODUCTION_GIT_SHA256, git_sha256, 1)
+    assert repr(str(git_path)) in source
+    assert git_sha256 in source
+    destination.write_text(source, encoding="utf-8")
 
 
 def _install_local_origin_fixture_seam(lock_script: Path) -> None:
@@ -448,10 +468,6 @@ $blocked | ConvertTo-Json -Compress
     assert json.loads(result.stdout.strip().splitlines()[-1]) is True
 
 
-@pytest.mark.skipif(
-    sys.platform != "win32",
-    reason="the governed production bootstrap pins the approved Windows Git binary",
-)
 def test_isolated_bootstrap_imports_intraday_from_exact_release_root(
     tmp_path: Path,
 ) -> None:
@@ -459,7 +475,7 @@ def test_isolated_bootstrap_imports_intraday_from_exact_release_root(
     (root / "scripts").mkdir(parents=True)
     (root / "intraday_scanner").mkdir()
     bootstrap = root / "scripts" / "dawnstrike_python_bootstrap.py"
-    shutil.copy2(Path("scripts/dawnstrike_python_bootstrap.py"), bootstrap)
+    _copy_bootstrap_for_host(bootstrap)
     (root / "intraday_scanner" / "__init__.py").write_text("\n", encoding="utf-8")
     (root / "intraday_scanner" / "probe.py").write_text(
         "print('EXACT_RELEASE_IMPORT')\n", encoding="utf-8"
@@ -474,6 +490,7 @@ def test_isolated_bootstrap_imports_intraday_from_exact_release_root(
     )
     _git(root, "config", "user.email", "activation-test@example.invalid")
     _git(root, "config", "user.name", "Activation Test")
+    _git(root, "config", "core.autocrlf", "false")
     _git(root, "add", ".")
     _git(root, "commit", "-m", "bootstrap fixture")
     expected_sha = _git(root, "rev-parse", "HEAD")
