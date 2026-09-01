@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts import build_public
 from scripts.build_public import (
     _promote_public_artifact,
     _PublicBuildOperation,
@@ -60,7 +61,7 @@ def test_exact_public_inventory_rejects_any_extra_file(tmp_path: Path) -> None:
 
 
 def test_public_promotion_converges_crash_after_prior_directory_move(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     final = tmp_path / "public"
     _write_exact_public(final, "prior")
@@ -71,10 +72,36 @@ def test_public_promotion_converges_crash_after_prior_directory_move(
     operation.mark("PRE_SWAP")
     os.replace(final, operation.backup_root)
     operation.mark("PRIOR_MOVED")
+    monkeypatch.setattr(
+        build_public,
+        "_is_recoverable_candidate_public_artifact",
+        lambda path, journal: True,
+    )
 
     operation.close()
 
     assert (final / "index.html").read_text(encoding="utf-8").startswith("candidate:")
+    assert not operation.stage_root.exists()
+    assert not operation.backup_root.exists()
+    assert not operation.journal_path.exists()
+
+
+def test_public_recovery_restores_prior_when_exact_shaped_stage_is_unverified(
+    tmp_path: Path,
+) -> None:
+    final = tmp_path / "public"
+    _write_exact_public(final, "prior")
+    operation = _PublicBuildOperation(tmp_path, final)
+    stage = operation.begin(source_sha="a" * 40, market_date="2026-09-01")
+    _write_exact_public(stage, "attacker")
+    operation.mark("STAGED")
+    operation.mark("PRE_SWAP")
+    os.replace(final, operation.backup_root)
+    operation.mark("PRIOR_MOVED")
+
+    operation.close()
+
+    assert (final / "index.html").read_text(encoding="utf-8").startswith("prior:")
     assert not operation.stage_root.exists()
     assert not operation.backup_root.exists()
     assert not operation.journal_path.exists()

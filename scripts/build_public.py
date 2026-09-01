@@ -37,6 +37,7 @@ from scripts.public_artifact_inventory import (
     inventory_files_no_reparse,
 )
 from scripts.public_lineage import build_sha as _lineage_build_sha
+from scripts.verify_public_artifact import verify as verify_public_artifact
 from scripts.verify_public_artifact_security import scan_public_artifact
 
 _ACTIVE_PUBLIC_BUILD_OPERATION: _PublicBuildOperation | None = None
@@ -199,27 +200,6 @@ def _main(argv: list[str] | None = None) -> int:
         json.dumps(readiness, sort_keys=True, indent=2, default=str),
         encoding="utf-8",
     )
-    notification = _record_build_notification(
-        db_path,
-        result,
-        market_date=market_date,
-        build_id=build_id,
-        data_hash=performance_hash,
-        deployment_url=args.deployment_url,
-    )
-    result["notification"] = notification
-    result["deployment_url"] = args.deployment_url
-    if args.result_out:
-        result_out = Path(args.result_out).resolve()
-        if _is_relative_to(result_out, final_output_root) or _is_relative_to(
-            result_out, output_root
-        ):
-            raise ValueError("Private finalize result cannot be written into the public artifact")
-        result_out.parent.mkdir(parents=True, exist_ok=True)
-        result_out.write_text(
-            json.dumps(result, sort_keys=True, indent=2, default=str),
-            encoding="utf-8",
-        )
     assert_exact_public_inventory(
         output_root,
         expected=PUBLIC_ARTIFACT_FILES - {"build-manifest.json", "release-manifest.json"},
@@ -302,6 +282,30 @@ def _main(argv: list[str] | None = None) -> int:
         return 2
     operation.mark("STAGED")
     _promote_public_artifact(root, output_root, final_output_root, operation=operation)
+    # Success evidence is emitted only after the staged bytes pass the exact
+    # inventory/security boundary and are atomically installed.  A rejected or
+    # interrupted candidate must not leave a durable COMPLETE notification.
+    notification = _record_build_notification(
+        db_path,
+        result,
+        market_date=market_date,
+        build_id=build_id,
+        data_hash=performance_hash,
+        deployment_url=args.deployment_url,
+    )
+    result["notification"] = notification
+    result["deployment_url"] = args.deployment_url
+    if args.result_out:
+        result_out = Path(args.result_out).resolve()
+        if _is_relative_to(result_out, final_output_root) or _is_relative_to(
+            result_out, output_root
+        ):
+            raise ValueError("Private finalize result cannot be written into the public artifact")
+        result_out.parent.mkdir(parents=True, exist_ok=True)
+        result_out.write_text(
+            json.dumps(result, sort_keys=True, indent=2, default=str),
+            encoding="utf-8",
+        )
     print(json.dumps(result, sort_keys=True, indent=2, default=str))
     return 0 if result.get("status") == "COMPLETE" and readiness.get("status") == "ready" else 2
 
@@ -760,7 +764,8 @@ class _PublicBuildOperation:
                     "public build operation paths exist without their journal"
                 )
             return
-        self._load_journal()
+        journal = self._load_journal()
+        phase = str(journal["phase"])
         if stage_exists:
             assert_contained_no_reparse(self.governed_root, self.stage_root)
         if backup_exists:
@@ -769,7 +774,11 @@ class _PublicBuildOperation:
             assert_contained_no_reparse(self.governed_root, self.final_root)
 
         if backup_exists and not final_exists:
-            if stage_exists and _is_exact_public_artifact(self.stage_root):
+            if (
+                stage_exists
+                and phase in {"PRE_SWAP", "PRIOR_MOVED"}
+                and _is_recoverable_candidate_public_artifact(self.stage_root, journal)
+            ):
                 os.replace(self.stage_root, self.final_root)
                 stage_exists = False
                 final_exists = True
@@ -788,16 +797,25 @@ class _PublicBuildOperation:
                 raise PublicArtifactInventoryError(
                     "public build operation has an ambiguous three-directory state"
                 )
-            assert_exact_public_inventory(self.final_root)
             _assert_safe_previous_public_artifact(self.backup_root)
-            _remove_tree_no_reparse(self.governed_root, self.backup_root)
+            if (
+                phase in {"PRIOR_MOVED", "PROMOTED"}
+                and _is_recoverable_candidate_public_artifact(self.final_root, journal)
+            ):
+                _remove_tree_no_reparse(self.governed_root, self.backup_root)
+            else:
+                _remove_tree_no_reparse(self.governed_root, self.final_root)
+                os.replace(self.backup_root, self.final_root)
             backup_exists = False
         elif stage_exists:
             if final_exists:
                 _assert_safe_previous_public_artifact(self.final_root)
                 _remove_tree_no_reparse(self.governed_root, self.stage_root)
                 stage_exists = False
-            elif _is_exact_public_artifact(self.stage_root):
+            elif (
+                phase in {"STAGED", "PRE_SWAP"}
+                and _is_recoverable_candidate_public_artifact(self.stage_root, journal)
+            ):
                 os.replace(self.stage_root, self.final_root)
                 stage_exists = False
                 final_exists = True
@@ -854,6 +872,35 @@ def _is_exact_public_artifact(path: Path) -> bool:
     except (OSError, PublicArtifactInventoryError):
         return False
     return True
+
+
+def _is_recoverable_candidate_public_artifact(
+    path: Path, journal: dict[str, object]
+) -> bool:
+    """Prove candidate bytes, lineage, and security before crash recovery promotes them."""
+
+    try:
+        assert_exact_public_inventory(path)
+        build_manifest = json.loads(
+            (path / "build-manifest.json").read_text(encoding="utf-8"),
+            object_pairs_hook=_reject_duplicate_json_pairs,
+        )
+        if not isinstance(build_manifest, dict):
+            return False
+        if build_manifest.get("source_sha") != journal.get("source_sha"):
+            return False
+        if build_manifest.get("market_date") != journal.get("market_date"):
+            return False
+        verification = verify_public_artifact(
+            path,
+            allow_degraded=True,
+            expected_source_sha=str(journal["source_sha"]),
+        )
+        if verification.get("status") != "PASS" or verification.get("errors"):
+            return False
+        return not scan_public_artifact(path)
+    except (OSError, UnicodeError, ValueError, TypeError, AttributeError, KeyError):
+        return False
 
 
 def _is_safe_previous_public_artifact(path: Path) -> bool:

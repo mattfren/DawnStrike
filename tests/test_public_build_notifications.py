@@ -9,6 +9,15 @@ from scripts import build_public
 from scripts.verify_public_artifact import verify
 
 
+def test_success_evidence_is_emitted_only_after_security_and_promotion() -> None:
+    source = Path(build_public.__file__).read_text(encoding="utf-8")
+    security = source.index("violations = scan_public_artifact(output_root)")
+    promotion = source.index("_promote_public_artifact(", security)
+    notification = source.index("notification = _record_build_notification(", security)
+    result_write = source.index("if args.result_out:", security)
+    assert security < promotion < notification < result_write
+
+
 def test_public_build_records_auditable_finalize_notification(
     tmp_path: Path, monkeypatch, request
 ) -> None:

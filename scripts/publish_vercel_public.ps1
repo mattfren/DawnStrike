@@ -1065,10 +1065,13 @@ function Assert-VercelPriorJournalHistoryTerminal {
             $savedJournalRoot = $script:journalRoot
             $savedJournalPath = $script:journalPath
             $savedResultRelativePath = $script:resultRelativePath
+            $savedResultPath = $script:resultPath
             try {
                 $script:journalRoot = $entry.root
                 $script:journalPath = $entry.path
                 $script:resultRelativePath = [string]$entry.payload.result_relative_path
+                $script:resultPath = Join-Path $resolvedStateRoot `
+                    ($script:resultRelativePath -replace '/', '\')
                 Invoke-VercelPublicationCompensation `
                     -Journal $entry.payload `
                     -FailureType "prior_date_interrupted_rollover"
@@ -1083,6 +1086,7 @@ function Assert-VercelPriorJournalHistoryTerminal {
                 $script:journalRoot = $savedJournalRoot
                 $script:journalPath = $savedJournalPath
                 $script:resultRelativePath = $savedResultRelativePath
+                $script:resultPath = $savedResultPath
             }
     }
 }

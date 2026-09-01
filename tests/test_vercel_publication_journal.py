@@ -487,6 +487,12 @@ def test_publisher_uses_dated_state_history_and_byte_exact_runtime_result_copy()
     assert "Assert-VercelPriorJournalHistoryTerminal" in script
     assert "prior_date_interrupted_rollover" in script
     assert "Prior-date terminal compensation verification" in script
+    prior_recovery = script.split("foreach ($entry in $priorNonterminal)", 1)[1].split(
+        "function Assert-VercelJournalMatchesInvocation", 1
+    )[0]
+    assert "$savedResultPath = $script:resultPath" in prior_recovery
+    assert "$script:resultPath = Join-Path $resolvedStateRoot" in prior_recovery
+    assert "$script:resultPath = $savedResultPath" in prior_recovery
     writer = script.split("function Write-VercelResultAtomic", 1)[1].split(
         "function Assert-LowerHex64", 1
     )[0]
