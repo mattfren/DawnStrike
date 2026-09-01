@@ -974,6 +974,12 @@ function Invoke-DawnstrikeRuntimeRollback {
                 if ($env:DAWNSTRIKE_TEST_LOCK_JOURNAL -ne "1") { throw "Rollback crash injection is test-only." }
                 Stop-Process -Id $PID -Force
             }
+            # The temporary seal input is no longer recovery evidence.  Remove
+            # it before the terminal journal transition so terminal cleanup
+            # cannot turn a committed rollback into compensation.
+            if (Test-Path -LiteralPath $input -PathType Leaf) {
+                Remove-Item -LiteralPath $input -Force
+            }
             $null = Set-DawnstrikeRuntimeOperationJournalPhase -StateRoot $state -JournalPath $operationJournalPath `
                 -Lock $activationLock -Operation runtime_rollback -Phase COMPLETE `
                 -CandidateSha $candidateSha -CandidateTree ([string]$activation.candidate_tree) `
@@ -985,6 +991,7 @@ function Invoke-DawnstrikeRuntimeRollback {
                 -TaskContractSha256 $journalTaskContractSha256 `
                 -RuntimeStageContractSha256 $stageContractSha256 `
                 -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256 | Out-Null
+            $journalPhase = "COMPLETE"
             if ($env:DAWNSTRIKE_TEST_ROLLBACK_CRASH_POINT -eq "after_complete") {
                 if ($env:DAWNSTRIKE_TEST_LOCK_JOURNAL -ne "1") { throw "Rollback crash injection is test-only." }
                 Stop-Process -Id $PID -Force
@@ -992,11 +999,63 @@ function Invoke-DawnstrikeRuntimeRollback {
             return $sealedRollback
         }
         finally {
-            if (Test-Path -LiteralPath $input -PathType Leaf) { Remove-Item -LiteralPath $input -Force }
+            if (Test-Path -LiteralPath $input -PathType Leaf) {
+                Remove-Item -LiteralPath $input -Force -ErrorAction SilentlyContinue
+            }
         }
     }
     catch {
         $failure = $_
+        # COMPLETE is an irreversible commit.  A cleanup/output fault can be
+        # raised after the journal file was durably replaced, so reconcile the
+        # exact terminal receipt before considering any compensation.  The
+        # stale local POST_SWAP value must never authorize rollback of a
+        # committed operation.
+        $terminalJournal = $null
+        try {
+            $terminalJournal = Get-DawnstrikeStrictRuntimeOperationJournal `
+                $operationJournalPath $lockInterpreter.path $lockInterpreter.sha256
+            $journalPhase = [string]$terminalJournal.payload.phase
+        }
+        catch {
+            $preserveLocks = $true
+            throw "Runtime rollback journal phase could not be reconciled; operator recovery is required."
+        }
+        if ($journalPhase -eq "COMPLETE") {
+            try {
+                if (-not (Test-Path -LiteralPath $rollbackReceipt -PathType Leaf)) {
+                    throw "Complete rollback journal has no exact complete receipt."
+                }
+                $terminalRollbackReceipt = Invoke-DawnstrikeContractCli `
+                    $pythonPath $runtime @("verify-receipt", "--receipt", $rollbackReceipt, "--expected-status", "ROLLED_BACK") `
+                    "Complete rollback terminal reconciliation" $ProcessTimeoutSeconds
+                $terminalRuntime = Get-DawnstrikeGitContract $gitPath $runtime $ProcessTimeoutSeconds $previousSha
+                if ($terminalRuntime.tree -ne $previousTree) {
+                    throw "Complete rollback terminal runtime identity is not exact."
+                }
+                $terminalTasks = Get-DawnstrikeTaskContract $runtime $state
+                if ($terminalTasks.task_contract_sha256 -ne [string]$activation.task_contract_sha256) {
+                    throw "Complete rollback terminal task identity is not exact."
+                }
+                if ($stateDeclaration.required -and [bool]$activation.auxiliary_capture_present) {
+                    $terminalAuxiliary = Get-DawnstrikeAuxiliaryCaptureTask $runtime $state
+                    $expectedAuxiliary = Get-DawnstrikeActivationAuxiliaryRecoveryContract `
+                        -Activation $activation -StateRoot $state
+                    if (-not $terminalAuxiliary.present -or
+                        $terminalAuxiliary.state -ne "Disabled" -or
+                        $terminalAuxiliary.xml_sha256 -ne $expectedAuxiliary.xml_sha256 -or
+                        $terminalAuxiliary.definition_contract_sha256 -ne $expectedAuxiliary.definition_contract_sha256 -or
+                        $terminalAuxiliary.action_contract_sha256 -ne $expectedAuxiliary.action_contract_sha256) {
+                        throw "Complete rollback terminal auxiliary task identity is not exact."
+                    }
+                }
+                return $terminalRollbackReceipt
+            }
+            catch {
+                $preserveLocks = $true
+                throw "Complete rollback evidence could not be reconciled; operator recovery is required."
+            }
+        }
         if ($candidateMoved -or $previousInstalled -or $tasksDisabled) {
             try {
                 $null = Set-DawnstrikeTasksFailClosedDisabled $runtime $state

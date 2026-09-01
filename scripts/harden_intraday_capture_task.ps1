@@ -739,6 +739,7 @@ $compensationReceiptPath = Join-Path $StateRoot ("receipts\capture-task\capture-
 $compensationReceiptRelativePath = "receipts/capture-task/capture-task-hardening-$CandidateSha.compensated.json"
 $journalTaskContractSha256 = Get-HardeningSha256File $contractScript
 $emptyArtifactSha = Get-HardeningSha256Text ""
+$preserveLocks = $false
 if (Test-Path -LiteralPath $lockPath -PathType Leaf) {
     if (-not (Test-Path -LiteralPath $operationJournalPath -PathType Leaf)) {
         throw "Existing hardening lock has no deterministic operation journal."
@@ -1304,6 +1305,49 @@ $statePrefix = $stateRootFull + '\'
 }
 catch {
     $failure = $_
+    # COMPLETE is an irreversible commit.  Cleanup, receipt output, or a
+    # journal readback fault after that transition must reconcile the exact
+    # Disabled task and receipt; it must never compensate a committed task.
+    $terminalJournal = $null
+    try {
+        $terminalJournal = Get-DawnstrikeStrictRuntimeOperationJournal `
+            $operationJournalPath $lockInterpreter.path $lockInterpreter.sha256
+        $journalPhase = [string]$terminalJournal.payload.phase
+    }
+    catch {
+        $preserveLocks = $true
+        throw "Hardening journal phase could not be reconciled; operator recovery is required."
+    }
+    if ($journalPhase -eq "COMPLETE") {
+        try {
+            if (-not (Test-Path -LiteralPath $ReceiptPath -PathType Leaf)) {
+                throw "Complete hardening journal has no exact complete receipt."
+            }
+            $terminalVerification = & $interpreterIdentity.path -I -B $contractScript verify-hardening `
+                --receipt $ReceiptPath --candidate-sha $CandidateSha --candidate-tree $CandidateTree 2>$null
+            if ($LASTEXITCODE -ne 0) { throw "Complete hardening receipt failed terminal validation." }
+            $terminalPayload = (($terminalVerification -join "") | ConvertFrom-Json)
+            $terminalTask = Get-HardeningTaskRecord -AllowDisabled
+            if ($terminalPayload.status -ne "COMPLETE" -or $terminalPayload.final_state -ne "Disabled" -or
+                $terminalPayload.xml_after_sha256 -ne $terminalTask.xml_sha256 -or
+                $terminalTask.state -ne "Disabled" -or
+                $terminalJournal.payload.complete_receipt_sha256 -ne (Get-HardeningSha256File $ReceiptPath)) {
+                throw "Complete hardening terminal task or receipt identity is not exact."
+            }
+            # PREPARED is recovery evidence, not part of the committed task
+            # state.  A failed best-effort cleanup is safe to retry and must
+            # not turn the committed operation into compensation.
+            if (Test-Path -LiteralPath $preparedPath -PathType Leaf) {
+                try { Remove-Item -LiteralPath $preparedPath -Force -ErrorAction Stop } catch { }
+            }
+            Write-Output ([System.IO.File]::ReadAllText($ReceiptPath, [System.Text.UTF8Encoding]::new($false)).Trim())
+            return
+        }
+        catch {
+            $preserveLocks = $true
+            throw "Complete hardening evidence could not be reconciled; operator recovery is required."
+        }
+    }
     try {
         $rollbackUser = $null
         $rollbackPassword = $null
@@ -1394,6 +1438,9 @@ catch {
     throw "Delayed SIP task hardening failed; exact original XML and enablement were restored."
 }
 finally {
+    if ($preserveLocks) {
+        throw "Hardening terminal evidence requires governed recovery; lock retained."
+    }
     if ($hardeningLock -and $hardeningLock.acquired -and $journalPhase -notin @("COMPLETE", "COMPENSATED")) {
         throw "Hardening lock and nonterminal journal are retained for governed recovery."
     }

@@ -395,3 +395,41 @@ def test_consumers_keep_nonterminal_journal_until_compensation_or_completion() -
         assert complete_transition < local_terminal
         compensated = script.index("after_compensated_before_release")
         assert compensated < script.index("Exit-DawnstrikeGovernedRuntimeLock", compensated)
+
+
+def test_consumers_reconcile_complete_before_any_compensation_or_restore() -> None:
+    """A post-commit cleanup/output fault must not execute a stale rollback path."""
+
+    cases = (
+        (
+            "scripts/rebind_intraday_capture_task.ps1",
+            "Restore-DawnstrikeAuxiliaryCaptureTask",
+            "Capture-task terminal evidence requires governed recovery",
+        ),
+        (
+            "scripts/harden_intraday_capture_task.ps1",
+            "Restore-HardeningExactTask",
+            "Hardening terminal evidence requires governed recovery",
+        ),
+        (
+            "scripts/activate_dawnstrike_runtime.ps1",
+            "Set-DawnstrikeTasksFailClosedDisabled",
+            "Complete activation evidence could not be reconciled",
+        ),
+        (
+            "scripts/rollback_dawnstrike_runtime.ps1",
+            "Set-DawnstrikeTasksFailClosedDisabled",
+            "Complete rollback evidence could not be reconciled",
+        ),
+    )
+    for script_name, compensation_marker, recovery_marker in cases:
+        script = Path(script_name).read_text(encoding="utf-8")
+        comment = script.find("COMPLETE journal is an irreversible commit")
+        if comment < 0:
+            comment = script.find("COMPLETE is an irreversible commit")
+        assert comment >= 0
+        terminal_guard = script.index('if ($journalPhase -eq "COMPLETE")', comment)
+        compensation = script.index(compensation_marker, terminal_guard)
+        assert terminal_guard < compensation
+        assert recovery_marker in script
+        assert "journal phase could not be reconciled" in script
