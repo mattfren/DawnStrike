@@ -20,11 +20,11 @@ EMPTY = hashlib.sha256(b"").hexdigest()
 def _payload(operation: str = "runtime_activation", phase: str = "INIT") -> dict:
     phases = {
         "runtime_activation": (
-            "INIT", "PRE_QUIESCE", "PRE_SWAP", "POST_SWAP", "COMPLETE", "COMPENSATED"
+            "INIT", "PRE_QUIESCE", "PRE_SWAP", "POST_SWAP", "POST_SWAP_READY", "COMPLETE", "COMPENSATED"
         ),
         "capture_task_rebind": ("INIT", "PRE_ENABLE", "POST_ENABLE", "COMPLETE", "COMPENSATED"),
         "runtime_rollback": (
-            "INIT", "PRE_SWAP", "POST_SWAP", "COMPLETE", "COMPENSATED"
+            "INIT", "PRE_SWAP", "POST_SWAP", "POST_SWAP_READY", "COMPLETE", "COMPENSATED"
         ),
         "capture_task_hardening": (
             "INIT", "PRE_TASK_UPDATE", "POST_TASK_UPDATE", "COMPLETE", "COMPENSATED"
@@ -68,7 +68,7 @@ def _payload(operation: str = "runtime_activation", phase: str = "INIT") -> dict
         "prepared_receipt_relative_path": "receipts/runtime-activation/prepared.json",
         "prepared_receipt_sha256": EMPTY if phase in {"INIT", "PRE_QUIESCE"} else "9" * 64,
         "complete_receipt_relative_path": "receipts/runtime-activation/complete.json",
-        "complete_receipt_sha256": "8" * 64 if phase == "COMPLETE" else EMPTY,
+        "complete_receipt_sha256": "8" * 64 if phase in {"POST_SWAP_READY", "COMPLETE"} else EMPTY,
         "backup_contract_sha256": EMPTY if phase == "INIT" else "4" * 64,
         "task_contract_sha256": "5" * 64,
         "runtime_stage_contract_sha256": (
@@ -94,6 +94,7 @@ def _payload(operation: str = "runtime_activation", phase: str = "INIT") -> dict
     [
         ("runtime_activation", "INIT"),
         ("runtime_activation", "POST_SWAP"),
+        ("runtime_activation", "POST_SWAP_READY"),
         ("capture_task_rebind", "POST_ENABLE"),
         ("runtime_rollback", "COMPLETE"),
         ("capture_task_hardening", "POST_TASK_UPDATE"),
@@ -355,7 +356,7 @@ def test_runtime_compensation_cannot_replace_complete_journal(tmp_path: Path) ->
     )
     source.write_text(json.dumps(initial), encoding="utf-8")
     prior = transition(source, journal, None)
-    for phase in ("PRE_QUIESCE", "PRE_SWAP", "POST_SWAP", "COMPLETE"):
+    for phase in ("PRE_QUIESCE", "PRE_SWAP", "POST_SWAP", "POST_SWAP_READY", "COMPLETE"):
         payload = _payload("runtime_activation", phase)
         payload.update(
             schema_version="dawnstrike.runtime_operation_journal.v2",

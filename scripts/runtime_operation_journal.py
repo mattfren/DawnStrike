@@ -24,10 +24,10 @@ PHASES = {
     # mutation.  It lets activation recovery distinguish an interrupted
     # quiescence operation from an unstarted activation.
     "runtime_activation": (
-        "INIT", "PRE_QUIESCE", "PRE_SWAP", "POST_SWAP", "COMPLETE", "COMPENSATED"
+        "INIT", "PRE_QUIESCE", "PRE_SWAP", "POST_SWAP", "POST_SWAP_READY", "COMPLETE", "COMPENSATED"
     ),
     "capture_task_rebind": ("INIT", "PRE_ENABLE", "POST_ENABLE", "COMPLETE", "COMPENSATED"),
-    "runtime_rollback": ("INIT", "PRE_SWAP", "POST_SWAP", "COMPLETE", "COMPENSATED"),
+    "runtime_rollback": ("INIT", "PRE_SWAP", "POST_SWAP", "POST_SWAP_READY", "COMPLETE", "COMPENSATED"),
     "capture_task_hardening": (
         "INIT", "PRE_TASK_UPDATE", "POST_TASK_UPDATE", "COMPLETE", "COMPENSATED"
     ),
@@ -186,6 +186,13 @@ def validate(raw: bytes) -> dict[str, Any]:
             raise ValueError("compensated receipt path is invalid")
         if value["runtime_stage_contract_sha256"] != empty:
             raise ValueError("compensated task journal carries runtime stage proof")
+    elif value["phase"] == "POST_SWAP_READY":
+        # A COMPLETE receipt is sealed before scheduler enablement.  This
+        # durable intermediate phase is the recovery boundary for a power loss
+        # while tasks are being re-enabled: a Ready task set can never exist
+        # without an exact receipt/journal pair to finish the commit.
+        if prepared_receipt == empty or complete_receipt == empty or backup == empty or stage == empty:
+            raise ValueError("POST_SWAP_READY journal artifact proof is invalid")
     else:
         if prepared_receipt == empty or backup == empty:
             raise ValueError("mutation phase lacks prepared receipt or backup proof")

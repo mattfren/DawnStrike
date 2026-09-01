@@ -1255,7 +1255,7 @@ def test_rollback_compensation_failure_preserves_adoptable_locks() -> None:
         "Set-DawnstrikeTasksFailClosedDisabled $runtime $state", seam, compensation_catch
     )
     phase_guard = rollback.index(
-        'journalPhase -in @("PRE_SWAP", "POST_SWAP")', compensation_catch
+        'journalPhase -in @("PRE_SWAP", "POST_SWAP", "POST_SWAP_READY")', compensation_catch
     )
     preserve = rollback.index("$preserveLocks = $true", phase_guard)
     lock_pair_guard = rollback.index(
@@ -1648,6 +1648,58 @@ def test_activation_pre_swap_recovers_exact_post_second_rename_state() -> None:
     assert "PRE_SWAP installed/previous runtime identity is invalid" in activation
 
 
+def test_activation_seals_terminal_evidence_before_task_enablement() -> None:
+    activation = Path("scripts/activate_dawnstrike_runtime.ps1").read_text(
+        encoding="utf-8"
+    )
+    ready = activation.index(
+        "-Operation runtime_activation -Phase POST_SWAP_READY -CandidateSha $ExpectedSha"
+    )
+    receipt = activation.index('"Complete activation receipt sealing"', ready - 5000)
+    enable = activation.index("            Enable-DawnstrikeCanonicalTasks", ready)
+    complete = activation.index(
+        "-Operation runtime_activation -Phase COMPLETE -CandidateSha $ExpectedSha",
+        enable,
+    )
+    assert receipt < ready < enable < complete
+    assert 'if ($TestStageCrashPoint -eq "after_ready_journal")' in activation
+    assert 'if ($TestStageCrashPoint -eq "after_enable_before_complete")' in activation
+    assert 'phase -eq "POST_SWAP_READY"' in activation
+    assert "FileOptions]::WriteThrough" in activation
+
+
+def test_rollback_seals_terminal_evidence_before_task_enablement() -> None:
+    rollback = Path("scripts/rollback_dawnstrike_runtime.ps1").read_text(
+        encoding="utf-8"
+    )
+    receipt = rollback.index('"Rollback receipt sealing"')
+    ready = rollback.index(
+        "-Operation runtime_rollback -Phase POST_SWAP_READY", receipt
+    )
+    enable = rollback.index("        Enable-DawnstrikeCanonicalTasks", ready)
+    complete = rollback.index(
+        "-Operation runtime_rollback -Phase COMPLETE", enable
+    )
+    assert receipt < ready < enable < complete
+    assert 'journalPhase -in @("POST_SWAP", "POST_SWAP_READY")' in rollback
+    assert 'DAWNSTRIKE_TEST_ROLLBACK_CRASH_POINT -eq "after_ready"' in rollback
+    assert 'DAWNSTRIKE_TEST_ROLLBACK_CRASH_POINT -eq "after_enable"' in rollback
+
+
+def test_lock_adoption_recovers_a_replace_completed_before_process_death() -> None:
+    lock = Path("scripts/runtime_activation_lock.ps1").read_text(encoding="utf-8")
+    recovered_round = lock.index(
+        'elseif($current.raw_file_sha256-eq$payload.next_lock_file_sha256)'
+    )
+    new_temp = lock.index('$nextName=\'.next-runtime-lock-\'', recovered_round)
+    reseal = lock.index("'ADOPTION_PREPARED'", recovered_round)
+    owner_guard = lock.index(
+        'process_started_at_utc -ne $ownerStart', recovered_round
+    )
+    assert recovered_round < new_temp < reseal < owner_guard
+    assert "return [pscustomobject]@{path=$path" in lock
+
+
 def test_complete_activation_retry_reconciles_only_exact_owned_locks() -> None:
     activation = Path("scripts/activate_dawnstrike_runtime.ps1").read_text(
         encoding="utf-8"
@@ -1763,7 +1815,7 @@ def test_activation_nonterminal_failure_preserves_adoptable_lock_pair() -> None:
         "$failureJournal = Get-DawnstrikeStrictRuntimeOperationJournal"
     )
     preserve = activation.index(
-        'if ($journalPhase -in @("PRE_QUIESCE", "PRE_SWAP", "POST_SWAP"))',
+            'if ($journalPhase -in @("PRE_QUIESCE", "PRE_SWAP", "POST_SWAP", "POST_SWAP_READY"))',
         failure_reconcile,
     )
     preserve_assignment = activation.index("$preserveLocks = $true", preserve)

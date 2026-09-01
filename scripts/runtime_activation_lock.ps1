@@ -532,15 +532,36 @@ function Adopt-DawnstrikeGovernedRuntimeLockWithJournal {
             if($current.raw_file_sha256-eq$payload.old_lock_file_sha256){
                 if(-not(Test-Path -LiteralPath $nextPath -PathType Leaf)-or(Get-DawnstrikeRuntimeLockHash $nextPath)-ne$payload.next_lock_file_sha256){throw 'Prepared next-lock bytes are missing or changed.'}
                 [IO.File]::Replace($nextPath,$path,$oldPath,$true)
-            }elseif($current.raw_file_sha256-ne$payload.next_lock_file_sha256-or-not(Test-Path -LiteralPath $oldPath -PathType Leaf)-or(Get-DawnstrikeRuntimeLockHash $oldPath)-ne$payload.old_lock_file_sha256){throw 'Prepared adoption lock/archive pair is invalid.'}
-            if($TestCrashPoint-eq'after_replace'){exit 137}
-            $current=Get-DawnstrikeStrictRuntimeLock $path $PythonPath $PythonSha256
-            $journal=Set-DawnstrikeRuntimeOperationJournalAdoption $journal $journalFull 'ADOPTED' ([string]$current.payload.lock_token) ([string]$current.raw_file_sha256) ([string]$payload.old_lock_token) ([string]$payload.old_lock_file_sha256) ([string]$payload.next_lock_token) ([string]$payload.next_lock_file_sha256) ([string]$payload.old_lock_archive_relative_path) 'NONE' $PythonPath $PythonSha256
+                if($TestCrashPoint-eq'after_replace'){exit 137}
+                $current=Get-DawnstrikeStrictRuntimeLock $path $PythonPath $PythonSha256
+                $journal=Set-DawnstrikeRuntimeOperationJournalAdoption $journal $journalFull 'ADOPTED' ([string]$current.payload.lock_token) ([string]$current.raw_file_sha256) ([string]$payload.old_lock_token) ([string]$payload.old_lock_file_sha256) ([string]$payload.next_lock_token) ([string]$payload.next_lock_file_sha256) ([string]$payload.old_lock_archive_relative_path) 'NONE' $PythonPath $PythonSha256
+            }elseif($current.raw_file_sha256-eq$payload.next_lock_file_sha256){
+                # The prior recovery process may have died after the atomic
+                # replace.  Its lock payload names that dead PID, so it cannot
+                # be returned to a caller that must perform the next journal
+                # transition.  Start a new durable adoption round using a
+                # lock payload owned by this exact process; this also avoids
+                # trying to replace the already-consumed next-lock temp.
+                if(-not(Test-Path -LiteralPath $oldPath -PathType Leaf)-or(Get-DawnstrikeRuntimeLockHash $oldPath)-ne$payload.old_lock_file_sha256){throw 'Prepared adoption archive is missing or changed.'}
+                $oldToken=[string]$current.payload.lock_token;$oldHash=[string]$current.raw_file_sha256
+                $nextToken=[guid]::NewGuid().ToString('N')
+                $nextJson=(New-DawnstrikeRuntimeLockPayload ([string]$current.payload.operation) $CandidateSha $CandidateTree $OriginIdentity $nextToken)|ConvertTo-Json -Compress
+                $nextBytes=[Text.UTF8Encoding]::new($false).GetBytes($nextJson)
+                $nextHash=Get-DawnstrikeSharedLockSha256Text $nextJson
+                $nextName='.next-runtime-lock-'+$nextHash+'.tmp';$nextPath=Join-Path $lockRoot $nextName
+                $nextStream=[IO.File]::Open($nextPath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+                try{$nextStream.Write($nextBytes,0,$nextBytes.Length);$nextStream.Flush($true)}finally{$nextStream.Dispose()}
+                $archiveName='recovered-stale-'+$oldHash+'.lock'
+                $journal=Set-DawnstrikeRuntimeOperationJournalAdoption $journal $journalFull 'ADOPTION_PREPARED' $oldToken $oldHash $oldToken $oldHash $nextToken $nextHash ('locks/'+$archiveName) ('locks/'+$nextName) $PythonPath $PythonSha256
+                [IO.File]::Replace($nextPath,$path,(Join-Path $lockRoot $archiveName),$true)
+                if($TestCrashPoint-eq'after_replace'){exit 137}
+                $current=Get-DawnstrikeStrictRuntimeLock $path $PythonPath $PythonSha256
+                $journal=Set-DawnstrikeRuntimeOperationJournalAdoption $journal $journalFull 'ADOPTED' ([string]$current.payload.lock_token) ([string]$current.raw_file_sha256) $oldToken $oldHash $nextToken $nextHash ('locks/'+$archiveName) 'NONE' $PythonPath $PythonSha256
+            }else{throw 'Prepared adoption lock/archive pair is invalid.'}
         }
         $current=Get-DawnstrikeStrictRuntimeLock $path $PythonPath $PythonSha256
-        # A recovered precomputed lock can belong to a recovery process that
-        # crashed after replacement. Loop under the same mutex until the lock
-        # payload is owned by this exact PID/start pair.
+        if($current.payload.process_id -ne [int]$PID -or $current.payload.process_started_at_utc -ne $ownerStart){throw 'Recovered runtime lock is not owned by this exact process.'}
+        return [pscustomobject]@{path=$path;token=[string]$current.payload.lock_token;bytes_sha256=[string]$current.raw_file_sha256;operation=[string]$current.payload.operation;python_path=$PythonPath;python_sha256=$PythonSha256;acquired=$true;journal_path=$journalFull;journal_sha256=[string]$journal.raw_file_sha256}
         }
     }finally{Exit-DawnstrikeRuntimeLockMutex $mutex}
 }
@@ -552,7 +573,7 @@ function Set-DawnstrikeRuntimeOperationJournalPhase {
         [Parameter(Mandatory=$true)][string]$JournalPath,
         [Parameter(Mandatory=$true)][object]$Lock,
 [ValidateSet('runtime_activation','runtime_rollback','capture_task_rebind','capture_task_hardening','state_preparation')][string]$Operation,
-[ValidateSet('INIT','PRE_QUIESCE','PRE_SWAP','POST_SWAP','PRE_ENABLE','POST_ENABLE','PRE_TASK_UPDATE','POST_TASK_UPDATE','PREPARE','COMPLETE','COMPENSATED')][string]$Phase,
+ [ValidateSet('INIT','PRE_QUIESCE','PRE_SWAP','POST_SWAP','POST_SWAP_READY','PRE_ENABLE','POST_ENABLE','PRE_TASK_UPDATE','POST_TASK_UPDATE','PREPARE','COMPLETE','COMPENSATED')][string]$Phase,
         [ValidatePattern('^[0-9a-f]{40}$')][string]$CandidateSha,
         [ValidatePattern('^[0-9a-f]{40}$')][string]$CandidateTree,
         [ValidatePattern('^[0-9a-f]{40}$')][string]$CurrentSha,
@@ -582,8 +603,8 @@ function Set-DawnstrikeRuntimeOperationJournalPhase {
     if($current.payload.lock_token-ne$Lock.token-or$current.raw_file_sha256-ne$Lock.bytes_sha256-or[int]$current.payload.process_id-ne[int]$PID-or[string]$current.payload.process_started_at_utc-ne$processStart){throw 'Journal transition requires the exact live lock owned by this process.'}
     if($current.payload.operation-ne$Operation-or$current.payload.candidate_sha-ne$CandidateSha-or$current.payload.candidate_tree-ne$CandidateTree-or$current.payload.origin_identity-ne$OriginIdentity){throw 'Journal transition lock identity does not match the operation.'}
     $phases=@{
-runtime_activation=@('INIT','PRE_QUIESCE','PRE_SWAP','POST_SWAP','COMPLETE','COMPENSATED')
-runtime_rollback=@('INIT','PRE_SWAP','POST_SWAP','COMPLETE','COMPENSATED')
+runtime_activation=@('INIT','PRE_QUIESCE','PRE_SWAP','POST_SWAP','POST_SWAP_READY','COMPLETE','COMPENSATED')
+runtime_rollback=@('INIT','PRE_SWAP','POST_SWAP','POST_SWAP_READY','COMPLETE','COMPENSATED')
 capture_task_rebind=@('INIT','PRE_ENABLE','POST_ENABLE','COMPLETE','COMPENSATED')
 capture_task_hardening=@('INIT','PRE_TASK_UPDATE','POST_TASK_UPDATE','COMPLETE','COMPENSATED')
         state_preparation=@('INIT','PREPARE','COMPLETE','COMPENSATED')
