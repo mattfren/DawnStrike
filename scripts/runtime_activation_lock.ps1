@@ -306,8 +306,10 @@ function Set-DawnstrikeRuntimeOperationJournalPhase {
         [ValidatePattern('^[0-9a-f]{40}$')][string]$PreviousSha,
         [ValidatePattern('^[0-9a-f]{40}$')][string]$PreviousTree,
         [Parameter(Mandatory=$true)][string]$OriginIdentity,
-        [Parameter(Mandatory=$true)][string]$ReceiptRelativePath,
-        [ValidatePattern('^[0-9a-f]{64}$')][string]$ReceiptSha256,
+        [Parameter(Mandatory=$true)][string]$PreparedReceiptRelativePath,
+        [ValidatePattern('^[0-9a-f]{64}$')][string]$PreparedReceiptSha256,
+        [Parameter(Mandatory=$true)][string]$CompleteReceiptRelativePath,
+        [ValidatePattern('^[0-9a-f]{64}$')][string]$CompleteReceiptSha256,
         [ValidatePattern('^[0-9a-f]{64}$')][string]$BackupContractSha256,
         [ValidatePattern('^[0-9a-f]{64}$')][string]$TaskContractSha256,
         [ValidatePattern('^[0-9a-f]{64}$')][string]$RuntimeStageContractSha256,
@@ -344,7 +346,9 @@ function Set-DawnstrikeRuntimeOperationJournalPhase {
         origin_identity_sha256=Get-DawnstrikeSharedLockSha256Text $OriginIdentity
         state_root_sha256=Get-DawnstrikeSharedLockSha256Text $state.ToLowerInvariant()
         lock_token=[string]$current.payload.lock_token;lock_file_sha256=[string]$current.raw_file_sha256
-        prior_journal_file_sha256=$priorHash;receipt_relative_path=$ReceiptRelativePath;receipt_sha256=$ReceiptSha256
+        prior_journal_file_sha256=$priorHash
+        prepared_receipt_relative_path=$PreparedReceiptRelativePath;prepared_receipt_sha256=$PreparedReceiptSha256
+        complete_receipt_relative_path=$CompleteReceiptRelativePath;complete_receipt_sha256=$CompleteReceiptSha256
         backup_contract_sha256=$BackupContractSha256;task_contract_sha256=$TaskContractSha256
         runtime_stage_contract_sha256=$RuntimeStageContractSha256;recorded_at_utc=[DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ')
         research_only=$true;broker_execution_enabled=$false;adoption_state='NONE'
