@@ -220,6 +220,10 @@ function Assert-DawnstrikeCaptureHardeningBoundary {
     $null = Assert-DawnstrikeCaptureTaskSafety -Xml ([string]$Current.xml) -RuntimeRoot $RuntimeRoot -StateRoot $StateRoot -ExpectedPrincipal ([string]$currentPrincipalUser[0].InnerText) -ExpectedCandidateSha $CandidateSha -ExpectedInterpreterPath ([string]$receipt.interpreter_path) -ExpectedInterpreterSha256 ([string]$receipt.interpreter_sha256) -ExpectedInterpreterSignerThumbprint ([string]$receipt.interpreter_signer_thumbprint) -ExpectedEnabled "false" -RequirePasswordPrincipal -RequireRunner
     $records = @(Get-DawnstrikeCaptureActionRecords ([string]$Current.xml))
     if ($records.Count -ne 1) { throw "Current auxiliary task action is ambiguous." }
+    $expectedBytecodePrefix = [System.IO.Path]::GetFullPath((Join-Path $StateRoot ("capture-bytecode\" + $CandidateSha)))
+    if ([string]$receipt.action_bindings.bytecode_prefix -ine $expectedBytecodePrefix) {
+        throw "Hardening receipt bytecode prefix is not candidate-bound."
+    }
     $bindingPairs = @(
         @("candidate-sha", "candidate_sha"),
         @("symbols-manifest", "symbols_manifest_path"),

@@ -327,6 +327,7 @@ def validate_receipt(
         bindings = payload.get("action_bindings")
         if not isinstance(bindings, dict) or set(bindings) != {
             "candidate_sha",
+            "bytecode_prefix",
             "runner_path",
             "runner_sha256",
             "symbols_manifest_path",
@@ -339,6 +340,7 @@ def validate_receipt(
             raise CaptureTaskHardeningContractError("hardening action bindings are not exact")
         if (
             bindings.get("candidate_sha") != payload.get("candidate_sha")
+            or not isinstance(bindings.get("bytecode_prefix"), str)
             or bindings.get("runner_path") != payload.get("runner_path")
             or bindings.get("runner_sha256") != payload.get("runner_sha256")
         ):
@@ -355,6 +357,13 @@ def validate_receipt(
         for field in ("symbols_manifest_path", "entitlement_receipt_path", "source_config_path"):
             if not isinstance(bindings.get(field), str) or not os.path.isabs(bindings[field]):
                 raise CaptureTaskHardeningContractError("hardening action input path is invalid")
+        prefix = bindings["bytecode_prefix"]
+        if not os.path.isabs(prefix) or "\n" in prefix or "\r" in prefix:
+            raise CaptureTaskHardeningContractError("hardening bytecode prefix path is invalid")
+        if not re.search(rf"[\\/]capture-bytecode[\\/]{payload['candidate_sha']}$", prefix, re.I):
+            raise CaptureTaskHardeningContractError(
+                "hardening bytecode prefix is not candidate-bound"
+            )
     for field in ("old_last_task_result", "new_last_task_result"):
         if not isinstance(payload.get(field), int) or isinstance(payload.get(field), bool):
             raise CaptureTaskHardeningContractError(f"hardening {field} is invalid")
@@ -505,6 +514,7 @@ _PREPARED_KEYS = frozenset(
         "research_only",
         "broker_execution_enabled",
         "prepared_at_utc",
+        "input_stage",
         "prepared_record_sha256",
     }
 )
@@ -548,6 +558,8 @@ def validate_prepared(payload: Mapping[str, Any]) -> dict[str, Any]:
         raise CaptureTaskHardeningContractError("prepared lock token is invalid")
     if payload.get("original_state") not in {"Ready", "Disabled"}:
         raise CaptureTaskHardeningContractError("prepared original state is invalid")
+    if payload.get("input_stage") not in {"LEGACY_MIGRATION", "CANONICAL_REPIN"}:
+        raise CaptureTaskHardeningContractError("prepared input stage is invalid")
     backup_path = payload.get("backup_path")
     if (
         not isinstance(backup_path, str)
@@ -601,6 +613,30 @@ def validate_prepared(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 def load_prepared(path: str | Path) -> dict[str, Any]:
     return validate_prepared(_load_json_object(path))
+
+
+def reseal_prepared_lock(path: str | Path, token: str, raw_sha256: str) -> dict[str, Any]:
+    value = load_prepared(path)
+    if not re.fullmatch(r"^[0-9a-f]{32}$", token) or not _SHA256.fullmatch(raw_sha256):
+        raise CaptureTaskHardeningContractError("replacement lock identity is invalid")
+    value["lock_token"] = token
+    value["lock_bytes_sha256"] = raw_sha256
+    value["prepared_record_sha256"] = self_hash(value, "prepared_record_sha256")
+    validated = validate_prepared(value)
+    destination = _assert_no_reparse_components(path)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(canonical_json(validated))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return validated
 
 
 def seal_receipt(payload: Mapping[str, Any], output_path: str | Path) -> dict[str, Any]:
@@ -694,6 +730,10 @@ def _parser() -> argparse.ArgumentParser:
     prepared.add_argument("--output", required=True)
     verify_prepared = sub.add_parser("verify-prepared")
     verify_prepared.add_argument("--prepared", required=True)
+    reseal = sub.add_parser("reseal-prepared-lock")
+    reseal.add_argument("--prepared", required=True)
+    reseal.add_argument("--lock-token", required=True)
+    reseal.add_argument("--lock-bytes-sha256", required=True)
     return parser
 
 
@@ -706,6 +746,8 @@ def main(argv: list[str] | None = None) -> int:
             result = seal_prepared(_load_json_object(args.input), args.output)
         elif args.command == "verify-prepared":
             result = load_prepared(args.prepared)
+        elif args.command == "reseal-prepared-lock":
+            result = reseal_prepared_lock(args.prepared, args.lock_token, args.lock_bytes_sha256)
         else:
             result = load_receipt(
                 args.receipt,

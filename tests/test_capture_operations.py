@@ -221,14 +221,17 @@ def test_capture_script_is_plan_only_without_execute() -> None:
     ).read_text(encoding="utf-8")
     assert "Python313\\python.exe" in registration
     assert "ef8f51028ac5329641985112f8efb1c2d4c47c86b8011ddf7e6fae21e2b4e5a1" in registration
-    assert '$pythonPrefix = @("-I", "-u")' in registration
+    assert (
+        '$pythonPrefix = @("-I", "-B", "-X", ("pycache_prefix=" + $bytecodePrefix), "-u")'
+        in registration
+    )
     assert "Get-AuthenticodeSignature" in registration
-    execute_index = registration.index('$pythonVersion = @(& $Python -I -c')
+    execute_index = registration.index("$pythonVersion = @(& $Python -I -c")
     assert registration.index("Get-FileHash -LiteralPath $Python") < execute_index
     assert registration.index("Get-AuthenticodeSignature -LiteralPath $Python") < execute_index
     assert registration.index("SignerCertificate.Thumbprint") < execute_index
-    assert '$argumentTokens = @($pythonPrefix + $captureArgs)' in registration
-    assert "-u \"{0}\"" not in registration
+    assert "$argumentTokens = @($pythonPrefix + $captureArgs)" in registration
+    assert '-u "{0}"' not in registration
     assert "[switch]$InteractiveCurrentUser" in registration
     assert "New-ScheduledTaskPrincipal" in registration
     assert "-LogonType Interactive -RunLevel Limited" in registration

@@ -67,6 +67,7 @@ def _prepared() -> dict[str, object]:
         "research_only": True,
         "broker_execution_enabled": False,
         "prepared_at_utc": "2026-08-31T23:59:00.0000000Z",
+        "input_stage": "LEGACY_MIGRATION",
     }
     payload["prepared_record_sha256"] = self_hash(payload, "prepared_record_sha256")
     return payload

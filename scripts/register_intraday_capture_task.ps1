@@ -123,7 +123,14 @@ $pythonVersion = @(& $Python -I -c "import sys; print('.'.join(map(str, sys.vers
 if ($LASTEXITCODE -ne 0 -or $pythonVersion.Count -ne 1 -or [string]$pythonVersion[0] -notmatch '^3\.13\.') {
     throw "Capture interpreter must be exact Python 3.13."
 }
-$pythonPrefix = @("-I", "-u")
+$bytecodePrefix = Join-Path $StateRoot ("capture-bytecode\" + $CandidateSha)
+New-Item -ItemType Directory -Path $bytecodePrefix -Force -ErrorAction Stop | Out-Null
+$bytecodePrefix = [System.IO.Path]::GetFullPath($bytecodePrefix)
+$bytecodePrefixItem = Get-Item -LiteralPath $bytecodePrefix -Force -ErrorAction Stop
+if (-not $bytecodePrefixItem.PSIsContainer -or ($bytecodePrefixItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "Capture bytecode prefix must be a regular non-reparse directory."
+}
+$pythonPrefix = @("-I", "-B", "-X", ("pycache_prefix=" + $bytecodePrefix), "-u")
 if ([string]::IsNullOrWhiteSpace($EnvFile)) {
     $EnvFile = Join-Path $StateRoot "secrets\runtime.env"
 }
