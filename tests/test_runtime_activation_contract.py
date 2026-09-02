@@ -164,6 +164,25 @@ def _install_local_origin_fixture_seam(lock_script: Path) -> None:
     lock_script.write_text(text[:start] + fixture + text[end:], encoding="utf-8")
 
 
+def _install_local_interpreter_fixture_seam(candidate: Path) -> None:
+    """Bind disposable activation fixtures to the signed interpreter running pytest."""
+
+    production = r"C:\Program Files\Dawnstrike\Python313\python.exe"
+    fixture = str(Path(sys.executable).resolve())
+    for relative in (
+        "scripts/activate_dawnstrike_runtime.ps1",
+        "scripts/runtime_activation_lock.ps1",
+        "scripts/dawnstrike_process_runner.ps1",
+        "scripts/runtime_activation_contract.py",
+        "scripts/vercel_toolchain_contract.py",
+    ):
+        path = candidate / relative
+        text = path.read_text(encoding="utf-8")
+        if production not in text:
+            raise AssertionError(f"interpreter fixture seam is absent from {relative}")
+        path.write_text(text.replace(production, fixture), encoding="utf-8")
+
+
 def _install_local_github_ci_fixture_seam(contract_script: Path) -> None:
     """Use deterministic GitHub authority responses in a copied candidate only."""
 
@@ -241,7 +260,7 @@ def _state_preparation_declaration() -> dict[str, object]:
         "legacy_schema_marker": 30,
         "required_before_activation": True,
         "capture_interpreter_path": (
-            r"C:\Users\MattFields\AppData\Local\Programs\Python\Python313\python.exe"
+            r"C:\Program Files\Dawnstrike\Python313\python.exe"
         ),
         "capture_interpreter_version": "3.13.14",
         "capture_interpreter_sha256": (
@@ -1593,8 +1612,10 @@ def test_recovery_tools_use_pinned_signed_python_and_git() -> None:
         Path("scripts/rollback_dawnstrike_runtime.ps1").read_text(encoding="utf-8"),
         Path("scripts/rebind_intraday_capture_task.ps1").read_text(encoding="utf-8"),
         Path("scripts/harden_intraday_capture_task.ps1").read_text(encoding="utf-8"),
-        Path("scripts/prepare_dawnstrike_state.ps1").read_text(encoding="utf-8"),
     ]
+    state_preparation = Path("scripts/prepare_dawnstrike_state.ps1").read_text(
+        encoding="utf-8"
+    )
 
     assert "$script:DawnstrikeApprovedGitPath=" in lock
     assert "$script:DawnstrikeApprovedGitSha256=" in lock
@@ -1610,6 +1631,14 @@ def test_recovery_tools_use_pinned_signed_python_and_git() -> None:
         assert "Get-Command git.exe" not in script
         assert "Get-DawnstrikeApprovedGit" in script
         assert "Get-DawnstrikeApprovedLockInterpreter" in script
+
+    assert "Get-Command py.exe" not in state_preparation
+    assert "Get-Command git.exe" not in state_preparation
+    assert "Assert-DawnstrikeStatePreparationBootstrapSource" in state_preparation
+    assert (
+        '. (Join-Path $statePreparationToolRoot "scripts\\activate_dawnstrike_runtime.ps1")'
+        in state_preparation
+    )
 
     process_start = activation.index("function Invoke-DawnstrikeActivationProcess")
     process_end = activation.index("function Get-DawnstrikeActivationNowUtc", process_start)
@@ -2243,6 +2272,7 @@ def test_disposable_activation_and_rollback_preserve_exact_runtime_and_state(
     ):
         shutil.copy2(source / "scripts" / name, candidate / "scripts" / name)
     _install_local_origin_fixture_seam(candidate / "scripts" / "runtime_activation_lock.ps1")
+    _install_local_interpreter_fixture_seam(candidate)
     _install_local_github_ci_fixture_seam(candidate / "scripts" / "runtime_activation_contract.py")
     shutil.copytree(
         source / "intraday_scanner",

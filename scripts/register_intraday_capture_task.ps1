@@ -99,7 +99,7 @@ $EntitlementReceipt = Assert-DawnstrikeCaptureInputBindingFile `
     -Path $EntitlementReceipt -ExpectedSha256 $EntitlementReceiptSha256 -Label "Entitlement receipt"
 $SourceConfig = Assert-DawnstrikeCaptureInputBindingFile `
     -Path $SourceConfig -ExpectedSha256 $SourceConfigSha256 -Label "Source config"
-$approvedPython = "C:\Users\MattFields\AppData\Local\Programs\Python\Python313\python.exe"
+$approvedPython = "C:\Program Files\Dawnstrike\Python313\python.exe"
 $approvedPythonSha256 = "ef8f51028ac5329641985112f8efb1c2d4c47c86b8011ddf7e6fae21e2b4e5a1"
 if ([string]::IsNullOrWhiteSpace($Python)) { $Python = $approvedPython }
 $Python = [System.IO.Path]::GetFullPath($Python)

@@ -12,12 +12,10 @@ py -m mypy intraday_scanner
 py -m intraday_scanner.cli --help
 ```
 
-If you want console scripts directly, add your Python Scripts directory:
-
-```powershell
-$env:PATH = "C:\Users\MattFields\AppData\Local\Programs\Python\Python313\Scripts;$env:PATH"
-intraday-scan --help
-```
+Keep using module-entry commands for development. The protected production
+prefix is not added to `PATH`; its console wrappers are outside the scheduled
+execution contract, and only the hash-pinned `uv.exe` is admitted by the
+governed Vercel publisher.
 
 Recommended local app command:
 

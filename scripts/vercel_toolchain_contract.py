@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA = "dawnstrike.vercel_toolchain.v1"
-PYTHON_PATH = Path(r"C:\Users\MattFields\AppData\Local\Programs\Python\Python313\python.exe")
+PYTHON_PATH = Path(r"C:\Program Files\Dawnstrike\Python313\python.exe")
 PYTHON_SHA256 = "ef8f51028ac5329641985112f8efb1c2d4c47c86b8011ddf7e6fae21e2b4e5a1"
 PYTHON_SIGNER_SUBJECT = (
     "CN=Python Software Foundation, O=Python Software Foundation, "
@@ -43,7 +43,7 @@ CURL_SIGNER_SUBJECT = (
 CURL_SIGNER_THUMBPRINT = "DC91E564D5BC1E3A8E02D6A8508682ABEA8A2443"
 NPX_PATH = Path(r"C:\Program Files\nodejs\node_modules\npm\bin\npx-cli.js")
 NPX_SHA256 = "a9ca027c18c5bd7da278230edc7a174ff1d8b6b558e0e0a4a2c9c2fae346d66b"
-UV_PATH = Path(r"C:\Users\MattFields\AppData\Local\Programs\Python\Python313\Scripts\uv.exe")
+UV_PATH = Path(r"C:\Program Files\Dawnstrike\Python313\Scripts\uv.exe")
 UV_SHA256 = "268cd62b99395eb53825795518e067e4b27ec4b445175df343824689f307c807"
 VERCEL_ROOT = Path(r"C:\Users\MattFields\AppData\Local\npm-cache\_npx\055e0f88b112d3d7")
 VERCEL_ENTRY = VERCEL_ROOT / "node_modules" / "vercel" / "dist" / "vc.js"

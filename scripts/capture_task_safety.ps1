@@ -308,7 +308,17 @@ function Assert-DawnstrikeCaptureTaskSafety {
     catch { throw "Capture task safety validation requires valid XML." }
     Assert-DawnstrikeCaptureCanonicalXml -Document $document -AllowLegacySettings:$AllowLegacySettings
     $settingsForStage = @($document.SelectNodes("//*[local-name()='Settings']"))
-    $idleSettings = if ($settingsForStage.Count -eq 1) { @($settingsForStage[0].ChildNodes | Where-Object { $_.LocalName -eq "IdleSettings" }) } else { @() }
+    $idleSettings = @()
+    if ($settingsForStage.Count -eq 1) {
+        # Assign the array expression directly. PowerShell 5.1 unwraps the
+        # output of an `if` expression, so the former one-liner produced
+        # either $null or a scalar XmlElement and `.Count` failed under
+        # Set-StrictMode before any task mutation.
+        $idleSettings = @(
+            $settingsForStage[0].ChildNodes |
+                Where-Object { $_.LocalName -eq "IdleSettings" }
+        )
+    }
     if ($idleSettings.Count -gt 0 -and -not $AllowLegacySettings) {
         throw "IdleSettings are permitted only on a validated migration input."
     }

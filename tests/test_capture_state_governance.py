@@ -100,6 +100,31 @@ def _install_local_origin_fixture_seam(lock_script: Path) -> None:
     lock_script.write_text(text[:start] + fixture + text[end:], encoding="utf-8")
 
 
+def _install_local_interpreter_fixture_seam(candidate: Path) -> None:
+    """Use this host's signed Python only inside the disposable integration copy."""
+
+    production = r"C:\Program Files\Dawnstrike\Python313\python.exe"
+    fixture = str(Path(sys.executable).resolve())
+    for relative in (
+        "scripts/activate_dawnstrike_runtime.ps1",
+        "scripts/runtime_activation_lock.ps1",
+        "scripts/prepare_dawnstrike_state.ps1",
+        "scripts/dawnstrike_process_runner.ps1",
+        "scripts/runtime_activation_contract.py",
+        "scripts/run_daily_intraday_capture.py",
+    ):
+        path = candidate / relative
+        text = path.read_text(encoding="utf-8")
+        if production not in text:
+            raise AssertionError(f"interpreter fixture seam is absent from {relative}")
+        path.write_text(text.replace(production, fixture), encoding="utf-8")
+
+    declaration_path = candidate / "config" / "state_preparation_contract.json"
+    declaration = json.loads(declaration_path.read_text(encoding="utf-8"))
+    declaration["capture_interpreter_path"] = fixture
+    _write_json(declaration_path, declaration)
+
+
 def _install_local_state_preparation_origin_fixture_seam(
     preparation_script: Path, origin: Path
 ) -> None:
@@ -1325,18 +1350,26 @@ def test_powershell_sidecar_activation_rebind_and_legacy_rollback_quarantine(
         "state_disaster_recovery.py",
         "dawnstrike_python_bootstrap.py",
         "run_daily_intraday_capture.py",
+        "import_dawnstrike_environment.ps1",
+        "run_alphaops_morning.ps1",
+        "run_alphaops_monitor.ps1",
+        "run_alphaops_eod.ps1",
+        "run_alphaops_weekly_training.ps1",
+        "run_daily_finalize.ps1",
+        "alpha_cycle_artifact.ps1",
+        "monitor_schedule_helper.ps1",
+        "publish_vercel_public.ps1",
+        "vercel_source_contract.ps1",
+        "vercel_toolchain_contract.py",
+        "vercel_publication_journal.py",
+        "publication_boundary.py",
+        "verify_daily_prepublication.py",
+        "build_vercel_public_stage.ps1",
+        "verify_vercel_candidate.ps1",
     ):
         shutil.copy2(source / "scripts" / name, candidate / "scripts" / name)
-    # The repository checkout can be temporarily mixed-newline while patches
-    # are under review, but the disposable Git candidate and its later
-    # autocrlf checkout must expose identical immutable runner bytes to the
-    # pre-swap hardening receipt.  Normalize only this copied fixture file.
     candidate_runner = candidate / "scripts" / "run_daily_intraday_capture.py"
-    runner_text = candidate_runner.read_text(encoding="utf-8").replace("\r\n", "\n")
-    candidate_runner.write_bytes(runner_text.replace("\n", "\r\n").encode("utf-8"))
     candidate_bootstrap = candidate / "scripts" / "dawnstrike_python_bootstrap.py"
-    bootstrap_text = candidate_bootstrap.read_text(encoding="utf-8").replace("\r\n", "\n")
-    candidate_bootstrap.write_bytes(bootstrap_text.replace("\n", "\r\n").encode("utf-8"))
     _install_local_origin_fixture_seam(candidate / "scripts" / "runtime_activation_lock.ps1")
     _install_local_state_preparation_origin_fixture_seam(
         candidate / "scripts" / "prepare_dawnstrike_state.ps1", remote
@@ -1368,6 +1401,7 @@ def test_powershell_sidecar_activation_rebind_and_legacy_rollback_quarantine(
     shutil.copy2(source / "requirements.lock", candidate / "requirements.lock")
     shutil.copy2(source / ".gitignore", candidate / ".gitignore")
     shutil.copy2(source / ".gitattributes", candidate / ".gitattributes")
+    _install_local_interpreter_fixture_seam(candidate)
 
     subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
     subprocess.run(
@@ -1480,11 +1514,16 @@ def test_powershell_sidecar_activation_rebind_and_legacy_rollback_quarantine(
     def file_sha(path: Path) -> str:
         return hashlib.sha256(path.read_bytes()).hexdigest()
 
-    def windows_checkout_sha(path: Path) -> str:
-        """Hash the CRLF bytes produced by the fixture's autocrlf checkout."""
+    def git_blob_sha(path: Path) -> str:
+        """Hash the committed bytes that state preparation installs."""
 
-        normalized = path.read_text(encoding="utf-8").replace("\r\n", "\n")
-        return hashlib.sha256(normalized.replace("\n", "\r\n").encode("utf-8")).hexdigest()
+        relative = path.relative_to(candidate).as_posix()
+        blob = subprocess.run(
+            ["git", "-C", str(candidate), "show", f"{candidate_sha}:{relative}"],
+            check=True,
+            capture_output=True,
+        ).stdout
+        return hashlib.sha256(blob).hexdigest()
 
     def quote(path: Path) -> str:
         return str(path).replace("'", "''")
@@ -1509,8 +1548,8 @@ def test_powershell_sidecar_activation_rebind_and_legacy_rollback_quarantine(
     symbols_sha = file_sha(symbols_manifest)
     entitlement_sha = file_sha(entitlement_receipt)
     source_config_sha = file_sha(source_config)
-    runner_sha = windows_checkout_sha(candidate / "scripts" / "run_daily_intraday_capture.py")
-    bootstrap_sha = windows_checkout_sha(candidate_bootstrap)
+    runner_sha = git_blob_sha(candidate_runner)
+    bootstrap_sha = git_blob_sha(candidate_bootstrap)
     previous_runner_sha = file_sha(runtime / "scripts" / "run_daily_intraday_capture.py")
     owner_comment_body = json.dumps(
         {
@@ -1549,8 +1588,17 @@ def test_powershell_sidecar_activation_rebind_and_legacy_rollback_quarantine(
 $global:MockState = '{state_q}'
     $global:MockAuxState = 'Disabled'
 $global:MockTaskStates = @{{}}
+$global:MockTaskActions = @{{}}
 $global:TaskEvents = @()
-foreach ($name in $script:DawnstrikeCanonicalTaskNames) {{ $global:MockTaskStates[$name] = 'Ready' }}
+foreach ($name in $script:DawnstrikeCanonicalTaskNames) {{
+  $global:MockTaskStates[$name] = 'Ready'
+  $initialPolicy = Get-DawnstrikeCanonicalTaskPolicy -TaskName $name -RuntimeRoot $global:MockRuntime -StateRoot $global:MockState
+  $global:MockTaskActions[$name] = [pscustomobject]@{{
+    Execute='C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
+    Arguments=[string]$initialPolicy.arguments
+    WorkingDirectory=$global:MockRuntime
+  }}
+}}
     $global:MockAuxPrincipal = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
     $global:MockAuxExecute = '{interpreter_declaration["capture_interpreter_path"]}'
     $bootstrapPreloader = Get-DawnstrikeCaptureBootstrapPreloader
@@ -1648,7 +1696,7 @@ function Get-ScheduledTask {{
       }}
       return [pscustomobject]@{{
         State=$canonicalState; TaskPath='\'
-        Actions=@([pscustomobject]@{{ Execute='C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'; Arguments=$canonicalPolicy.arguments; WorkingDirectory=$global:MockRuntime }})
+        Actions=@($global:MockTaskActions[$TaskName])
         Triggers=@($canonicalTrigger)
         Principal=[pscustomobject]@{{ LogonType='Password'; UserId='capture-test'; RunLevel='Limited' }}
         Settings=$canonicalSettings
@@ -1658,7 +1706,11 @@ function Export-ScheduledTask {{
   [CmdletBinding()] param([string]$TaskName,[string]$TaskPath)
   if ($TaskName -eq 'Dawnstrike Delayed SIP Capture') {{ return $global:MockAuxXml }}
   $enabled = if ($global:MockTaskStates[$TaskName] -eq 'Disabled') {{ 'false' }} else {{ 'true' }}
-  return "<Task><Name>$TaskName</Name><Runtime>$global:MockRuntime</Runtime><State>$global:MockState</State><Settings><Enabled>$enabled</Enabled></Settings></Task>"
+  $action = $global:MockTaskActions[$TaskName]
+  $execute = ConvertTo-TestXmlText ([string]$action.Execute)
+  $arguments = ConvertTo-TestXmlText ([string]$action.Arguments)
+  $working = ConvertTo-TestXmlText ([string]$action.WorkingDirectory)
+  return "<Task><Name>$TaskName</Name><Runtime>$global:MockRuntime</Runtime><State>$global:MockState</State><Settings><Enabled>$enabled</Enabled></Settings><Actions><Exec><Command>$execute</Command><Arguments>$arguments</Arguments><WorkingDirectory>$working</WorkingDirectory></Exec></Actions></Task>"
 }}
 function Get-ScheduledTaskInfo {{
   [CmdletBinding()] param([string]$TaskName,[string]$TaskPath)
@@ -1699,18 +1751,34 @@ function Disable-ScheduledTask {{
         $global:MockAuxExecute = [string]$Action[0].Execute
         $global:MockAuxXml = $global:MockAuxXml -replace '(?s)(<Arguments>).*?(</Arguments>)', ('$1' + $global:MockAuxArguments + '$2')
       }}
+      else {{
+        $global:MockTaskActions[$TaskName] = [pscustomobject]@{{
+          Execute=[string]$Action[0].Execute
+          Arguments=[string]$Action[0].Arguments
+          WorkingDirectory=[string]$Action[0].WorkingDirectory
+        }}
+      }}
       [pscustomobject]@{{ TaskName=$TaskName }}
     }}
     function Register-ScheduledTask {{
       [CmdletBinding()] param([string]$TaskName,[string]$TaskPath,[string]$Xml,[switch]$Force)
-      $global:MockAuxXml=$Xml
       $registeredDocument = [System.Xml.XmlDocument]::new()
       $registeredDocument.LoadXml($Xml)
-      $global:MockAuxArguments=[string](@($registeredDocument.SelectNodes("//*[local-name()='Arguments']"))[0].InnerText)
-      $global:MockAuxExecute=[string](@($registeredDocument.SelectNodes("//*[local-name()='Command']"))[0].InnerText)
       $registeredEnabled = @($registeredDocument.SelectNodes("/*[local-name()='Task']/*[local-name()='Settings']/*[local-name()='Enabled']"))
-      if ($registeredEnabled.Count -ne 1) {{ throw 'registered task settings enablement is ambiguous' }}
-      $global:MockAuxState=if ([string]$registeredEnabled[0].InnerText -eq 'true') {{ 'Ready' }} else {{ 'Disabled' }}
+      $enabledValue = if ($registeredEnabled.Count -eq 0) {{ $true }} elseif ($registeredEnabled.Count -eq 1) {{ [string]$registeredEnabled[0].InnerText -eq 'true' }} else {{ throw 'registered task settings enablement is ambiguous' }}
+      $registeredArguments=[string](@($registeredDocument.SelectNodes("//*[local-name()='Arguments']"))[0].InnerText)
+      $registeredExecute=[string](@($registeredDocument.SelectNodes("//*[local-name()='Command']"))[0].InnerText)
+      $registeredWorking=[string](@($registeredDocument.SelectNodes("//*[local-name()='WorkingDirectory']"))[0].InnerText)
+      if ($TaskName -eq 'Dawnstrike Delayed SIP Capture') {{
+        $global:MockAuxXml=$Xml
+        $global:MockAuxArguments=$registeredArguments
+        $global:MockAuxExecute=$registeredExecute
+        $global:MockAuxState=if ($enabledValue) {{ 'Ready' }} else {{ 'Disabled' }}
+      }}
+      else {{
+        $global:MockTaskActions[$TaskName]=[pscustomobject]@{{ Execute=$registeredExecute; Arguments=$registeredArguments; WorkingDirectory=$registeredWorking }}
+        $global:MockTaskStates[$TaskName]=if ($enabledValue) {{ 'Ready' }} else {{ 'Disabled' }}
+      }}
   [pscustomobject]@{{ TaskName=$TaskName }}
 }}
 function Get-TestSectionHash {{
@@ -1915,9 +1983,15 @@ catch {{
         env=environment,
         text=True,
         capture_output=True,
-        timeout=240,
+        # This fixture performs state backup verification, activation, task
+        # rebind, and rollback in one Windows PowerShell process. Antivirus
+        # and Git process startup variance can legitimately exceed several
+        # minutes without any governed child exceeding its own 120s bound.
+        timeout=900,
         check=False,
     )
+    if result.returncode != 0:
+        print(result.stderr)
     assert result.returncode == 0, (result.stdout, result.stderr)
     payload = json.loads(result.stdout.strip().splitlines()[-1])
     assert payload["prepared"]["schema_version"] == "dawnstrike.capture_task_hardening_prepared.v2"

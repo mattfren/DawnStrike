@@ -71,6 +71,70 @@ def test_process_runner_rejects_identity_substitution_and_git_execution_hooks() 
     assert "Get-Acl -LiteralPath" in text
 
 
+def test_scheduled_python_requires_an_administrator_owned_program_files_boundary() -> None:
+    text = (ROOT / "scripts" / "dawnstrike_process_runner.ps1").read_text(
+        encoding="utf-8"
+    )
+    for marker in (
+        r"C:\Program Files\Dawnstrike\Python313\python.exe",
+        "python313.dll",
+        r"DLLs\_hashlib.pyd",
+        r"Lib\hashlib.py",
+        r"Scripts\uv.exe",
+        "is not owned by an administrator principal",
+        "is writable by a non-admin principal",
+    ):
+        assert marker in text
+    assert "AzureAD" not in text
+    assert "IdentityReference -notmatch" in text
+
+
+def test_release_activation_uses_an_administrator_installed_preparse_launcher() -> None:
+    launcher = (ROOT / "scripts" / "dawnstrike_release_launcher.ps1").read_text(
+        encoding="utf-8"
+    )
+    installer = (
+        ROOT / "scripts" / "install_dawnstrike_host_boundary.ps1"
+    ).read_text(encoding="utf-8")
+
+    for marker in (
+        r"C:\Program Files\Dawnstrike\bin\dawnstrike_release_launcher.ps1",
+        "Trusted release launcher requires exact local and origin/main SHA identity",
+        "Trusted release entry bytes do not match the exact candidate commit",
+        "[IO.FileShare]::Read",
+        r"scripts\activate_dawnstrike_runtime.ps1",
+        r"scripts\rollback_dawnstrike_runtime.ps1",
+        r"scripts\prepare_dawnstrike_state.ps1",
+        r"scripts\harden_intraday_capture_task.ps1",
+        r"scripts\rebind_intraday_capture_task.ps1",
+        "HardenCapture mode requires a locally prompted RunAsCredential",
+        "RebindCapture mode requires a credential and exact input files",
+    ):
+        assert marker in launcher
+    assert launcher.index("Open-DawnstrikeLauncherEntry") < launcher.index(
+        "& $entryLocks[0].path"
+    )
+    for marker in (
+        "requires an elevated administrator process",
+        r"C:\Program Files\Dawnstrike",
+        r"C:\ProgramData\Dawnstrike",
+        r"C:\Program Files\Dawnstrike\bin\install_dawnstrike_host_boundary.ps1",
+        "https://www.python.org/ftp/python/3.13.14/python-3.13.14-amd64.exe",
+        "c54d9b9bbb8a36e6489363ddd01139707fd781d72f1f9e90c7ec65d0061368e0",  # pragma: allowlist secret  # noqa: E501
+        "must run from the protected installed bootstrap path",
+        "Copy-DawnstrikeExactGitFile",
+        "SetAccessRuleProtection($true, $false)",
+        "S-1-5-32-544",
+        "S-1-5-18",
+        "S-1-5-32-545",
+        "research_only = $true",
+        "broker_execution_enabled = $false",
+        "Protected Python dependency verification failed",
+        "dawnstrike.protected_python_verification.v1",
+    ):
+        assert marker in installer
+
+
 @pytest.mark.skipif(
     not Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe").is_file(),
     reason="scheduled-entry file-lock proof requires Windows PowerShell 5.1",

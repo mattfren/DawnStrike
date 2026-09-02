@@ -1551,6 +1551,7 @@ if ([string]$startJournal.payload.phase -in @("PRE_ENABLE", "POST_ENABLE")) {
         -CompleteReceiptRelativePath $journalCompleteRelativePath -TaskContractSha256 $journalTaskContractSha256 `
         -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
 }
+$unhandledOperationError = $null
 try {
     $operationJournal = Get-DawnstrikeStrictRuntimeOperationJournal $operationJournalPath $lockInterpreter.path $lockInterpreter.sha256
     $journalPhase = [string]$operationJournal.payload.phase
@@ -2164,12 +2165,21 @@ try {
         }
     }
 }
+catch {
+    $unhandledOperationError = $_
+    throw
+}
 finally {
     if ($preserveLocks) {
         throw "Capture-task terminal evidence requires governed recovery; lock retained."
     }
     if ($rebindLock -and $rebindLock.acquired -and $journalPhase -notin @("COMPLETE", "COMPENSATED")) {
-        throw "Capture-task rebind lock and nonterminal journal are retained for governed recovery."
+        if ($unhandledOperationError) {
+            [Console]::Error.WriteLine("Capture-task rebind lock and nonterminal journal are retained for governed recovery.")
+        }
+        else {
+            throw "Capture-task rebind lock and nonterminal journal are retained for governed recovery."
+        }
     }
     Exit-DawnstrikeGovernedRuntimeLock $rebindLock
     if (Test-Path -LiteralPath $rebindLock.path -PathType Leaf) {

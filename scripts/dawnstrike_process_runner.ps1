@@ -460,24 +460,54 @@ function Assert-DawnstrikePythonDependencyAclBoundary {
     param([Parameter(Mandatory = $true)][string]$InterpreterPath)
 
     $interpreter = [IO.Path]::GetFullPath($InterpreterPath)
+    $expectedInterpreter = 'C:\Program Files\Dawnstrike\Python313\python.exe'
+    if (-not [string]::Equals(
+            $interpreter,
+            $expectedInterpreter,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "Python dependency boundary is outside the administrator-owned prefix."
+    }
     $prefix = [IO.Directory]::GetParent($interpreter).FullName
-    $targets = @($interpreter, $prefix, (Join-Path $prefix 'Lib'), (Join-Path $prefix 'Lib\site-packages'))
+    $targets = @(
+        'C:\Program Files',
+        'C:\Program Files\Dawnstrike',
+        $prefix,
+        $interpreter,
+        (Join-Path $prefix 'python3.dll'),
+        (Join-Path $prefix 'python313.dll'),
+        (Join-Path $prefix 'vcruntime140.dll'),
+        (Join-Path $prefix 'DLLs'),
+        (Join-Path $prefix 'DLLs\_hashlib.pyd'),
+        (Join-Path $prefix 'Lib'),
+        (Join-Path $prefix 'Lib\hashlib.py'),
+        (Join-Path $prefix 'Lib\site-packages'),
+        (Join-Path $prefix 'Scripts'),
+        (Join-Path $prefix 'Scripts\uv.exe')
+    ) | Select-Object -Unique
+    $writeLikeRights = (
+        [Security.AccessControl.FileSystemRights]::Write -bor
+        [Security.AccessControl.FileSystemRights]::Modify -bor
+        [Security.AccessControl.FileSystemRights]::Delete -bor
+        [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [Security.AccessControl.FileSystemRights]::TakeOwnership -bor
+        [Security.AccessControl.FileSystemRights]::FullControl
+    )
     foreach ($target in $targets) {
         $item = Get-Item -LiteralPath $target -Force -ErrorAction Stop
         if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
             throw "Python dependency boundary contains a reparse point: $target"
         }
         $acl = Get-Acl -LiteralPath $target -ErrorAction Stop
+        if ([string]$acl.Owner -notmatch '(?i)(^|\\)(SYSTEM|Administrators|TrustedInstaller)$') {
+            throw "Python dependency boundary is not owned by an administrator principal: $target"
+        }
         foreach ($rule in @($acl.Access)) {
             if (
                 $rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
-                [string]$rule.IdentityReference -match '(?i)(^|\\)(Everyone|Users|Authenticated Users)$' -and
-                ($rule.FileSystemRights -band (
-                    [Security.AccessControl.FileSystemRights]::Write -bor
-                    [Security.AccessControl.FileSystemRights]::Modify -bor
-                    [Security.AccessControl.FileSystemRights]::Delete -bor
-                    [Security.AccessControl.FileSystemRights]::FullControl
-                )) -ne 0
+                [string]$rule.IdentityReference -notmatch '(?i)(^|\\)(SYSTEM|Administrators|TrustedInstaller)$' -and
+                ($rule.FileSystemRights -band $writeLikeRights) -ne 0
             ) {
                 throw "Python dependency boundary is writable by a non-admin principal: $target"
             }

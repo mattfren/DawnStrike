@@ -19,7 +19,7 @@ from intraday_scanner.services.capture_operations import CapturePlan, CapturePla
 from intraday_scanner.storage.intraday_evidence_store import IntradayEvidenceStore
 
 _APPROVED_PYTHON = Path(
-    r"C:\Users\MattFields\AppData\Local\Programs\Python\Python313\python.exe"
+    r"C:\Program Files\Dawnstrike\Python313\python.exe"
 )
 _APPROVED_PYTHON_SHA256 = "ef8f51028ac5329641985112f8efb1c2d4c47c86b8011ddf7e6fae21e2b4e5a1"
 _BOOTSTRAP_PRELOADER = (

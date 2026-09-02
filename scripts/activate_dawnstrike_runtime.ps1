@@ -415,7 +415,7 @@ function Invoke-DawnstrikeActivationProcess {
     )
 
     $effectiveArguments = @($ArgumentList)
-    $approvedPythonPath = 'C:\Users\MattFields\AppData\Local\Programs\Python\Python313\python.exe'
+    $approvedPythonPath = 'C:\Program Files\Dawnstrike\Python313\python.exe'
     if ([string]::Equals(
             [System.IO.Path]::GetFullPath($FilePath),
             $approvedPythonPath,
@@ -1890,6 +1890,34 @@ function Assert-DawnstrikeTaskXmlBackup {
     }
 }
 
+function Get-DawnstrikeGitBlobSha256 {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    # Runtime staging disables ambient Git configuration and therefore checks
+    # out the committed LF representation.  Normalize this admitted Windows
+    # checkout before comparing it with the future staged runtime bytes.
+    $raw = [System.IO.File]::ReadAllBytes($Path)
+    $normalized = New-Object byte[] $raw.Length
+    $count = 0
+    for ($index = 0; $index -lt $raw.Length; $index++) {
+        if ($raw[$index] -eq 13 -and $index + 1 -lt $raw.Length -and $raw[$index + 1] -eq 10) {
+            $normalized[$count] = 10
+            $count++
+            $index++
+        }
+        else {
+            $normalized[$count] = $raw[$index]
+            $count++
+        }
+    }
+    $body = New-Object byte[] $count
+    [Array]::Copy($normalized, $body, $count)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { return ([System.BitConverter]::ToString($sha.ComputeHash($body))).Replace("-", "").ToLowerInvariant() }
+    finally { $sha.Dispose() }
+}
+
 function Get-DawnstrikeGitBlobSha1 {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -2695,7 +2723,12 @@ function Assert-DawnstrikeCaptureHardeningAttestation {
         RequireRunner = $true
     }
     if ($Stage -eq "PRE_SWAP") { $safetyArguments.AllowMissingBootstrap = $true }
-    $null = Assert-DawnstrikeCaptureTaskSafety @safetyArguments
+    try {
+        $null = Assert-DawnstrikeCaptureTaskSafety @safetyArguments
+    }
+    catch {
+        throw "Activation capture-task safety validation failed: $($_.Exception.Message) $($_.ScriptStackTrace)"
+    }
     $receiptBindings = $receipt.action_bindings
     if ([string]$receipt.runner_path -ne [string]$receiptBindings.runner_path -or [string]$receipt.runner_sha256 -ne [string]$receiptBindings.runner_sha256 -or [string]$receiptBindings.candidate_sha -ne $CandidateSha) { throw "Activation hardening input bindings are not exact." }
     $taskDocument = [System.Xml.XmlDocument]::new()
@@ -2743,7 +2776,7 @@ function Assert-DawnstrikeCaptureHardeningAttestation {
         $tokens[7] -cne (Get-DawnstrikeCaptureBootstrapPreloader) -or
         [System.IO.Path]::GetFullPath([string]$tokens[8]) -cne $expectedBootstrap -or
         $tokens[9] -notmatch '^[0-9a-f]{64}$' -or
-        $tokens[9] -cne (Get-DawnstrikeSha256File $candidateBootstrap) -or
+        $tokens[9] -cne (Get-DawnstrikeGitBlobSha256 $candidateBootstrap) -or
         $tokens[10] -cne "--release-root" -or
         [System.IO.Path]::GetFullPath([string]$tokens[11]) -cne [System.IO.Path]::GetFullPath($RuntimeRoot) -or
         $tokens[12] -cne "--expected-sha" -or
@@ -2772,7 +2805,7 @@ function Assert-DawnstrikeCaptureHardeningAttestation {
     }
     $liveRunner = [System.IO.Path]::GetFullPath((Join-Path $RuntimeRoot "scripts\run_daily_intraday_capture.py"))
     $candidateRunner = [System.IO.Path]::GetFullPath((Join-Path $CandidateRoot "scripts\run_daily_intraday_capture.py"))
-    if ((Get-DawnstrikeSha256File $candidateRunner) -ne [string]$receipt.runner_sha256) {
+    if ((Get-DawnstrikeGitBlobSha256 $candidateRunner) -ne [string]$receipt.runner_sha256) {
         throw "Hardening receipt candidate runner identity is invalid."
     }
     $runtimeRunnerSha = Get-DawnstrikeSha256File $liveRunner

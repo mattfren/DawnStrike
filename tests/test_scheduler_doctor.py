@@ -591,7 +591,7 @@ def _auxiliary_task(runtime: Path, state: Path, *, candidate_sha: str = "a" * 40
         "trigger_end_boundary": None,
         "trigger_random_delay": None,
         "trigger_start_boundary": "2026-08-31T15:20:00-05:00",
-        "next_run_time": "2026-09-01T15:20:00-05:00",
+        "next_run_time": "2099-09-01T15:20:00-05:00",
         "principal_sha256": "4" * 64,
         "trigger_sha256": "5" * 64,
         "settings_sha256": "6" * 64,

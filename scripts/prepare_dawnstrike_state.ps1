@@ -33,7 +33,7 @@ function Assert-DawnstrikeStatePreparationBootstrapSource {
     $bootstrapGitSha256 = '37c5725818d602e951ba2563b870d62763322956b73373da4c33a0b566a80bc9'
     $bootstrapGitSubject = 'CN=Johannes Schindelin, O=Johannes Schindelin, S=Nordrhein-Westfalen, C=DE'
     $bootstrapGitThumbprint = '3EB14A3AEF84B7153E139397F0A49E2FAC662B0E'
-    $bootstrapPython = 'C:\Users\MattFields\AppData\Local\Programs\Python\Python313\python.exe'
+    $bootstrapPython = 'C:\Program Files\Dawnstrike\Python313\python.exe'
     $bootstrapPythonSha256 = 'ef8f51028ac5329641985112f8efb1c2d4c47c86b8011ddf7e6fae21e2b4e5a1'
     $bootstrapPythonSubject = 'CN=Python Software Foundation, O=Python Software Foundation, L=Beaverton, S=Oregon, C=US'
     $bootstrapPythonThumbprint = '9BA3C2E210C7E8296C5056515BFC0B0BBA78AC48'

@@ -4,7 +4,7 @@
   "sidecar_version": 1,
   "legacy_schema_marker": 30,
   "required_before_activation": true,
-  "capture_interpreter_path": "C:\\Users\\MattFields\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+  "capture_interpreter_path": "C:\\Program Files\\Dawnstrike\\Python313\\python.exe",
   "capture_interpreter_version": "3.13.14",
   "capture_interpreter_sha256": "ef8f51028ac5329641985112f8efb1c2d4c47c86b8011ddf7e6fae21e2b4e5a1",
   "capture_interpreter_signer_subject": "CN=Python Software Foundation, O=Python Software Foundation, L=Beaverton, S=Oregon, C=US",

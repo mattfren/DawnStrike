@@ -30,7 +30,7 @@ AUXILIARY_BOOTSTRAP_PRELOADER = (
     "exec(compile(b,p,'exec'),{'__name__':'__main__','__file__':p})"
 )
 AUXILIARY_INTERPRETER = Path(
-    r"C:\Users\MattFields\AppData\Local\Programs\Python\Python313\python.exe"
+    r"C:\Program Files\Dawnstrike\Python313\python.exe"
 )
 AUXILIARY_INTERPRETER_SHA256 = "ef8f51028ac5329641985112f8efb1c2d4c47c86b8011ddf7e6fae21e2b4e5a1"
 AUXILIARY_INTERPRETER_VERSION = "3.13.14"

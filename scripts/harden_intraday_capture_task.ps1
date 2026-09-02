@@ -514,6 +514,34 @@ function Get-HardeningRuntimeIdentity {
     return [pscustomobject]@{ root = $Root; head = $head; tree = $tree; origin = $origin; origin_sha256 = Get-HardeningSha256Text $origin; runner_blob = $runnerHeadBlob; runner_sha256 = Get-HardeningSha256File $runner }
 }
 
+function Get-HardeningGitBlobSha256 {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    # Activation clones with system/global Git configuration disabled, so text
+    # paths are materialized from the committed LF blob.  Hash that future
+    # runtime representation rather than this Windows checkout's CRLF bytes.
+    $raw = [System.IO.File]::ReadAllBytes($Path)
+    $normalized = New-Object byte[] $raw.Length
+    $count = 0
+    for ($index = 0; $index -lt $raw.Length; $index++) {
+        if ($raw[$index] -eq 13 -and $index + 1 -lt $raw.Length -and $raw[$index + 1] -eq 10) {
+            $normalized[$count] = 10
+            $count++
+            $index++
+        }
+        else {
+            $normalized[$count] = $raw[$index]
+            $count++
+        }
+    }
+    $body = New-Object byte[] $count
+    [Array]::Copy($normalized, $body, $count)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { return ([System.BitConverter]::ToString($sha.ComputeHash($body))).Replace("-", "").ToLowerInvariant() }
+    finally { $sha.Dispose() }
+}
+
 function Get-HardeningCandidateBootstrapIdentity {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string]$Root)
@@ -531,7 +559,7 @@ function Get-HardeningCandidateBootstrapIdentity {
     return [pscustomobject]@{
         path = $path
         blob = $headBlob
-        sha256 = Get-HardeningSha256File $path
+        sha256 = Get-HardeningGitBlobSha256 $path
     }
 }
 
@@ -737,7 +765,7 @@ function Set-HardeningDirectCaptureAction {
     $tail[1] = $CandidateSha
     $runtime = [System.IO.Path]::GetFullPath($RuntimeRoot).TrimEnd('\')
     $bootstrapSource = Assert-DawnstrikeCaptureRegularPath $CandidateBootstrapPath "Candidate release bootstrap"
-    $bootstrapSha256 = Get-HardeningSha256File $bootstrapSource
+    $bootstrapSha256 = Get-HardeningGitBlobSha256 $bootstrapSource
     $bootstrapPreloader = Get-DawnstrikeCaptureBootstrapPreloader
     $bootstrap = [System.IO.Path]::GetFullPath((Join-Path $runtime "scripts\dawnstrike_python_bootstrap.py"))
     $runner = Assert-DawnstrikeCaptureRegularPath (Join-Path $runtime "scripts\run_daily_intraday_capture.py") "Capture runner"
@@ -1240,7 +1268,7 @@ try {
         $beforeActionXml = [string]$prepared.action_sha256
         $runnerBeforeSha256 = [string]$prepared.runner_before_sha256
         $runnerTargetPath = Join-Path $hardeningCandidateRoot "scripts\run_daily_intraday_capture.py"
-        $runnerTargetSha256 = Get-HardeningSha256File $runnerTargetPath
+        $runnerTargetSha256 = Get-HardeningGitBlobSha256 $runnerTargetPath
         if ($runnerTargetSha256 -cne $prepared.runner_target_sha256) { throw "PREPARED target runner identity changed." }
         $currentTask = $before
         $verified = $before
@@ -1367,7 +1395,7 @@ $previewTokens = @([regex]::Matches([string]$previewArguments[0].InnerText, '"(?
 if ($previewTokens.Count -lt 3) { throw "Prepared capture action bindings are incomplete." }
 $runnerTargetPath = Join-Path $hardeningCandidateRoot "scripts\run_daily_intraday_capture.py"
 $null = Assert-DawnstrikeCaptureRegularPath $runnerTargetPath "Candidate capture runner"
-$runnerTargetSha256 = Get-HardeningSha256File $runnerTargetPath
+$runnerTargetSha256 = Get-HardeningGitBlobSha256 $runnerTargetPath
 # A replacement must be born disabled.  The activation/rebind seam is the only
 # governed path allowed to enable this auxiliary task for an exact candidate.
 $settingsForReplacement = Get-HardeningSingleSection $before.document "Settings"

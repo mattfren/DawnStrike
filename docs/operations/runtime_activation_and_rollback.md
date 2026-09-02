@@ -123,13 +123,62 @@ cleanup workflow. Never put either evidence object in `runtime.env`.
 The preflight refreshes `origin/main` and reads Git, Task Scheduler, SQLite,
 and evidence state. It does not create a state backup or swap a directory.
 
+Before the first activation on a host, an administrator must establish the
+protected bootstrap at
+`C:\Program Files\Dawnstrike\bin\install_dawnstrike_host_boundary.ps1`.
+The initial copy is an operator-controlled trust ceremony: hold the source
+file read-locked, require its filtered Git blob to equal
+`<accepted-origin-main-sha>:scripts/install_dawnstrike_host_boundary.ps1`,
+then write those exact bytes into the administrator-owned destination. Do not
+launch the installer directly from the user-writable checkout. Once the
+protected bootstrap exists, run it from an elevated PowerShell process:
+
 ```powershell
-& C:\r\dawnstrike-main\scripts\activate_dawnstrike_runtime.ps1 `
+& 'C:\Program Files\Dawnstrike\bin\install_dawnstrike_host_boundary.ps1' `
+  -ExpectedSha <accepted-origin-main-sha> `
+  -CandidateRoot C:\r\dawnstrike-main
+```
+
+The installer anchors the Python 3.13.14 core to the official PSF installer
+digest and signer, admits the existing dependency set only after the locked
+distribution verifier passes, writes only below
+`C:\Program Files\Dawnstrike` and `C:\ProgramData\Dawnstrike`, removes
+inherited non-admin write access, and records a host-boundary receipt.
+Activation and rollback must then enter through the installed launcher so
+their candidate entry bytes are verified and held read-locked before
+PowerShell parses them.
+
+If the delayed-SIP task exists, harden it to the exact candidate while it is
+disabled, then prepare the schema-30 sidecar. Prompt locally; never persist or
+forward the credential:
+
+```powershell
+$runAs = Get-Credential
+& 'C:\Program Files\Dawnstrike\bin\dawnstrike_release_launcher.ps1' `
+  -Mode HardenCapture `
+  -CandidateRoot C:\r\dawnstrike-main `
+  -ExpectedSha <accepted-origin-main-sha> `
+  -RuntimeRoot C:\r\dawnstrike-runtime `
+  -StateRoot C:\r\dawnstrike-state `
+  -RunAsCredential $runAs
+
+& 'C:\Program Files\Dawnstrike\bin\dawnstrike_release_launcher.ps1' `
+  -Mode Prepare `
+  -CandidateRoot C:\r\dawnstrike-main `
+  -ExpectedSha <accepted-origin-main-sha> `
+  -RuntimeRoot C:\r\dawnstrike-runtime `
+  -StateRoot C:\r\dawnstrike-state `
+  -BackupRoot C:\r\dawnstrike-state-backups
+```
+
+```powershell
+& 'C:\Program Files\Dawnstrike\bin\dawnstrike_release_launcher.ps1' `
+  -Mode Activate `
+  -CandidateRoot C:\r\dawnstrike-main `
   -ExpectedSha <accepted-origin-main-sha> `
   -MarketDate 2026-08-31 `
   -CiEvidencePath C:\r\dawnstrike-state\evidence\ci.json `
   -SolEvidencePath C:\r\dawnstrike-state\evidence\sol.json `
-  -CandidateRoot C:\r\dawnstrike-main `
   -RuntimeRoot C:\r\dawnstrike-runtime `
   -StateRoot C:\r\dawnstrike-state `
   -BackupRoot C:\r\dawnstrike-state-backups `
@@ -190,12 +239,35 @@ work until operator recovery.
 Re-running a completed exact activation returns its valid receipt. A partial
 activation fails closed instead of guessing which directory is authoritative.
 
+After activation, rebind the delayed-SIP task to the exact runtime and only
+enable it with separately hashed, current provider inputs:
+
+```powershell
+& 'C:\Program Files\Dawnstrike\bin\dawnstrike_release_launcher.ps1' `
+  -Mode RebindCapture `
+  -CandidateRoot C:\r\dawnstrike-main `
+  -ExpectedSha <accepted-origin-main-sha> `
+  -RuntimeRoot C:\r\dawnstrike-runtime `
+  -StateRoot C:\r\dawnstrike-state `
+  -SymbolsManifest <absolute-path> `
+  -SymbolsManifestSha256 <64-lowercase-hex> `
+  -EntitlementReceipt <absolute-path> `
+  -EntitlementReceiptSha256 <64-lowercase-hex> `
+  -SourceConfig <absolute-path> `
+  -SourceConfigSha256 <64-lowercase-hex> `
+  -RunAsCredential $runAs `
+  -EnableCapture
+```
+
 ## Roll back
 
 Rollback is permitted from a valid `PREPARED` or `COMPLETE` activation receipt:
 
 ```powershell
-& C:\r\dawnstrike-main\scripts\rollback_dawnstrike_runtime.ps1 `
+& 'C:\Program Files\Dawnstrike\bin\dawnstrike_release_launcher.ps1' `
+  -Mode Rollback `
+  -CandidateRoot C:\r\dawnstrike-main `
+  -ExpectedSha <exact-candidate-sha> `
   -ActivationReceipt C:\r\dawnstrike-state\receipts\runtime-activation\runtime-activation-<id>.json `
   -ContractRoot C:\r\dawnstrike-main `
   -RuntimeRoot C:\r\dawnstrike-runtime `

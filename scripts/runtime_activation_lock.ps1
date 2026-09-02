@@ -1,6 +1,6 @@
 # Shared, strict activation-lock implementation. Callers set operation and
 # immutable source identity before acquisition; credentials are never accepted.
-$script:DawnstrikeApprovedPythonPath='C:\Users\MattFields\AppData\Local\Programs\Python\Python313\python.exe'
+$script:DawnstrikeApprovedPythonPath='C:\Program Files\Dawnstrike\Python313\python.exe'
 $script:DawnstrikeApprovedPythonSha256='ef8f51028ac5329641985112f8efb1c2d4c47c86b8011ddf7e6fae21e2b4e5a1'
 $script:DawnstrikeApprovedPythonSubject='CN=Python Software Foundation, O=Python Software Foundation, L=Beaverton, S=Oregon, C=US'
 $script:DawnstrikeApprovedPythonThumbprint='9BA3C2E210C7E8296C5056515BFC0B0BBA78AC48'

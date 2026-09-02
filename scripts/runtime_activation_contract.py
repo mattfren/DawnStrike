@@ -271,7 +271,7 @@ _PRIOR_RUNTIME_AUTHORIZATION_KEYS = frozenset(
 )
 _CAPTURE_INTERPRETER_DECLARATION = {
     "capture_interpreter_path": (
-        r"C:\Users\MattFields\AppData\Local\Programs\Python\Python313\python.exe"
+        r"C:\Program Files\Dawnstrike\Python313\python.exe"
     ),
     "capture_interpreter_version": "3.13.14",
     "capture_interpreter_sha256": (
