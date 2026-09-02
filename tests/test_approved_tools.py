@@ -24,6 +24,18 @@ def test_run_git_accepts_only_platform_native_filemode(tmp_path: Path) -> None:
         [git, "-C", str(repository), "config", "--local", "core.filemode", native],
         check=True,
     )
+    subprocess.run(
+        [
+            git,
+            "-C",
+            str(repository),
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/mattfren/DawnStrike",
+        ],
+        check=True,
+    )
     assert approved_tools.run_git(repository, "status", "--porcelain=v1").returncode == 0
 
     subprocess.run(
@@ -31,6 +43,25 @@ def test_run_git_accepts_only_platform_native_filemode(tmp_path: Path) -> None:
         check=True,
     )
     with pytest.raises(approved_tools.ApprovedToolError, match="core.filemode"):
+        approved_tools.run_git(repository, "status", "--porcelain=v1")
+
+    subprocess.run(
+        [git, "-C", str(repository), "config", "--local", "core.filemode", native],
+        check=True,
+    )
+    subprocess.run(
+        [
+            git,
+            "-C",
+            str(repository),
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/attacker/DawnStrike.git",
+        ],
+        check=True,
+    )
+    with pytest.raises(approved_tools.ApprovedToolError, match="remote.origin.url"):
         approved_tools.run_git(repository, "status", "--porcelain=v1")
 
 

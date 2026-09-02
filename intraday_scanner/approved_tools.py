@@ -32,10 +32,15 @@ _FIXED_LOCAL_GIT_CONFIG = {
     "core.logallrefupdates": "true",
     "core.symlinks": "false",
     "core.ignorecase": "true",
-    "remote.origin.url": "https://github.com/mattfren/DawnStrike.git",
     "remote.origin.fetch": "+refs/heads/*:refs/remotes/origin/*",
     "lfs.repositoryformatversion": "0",
 }
+_GOVERNED_ORIGIN_URLS = frozenset(
+    {
+        "https://github.com/mattfren/DawnStrike",
+        "https://github.com/mattfren/DawnStrike.git",
+    }
+)
 _NON_EXECUTING_LOCAL_GIT_CONFIG = frozenset({"user.email", "user.name"})
 
 
@@ -127,6 +132,12 @@ def _assert_local_git_config_safe(root: Path) -> None:
         if key in seen:
             raise ApprovedToolError("local Git configuration contains a duplicate key")
         seen.add(key)
+        if key == "remote.origin.url":
+            if value not in _GOVERNED_ORIGIN_URLS:
+                raise ApprovedToolError(
+                    "local Git configuration is not governed: remote.origin.url"
+                )
+            continue
         if key in _FIXED_LOCAL_GIT_CONFIG:
             if value != _FIXED_LOCAL_GIT_CONFIG[key]:
                 raise ApprovedToolError(f"local Git configuration is not governed: {key}")
