@@ -140,8 +140,11 @@ protected bootstrap exists, run it from an elevated PowerShell process:
 ```
 
 The installer anchors the Python 3.13.14 core to the official PSF installer
-digest and signer, admits the existing dependency set only after the locked
-distribution verifier passes, writes only below
+digest and signer. It treats the existing user-profile environment only as a
+byte cache: only `requirements.lock` distributions are materialized, and every
+copied source, native, and data payload must match its source-approved wheel
+`RECORD` hash and size. Extra distributions and unowned files are never copied.
+The installer writes only below
 `C:\Program Files\Dawnstrike` and `C:\ProgramData\Dawnstrike`, removes
 inherited non-admin write access, and records a host-boundary receipt.
 Activation and rollback must then enter through the installed launcher so

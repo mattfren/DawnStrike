@@ -131,8 +131,13 @@ def test_release_activation_uses_an_administrator_installed_preparse_launcher() 
         "broker_execution_enabled = $false",
         "Protected Python dependency verification failed",
         "dawnstrike.protected_python_verification.v1",
+        "materialize_dawnstrike_dependencies.py",
+        "dawnstrike.dependency_materialization.v1",
+        "Include_pip=0",
+        "Protected dependency materialization failed",
     ):
         assert marker in installer
+    assert "robocopy.exe" not in installer
 
 
 @pytest.mark.skipif(

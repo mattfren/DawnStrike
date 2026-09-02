@@ -101,6 +101,26 @@ function Set-DawnstrikeProtectedDirectoryAcl {
     Set-Acl -LiteralPath $Path -AclObject $acl
 }
 
+function Assert-DawnstrikeInstallNoReparse {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    $full = [IO.Path]::GetFullPath($Path)
+    $current = [IO.Path]::GetPathRoot($full)
+    foreach ($segment in $full.Substring($current.Length).Split([IO.Path]::DirectorySeparatorChar, [StringSplitOptions]::RemoveEmptyEntries)) {
+        $current = Join-Path $current $segment
+        if (Test-Path -LiteralPath $current) {
+            $item = Get-Item -LiteralPath $current -Force -ErrorAction Stop
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "$Label contains a reparse point."
+            }
+        }
+    }
+}
+
 function Assert-DawnstrikeInstalledBoundaryAcl {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string[]]$Paths)
@@ -306,6 +326,7 @@ else {
             'Include_test=0',
             'Include_doc=0',
             'Include_tcltk=0',
+            'Include_pip=0',
             'PrependPath=0',
             'Shortcuts=0'
         ) -Wait -PassThru -WindowStyle Hidden
@@ -320,17 +341,75 @@ else {
     }
 }
 
-$sitePackagesSource = Join-Path $pythonSourceRoot 'Lib\site-packages'
 $sitePackagesDestination = Join-Path $pythonDestination 'Lib\site-packages'
-& C:\Windows\System32\robocopy.exe $sitePackagesSource $sitePackagesDestination /E /COPY:DAT /DCOPY:DAT /R:1 /W:1 /XJ /NFL /NDL /NJH /NJS /NP | Out-Null
-if ($LASTEXITCODE -gt 7) { throw "Protected dependency copy failed with robocopy exit $LASTEXITCODE." }
 $scriptsSource = Join-Path $pythonSourceRoot 'Scripts'
 $scriptsDestination = Join-Path $pythonDestination 'Scripts'
-if (-not (Test-Path -LiteralPath $scriptsDestination -PathType Container)) {
-    $null = New-Item -ItemType Directory -Path $scriptsDestination
+$dependencyStage = Join-Path $InstallRoot ('.dependency-stage-' + [Guid]::NewGuid().ToString('N'))
+$materializationRoot = Join-Path $InstallRoot ('.dependency-tool-' + [Guid]::NewGuid().ToString('N'))
+$null = New-Item -ItemType Directory -Path $dependencyStage
+$null = New-Item -ItemType Directory -Path $materializationRoot
+Set-DawnstrikeProtectedDirectoryAcl -Path $dependencyStage
+Set-DawnstrikeProtectedDirectoryAcl -Path $materializationRoot
+$materializer = Join-Path $materializationRoot 'materialize_dawnstrike_dependencies.py'
+$materializationLock = Join-Path $materializationRoot 'requirements.lock'
+try {
+    Copy-DawnstrikeExactGitFile -RelativePath 'scripts/materialize_dawnstrike_dependencies.py' -Destination $materializer
+    Copy-DawnstrikeExactGitFile -RelativePath 'requirements.lock' -Destination $materializationLock
+    $materializationOutput = @(
+        & (Join-Path $pythonDestination 'python.exe') -I -B -S $materializer `
+            --source-prefix $pythonSourceRoot `
+            --stage-prefix $dependencyStage `
+            --requirements-lock $materializationLock 2>&1
+    )
+    if ($LASTEXITCODE -ne 0) { throw 'Protected dependency materialization failed.' }
+    try { $materialization = (($materializationOutput | ForEach-Object { [string]$_ }) -join "`n").Trim() | ConvertFrom-Json }
+    catch { throw 'Protected dependency materialization did not return valid JSON.' }
+    if (
+        [string]$materialization.schema_version -cne 'dawnstrike.dependency_materialization.v1' -or
+        [string]$materialization.status -cne 'PASS' -or
+        [int]$materialization.distribution_count -lt 1 -or
+        [int]$materialization.payload_count -lt 1 -or
+        [int]$materialization.record_count -ne [int]$materialization.distribution_count -or
+        [string]$materialization.record_set_sha256 -notmatch '^[0-9a-f]{64}$' -or
+        $materialization.research_only -ne $true -or
+        $materialization.broker_execution_enabled -ne $false
+    ) {
+        throw 'Protected dependency materialization returned an invalid safety contract.'
+    }
+
+    $stagedScripts = Join-Path $dependencyStage 'Scripts'
+    if (-not (Test-Path -LiteralPath $stagedScripts -PathType Container)) {
+        $null = New-Item -ItemType Directory -Path $stagedScripts
+    }
+    Copy-DawnstrikePinnedFile -Source (Join-Path $scriptsSource 'uv.exe') `
+        -Destination (Join-Path $stagedScripts 'uv.exe') -ExpectedSha256 $expectedUvHash
+
+    foreach ($ownedTarget in @($sitePackagesDestination, $scriptsDestination)) {
+        $ownedFull = [IO.Path]::GetFullPath($ownedTarget)
+        $pythonPrefix = [IO.Path]::GetFullPath($pythonDestination).TrimEnd('\') + '\'
+        if (-not $ownedFull.StartsWith($pythonPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Dependency promotion target escaped the protected Python prefix.'
+        }
+        Assert-DawnstrikeInstallNoReparse $ownedFull 'Protected dependency promotion target'
+        if (Test-Path -LiteralPath $ownedFull) {
+            Remove-Item -LiteralPath $ownedFull -Recurse -Force
+        }
+    }
+    $stagedSitePackages = Join-Path $dependencyStage 'Lib\site-packages'
+    if (-not (Test-Path -LiteralPath $stagedSitePackages -PathType Container)) {
+        throw 'Protected dependency materialization produced no site-packages directory.'
+    }
+    Move-Item -LiteralPath $stagedSitePackages -Destination $sitePackagesDestination
+    Move-Item -LiteralPath $stagedScripts -Destination $scriptsDestination
 }
-Copy-DawnstrikePinnedFile -Source (Join-Path $scriptsSource 'uv.exe') `
-    -Destination (Join-Path $scriptsDestination 'uv.exe') -ExpectedSha256 $expectedUvHash
+finally {
+    if (Test-Path -LiteralPath $dependencyStage) {
+        Remove-Item -LiteralPath $dependencyStage -Recurse -Force
+    }
+    if (Test-Path -LiteralPath $materializationRoot) {
+        Remove-Item -LiteralPath $materializationRoot -Recurse -Force
+    }
+}
 & C:\Windows\System32\icacls.exe $pythonDestination /setowner '*S-1-5-32-544' /T /C /Q | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Protected Python ownership hardening failed.' }
 
