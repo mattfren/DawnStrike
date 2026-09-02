@@ -840,7 +840,7 @@ def validate_opportunity_projection_rows(rows: object) -> list[str]:
         for field in text_fields:
             if not _safe_opportunity_text(row.get(field)):
                 failures.append(f"{prefix}_{field}_invalid")
-        if row.get("decision") not in {"WATCH", "TAKE"}:
+        if row.get("decision") not in {"watch", "take"}:
             failures.append(f"{prefix}_decision_invalid")
         evidence = row.get("liquidity_evidence_kind")
         if evidence is not None and not _safe_opportunity_text(evidence):

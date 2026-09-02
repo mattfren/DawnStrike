@@ -1365,7 +1365,9 @@ def test_powershell_sidecar_activation_rebind_and_legacy_rollback_quarantine(
         candidate / "config" / "state_preparation_contract.json",
     )
     shutil.copy2(source / "pyproject.toml", candidate / "pyproject.toml")
+    shutil.copy2(source / "requirements.lock", candidate / "requirements.lock")
     shutil.copy2(source / ".gitignore", candidate / ".gitignore")
+    shutil.copy2(source / ".gitattributes", candidate / ".gitattributes")
 
     subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
     subprocess.run(
@@ -1646,7 +1648,7 @@ function Get-ScheduledTask {{
       }}
       return [pscustomobject]@{{
         State=$canonicalState; TaskPath='\'
-        Actions=@([pscustomobject]@{{ Execute='powershell.exe'; Arguments=$canonicalPolicy.arguments; WorkingDirectory=$global:MockRuntime }})
+        Actions=@([pscustomobject]@{{ Execute='C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'; Arguments=$canonicalPolicy.arguments; WorkingDirectory=$global:MockRuntime }})
         Triggers=@($canonicalTrigger)
         Principal=[pscustomobject]@{{ LogonType='Password'; UserId='capture-test'; RunLevel='Limited' }}
         Settings=$canonicalSettings

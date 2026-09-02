@@ -497,3 +497,11 @@ def test_shared_opportunity_row_safety_rejects_forged_live_decision() -> None:
     failures = validate_opportunity_projection_rows([row])
 
     assert "opportunity_row_0_decision_invalid" in failures
+
+    row["decision"] = "watch"
+    failures = validate_opportunity_projection_rows([row])
+    assert "opportunity_row_0_decision_invalid" not in failures
+
+    row["decision"] = "WATCH"
+    failures = validate_opportunity_projection_rows([row])
+    assert "opportunity_row_0_decision_invalid" in failures

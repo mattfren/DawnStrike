@@ -130,9 +130,28 @@ function Assert-DawnstrikeStatePreparationBootstrapSource {
         if ($localFilterExit -eq 0 -and -not [string]::IsNullOrWhiteSpace(((@($localFilterOutput) | ForEach-Object { [string]$_ }) -join "`n"))) {
             throw "State-preparation bootstrap refuses configured Git filters."
         }
-        $trackedAttributes = Invoke-StatePreparationBootstrapGit @('ls-files', '--', '*.gitattributes', '.gitattributes')
-        if (-not [string]::IsNullOrWhiteSpace($trackedAttributes)) {
-            throw "State-preparation bootstrap refuses tracked Git attributes that can rewrite tool bytes."
+        $trackedAttributesText = Invoke-StatePreparationBootstrapGit @(
+            'ls-files', '--', '*.gitattributes', '.gitattributes'
+        )
+        $trackedAttributes = @(([string]$trackedAttributesText).Split(
+            [char]10, [System.StringSplitOptions]::RemoveEmptyEntries
+        ))
+        if ($trackedAttributes.Count -ne 1 -or $trackedAttributes[0] -cne '.gitattributes') {
+            throw "State-preparation bootstrap requires one governed root .gitattributes file."
+        }
+        $attributesPath = Join-Path $expectedRoot '.gitattributes'
+        $attributesBlob = (Invoke-StatePreparationBootstrapGit @(
+            'rev-parse', ($headBefore + ':.gitattributes')
+        )).ToLowerInvariant()
+        $attributesWorking = (Invoke-StatePreparationBootstrapGit @(
+            '-c', 'core.autocrlf=true', 'hash-object', '--path=.gitattributes', '--', $attributesPath
+        )).ToLowerInvariant()
+        if ($attributesBlob -notmatch '^[0-9a-f]{40}$' -or $attributesWorking -cne $attributesBlob) {
+            throw "State-preparation bootstrap .gitattributes is not blob-bound to ToolRoot HEAD."
+        }
+        $attributesText = [IO.File]::ReadAllText($attributesPath)
+        if ($attributesText -match '(?im)(?:^|\s)(?:filter|working-tree-encoding)\s*=') {
+            throw "State-preparation bootstrap refuses executable Git attribute transforms."
         }
         $infoAttributes = Join-Path $expectedRoot '.git\info\attributes'
         if (Test-Path -LiteralPath $infoAttributes -PathType Leaf) {
@@ -177,7 +196,14 @@ function Assert-DawnstrikeStatePreparationBootstrapSource {
         if ($headAfter -cne $headBefore -or $treeAfter -cne $treeBefore -or $originMainAfter -cne $originMainBefore) {
             throw "State-preparation bootstrap ToolRoot changed during validation."
         }
-        return [pscustomobject]@{ head = $headAfter; tree = $treeAfter; origin = $originMainAfter; module_blobs = $moduleBlobs }
+        return [pscustomobject]@{
+            head = $headAfter
+            tree = $treeAfter
+            origin = $originMainAfter
+            module_blobs = $moduleBlobs
+            git = [pscustomobject]@{ path = $bootstrapGit; sha256 = $bootstrapGitSha256 }
+            python = [pscustomobject]@{ path = $bootstrapPython; sha256 = $bootstrapPythonSha256 }
+        }
     }
     finally {
         Remove-Item Env:GIT_CONFIG_NOSYSTEM -ErrorAction SilentlyContinue
@@ -200,6 +226,11 @@ $statePreparationBootstrap = Assert-DawnstrikeStatePreparationBootstrapSource -R
 # helpers.  In particular, CandidateRoot is never dot-sourced as an
 # unauthenticated caller path during recovery.
 . (Join-Path $statePreparationToolRoot "scripts\activate_dawnstrike_runtime.ps1")
+$statePreparationLockModule = New-Module -ScriptBlock {
+    param([string]$Path)
+    . $Path
+} -ArgumentList (Join-Path $statePreparationToolRoot "scripts\runtime_activation_lock.ps1")
+Import-Module $statePreparationLockModule -Force -DisableNameChecking
 . (Join-Path $statePreparationToolRoot "scripts\dawnstrike_job_process.ps1")
 . (Join-Path $statePreparationToolRoot "scripts\invoke_dawnstrike_stage.ps1")
 $CandidateRoot = $statePreparationToolRoot
@@ -575,8 +606,8 @@ $candidate = Resolve-DawnstrikeActivationRoot $CandidateRoot "CandidateRoot"
 $runtime = Resolve-DawnstrikeActivationRoot $RuntimeRoot "RuntimeRoot"
 $state = Resolve-DawnstrikeActivationRoot $StateRoot "StateRoot"
 Assert-DawnstrikeRootIsolation $BackupRoot @($candidate, $runtime, $state) "BackupRoot"
-$approvedGit = Get-DawnstrikeApprovedGit
-$approvedPython = Get-DawnstrikeApprovedLockInterpreter
+$approvedGit = $statePreparationBootstrap.git
+$approvedPython = $statePreparationBootstrap.python
 $git = [string]$approvedGit.path
 $python = [string]$approvedPython.path
 $toolRootContract = Get-DawnstrikeGitContract $git $candidate $ProcessTimeoutSeconds
