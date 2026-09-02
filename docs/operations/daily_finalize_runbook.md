@@ -1,55 +1,49 @@
-# Daily finalize runbook
+# Daily Finalize runbook
 
-The daily chain is one idempotent operation:
+Daily Finalize is a production scheduled operation, not a manual script. Its
+only production owner is `Dawnstrike 10of10 Daily Finalize` at 17:30
+America/Chicago. The task action is bound to the mounted runtime's exact SHA,
+the complete launch-manifest hash, protected Windows PowerShell 5.1, durable
+state, and the research-only/broker-disabled boundary.
 
-`reconcile raw inputs -> persist canonical rows -> write bounded snapshot -> write readiness -> write stage manifest`
+The idempotent chain is:
 
-Run it locally with:
-
-```powershell
-pwsh -File scripts\run_daily_finalize.ps1 -ProjectRoot C:\path\to\Dawnstrike
+```text
+reconcile raw inputs -> persist canonical rows -> build bounded snapshot
+-> seal readiness and daily ledger -> verify publication authorization
+-> publish the exact artifact when READY
 ```
 
-The wrapper defaults to the local SQLite database, the static `build/public`
-output, two retries, and a 15-minute retry interval. A failed upstream step
-does not produce a green readiness file. The lock prevents overlapping runs;
-`daily_finalize_runs` records the final status, retry count, hashes, and error.
+A failed upstream step remains failed. Missing or degraded truth produces a
+non-ready artifact and HTTP 503 semantics; it is never relabeled as a green
+publication.
 
-## Schedule
+## Operator checks
 
-Register one local daily task only after the candidate checkout is the intended
-operator checkout:
-
-```powershell
-pwsh -File scripts\register_daily_finalize_task.ps1 -ProjectRoot C:\path\to\Dawnstrike
-```
-
-The registration script refuses to overwrite an existing task with the same
-name. Inspect it with:
+Read Task Scheduler state without changing it:
 
 ```powershell
 Get-ScheduledTask -TaskName 'Dawnstrike 10of10 Daily Finalize'
 Get-ScheduledTaskInfo -TaskName 'Dawnstrike 10of10 Daily Finalize'
 ```
 
-## Operator checks
+Then inspect the exact-date finalizer receipt, daily ledger, process receipts,
+readiness object, public-artifact verification, and Vercel publication journal
+under `C:\r\dawnstrike-state`. A zero task result alone is not publication
+proof. The public alias is accepted only when the same-SHA artifact, immutable
+deployment, all three governed aliases, source/build/readiness manifests, and
+public hashes agree.
 
-```powershell
-py scripts\verify_public_artifact.py --root build\public
-Get-Content build\public\readiness.json
-Get-Content build\public\stage-manifest.json
-```
+Do not invoke `run_daily_finalize.ps1`,
+`register_daily_finalize_task.ps1`, or the publisher directly. Do not use
+`Start-ScheduledTask` to replay an old market date. Task installation and
+repair use `runtime_activation_and_rollback.md`; an interrupted Vercel
+publication uses `public_dashboard_rollback.md`.
 
-Expected behavior is conservative: a complete or explicit no-trade snapshot
-is ready; missing or degraded truth is published only as a non-ready artifact
-with HTTP 503 semantics.
+## Timing and date authority
 
-## Publication date boundary
-
-Scheduled `Preview` and `Production` finalization resolves the authoritative
-current exchange session from the market calendar and wall clock, and only
-publishes that session after its scheduled close. Prior, future, and closed
-dates are blocked. `LocalOnly` remains available for explicit offline or
-historical replay and does not consult the wall clock. Production publication
-also requires the immutable prepublication/daily-ledger authorization identity
-and rejects regressive or divergent same-day Vercel lineage.
+Production finalization resolves the authoritative current exchange session
+from the market calendar and wall clock and publishes only after that
+session's scheduled close. Prior, future, closed, and incomplete dates fail
+closed. Offline historical research remains separate and cannot write the
+production daily ledger or aliases.

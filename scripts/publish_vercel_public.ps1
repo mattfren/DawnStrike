@@ -13,6 +13,7 @@ param(
     [switch]$AllowDegraded,
     [switch]$Promote,
     [switch]$RecoveryOnly,
+    [switch]$SuppressNativeConsoleReplay,
     [string]$StateRoot = "",
     [ValidatePattern('^$|^[0-9a-f]{40}$')][string]$ExpectedSha = "",
     [ValidatePattern('^$|^\d{4}-\d{2}-\d{2}$')][string]$ExpectedMarketDate = "",
@@ -38,6 +39,9 @@ if ($Promote -and $AllowDegraded) {
 if ($RecoveryOnly -and ($AllowDegraded -or $PrepublicationAuthorizationId -or $DailyLedgerAuthorizationId)) {
     throw "Recovery-only Vercel convergence cannot accept fresh publication authorization or degraded mode."
 }
+if ($SuppressNativeConsoleReplay -and -not $RecoveryOnly) {
+    throw "Native console replay suppression is restricted to recovery-only Vercel convergence."
+}
 if (($Promote -or $RecoveryOnly) -and [string]::IsNullOrWhiteSpace($StateRoot)) {
     throw "Production publication and recovery require an explicit durable StateRoot."
 }
@@ -49,6 +53,20 @@ $governedAdditionalAliases = @(
     "https://dawnstrike-command-center-x3-mattfrens-projects.vercel.app",
     "https://dawnstrike-command-center-x3-mattfren-mattfrens-projects.vercel.app"
 )
+$pinnedLegacyDeploymentId = 'dpl_H7UQb8hWkwxLVbNwSM1BAQq1t9g8' # pragma: allowlist secret
+$pinnedLegacyDeploymentUrl = 'https://dawnstrike-command-center-x3-jte5klucs-mattfrens-projects.vercel.app'
+$pinnedLegacySourceSha = '5190ab6beb1b81556bfc70640c43a4cff48bd1f8' # pragma: allowlist secret
+$pinnedLegacySourceTree = '5ad147c8813de9f841655f27c30b3aa59ccac1d6' # pragma: allowlist secret
+$pinnedLegacyMarketDate = '2026-08-28' # pragma: allowlist secret
+$pinnedLegacyBuildId = '1476e74cf607c056c5f0' # pragma: allowlist secret
+$pinnedLegacyBuildSha = '1476e74cf607c056c5f070eecfff0632507145c4a37f9186eb1ad9b0ea4bf8b7' # pragma: allowlist secret
+$pinnedLegacyBuildManifestSha256 = '38165e0f80c5044b8cf18b664098dd90ee3f4bac83ee4ab685ab47e6e545bdbe' # pragma: allowlist secret
+$pinnedLegacyReleaseManifestSha256 = '6fd7b2e4701e9ef0f4b0c4989e0088f493bfdc1a919f6fff1bb8fea1766308e1' # pragma: allowlist secret
+$pinnedLegacyArtifactMapSha256 = '335bcff3e359ced371356eeed4a9373253968650d77c6d0ecb6da723fbf53f9c' # pragma: allowlist secret
+$pinnedLegacyArtifactTotalBytes = 3286836
+$pinnedLegacyAttestationSha256 = '6846a6dd24bc905fee86d2b1c541140d2da3420cc5101c57c0793959b9efaa30' # pragma: allowlist secret
+$pinnedLegacyReadinessReason = 'public_integrity_check_failed'
+$pinnedLegacyFailedChecks = @('calendar_freshness_stale_by_clock', 'market_date_stale')
 if ($Promote -or $RecoveryOnly) {
     if ($ProjectId -cne $governedProjectId -or
         $ProjectName -cne $governedProjectName -or
@@ -59,6 +77,28 @@ if ($Promote -or $RecoveryOnly) {
         throw "Production publication target differs from the governed Vercel target tuple."
     }
 }
+
+function Resolve-VercelCanonicalMarketDate {
+    param([AllowEmptyString()][string]$Value)
+    $candidate = $Value.Trim()
+    if ([string]::IsNullOrWhiteSpace($candidate)) { return '' }
+    try {
+        $parsed = [DateTime]::ParseExact(
+            $candidate,
+            'yyyy-MM-dd',
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::None
+        )
+    }
+    catch { throw 'ExpectedMarketDate is not a real canonical calendar date.' }
+    if ($parsed.ToString('yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture) -cne
+        $candidate) {
+        throw 'ExpectedMarketDate is not a real canonical calendar date.'
+    }
+    return $candidate
+}
+
+$canonicalExpectedMarketDate = Resolve-VercelCanonicalMarketDate $ExpectedMarketDate
 
 # Recovery is allowed to mutate provider aliases before a fresh daily build
 # exists, so its implementation must first prove that the currently mounted
@@ -381,7 +421,7 @@ else {
     New-Item -ItemType Directory -Path $StateRoot -Force | Out-Null
     (Resolve-Path $StateRoot).Path
 }
-$resolvedExpectedMarketDate = $ExpectedMarketDate.Trim()
+$resolvedExpectedMarketDate = $canonicalExpectedMarketDate
 if (($Promote -or $RecoveryOnly) -and [string]::IsNullOrWhiteSpace($resolvedExpectedMarketDate)) {
     throw "Direct -Promote is blocked: ExpectedMarketDate requires governed finalization authorization."
 }
@@ -422,6 +462,7 @@ $priorProduction = $null
 $priorProductionAliases = @{}
 $promotedDeployment = $null
 $packageManifestSha256 = $null
+$pinnedLegacyRollbackConsumed = $false
 $allProductionAliases = @($ProductionAlias) + @($AdditionalProductionAliases) |
     Select-Object -Unique | Sort-Object
 
@@ -624,6 +665,20 @@ function Assert-RemoteVercelSourceManifest {
         -Label $Label
 }
 
+function Test-VercelObjectProperty {
+    param(
+        [AllowNull()][object]$InputObject,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+    if ($null -eq $InputObject) {
+        return $false
+    }
+    if ($InputObject -is [System.Collections.IDictionary]) {
+        return $InputObject.Contains($Name)
+    }
+    return $null -ne $InputObject.PSObject.Properties[$Name]
+}
+
 function Get-OptionalJsonProperty {
     param(
         [AllowNull()][object]$InputObject,
@@ -632,11 +687,13 @@ function Get-OptionalJsonProperty {
     if ($null -eq $InputObject) {
         return $null
     }
-    $property = $InputObject.PSObject.Properties[$Name]
-    if ($null -eq $property) {
+    if (-not (Test-VercelObjectProperty -InputObject $InputObject -Name $Name)) {
         return $null
     }
-    return $property.Value
+    if ($InputObject -is [System.Collections.IDictionary]) {
+        return $InputObject[$Name]
+    }
+    return $InputObject.PSObject.Properties[$Name].Value
 }
 
 function Set-VercelAlias {
@@ -660,11 +717,11 @@ function Normalize-VercelDeploymentUrl {
 
 function Get-VercelImmutableDeploymentBaseUrl {
     param([Parameter(Mandatory = $true)][string]$DeploymentUrl)
-    $host = Normalize-VercelDeploymentUrl $DeploymentUrl
-    if (-not $host -or $host -notmatch '^[a-z0-9.-]+$') {
+    $deploymentHostName = Normalize-VercelDeploymentUrl $DeploymentUrl
+    if (-not $deploymentHostName -or $deploymentHostName -notmatch '^[a-z0-9.-]+$') {
         throw "Vercel deployment URL is invalid."
     }
-    return "https://$host"
+    return "https://$deploymentHostName"
 }
 
 function Assert-VercelPriorAliasSnapshotsCurrent {
@@ -696,11 +753,14 @@ function Assert-VercelAliasRestored {
         -Arguments @("inspect", [string]$AliasUrl, "--json") `
         -Label "Rollback verification inspect for $AliasUrl"
     $restoredId = [string](Get-OptionalJsonProperty -InputObject $restored -Name "id")
-    $restoredUrl = [string](Get-OptionalJsonProperty -InputObject $restored -Name "url")
-    $expectedId = if ($null -ne $PriorAlias.PSObject.Properties['deployment_id']) {
+    $restoredUrlRaw = [string](Get-OptionalJsonProperty -InputObject $restored -Name "url")
+    $restoredUrl = if ($restoredUrlRaw) {
+        Get-VercelImmutableDeploymentBaseUrl -DeploymentUrl $restoredUrlRaw
+    } else { '' }
+    $expectedId = if (Test-VercelObjectProperty -InputObject $PriorAlias -Name 'deployment_id') {
         [string]$PriorAlias.deployment_id
     } else { [string]$PriorAlias.id }
-    $expectedUrl = if ($null -ne $PriorAlias.PSObject.Properties['deployment_url']) {
+    $expectedUrl = if (Test-VercelObjectProperty -InputObject $PriorAlias -Name 'deployment_url') {
         [string]$PriorAlias.deployment_url
     } else { [string]$PriorAlias.url }
     if (-not $restoredId -or $restoredId -ne $expectedId) {
@@ -714,7 +774,10 @@ function Assert-VercelAliasRestored {
         throw "Rollback verification for $AliasUrl resolved the wrong deployment URL."
     }
 
-    $proof = Get-VercelAliasEndpointProof -AliasUrl $AliasUrl -CacheBuster $CacheBuster
+    $hasRollbackContract = (Test-VercelObjectProperty -InputObject $PriorAlias -Name 'rollback_contract') -and
+        $null -ne $PriorAlias.rollback_contract
+    $proofBaseUrl = if ($hasRollbackContract) { $expectedUrl } else { $AliasUrl }
+    $proof = Get-VercelAliasEndpointProof -AliasUrl $proofBaseUrl -CacheBuster $CacheBuster
     if ($PriorAlias.health_available -and -not $proof.health_available) {
         throw "Rollback verification health is unavailable for $AliasUrl."
     }
@@ -731,7 +794,9 @@ function Assert-VercelAliasRestored {
         $proof.readiness_http_status -ne $PriorAlias.readiness_http_status) {
         throw "Rollback verification readiness HTTP status changed for $AliasUrl."
     }
-    if ($PriorAlias.source_manifest_available) {
+    if ($PriorAlias.source_manifest_available -or
+        ($hasRollbackContract -and
+            [string]$PriorAlias.rollback_contract.mode -ceq 'READY_SOURCE_MANIFEST')) {
         if (-not $proof.source_manifest_available) {
             throw "Rollback verification source manifest is unavailable for $AliasUrl."
         }
@@ -740,39 +805,61 @@ function Assert-VercelAliasRestored {
         }
     }
     $restoredBuild = Invoke-VercelJson `
-        -Arguments @("curl", "$AliasUrl/build-manifest.json?rollback_verify=$CacheBuster") `
+        -Arguments @("curl", "$proofBaseUrl/build-manifest.json?rollback_verify=$CacheBuster") `
         -Label "Rollback build manifest proof for $AliasUrl"
     $restoredRelease = Invoke-VercelJson `
-        -Arguments @("curl", "$AliasUrl/release-manifest.json?rollback_verify=$CacheBuster") `
+        -Arguments @("curl", "$proofBaseUrl/release-manifest.json?rollback_verify=$CacheBuster") `
         -Label "Rollback release manifest proof for $AliasUrl"
-    Assert-PublicationState `
-        -Health $proof.health `
-        -Readiness $proof.readiness `
-        -BuildManifest $restoredBuild `
-        -ReleaseManifest $restoredRelease `
-        -ExpectedSourceSha ([string]$PriorAlias.source_sha) `
-        -ExpectedMarketDate ([string]$restoredBuild.market_date) `
-        -Label "Rollback alias $AliasUrl"
-    if ([string]$proof.source_sha -cne [string]$restoredBuild.source_sha) {
-        throw "Rollback source manifest/build source diverged for $AliasUrl."
-    }
     $buildHash = Get-VercelRemoteFileSha256 `
-        -BaseUrl $AliasUrl -RelativePath 'build-manifest.json' `
+        -BaseUrl $proofBaseUrl -RelativePath 'build-manifest.json' `
         -Label "Rollback alias $AliasUrl"
     $releaseHash = Get-VercelRemoteFileSha256 `
-        -BaseUrl $AliasUrl -RelativePath 'release-manifest.json' `
+        -BaseUrl $proofBaseUrl -RelativePath 'release-manifest.json' `
         -Label "Rollback alias $AliasUrl"
     if ($buildHash -cne [string]$PriorAlias.build_manifest_sha256 -or
         $releaseHash -cne [string]$PriorAlias.release_manifest_sha256) {
         throw "Rollback build/release manifest bytes changed for $AliasUrl."
     }
+    $isPinnedLegacy = $hasRollbackContract -and
+        [string]$PriorAlias.rollback_contract.mode -ceq 'PINNED_LEGACY_CLOCK_STALE'
     $artifactProof = Get-VercelGovernedAssetProof `
-        -BaseUrl $AliasUrl -BuildManifest $restoredBuild -Label "Rollback alias $AliasUrl"
+        -BaseUrl $proofBaseUrl -BuildManifest $restoredBuild `
+        -Label "Rollback alias $AliasUrl" -PinnedLegacyInventory:$isPinnedLegacy
+    if ($isPinnedLegacy) {
+        $observedRollbackContract = Assert-VercelPinnedLegacyRollbackTarget `
+            -DeploymentId $restoredId -DeploymentUrl $expectedUrl `
+            -EndpointProof $proof -BuildManifest $restoredBuild `
+            -ReleaseManifest $restoredRelease -BuildManifestSha256 $buildHash `
+            -ReleaseManifestSha256 $releaseHash -ArtifactProof $artifactProof `
+            -Label "Rollback alias $AliasUrl"
+    }
+    else {
+        Assert-PublicationState `
+            -Health $proof.health `
+            -Readiness $proof.readiness `
+            -BuildManifest $restoredBuild `
+            -ReleaseManifest $restoredRelease `
+            -ExpectedSourceSha ([string]$PriorAlias.source_sha) `
+            -ExpectedMarketDate ([string]$restoredBuild.market_date) `
+            -Label "Rollback alias $AliasUrl"
+        if ([string]$proof.source_sha -cne [string]$restoredBuild.source_sha) {
+            throw "Rollback source manifest/build source diverged for $AliasUrl."
+        }
+        if ($hasRollbackContract) {
+            $observedRollbackContract = New-VercelReadyRollbackContract `
+                -EndpointProof $proof -Label "Rollback alias $AliasUrl"
+        }
+    }
+    if ($hasRollbackContract -and
+        (ConvertTo-VercelCanonicalJson $observedRollbackContract) -cne
+            (ConvertTo-VercelCanonicalJson $PriorAlias.rollback_contract)) {
+        throw "Rollback contract changed for $AliasUrl."
+    }
     if ((ConvertTo-VercelCanonicalJson $artifactProof) -cne
         (ConvertTo-VercelCanonicalJson $PriorAlias.artifact_proof)) {
         throw "Rollback governed artifact proof changed for $AliasUrl."
     }
-    return [ordered]@{
+    $evidence = [ordered]@{
         alias = $AliasUrl
         expected_deployment_id = $expectedId
         expected_deployment_url = $expectedUrl
@@ -782,12 +869,57 @@ function Assert-VercelAliasRestored {
         health_status = $proof.health_status
         readiness_status = $proof.readiness_status
         readiness_http_status = $proof.readiness_http_status
-        source_sha = [string]$proof.source_sha
-        source_tree = [string]$proof.source_tree
-        source_manifest_sha256 = [string]$proof.source_manifest_sha256
+        source_sha = [string]$PriorAlias.source_sha
+        source_tree = [string]$PriorAlias.source_tree
+        source_manifest_sha256 = [string]$PriorAlias.source_manifest_sha256
         build_manifest_sha256 = $buildHash
         release_manifest_sha256 = $releaseHash
         artifact_proof = $artifactProof
+    }
+    if ($hasRollbackContract) {
+        $evidence['rollback_contract'] = $observedRollbackContract
+    }
+    return $evidence
+}
+
+function Get-VercelRemoteHttpStatus {
+    param(
+        [Parameter(Mandatory = $true)][string]$BaseUrl,
+        [Parameter(Mandatory = $true)][string]$RelativePath,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    if ($RelativePath -cnotmatch '^[A-Za-z0-9._/-]+$' -or
+        $RelativePath.StartsWith('/') -or $RelativePath.Contains('\')) {
+        throw "$Label remote status path is unsafe."
+    }
+    $temporary = Join-Path $journalRoot ('.http-status-' + [guid]::NewGuid().ToString('N') + '.bin')
+    Assert-VercelContainedNonReparsePath -RootPath $resolvedStateRoot -TargetPath $temporary
+    New-Item -ItemType Directory -Path $journalRoot -Force | Out-Null
+    Assert-VercelContainedNonReparsePath -RootPath $resolvedStateRoot -TargetPath $temporary
+    try {
+        $result = Invoke-VercelProcess `
+            -Arguments @(
+                'curl',
+                "$($BaseUrl.TrimEnd('/'))/$RelativePath?status_verify=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())",
+                '--', '--silent', '--show-error', '--max-filesize', '1048576',
+                '--output', $temporary, '--write-out', '%{http_code}'
+            ) `
+            -Label "$Label HTTP status" `
+            -TimeoutSeconds $VercelCommandTimeoutSeconds
+        $statusText = ([string]$result.Stdout).Trim()
+        if ($statusText -cnotmatch '^\d{3}$') {
+            throw "$Label HTTP status output is invalid."
+        }
+        if (-not (Test-Path -LiteralPath $temporary -PathType Leaf) -or
+            (Get-Item -LiteralPath $temporary).Length -gt 1048576) {
+            throw "$Label HTTP response body is unavailable or oversized."
+        }
+        return [int]$statusText
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporary -PathType Leaf) {
+            Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -803,7 +935,10 @@ function Get-VercelAliasEndpointProof {
         readiness_available = $false
         readiness_status = $null
         readiness_http_status = $null
+        readiness_reason = $null
+        readiness_failed_checks = @()
         source_manifest_available = $false
+        source_manifest_http_status = $null
         source_sha = $null
         source_tree = $null
         source_manifest_sha256 = $null
@@ -830,6 +965,9 @@ function Get-VercelAliasEndpointProof {
             $proof.readiness_available = $true
             $proof.readiness_status = Get-OptionalJsonProperty -InputObject $readiness -Name "status"
             $proof.readiness_http_status = Get-OptionalJsonProperty -InputObject $readiness -Name "http_status"
+            $proof.readiness_reason = Get-OptionalJsonProperty -InputObject $readiness -Name "reason"
+            $failedChecks = Get-OptionalJsonProperty -InputObject $readiness -Name "failed_checks"
+            $proof.readiness_failed_checks = if ($null -eq $failedChecks) { @() } else { @($failedChecks) }
         }
     }
     catch { }
@@ -842,11 +980,22 @@ function Get-VercelAliasEndpointProof {
             -RawJson ([string]$manifestProcess.Stdout).Trim()
         $manifest = $manifestCanonical | ConvertFrom-Json
         $proof.source_manifest_available = $true
+        $proof.source_manifest_http_status = 200
         $proof.source_sha = [string]$manifest.source_sha
         $proof.source_tree = [string]$manifest.source_tree
         $proof.source_manifest_sha256 = Get-Sha256Hex $manifestCanonical
     }
-    catch { }
+    catch {
+        try {
+            $proof.source_manifest_http_status = Get-VercelRemoteHttpStatus `
+                -BaseUrl $AliasUrl -RelativePath 'vercel-source-manifest.json' `
+                -Label "Alias source manifest proof for $AliasUrl"
+        }
+        catch { }
+    }
+    if (-not $proof.source_sha -and $proof.health_available) {
+        $proof.source_sha = [string](Get-OptionalJsonProperty -InputObject $proof.health -Name 'source_sha')
+    }
     if ($RequireHealthReadiness -and -not $proof.health_available) {
         throw "Prior production health proof is unavailable for $AliasUrl."
     }
@@ -1030,6 +1179,31 @@ function Release-VercelPublicationLock {
     $script:publicationLockAcquired = $false
 }
 
+function Assert-VercelRuntimeActivationAbsent {
+    # Two-lock handshake with runtime activation: publication owns its global
+    # lock before sampling the activation lock, while activation owns its
+    # runtime lock before sampling the publication lock. Concurrent starts
+    # therefore both stop before provider mutation or a runtime rename.
+    $activationLockRoot = Join-Path $resolvedStateRoot 'locks'
+    if (-not (Test-Path -LiteralPath $activationLockRoot)) { return }
+    Assert-VercelContainedNonReparsePath `
+        -RootPath $resolvedStateRoot -TargetPath $activationLockRoot
+    $rootItem = Get-Item -LiteralPath $activationLockRoot -Force -ErrorAction Stop
+    if (-not $rootItem.PSIsContainer -or
+        ($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'Runtime activation lock root is unsafe.'
+    }
+    $matches = @(Get-ChildItem -LiteralPath $activationLockRoot -Force |
+        Where-Object { [string]$_.Name -ieq 'dawnstrike-runtime-activation.lock' })
+    if ($matches.Count -gt 0) {
+        foreach ($match in $matches) {
+            Assert-VercelContainedNonReparsePath `
+                -RootPath $resolvedStateRoot -TargetPath $match.FullName
+        }
+        throw 'A runtime activation lock exists; Vercel publication and recovery are blocked.'
+    }
+}
+
 function Assert-VercelJournalBaseMatchesInvocation {
     param([Parameter(Mandatory = $true)][object]$Journal)
     if ([string]$Journal.candidate_source_sha -ne $expectedSourceSha -or
@@ -1068,6 +1242,7 @@ function Assert-VercelPriorJournalHistoryTerminal {
     # A dated directory is immutable operation history. Never treat a prior
     # date's COMPLETE as today's completion, and never start a new mutation
     # while an earlier operation still requires rollback compensation.
+    $script:pinnedLegacyRollbackConsumed = $false
     if (-not (Test-Path -LiteralPath $journalHistoryRoot -PathType Container)) { return }
     $legacy = Join-Path $journalHistoryRoot "vercel-publication-operation.json"
     if (Test-Path -LiteralPath $legacy -PathType Leaf) {
@@ -1108,6 +1283,17 @@ function Assert-VercelPriorJournalHistoryTerminal {
             terminal = [string]$verified.payload.phase -in @("COMPLETE", "COMPENSATED")
         }
     }
+    $script:pinnedLegacyRollbackConsumed = @($history | Where-Object {
+        [string]$_.payload.schema_version -ceq 'dawnstrike.vercel_publication_journal.v3' -and
+        [string]$_.payload.phase -ceq 'COMPLETE'
+    }).Count -gt 0
+    $otherNonterminal = @($history | Where-Object { -not $_.terminal })
+    if ($RecoveryOnly -and $otherNonterminal.Count -gt 0) {
+        # Manual recovery is an exact dated operation. Never let a mistyped or
+        # later ExpectedMarketDate compensate another journal and then report
+        # that the requested date had no operation.
+        throw 'RecoveryOnly found a nonterminal Vercel journal outside its exact ExpectedMarketDate.'
+    }
     $futureNonterminal = @($history | Where-Object { $_.date -gt $resolvedExpectedMarketDate -and -not $_.terminal })
     if ($futureNonterminal.Count -gt 0) {
         throw "A future-dated Vercel publication journal is nonterminal; provider mutation is blocked."
@@ -1146,6 +1332,12 @@ function Assert-VercelPriorJournalHistoryTerminal {
                 $script:resultRelativePath = $savedResultRelativePath
                 $script:resultPath = $savedResultPath
             }
+    }
+}
+
+function Assert-VercelPinnedLegacyRollbackAvailable {
+    if ($script:pinnedLegacyRollbackConsumed) {
+        throw "Pinned legacy rollback authorization was already consumed by a prior successful migration."
     }
 }
 
@@ -1410,7 +1602,8 @@ function Assert-GovernedPublicationAuthorization {
         -LogName "vercel_publication_market_boundary" `
         -WorkingDirectory $resolvedRoot `
         -EnvironmentOverrides $authorizationEnvironment `
-        -NoSite
+        -NoSite `
+        -SuppressConsoleReplay:$SuppressNativeConsoleReplay
     if ($boundary.exit_code -ne 0) {
         throw "Vercel publication market boundary rejected ExpectedMarketDate."
     }
@@ -1429,7 +1622,8 @@ function Assert-GovernedPublicationAuthorization {
         -LogName "vercel_publication_authorization" `
         -WorkingDirectory $resolvedRoot `
         -EnvironmentOverrides $authorizationEnvironment `
-        -NoSite
+        -NoSite `
+        -SuppressConsoleReplay:$SuppressNativeConsoleReplay
     if ($verify.exit_code -ne 0) {
         throw "Vercel publication requires a passing governed prepublication authorization."
     }
@@ -1562,7 +1756,8 @@ function Assert-LowerHex64 {
 function Assert-VercelPublicFileHashSet {
     param(
         [Parameter(Mandatory = $true)][object]$BuildManifest,
-        [Parameter(Mandatory = $true)][string]$Label
+        [Parameter(Mandatory = $true)][string]$Label,
+        [switch]$PinnedLegacyInventory
     )
     $expectedNames = @(
         'assets/dawnstrike.css',
@@ -1583,6 +1778,9 @@ function Assert-VercelPublicFileHashSet {
         'release-manifest.json',
         'stage-manifest.json'
     )
+    if ($PinnedLegacyInventory) {
+        $expectedNames += 'daily-finalize.jsonl'
+    }
     $fileHashes = Get-OptionalJsonProperty -InputObject $BuildManifest -Name 'file_hashes'
     if ($null -eq $fileHashes) { throw "$Label build manifest file_hashes is missing." }
     $expected = [System.Collections.Generic.HashSet[string]]::new(
@@ -1881,7 +2079,10 @@ function Get-VercelAliasObservation {
         -Arguments @("inspect", $Alias, "--json") `
         -Label "Publication alias inspect for $Alias"
     $id = [string](Get-OptionalJsonProperty -InputObject $observed -Name "id")
-    $url = [string](Get-OptionalJsonProperty -InputObject $observed -Name "url")
+    $urlRaw = [string](Get-OptionalJsonProperty -InputObject $observed -Name "url")
+    $url = if ($urlRaw) {
+        Get-VercelImmutableDeploymentBaseUrl -DeploymentUrl $urlRaw
+    } else { '' }
     if (-not $id -or -not $url) { throw "Publication alias inspect is incomplete for $Alias." }
     return [pscustomobject]@{ alias = $Alias; id = $id; url = $url }
 }
@@ -1950,8 +2151,22 @@ function New-VercelPublicationJournalPayload {
         [string]$CompensationSha256 = $emptySha256
     )
     $resultHash = if ($null -eq $ResultPayload) { $emptySha256 } else { Get-VercelResultSha256 $ResultPayload }
+    $currentRollbackContracts = @($PriorAliases | Where-Object {
+        Test-VercelObjectProperty -InputObject $_ -Name 'rollback_contract'
+    }).Count
+    if ($currentRollbackContracts -notin @(0, $PriorAliases.Count)) {
+        throw 'Vercel publication journal cannot mix legacy and current rollback contracts.'
+    }
+    $currentJournalSchema = $currentRollbackContracts -eq $PriorAliases.Count
     $payload = [ordered]@{
-        schema_version = if ($Phase -eq "COMPENSATED") { "dawnstrike.vercel_publication_journal.v2" } else { "dawnstrike.vercel_publication_journal.v1" }
+        schema_version = if ($Phase -eq 'COMPENSATED') {
+            if ($currentJournalSchema) { 'dawnstrike.vercel_publication_journal.v4' }
+            else { 'dawnstrike.vercel_publication_journal.v2' }
+        }
+        else {
+            if ($currentJournalSchema) { 'dawnstrike.vercel_publication_journal.v3' }
+            else { 'dawnstrike.vercel_publication_journal.v1' }
+        }
         operation = "vercel_publication"
         phase = $Phase
         sequence = $Sequence
@@ -1959,7 +2174,8 @@ function New-VercelPublicationJournalPayload {
         project_name = $ProjectName
         provider_scope = $ProviderScope
         production_aliases = @($allProductionAliases)
-        candidate_preview_url = [string]$CandidateDeployment.url
+        candidate_preview_url = Get-VercelImmutableDeploymentBaseUrl `
+            -DeploymentUrl ([string]$CandidateDeployment.url)
         candidate_preview_deployment_id = [string]$CandidateDeployment.id
         candidate_source_sha = [string]$PreviewManifest.source_sha
         candidate_source_tree = $CandidateSourceTree
@@ -1976,7 +2192,9 @@ function New-VercelPublicationJournalPayload {
         candidate_package_manifest_sha256 = $PackageManifestSha256
         prior_aliases = @($PriorAliases)
         promoted_deployment_id = if ($null -eq $PromotedDeployment) { $null } else { [string]$PromotedDeployment.id }
-        promoted_deployment_url = if ($null -eq $PromotedDeployment) { $null } else { [string]$PromotedDeployment.url }
+        promoted_deployment_url = if ($null -eq $PromotedDeployment) { $null } else {
+            Get-VercelImmutableDeploymentBaseUrl -DeploymentUrl ([string]$PromotedDeployment.url)
+        }
         production_result_sha256 = $resultHash
         result_relative_path = $ResultRelativePath
         result_payload = $ResultPayload
@@ -2024,7 +2242,10 @@ function Get-VercelJournalCandidateDeployment {
     }
     if ($matches.Count -eq 0) { return $null }
     $id = [string](Get-OptionalJsonProperty -InputObject $matches[0] -Name "id")
-    $url = [string](Get-OptionalJsonProperty -InputObject $matches[0] -Name "url")
+    $urlRaw = [string](Get-OptionalJsonProperty -InputObject $matches[0] -Name "url")
+    $url = if ($urlRaw) {
+        Get-VercelImmutableDeploymentBaseUrl -DeploymentUrl $urlRaw
+    } else { '' }
     if (-not $id -or -not $url) {
         throw "Interrupted provider promotion metadata is incomplete."
     }
@@ -2125,7 +2346,11 @@ function Invoke-VercelPublicationCompensation {
         throw "Vercel publication compensation aliases changed before terminal evidence."
     }
     $compensation = [ordered]@{
-        schema_version = "dawnstrike.vercel_publication_compensation.v1"
+        schema_version = if ([string]$Journal.schema_version -in @(
+            'dawnstrike.vercel_publication_journal.v3',
+            'dawnstrike.vercel_publication_journal.v4'
+        )) { 'dawnstrike.vercel_publication_compensation.v2' }
+        else { 'dawnstrike.vercel_publication_compensation.v1' }
         status = "COMPENSATED"
         operation = "vercel_publication"
         candidate_source_sha = [string]$Journal.candidate_source_sha
@@ -2407,6 +2632,18 @@ function Test-VercelPromotedCandidateSetMatchesJournal {
             (Normalize-VercelDeploymentUrl $item.url) -cne
             (Normalize-VercelDeploymentUrl $primary.url)) { return $false }
     }
+    $journalPromotedId = Get-OptionalJsonProperty `
+        -InputObject $Journal -Name 'promoted_deployment_id'
+    $journalPromotedUrl = Get-OptionalJsonProperty `
+        -InputObject $Journal -Name 'promoted_deployment_url'
+    $hasJournalPromotedId = -not [string]::IsNullOrWhiteSpace([string]$journalPromotedId)
+    $hasJournalPromotedUrl = -not [string]::IsNullOrWhiteSpace([string]$journalPromotedUrl)
+    if ($hasJournalPromotedId -ne $hasJournalPromotedUrl) { return $false }
+    if ($hasJournalPromotedId -and (
+        [string]$primary.id -cne [string]$journalPromotedId -or
+        (Normalize-VercelDeploymentUrl $primary.url) -cne
+            (Normalize-VercelDeploymentUrl $journalPromotedUrl)
+    )) { return $false }
     $response = Invoke-VercelJson `
         -Arguments @("list", $ProjectName, "--json", "--limit", "20") `
         -Label "Interrupted promotion deployment list"
@@ -2426,11 +2663,13 @@ function Get-VercelGovernedAssetProof {
     param(
         [Parameter(Mandatory = $true)][string]$BaseUrl,
         [Parameter(Mandatory = $true)][object]$BuildManifest,
-        [Parameter(Mandatory = $true)][string]$Label
+        [Parameter(Mandatory = $true)][string]$Label,
+        [switch]$PinnedLegacyInventory
     )
     $fileHashes = Get-OptionalJsonProperty -InputObject $BuildManifest -Name "file_hashes"
     if ($null -eq $fileHashes) { throw "$Label build manifest file_hashes is missing." }
-    Assert-VercelPublicFileHashSet -BuildManifest $BuildManifest -Label $Label
+    Assert-VercelPublicFileHashSet -BuildManifest $BuildManifest -Label $Label `
+        -PinnedLegacyInventory:$PinnedLegacyInventory
     $properties = @($fileHashes.PSObject.Properties | Sort-Object Name)
     if ($properties.Count -lt 1 -or $properties.Count -gt 256) {
         throw "$Label governed asset count is outside 1..256."
@@ -2515,6 +2754,99 @@ function Get-VercelRemoteFileSha256 {
     }
 }
 
+function New-VercelReadyRollbackContract {
+    param(
+        [Parameter(Mandatory = $true)][object]$EndpointProof,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    if (-not $EndpointProof.source_manifest_available -or
+        [int]$EndpointProof.source_manifest_http_status -ne 200 -or
+        [string]$EndpointProof.source_manifest_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        [string]$EndpointProof.readiness_reason -eq '' -or
+        @($EndpointProof.readiness_failed_checks).Count -ne 0) {
+        throw "$Label READY rollback contract is incomplete."
+    }
+    return [ordered]@{
+        schema_version = 'dawnstrike.vercel_rollback_target.v1'
+        mode = 'READY_SOURCE_MANIFEST'
+        health_status = [string]$EndpointProof.health_status
+        readiness_status = [string]$EndpointProof.readiness_status
+        readiness_http_status = [int]$EndpointProof.readiness_http_status
+        readiness_reason = [string]$EndpointProof.readiness_reason
+        readiness_failed_checks = @()
+        source_proof = [ordered]@{
+            kind = 'deployed_source_manifest'
+            sha256 = [string]$EndpointProof.source_manifest_sha256
+        }
+    }
+}
+
+function Assert-VercelPinnedLegacyRollbackTarget {
+    param(
+        [Parameter(Mandatory = $true)][string]$DeploymentId,
+        [Parameter(Mandatory = $true)][string]$DeploymentUrl,
+        [Parameter(Mandatory = $true)][object]$EndpointProof,
+        [Parameter(Mandatory = $true)][object]$BuildManifest,
+        [Parameter(Mandatory = $true)][object]$ReleaseManifest,
+        [Parameter(Mandatory = $true)][string]$BuildManifestSha256,
+        [Parameter(Mandatory = $true)][string]$ReleaseManifestSha256,
+        [Parameter(Mandatory = $true)][object]$ArtifactProof,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    $failedChecks = @($EndpointProof.readiness_failed_checks)
+    if ($DeploymentId -cne $pinnedLegacyDeploymentId -or
+        $DeploymentUrl -cne $pinnedLegacyDeploymentUrl -or
+        -not $EndpointProof.health_available -or
+        [string]$EndpointProof.health_status -cne 'alive' -or
+        -not $EndpointProof.readiness_available -or
+        [string]$EndpointProof.readiness_status -cne 'not_ready' -or
+        [int]$EndpointProof.readiness_http_status -ne 503 -or
+        [string]$EndpointProof.readiness_reason -cne $pinnedLegacyReadinessReason -or
+        (ConvertTo-VercelCanonicalJson $failedChecks) -cne
+            (ConvertTo-VercelCanonicalJson $pinnedLegacyFailedChecks) -or
+        $EndpointProof.source_manifest_available -or
+        [int]$EndpointProof.source_manifest_http_status -ne 404 -or
+        [string]$EndpointProof.source_sha -cne $pinnedLegacySourceSha -or
+        [string]$BuildManifest.source_sha -cne $pinnedLegacySourceSha -or
+        [string]$BuildManifest.market_date -cne $pinnedLegacyMarketDate -or
+        [string]$BuildManifest.build_id -cne $pinnedLegacyBuildId -or
+        [string]$BuildManifest.build_sha -cne $pinnedLegacyBuildSha -or
+        [string]$BuildManifestSha256 -cne $pinnedLegacyBuildManifestSha256 -or
+        [string]$ReleaseManifestSha256 -cne $pinnedLegacyReleaseManifestSha256 -or
+        [string]$ReleaseManifest.source_sha -cne $pinnedLegacySourceSha -or
+        [string]$ReleaseManifest.build_sha -cne $pinnedLegacyBuildSha -or
+        $BuildManifest.source_clean -ne $true -or
+        $BuildManifest.research_only -ne $true -or
+        $BuildManifest.live_trading_enabled -ne $false -or
+        $ReleaseManifest.research_only -ne $true -or
+        $ReleaseManifest.broker_execution_enabled -ne $false -or
+        [string]$ArtifactProof.endpoint -cne $pinnedLegacyDeploymentUrl -or
+        [string]$ArtifactProof.build_sha -cne $pinnedLegacyBuildSha -or
+        [int]$ArtifactProof.asset_count -ne 18 -or
+        [int64]$ArtifactProof.total_bytes -ne $pinnedLegacyArtifactTotalBytes -or
+        [string]$ArtifactProof.file_hashes_sha256 -cne $pinnedLegacyArtifactMapSha256) {
+        throw "$Label is not the exact authorized pinned legacy rollback target."
+    }
+    $legacyBuildFormula = Get-Sha256Hex `
+        "$($BuildManifest.source_sha):$($BuildManifest.publication_set_sha256):$($BuildManifest.opportunity_projection_sha256):$($BuildManifest.market_date)"
+    if ($legacyBuildFormula -cne $pinnedLegacyBuildSha) {
+        throw "$Label legacy four-input build identity is invalid."
+    }
+    return [ordered]@{
+        schema_version = 'dawnstrike.vercel_rollback_target.v1'
+        mode = 'PINNED_LEGACY_CLOCK_STALE'
+        health_status = 'alive'
+        readiness_status = 'not_ready'
+        readiness_http_status = 503
+        readiness_reason = $pinnedLegacyReadinessReason
+        readiness_failed_checks = @($pinnedLegacyFailedChecks)
+        source_proof = [ordered]@{
+            kind = 'pinned_legacy_attestation'
+            sha256 = $pinnedLegacyAttestationSha256
+        }
+    }
+}
+
 function Assert-VercelAuthorizedManifestBytes {
     param(
         [Parameter(Mandatory = $true)][string]$BaseUrl,
@@ -2558,6 +2890,7 @@ if (-not ($Promote -or $RecoveryOnly)) {
         -CandidateSourceSha $expectedSourceSha `
         -CandidateSourceTree $expectedSourceTree `
         -CandidateMarketDate $ExpectedMarketDate
+    Assert-VercelRuntimeActivationAbsent
     Assert-VercelPublicationToolchainStable
 }
 if ($Promote -or $RecoveryOnly) {
@@ -2568,6 +2901,7 @@ if ($Promote -or $RecoveryOnly) {
         -CandidateSourceSha $expectedSourceSha `
         -CandidateSourceTree $expectedSourceTree `
         -CandidateMarketDate $ExpectedMarketDate
+    Assert-VercelRuntimeActivationAbsent
     Assert-VercelPublicationToolchainStable
     Assert-VercelPriorJournalHistoryTerminal
     # Read the journal only after taking the global lock. This closes the
@@ -2600,6 +2934,10 @@ if ($RecoveryOnly -and $null -eq $existingJournal) {
         schema_version = "dawnstrike.vercel_publication_recovery.v1"
         status = "NO_NONTERMINAL_CURRENT_OPERATION"
         market_date = $resolvedExpectedMarketDate
+        project_id = $ProjectId
+        project_name = $ProjectName
+        provider_scope = $ProviderScope
+        production_aliases = @($allProductionAliases)
         research_only = $true
         broker_execution_enabled = $false
     }))
@@ -2613,6 +2951,10 @@ if ($null -ne $existingJournal) {
                 schema_version = "dawnstrike.vercel_publication_recovery.v1"
                 status = "ARCHIVED_COMPENSATED"
                 market_date = [string]$existingJournal.candidate_market_date
+                project_id = [string]$existingJournal.project_id
+                project_name = [string]$existingJournal.project_name
+                provider_scope = [string]$existingJournal.provider_scope
+                production_aliases = @($existingJournal.production_aliases)
                 archived_journal_sha256 = Get-VercelFileSha256 -Path $archivedCompensation
                 research_only = $true
                 broker_execution_enabled = $false
@@ -2675,6 +3017,10 @@ if ($null -ne $existingJournal) {
             schema_version = "dawnstrike.vercel_publication_recovery.v1"
             status = "COMPENSATED"
             market_date = [string]$terminalRecovery.candidate_market_date
+            project_id = [string]$terminalRecovery.project_id
+            project_name = [string]$terminalRecovery.project_name
+            provider_scope = [string]$terminalRecovery.provider_scope
+            production_aliases = @($terminalRecovery.production_aliases)
             archived_journal_sha256 = Get-VercelFileSha256 -Path $archivedCompensation
             research_only = $true
             broker_execution_enabled = $false
@@ -2691,15 +3037,24 @@ if ($null -ne $existingJournal) {
         $priorProductionAliases[[string]$priorRecord.alias] = [pscustomobject]@{
             id = [string]$priorRecord.deployment_id
             url = [string]$priorRecord.deployment_url
-            health_available = $false
-            health_status = $null
-            readiness_available = $false
-            readiness_status = $null
-            readiness_http_status = $null
-            source_manifest_available = $false
-            source_sha = $null
-            source_tree = $null
-            source_manifest_sha256 = $null
+            health_available = $true
+            health_status = [string]$priorRecord.health_status
+            readiness_available = $true
+            readiness_status = [string]$priorRecord.readiness_status
+            readiness_http_status = [int]$priorRecord.readiness_http_status
+            source_manifest_available = (
+                -not (Test-VercelObjectProperty -InputObject $priorRecord -Name 'rollback_contract') -or
+                [string]$priorRecord.rollback_contract.mode -ceq 'READY_SOURCE_MANIFEST'
+            )
+            source_sha = [string]$priorRecord.source_sha
+            source_tree = [string]$priorRecord.source_tree
+            source_manifest_sha256 = [string]$priorRecord.source_manifest_sha256
+            build_manifest_sha256 = [string]$priorRecord.build_manifest_sha256
+            release_manifest_sha256 = [string]$priorRecord.release_manifest_sha256
+            artifact_proof = $priorRecord.artifact_proof
+            rollback_contract = if (Test-VercelObjectProperty -InputObject $priorRecord -Name 'rollback_contract') {
+                $priorRecord.rollback_contract
+            } else { $null }
         }
     }
     $recoveryPreview = Get-VercelJournalPreviewEvidence -Journal $existingJournal
@@ -2889,6 +3244,7 @@ if ($Promote) {
     # promotion so an uncertain promotion can restore the exact deployment
     # that was serving that alias, rather than copying the primary alias to
     # every hostname.
+    $legacyPriorAliasCount = 0
     foreach ($alias in $allProductionAliases) {
         $snapshot = Invoke-VercelJson `
             -Arguments @("inspect", [string]$alias, "--json") `
@@ -2903,14 +3259,10 @@ if ($Promote) {
         $snapshotBaseUrl = Get-VercelImmutableDeploymentBaseUrl -DeploymentUrl $snapshotUrl
         $endpointProof = Get-VercelAliasEndpointProof `
             -AliasUrl $snapshotBaseUrl `
-            -CacheBuster ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) `
-            -RequireHealthReadiness
-        if (-not $endpointProof.source_manifest_available) {
-            throw "Prior production source manifest is unavailable for $alias."
-        }
+            -CacheBuster ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
         $priorProductionAliases[[string]$alias] = [pscustomobject]@{
             id = [string]$snapshotId
-            url = $snapshotUrl
+            url = $snapshotBaseUrl
             health_available = [bool]$endpointProof.health_available
             health_status = [string]$endpointProof.health_status
             readiness_available = [bool]$endpointProof.readiness_available
@@ -2919,9 +3271,12 @@ if ($Promote) {
             source_manifest_available = [bool]$endpointProof.source_manifest_available
             source_sha = [string]$endpointProof.source_sha
             source_tree = [string]$endpointProof.source_tree
-            source_manifest_sha256 = [string]$endpointProof.source_manifest_sha256
+            source_manifest_sha256 = if ($endpointProof.source_manifest_available) {
+                [string]$endpointProof.source_manifest_sha256
+            } else { $emptySha256 }
             build_manifest = $null
             release_manifest = $null
+            rollback_contract = $null
         }
         try {
             $priorProductionAliases[[string]$alias].build_manifest = Invoke-VercelJson `
@@ -2930,39 +3285,70 @@ if ($Promote) {
             $priorProductionAliases[[string]$alias].release_manifest = Invoke-VercelJson `
                 -Arguments @("curl", "$snapshotBaseUrl/release-manifest.json?rollback_verify=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())") `
                 -Label "Prior production release manifest for $alias"
-            Assert-PublicationState `
-                -Health $endpointProof.health `
-                -Readiness $endpointProof.readiness `
-                -BuildManifest $priorProductionAliases[[string]$alias].build_manifest `
-                -ReleaseManifest $priorProductionAliases[[string]$alias].release_manifest `
-                -ExpectedSourceSha ([string]$endpointProof.source_sha) `
-                -ExpectedMarketDate ([string]$priorProductionAliases[[string]$alias].build_manifest.market_date) `
-                -Label "Prior production alias $alias"
-            if ([string]$endpointProof.source_sha -cne
-                [string]$priorProductionAliases[[string]$alias].build_manifest.source_sha) {
-                throw "Prior production source manifest/build source diverged for $alias."
-            }
             $priorBuildRawSha = Get-VercelRemoteFileSha256 `
                 -BaseUrl $snapshotBaseUrl -RelativePath 'build-manifest.json' `
                 -Label "Prior production alias $alias"
             $priorReleaseRawSha = Get-VercelRemoteFileSha256 `
                 -BaseUrl $snapshotBaseUrl -RelativePath 'release-manifest.json' `
                 -Label "Prior production alias $alias"
-            $priorProductionAliases[[string]$alias] | Add-Member -NotePropertyName build_manifest_sha256 `
-                -NotePropertyValue $priorBuildRawSha
-            $priorProductionAliases[[string]$alias] | Add-Member -NotePropertyName release_manifest_sha256 `
-                -NotePropertyValue $priorReleaseRawSha
-            $priorProductionAliases[[string]$alias] | Add-Member -NotePropertyName artifact_proof `
-                -NotePropertyValue (Get-VercelGovernedAssetProof -BaseUrl $snapshotBaseUrl `
+            $isPinnedLegacyIdentity = [string]$snapshotId -ceq $pinnedLegacyDeploymentId -and
+                $snapshotBaseUrl -ceq $pinnedLegacyDeploymentUrl
+            $priorArtifactProof = Get-VercelGovernedAssetProof -BaseUrl $snapshotBaseUrl `
+                -BuildManifest $priorProductionAliases[[string]$alias].build_manifest `
+                -Label "Prior production alias $alias" `
+                -PinnedLegacyInventory:$isPinnedLegacyIdentity
+            if ($isPinnedLegacyIdentity) {
+                Assert-VercelPinnedLegacyRollbackAvailable
+                $priorProductionAliases[[string]$alias].source_tree = $pinnedLegacySourceTree
+                $priorProductionAliases[[string]$alias].rollback_contract = `
+                    Assert-VercelPinnedLegacyRollbackTarget `
+                        -DeploymentId ([string]$snapshotId) `
+                        -DeploymentUrl $snapshotBaseUrl `
+                        -EndpointProof $endpointProof `
+                        -BuildManifest $priorProductionAliases[[string]$alias].build_manifest `
+                        -ReleaseManifest $priorProductionAliases[[string]$alias].release_manifest `
+                        -BuildManifestSha256 $priorBuildRawSha `
+                        -ReleaseManifestSha256 $priorReleaseRawSha `
+                        -ArtifactProof $priorArtifactProof `
+                        -Label "Prior production alias $alias"
+                $legacyPriorAliasCount++
+            }
+            else {
+                if (-not $endpointProof.source_manifest_available) {
+                    throw "Prior production source manifest is unavailable for $alias."
+                }
+                Assert-PublicationState `
+                    -Health $endpointProof.health `
+                    -Readiness $endpointProof.readiness `
                     -BuildManifest $priorProductionAliases[[string]$alias].build_manifest `
-                    -Label "Prior production alias $alias")
+                    -ReleaseManifest $priorProductionAliases[[string]$alias].release_manifest `
+                    -ExpectedSourceSha ([string]$endpointProof.source_sha) `
+                    -ExpectedMarketDate ([string]$priorProductionAliases[[string]$alias].build_manifest.market_date) `
+                    -Label "Prior production alias $alias"
+                if ([string]$endpointProof.source_sha -cne
+                    [string]$priorProductionAliases[[string]$alias].build_manifest.source_sha) {
+                    throw "Prior production source manifest/build source diverged for $alias."
+                }
+                $priorProductionAliases[[string]$alias].rollback_contract = `
+                    New-VercelReadyRollbackContract `
+                        -EndpointProof $endpointProof -Label "Prior production alias $alias"
+            }
+            $priorProductionAliases[[string]$alias] | Add-Member `
+                -NotePropertyName build_manifest_sha256 -NotePropertyValue $priorBuildRawSha
+            $priorProductionAliases[[string]$alias] | Add-Member `
+                -NotePropertyName release_manifest_sha256 -NotePropertyValue $priorReleaseRawSha
+            $priorProductionAliases[[string]$alias] | Add-Member `
+                -NotePropertyName artifact_proof -NotePropertyValue $priorArtifactProof
         }
         catch {
-            throw "Prior production build/release lineage is unavailable for $alias."
+            throw "Prior production build/release lineage is unavailable for $alias`: $($_.Exception.Message)"
         }
         if ([string]$alias -eq [string]$ProductionAlias) {
             $priorProduction = $snapshot
         }
+    }
+    if ($legacyPriorAliasCount -notin @(0, $allProductionAliases.Count)) {
+        throw 'Pinned legacy rollback authorization requires the exact full governed alias set.'
     }
     $journalPriorAliases = @($allProductionAliases | ForEach-Object {
         $prior = $priorProductionAliases[[string]$_]
@@ -2979,6 +3365,7 @@ if ($Promote) {
             build_manifest_sha256 = [string]$prior.build_manifest_sha256
             release_manifest_sha256 = [string]$prior.release_manifest_sha256
             artifact_proof = $prior.artifact_proof
+            rollback_contract = $prior.rollback_contract
         }
     })
     $journalCandidate = [pscustomobject]@{ id = [string]$deploymentId; url = [string]$previewUrl }
@@ -3167,9 +3554,9 @@ try {
         $promotedDeploymentId = Get-OptionalJsonProperty `
             -InputObject $promotedDeployment `
             -Name "id"
-        $promotedUrl = [string](
+        $promotedUrl = Get-VercelImmutableDeploymentBaseUrl -DeploymentUrl ([string](
             Get-OptionalJsonProperty -InputObject $promotedDeployment -Name "url"
-        )
+        ))
         if (-not $promotedDeploymentId -or -not $promotedUrl) {
             throw "Promoted deployment inspect did not return a deployment ID and URL."
         }

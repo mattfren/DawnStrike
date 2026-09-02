@@ -1,5 +1,11 @@
 # Dawnstrike Operator Manual
 
+> Production boundary: this page's manual CLI examples are local research
+> diagnostics only. Production activation, task repair, runtime cutover, and
+> rollback must use `operations/runtime_activation_and_rollback.md` and the
+> administrator-installed release launcher. Never run a registration script
+> directly against the production runtime or state.
+
 ## Safety Boundary
 
 Dawnstrike is research/watchlist software. It does not place broker orders,
@@ -10,21 +16,20 @@ all broker decisions manually outside the app.
 
 ### What Windows Task Scheduler Runs
 
-The active task registration script is `scripts/register_alphaops_tasks.ps1`.
-It creates three weekday tasks:
+The active production contract contains five exact-SHA tasks. Their actions
+are installed and journaled only by the protected activation path:
 
 | Task | Time | Command | Log |
 | --- | --- | --- | --- |
-| `Dawnstrike AlphaOps Morning` | 8:00 AM CT | `py -m intraday_scanner.cli alpha-cycle --config config\web_sources.yaml --db-path data\shadow_real.sqlite --out-dir outputs\alpha_cycle --notify telegram` | `logs\alpha_morning.log` |
-| `Dawnstrike AlphaOps Monitor 5m` | 8:35 AM CT, every 5 minutes for 6 hours | `py -m intraday_scanner.cli alpha-monitor --db-path data\shadow_real.sqlite --notify telegram` | `logs\alpha_monitor.log` |
-| `Dawnstrike AlphaOps EOD Report` | 3:15 PM CT | `py -m intraday_scanner.cli alpha-report --db-path data\shadow_real.sqlite --out-dir outputs\alpha_report && py -m intraday_scanner.cli attribute-returns --db-path data\shadow_real.sqlite --out-dir outputs\return_attribution --persist && py -m intraday_scanner.cli historical-report --db-path data\shadow_real.sqlite --out-dir outputs\historical_report` | `logs\alpha_report.log` |
+| `Dawnstrike AlphaOps Morning` | 8:00 AM CT | Guarded Morning runner | Durable runtime logs/receipts |
+| `Dawnstrike AlphaOps Monitor 5m` | 8:35 AM CT, every 5 minutes | Guarded Monitor runner | Durable runtime logs/receipts |
+| `Dawnstrike AlphaOps EOD Full Report` | 3:15 PM CT | Guarded EOD runner | Durable runtime logs/receipts |
+| `Dawnstrike AlphaOps V6 Weekly Training` | Monday 9:00 PM CT | Guarded Weekly runner | Durable runtime logs/receipts |
+| `Dawnstrike 10of10 Daily Finalize` | 5:30 PM CT | Guarded Finalize/publisher runner | Durable runtime logs/receipts |
 
-If `schtasks /Query /TN "Dawnstrike AlphaOps EOD Report" /V /FO LIST` still
-shows only `alpha-report`, re-register tasks with:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\register_alphaops_tasks.ps1
-```
+If any task is absent, stale, mixed, or points outside
+`C:\r\dawnstrike-runtime`, preserve its XML and logs and follow the protected
+activation recovery procedure. Ad hoc re-registration is prohibited.
 
 ### What To Expect In Telegram
 
@@ -98,7 +103,9 @@ py -m intraday_scanner.cli web-source-doctor --config config\web_sources.yaml --
 
 ## B. Manual One-Off Mode
 
-Use these commands when you want to run the workflow yourself.
+Use these commands only in a local disposable research checkout and database.
+They are not production task substitutes and must not target
+`C:\r\dawnstrike-runtime` or `C:\r\dawnstrike-state`.
 
 ### Source Doctor
 

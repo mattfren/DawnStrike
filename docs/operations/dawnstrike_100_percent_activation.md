@@ -36,7 +36,8 @@ Do not hand-create a ticker list. Terra must fetch, hash, validate, and register
 
 ## 4. Enter your Windows password when prompted
 
-When Terra reaches task registration, it should run:
+When the protected activation procedure reaches its explicit credential step,
+the operator should run this in the pinned Windows PowerShell 5.1 session:
 
 ```powershell
 $credential = Get-Credential
@@ -48,16 +49,24 @@ Enter the Windows account and password that can run Dawnstrike while you are log
 
 Terra must:
 
-1. Merge the verified branch and install the exact merged SHA into
+1. Merge the verified branch only after exact-SHA CI, independent
+   `gpt-5.6-sol` review, and immutable owner authorization all validate.
+2. Install the exact merged SHA into
    `C:\r\dawnstrike-runtime` using the fail-closed two-phase procedure in
    [`runtime_activation_and_rollback.md`](runtime_activation_and_rollback.md).
-2. Build the real source config using your email, Alpaca as primary market data, and Yahoo as independent reconciliation data.
-3. Fetch and register the dated universe.
-4. Register the morning, monitor, EOD, weekly-training, and finalize tasks with your credential.
-5. Back up and disable the five conflicting legacy tasks—never delete them.
-6. Run copy-on-write doctors and a rehearsal.
-7. Deploy a Vercel preview, verify it, promote the exact verified build, and prove the public URL.
-8. Watch one full unattended market day and confirm the final Telegram receipt.
+3. Build the real source config using your email, approved read-only provider
+   access, and independent reconciliation data.
+4. Establish the governed dated universe without inventing or relabeling
+   membership evidence.
+5. Let protected activation journal, normalize, and rebind the existing
+   Morning, Monitor, EOD, Weekly, and Finalize task contract. Do not separately
+   register, delete, or hand-edit those tasks.
+6. Run imported-environment doctors and the activation preflight.
+7. Let the exact-date `Dawnstrike 10of10 Daily Finalize` task alone build,
+   verify, publish, and promote an eligible Vercel artifact through its durable
+   publication journal. Do not promote or alias manually.
+8. Watch one complete unattended market-day chain and confirm the same-SHA
+   finalizer, publication, public hashes, readiness, and Telegram receipt.
 
 ## What “100% functioning” means
 

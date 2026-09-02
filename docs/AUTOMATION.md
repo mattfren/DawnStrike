@@ -1,5 +1,10 @@
 # Automation
 
+> Local demo workflow only. The tasks and dashboard registration controls on
+> this page are not part of Dawnstrike's production five-task contract and
+> must never target `C:\r\dawnstrike-runtime` or `C:\r\dawnstrike-state`.
+> Production authority is `operations/runtime_activation_and_rollback.md`.
+
 Dawnstrike can run the scan, paper audit, and setup monitor without placing trades. The monitor checks whether earlier ranked setups are still following the planned path: hold invalidation, reclaim breakout, and work toward the first target.
 
 ## Web UI Workflow

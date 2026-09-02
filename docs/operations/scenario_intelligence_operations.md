@@ -52,11 +52,13 @@ DAWNSTRIKE_SCENARIO_OPENAI_TIMEOUT_SECONDS=45
 
 ## Operator checks
 
-```powershell
-py -m intraday_scanner.cli scenario-doctor --db-path C:\r\dawnstrike-state\shadow_real.sqlite
-py -m intraday_scanner.cli scenario-report --db-path C:\r\dawnstrike-state\shadow_real.sqlite
-py scripts\verify_public_artifact.py --root C:\r\dawnstrike-runtime\build\public
-```
+Direct ambient-Python commands are local observational diagnostics only and
+must not be used as production acceptance evidence. Authoritative production
+proof comes from the exact-SHA activation/scheduled runner using the protected
+interpreter after importing `C:\r\dawnstrike-state\secrets\runtime.env`, plus
+the same-date finalizer and public-artifact receipts. A missing OpenAI key,
+disabled feature flag, uncalibrated state, or unavailable provider remains
+`NOT_READY`; do not substitute a developer-shell result.
 
 The dashboard's Scenario Intelligence view separates forward paper performance
 from historical provider-timestamp replay. `UNCALIBRATED` is a withholding

@@ -46,8 +46,7 @@ def test_registration_and_rollback_entries_are_pinned_and_sha_bound() -> None:
     assert "Set-DawnstrikeCanonicalTaskExpectedSha" in rollback
     assert (
         "Assert-DawnstrikeCanonicalTaskSemantics -RuntimeRoot $runtime "
-        "-StateRoot $state -ExpectedSha $ExpectedSha"
-        in rollback
+        "-StateRoot $state -ExpectedSha $ExpectedSha" in rollback
     )
 
 
@@ -64,17 +63,14 @@ def test_process_runner_rejects_identity_substitution_and_git_execution_hooks() 
         assert marker in text
     assert (
         "Assert-DawnstrikeProcessSourceBoundToHead -ReleaseRoot $runtimePath "
-        "-ExpectedSha $ExpectedSha"
-        in text
+        "-ExpectedSha $ExpectedSha" in text
     )
     assert "Assert-DawnstrikePythonDependencyAclBoundary" in text
     assert "Get-Acl -LiteralPath" in text
 
 
 def test_scheduled_python_requires_an_administrator_owned_program_files_boundary() -> None:
-    text = (ROOT / "scripts" / "dawnstrike_process_runner.ps1").read_text(
-        encoding="utf-8"
-    )
+    text = (ROOT / "scripts" / "dawnstrike_process_runner.ps1").read_text(encoding="utf-8")
     for marker in (
         r"C:\Program Files\Dawnstrike\Python313\python.exe",
         "python313.dll",
@@ -90,12 +86,11 @@ def test_scheduled_python_requires_an_administrator_owned_program_files_boundary
 
 
 def test_release_activation_uses_an_administrator_installed_preparse_launcher() -> None:
-    launcher = (ROOT / "scripts" / "dawnstrike_release_launcher.ps1").read_text(
+    launcher = (ROOT / "scripts" / "dawnstrike_release_launcher.ps1").read_text(encoding="utf-8")
+    activation = (ROOT / "scripts" / "activate_dawnstrike_runtime.ps1").read_text(encoding="utf-8")
+    installer = (ROOT / "scripts" / "install_dawnstrike_host_boundary.ps1").read_text(
         encoding="utf-8"
     )
-    installer = (
-        ROOT / "scripts" / "install_dawnstrike_host_boundary.ps1"
-    ).read_text(encoding="utf-8")
 
     for marker in (
         r"C:\Program Files\Dawnstrike\bin\dawnstrike_release_launcher.ps1",
@@ -109,11 +104,19 @@ def test_release_activation_uses_an_administrator_installed_preparse_launcher() 
         r"scripts\rebind_intraday_capture_task.ps1",
         "HardenCapture mode requires a locally prompted RunAsCredential",
         "RebindCapture mode requires a credential and exact input files",
+        "Activate mode requires an elevated administrator process.",
+        "-AllowLegacyCanonicalExecute",
     ):
         assert marker in launcher
-    assert launcher.index("Open-DawnstrikeLauncherEntry") < launcher.index(
-        "& $entryLocks[0].path"
-    )
+    assert launcher.index("Open-DawnstrikeLauncherEntry") < launcher.index("& $entryLocks[0].path")
+    for marker in (
+        r"C:\Program Files\Dawnstrike\bin\dawnstrike_release_launcher.ps1",
+        "Legacy canonical-task admission is restricted to the protected release launcher.",
+        "Legacy canonical-task rebinding requires an elevated administrator process.",
+        "Canonical tasks contain a mixed pinned/legacy executable set.",
+    ):
+        assert marker in activation
+    assert "DAWNSTRIKE_TEST_LEGACY_CANONICAL_EXECUTE" not in activation
     for marker in (
         "requires an elevated administrator process",
         r"C:\Program Files\Dawnstrike",
@@ -146,14 +149,21 @@ def test_release_activation_uses_an_administrator_installed_preparse_launcher() 
 )
 def test_task_guard_holds_entry_and_helper_bytes_against_concurrent_swap(tmp_path: Path) -> None:
     state = tmp_path / "state"
+    expected_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
     script = """
     $ErrorActionPreference = 'Stop'
     . '{runner}'
     $m = New-DawnstrikeScheduledLaunchManifest `
-        -RuntimeRoot '{root}' -StateRoot '{state}' -ExpectedSha ('a' * 40) `
+        -RuntimeRoot '{root}' -StateRoot '{state}' -ExpectedSha '{sha}' `
         -TaskScript 'run_alphaops_morning.ps1'
     $bound = Assert-DawnstrikeScheduledLaunchManifest `
-        -RuntimeRoot '{root}' -StateRoot '{state}' -ExpectedSha ('a' * 40) `
+        -RuntimeRoot '{root}' -StateRoot '{state}' -ExpectedSha '{sha}' `
         -TaskScript 'run_alphaops_morning.ps1' -ManifestPath $m.path `
         -ManifestSha256 $m.sha256 -EntryScript '{entry}'
     try {{
@@ -161,12 +171,25 @@ def test_task_guard_holds_entry_and_helper_bytes_against_concurrent_swap(tmp_pat
             [IO.File]::WriteAllText('{entry}', 'hostile replacement')
             'SWAP_SUCCEEDED'
         }} catch {{ 'SWAP_BLOCKED' }}
+        try {{
+            [IO.File]::WriteAllText('{refresh}', 'hostile replacement')
+            'REFRESH_SWAP_SUCCEEDED'
+        }} catch {{ 'REFRESH_SWAP_BLOCKED' }}
+        try {{
+            [IO.File]::WriteAllText('{service}', 'hostile replacement')
+            'SERVICE_SWAP_SUCCEEDED'
+        }} catch {{ 'SERVICE_SWAP_BLOCKED' }}
     }} finally {{ foreach ($lock in $bound.locks) {{ $lock.Dispose() }} }}
     """.format(
         runner=str(ROOT / "scripts" / "dawnstrike_process_runner.ps1").replace("'", "''"),
+        sha=expected_sha,
         root=str(ROOT).replace("'", "''"),
         state=str(state).replace("'", "''"),
         entry=str(ROOT / "scripts" / "run_alphaops_morning.ps1").replace("'", "''"),
+        refresh=str(ROOT / "scripts" / "refresh_luna_core_universe.py").replace("'", "''"),
+        service=str(
+            ROOT / "intraday_scanner" / "services" / "luna_core_universe_service.py"
+        ).replace("'", "''"),
     )
     result = subprocess.run(
         ["powershell.exe", "-NoProfile", "-Command", script],
@@ -176,16 +199,167 @@ def test_task_guard_holds_entry_and_helper_bytes_against_concurrent_swap(tmp_pat
     )
     assert result.returncode == 0, result.stderr
     assert "SWAP_BLOCKED" in result.stdout
+    assert "REFRESH_SWAP_BLOCKED" in result.stdout
+    assert "SERVICE_SWAP_BLOCKED" in result.stdout
+
+
+@pytest.mark.skipif(
+    not Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe").is_file(),
+    reason="exact Git source inventory proof requires Windows PowerShell 5.1",
+)
+def test_luna_source_inventory_rejects_a_tracked_service_hidden_from_disk() -> None:
+    target = ROOT / "intraday_scanner" / "services" / "luna_core_universe_service.py"
+    hidden = target.with_name("luna_core_universe_service.py.hostile-hidden")
+    assert target.is_file()
+    assert not hidden.exists()
+    expected_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    target.replace(hidden)
+    try:
+        script = """
+        $ErrorActionPreference = 'Stop'
+        . '{runner}'
+        Get-DawnstrikeLunaCoreSourceFiles -ExpectedSha '{sha}' | Out-Null
+        """.format(
+            runner=str(ROOT / "scripts" / "dawnstrike_process_runner.ps1").replace("'", "''"),
+            sha=expected_sha,
+        )
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command", script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode != 0
+        assert "filesystem inventory differs from exact Git" in result.stderr
+    finally:
+        hidden.replace(target)
+
+    script = """
+    $ErrorActionPreference = 'Stop'
+    . '{runner}'
+    $files = @(Get-DawnstrikeLunaCoreSourceFiles -ExpectedSha '{sha}')
+    if ($files -cnotcontains 'intraday_scanner/services/luna_core_universe_service.py') {{
+        throw 'tracked service absent from exact source inventory'
+    }}
+    """.format(
+        runner=str(ROOT / "scripts" / "dawnstrike_process_runner.ps1").replace("'", "''"),
+        sha=expected_sha,
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-Command", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_inline_task_action_is_guarded_and_not_mutable_file_execution() -> None:
-    text = (ROOT / "scripts" / "dawnstrike_process_runner.ps1").read_text(
-        encoding="utf-8"
-    )
+    text = (ROOT / "scripts" / "dawnstrike_process_runner.ps1").read_text(encoding="utf-8")
     assert "Get-DawnstrikeScheduledLaunchCommand" in text
     assert "[IO.FileShare]::Read" in text
     assert "-Command" in text
     assert "-LaunchManifestSha256" in text
+
+
+def test_manual_production_operations_require_the_protected_launcher() -> None:
+    bootstrap = (ROOT / "scripts" / "bootstrap_luna_core_universe.ps1").read_text(encoding="utf-8")
+    recovery = (ROOT / "scripts" / "recover_vercel_publication.ps1").read_text(encoding="utf-8")
+    launcher = (ROOT / "scripts" / "dawnstrike_release_launcher.ps1").read_text(encoding="utf-8")
+    for text in (bootstrap, recovery):
+        assert r"C:\Program Files\Dawnstrike\bin\dawnstrike_release_launcher.ps1" in text
+        assert "$MyInvocation.ScriptName" in text
+        assert "$ProtectedLauncherGrant" in text
+        assert "requires an elevated administrator process" in text
+    assert "-AdditionalSourceFiles" in bootstrap
+    assert "Get-DawnstrikeLunaCoreSourceFiles" in bootstrap
+    assert "Enter-DawnstrikeDailyRunLock" in bootstrap
+    assert "Exit-DawnstrikeDailyRunLock" in bootstrap
+    assert "--bootstrap-state-street-proxy" in bootstrap
+    assert "Import-DawnstrikeEnvironment" in recovery
+    assert "-RecoveryOnly" in recovery
+    assert "-SuppressNativeConsoleReplay" in recovery
+    assert "-Promote" not in recovery
+    for marker in (
+        "'BootstrapUniverse'",
+        "'RecoverPublication'",
+        "scripts\\protected_operation_contract.ps1",
+        "scripts\\bootstrap_luna_core_universe.ps1",
+        "scripts\\recover_vercel_publication.ps1",
+        "scripts\\vercel_toolchain_contract.py",
+        "ls-tree', '-r', '--name-only', $ExpectedSha",
+        "-ProtectedLauncherGrant",
+        "requires CandidateRoot to be the exact mounted runtime",
+        "requires Windows PowerShell 5.1 Desktop",
+    ):
+        assert marker in launcher
+
+
+def test_primary_operator_docs_forbid_checkout_task_registration() -> None:
+    documents = (
+        ROOT / "README.md",
+        ROOT / "docs" / "OPERATOR_MANUAL.md",
+        ROOT / "docs" / "OPERATOR_RUNBOOK.md",
+        ROOT / "docs" / "DAWNSTRIKE_EXPLAINED.md",
+        ROOT / "docs" / "TROUBLESHOOTING.md",
+        ROOT / "docs" / "operations" / "daily_finalize_runbook.md",
+        ROOT / "docs" / "operations" / "alphaops_v6_release_runbook.md",
+        ROOT / "docs" / "operations" / "dawnstrike_v5_release.md",
+    )
+    direct_registration = (
+        "powershell -ExecutionPolicy Bypass -File scripts\\register_alphaops_tasks.ps1"
+    )
+    for document in documents:
+        text = document.read_text(encoding="utf-8")
+        assert direct_registration not in text
+        assert "runtime_activation_and_rollback.md" in text
+
+
+@pytest.mark.skipif(
+    not Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe").is_file(),
+    reason="protected-operation direct-call proof requires Windows PowerShell 5.1",
+)
+@pytest.mark.parametrize(
+    ("script_name", "error"),
+    [
+        (
+            "bootstrap_luna_core_universe.ps1",
+            "Core-universe bootstrap is restricted to the protected release launcher.",
+        ),
+        (
+            "recover_vercel_publication.ps1",
+            "Vercel publication recovery is restricted to the protected release launcher.",
+        ),
+    ],
+)
+def test_manual_production_operations_reject_direct_invocation(
+    script_name: str, error: str
+) -> None:
+    completed = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(ROOT / "scripts" / script_name),
+            "-ExpectedSha",
+            "a" * 40,
+            "-MarketDate",
+            "2026-09-03",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode != 0
+    assert error in completed.stderr
 
 
 def test_bootstrap_rejects_replace_refs_filters_and_dependency_reparse_points() -> None:

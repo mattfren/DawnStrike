@@ -19,14 +19,19 @@ messages, stores everything in SQLite, and shows the result in a Streamlit
 dashboard. It does not place orders, execute trades, or store broker trading
 credentials.
 
-Daily AlphaOps schedule:
+Production AlphaOps schedule (installed only through the protected activation
+path):
 
 - 8:00 AM CT: `Dawnstrike AlphaOps Morning` runs `alpha-cycle`.
 - 8:35 AM CT: `Dawnstrike AlphaOps Monitor 5m` starts checking saved names
   every 5 minutes.
-- 3:15 PM CT: `Dawnstrike AlphaOps EOD Report` writes the evidence report.
+- 3:15 PM CT: `Dawnstrike AlphaOps EOD Full Report` writes the evidence report.
   The EOD flow can run `alpha-report`, `attribute-returns`, and
   `historical-report`.
+- Monday 9:00 PM CT: `Dawnstrike AlphaOps V6 Weekly Training` runs the guarded
+  weekly research-training workflow.
+- 5:30 PM CT: `Dawnstrike 10of10 Daily Finalize` closes the dated evidence chain
+  and is the only production publication path.
 
 When the AlphaOps run contract is specifically `data_ineligible`, the morning
 runner can invoke OpenAI Responses API web search for the explicit research
@@ -70,8 +75,12 @@ Telegram messages are watchlist/status alerts only:
 - `Outcome Data Needed`: import the outcome CSV.
 - `Dawnstrike Shadow Results`: paper/shadow evidence summary, not a guarantee.
 
-Start with `docs\DAWNSTRIKE_EXPLAINED.md` and `docs\OPERATOR_MANUAL.md` for
-the full operator guide.
+Production operators must start with
+`docs\operations\runtime_activation_and_rollback.md` for activation, task
+repair, runtime cutover, or rollback. `docs\DAWNSTRIKE_EXPLAINED.md` and
+`docs\OPERATOR_MANUAL.md` describe the current production contract and local
+research diagnostics, but their CLI examples are not authority to register,
+repair, or run production tasks.
 
 ## Free Shadow Mode
 

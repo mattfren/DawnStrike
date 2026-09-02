@@ -38,8 +38,23 @@ The tool fails closed unless all of the following are true:
   are at most 30 days old, and contain no critical/high audit finding.
 - The current runtime is a clean, self-contained Git checkout.
 - All five canonical scheduled tasks are present, enabled, not running, and
-  still bind the fixed runtime and durable-state roots.
-- No daily lock or runtime-activation lock exists.
+  still bind the fixed runtime and durable-state roots. Their executable must
+  either already be the pinned full Windows PowerShell path or, for the
+  one-time host migration, all five must use the literal legacy executable
+  `powershell.exe`. This is an exact fresh-state rule: without a valid
+  nonterminal activation journal, the legacy count must be either zero or
+  five. A mixed legacy/pinned set is rejected before any mutation.
+- No daily lock or runtime-activation lock exists. No global Vercel publication
+  lock exists, and the durable Vercel publication history must verify as an
+  exact terminal history for the governed project, project name, provider
+  scope, and complete production-alias set. A nonterminal or malformed current
+  journal, a foreign target tuple, or an incomplete compensated archive/intent
+  pair blocks cutover. Activation never performs provider recovery: recover an
+  interrupted publication against its exact prior runtime SHA before retrying
+  activation. The publisher holds its publication lock while checking for the
+  runtime-activation lock, and activation holds its runtime lock while checking
+  publication history, so concurrent starts fail closed before either provider
+  mutation or a runtime rename.
 - `shadow_real.sqlite` passes read-only `PRAGMA quick_check`, and its schema is
   exactly the candidate application's current schema. Activation never runs a
   migration.
@@ -102,15 +117,28 @@ report SHA-256, immutable Codex share URL, `research_only: true`,
 not follow redirects. This proves owner authorization of an independently
 reviewed report; it does not prove cryptographic Sol identity.
 
-Seal each captured object atomically. Sealing supplies tamper evidence; it does
-not turn an unverified assertion into CI or audit proof.
+After the protected host boundary described below is installed, seal each
+captured object atomically with its protected interpreter and exact candidate
+SHA. Sealing supplies tamper evidence; it does not turn an unverified
+assertion into CI or audit proof.
 
 ```powershell
-py scripts\runtime_activation_contract.py seal-evidence `
+$sha = '<accepted-origin-main-sha>'
+& 'C:\Program Files\Dawnstrike\Python313\python.exe' -I -B -S `
+  C:\r\dawnstrike-main\scripts\dawnstrike_python_bootstrap.py `
+  --release-root C:\r\dawnstrike-main `
+  --expected-sha $sha `
+  --script C:\r\dawnstrike-main\scripts\runtime_activation_contract.py -- `
+  seal-evidence `
   --input C:\r\dawnstrike-state\evidence\ci-unsealed.json `
   --output C:\r\dawnstrike-state\evidence\ci.json
 
-py scripts\runtime_activation_contract.py seal-evidence `
+& 'C:\Program Files\Dawnstrike\Python313\python.exe' -I -B -S `
+  C:\r\dawnstrike-main\scripts\dawnstrike_python_bootstrap.py `
+  --release-root C:\r\dawnstrike-main `
+  --expected-sha $sha `
+  --script C:\r\dawnstrike-main\scripts\runtime_activation_contract.py -- `
+  seal-evidence `
   --input C:\r\dawnstrike-state\evidence\sol-unsealed.json `
   --output C:\r\dawnstrike-state\evidence\sol.json
 ```
@@ -134,7 +162,9 @@ launch the installer directly from the user-writable checkout. Once the
 protected bootstrap exists, run it from an elevated PowerShell process:
 
 ```powershell
-& 'C:\Program Files\Dawnstrike\bin\install_dawnstrike_host_boundary.ps1' `
+C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe `
+  -NoProfile -ExecutionPolicy Bypass `
+  -File 'C:\Program Files\Dawnstrike\bin\install_dawnstrike_host_boundary.ps1' `
   -ExpectedSha <accepted-origin-main-sha> `
   -CandidateRoot C:\r\dawnstrike-main
 ```
@@ -151,21 +181,36 @@ Activation and rollback must then enter through the installed launcher so
 their candidate entry bytes are verified and held read-locked before
 PowerShell parses them.
 
+The protected launcher is also the only entry point allowed to admit the
+all-five legacy executable set. `Activate -PreflightOnly` reports
+`legacy_canonical_execute_rebind_required`, the exact count, and the exact task
+names without changing them. The corresponding non-preflight activation must
+run in an elevated administrator process. No environment variable or direct
+checkout invocation can opt into this migration path. Do not call the
+candidate activation script directly even when all five actions are already
+pinned; the installed launcher is the governed entry point for both ordinary
+activation and executable normalization.
+
 If the delayed-SIP task exists, harden it to the exact candidate while it is
 disabled, then prepare the schema-30 sidecar. Prompt locally; never persist or
 forward the credential:
 
 ```powershell
-$runAs = Get-Credential
-& 'C:\Program Files\Dawnstrike\bin\dawnstrike_release_launcher.ps1' `
-  -Mode HardenCapture `
-  -CandidateRoot C:\r\dawnstrike-main `
-  -ExpectedSha <accepted-origin-main-sha> `
-  -RuntimeRoot C:\r\dawnstrike-runtime `
-  -StateRoot C:\r\dawnstrike-state `
-  -RunAsCredential $runAs
+C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe `
+  -NoProfile -ExecutionPolicy Bypass -Command {
+    $runAs = Get-Credential
+    & 'C:\Program Files\Dawnstrike\bin\dawnstrike_release_launcher.ps1' `
+      -Mode HardenCapture `
+      -CandidateRoot C:\r\dawnstrike-main `
+      -ExpectedSha <accepted-origin-main-sha> `
+      -RuntimeRoot C:\r\dawnstrike-runtime `
+      -StateRoot C:\r\dawnstrike-state `
+      -RunAsCredential $runAs
+  }
 
-& 'C:\Program Files\Dawnstrike\bin\dawnstrike_release_launcher.ps1' `
+C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe `
+  -NoProfile -ExecutionPolicy Bypass `
+  -File 'C:\Program Files\Dawnstrike\bin\dawnstrike_release_launcher.ps1' `
   -Mode Prepare `
   -CandidateRoot C:\r\dawnstrike-main `
   -ExpectedSha <accepted-origin-main-sha> `
@@ -175,11 +220,13 @@ $runAs = Get-Credential
 ```
 
 ```powershell
-& 'C:\Program Files\Dawnstrike\bin\dawnstrike_release_launcher.ps1' `
+C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe `
+  -NoProfile -ExecutionPolicy Bypass `
+  -File 'C:\Program Files\Dawnstrike\bin\dawnstrike_release_launcher.ps1' `
   -Mode Activate `
   -CandidateRoot C:\r\dawnstrike-main `
   -ExpectedSha <accepted-origin-main-sha> `
-  -MarketDate 2026-08-31 `
+  -MarketDate '<next-open-session-YYYY-MM-DD>' `
   -CiEvidencePath C:\r\dawnstrike-state\evidence\ci.json `
   -SolEvidencePath C:\r\dawnstrike-state\evidence\sol.json `
   -RuntimeRoot C:\r\dawnstrike-runtime `
@@ -210,15 +257,58 @@ Run the same command without `-PreflightOnly`. The tool:
 7. renames the old runtime to its durable rollback checkout and the verified
    stage to the fixed runtime path;
 8. verifies the installed commit/tree/origin while every task remains exactly
-   `Disabled`, re-enables only the originally enabled five tasks, verifies the
-   XML is byte-equivalent to the captured contract, then atomically seals a
-   `COMPLETE` receipt.
+   `Disabled`, seals the pre-rebind task identity and rebind intent in the
+   durable `POST_SWAP` journal before changing the first action;
+9. binds every canonical action to the full pinned Windows PowerShell
+   executable and an exact-SHA launch manifest. Each update must preserve the
+   exact task path, principal, triggers, settings, working directory, runtime
+   root, and durable-state root proven by the sealed scheduler XML;
+10. proves all five disabled actions are the exact candidate-SHA contract,
+    seals the ready-to-enable `PREPARED` receipt, and enters
+    `POST_SWAP_READY` before enabling any task; and
+11. re-enables only the originally enabled five tasks, verifies the exact new
+    Ready contract, then atomically seals a `COMPLETE` receipt. The sealed
+    scheduler backup retains the pre-activation action contract for
+    compensation or rollback.
 
 The two directory renames are individually atomic. If the second rename or
 post-swap verification fails in-process, the tool preserves the failed
 candidate and immediately restores the previous runtime. It never recursively
 deletes a runtime. A crash between renames remains recoverable from the sealed
 `PREPARED` receipt, rollback checkout, and hash-bound Git bundle.
+
+A crash in `PRE_QUIESCE`, before the runtime swap, restores the exact actions
+from the sealed scheduler XML and re-enables that original Ready contract. It
+must never bind the old runtime to the candidate SHA. A crash after the swap
+keeps tasks Disabled until the candidate action rebind and exact contract can
+be proven or the prior runtime/XML pair can be restored.
+
+### Scheduler normalization and journal recovery
+
+The operation journal, not the visible executable count by itself, determines
+which recovery state is admissible:
+
+| Journal phase | Admissible scheduler boundary | Governed recovery |
+| --- | --- | --- |
+| `PRE_QUIESCE` | The sealed pre-activation XML exists; enablement may be partially quiesced. Each action must be exactly either its sealed legacy form or the pinned-executable-only normalization derived from that form, with every non-action XML invariant unchanged. | Restore every exact XML-backed action and the original Ready contract. Do not write the candidate SHA into the old runtime's tasks. Any third action form or XML drift fails closed. |
+| `PRE_SWAP` | All five tasks are `Disabled` and match the sealed pre-rebind contract; the old runtime or the exact staged/rollback rename boundary is provable. | Complete the two-directory swap or compensate to the previous runtime and XML contract. |
+| `POST_SWAP` (rebind intent) | The candidate is installed, the rollback checkout is present, and all five tasks are `Disabled`. Each action must be exactly either its sealed pre-rebind form or its independently derived candidate-SHA form, and all preserved XML sections must match. This is the only phase in which a 1-through-4 partial rebind is admissible. | Verify the installed candidate and exact per-task old-or-target action proof, then idempotently converge every action to the candidate-SHA form or compensate using the previous runtime and sealed XML. Any third form fails closed. |
+| `POST_SWAP_READY` | All five tasks are `Disabled`, all five actions are exactly candidate-SHA-bound, and the journal binds the ready-to-enable `PREPARED` receipt. | Finish a partial enablement, re-prove the exact Ready contract, and seal `COMPLETE`. |
+| `COMPLETE` | All five canonical tasks are `Ready` under the exact candidate action/definition hashes. | Verify and return the existing terminal receipt; do not repeat mutation. |
+
+`POST_SWAP` rebind intent is recovery authority only when the journal, lock
+pair, candidate and previous runtime identities, prepared receipt,
+scheduler-backup manifest, and task contracts all verify together. A fresh
+invocation cannot use that rule to excuse a mixed host state. During recovery,
+the tool compares each disabled task with the two exact allowed action forms
+and proves that `Principal`, `Triggers`, `Settings`, task path, and working
+directory did not change. It does not accept an action merely because it
+contains a plausible SHA or points somewhere under `C:\r`.
+
+Never normalize a task manually with Task Scheduler, `Set-ScheduledTask`, or
+`schtasks`. Those edits would not be journaled, would break the XML/action
+hashes, and can destroy the only deterministic distinction between a partial
+governed rebind and untrusted scheduler drift.
 
 Completed receipts are under:
 
@@ -232,12 +322,30 @@ Scheduler XML evidence is under:
 
 `C:\r\dawnstrike-state\scheduler-backups\runtime-<activation|rollback>-<activation-id>`
 
-The receipt binds the scheduler backup directory and manifest hash. If an
-automatic runtime restore or exact task-definition verification is ambiguous,
-the scripts leave all five tasks disabled when that state can be proven; they
-report the task state as unverified otherwise. If exact disablement cannot be
-proven, both operation locks are deliberately preserved to prevent unattended
-work until operator recovery.
+The pre-swap `PREPARED` receipt binds the prior runtime, task action/definition
+contracts, scheduler-backup directory, and manifest hash. The durable
+`POST_SWAP` journal additionally binds the exact rebind intent and recovery
+lineage while candidate-SHA action rebinding is in progress. The ready-to-enable `PREPARED`
+receipt binds the new disabled candidate-SHA action/definition contracts; only
+the terminal `COMPLETE` receipt asserts restored enablement. No receipt alone
+is authority to enable a task unless its journal phase and live hashes also
+verify.
+
+If an automatic runtime restore or exact task-definition verification is
+ambiguous, the scripts leave all five tasks disabled when that state can be
+proven; they report the task state as unverified otherwise. If exact
+disablement cannot be proven, both operation locks are deliberately preserved
+to prevent unattended work until operator recovery.
+
+For a nonterminal activation, do not delete the journal or either lock, do not
+move a runtime directory, and do not edit or enable a task. Re-run the same
+protected launcher from an elevated administrator PowerShell process with the
+same candidate SHA, market date, evidence paths, and roots. The tool may adopt
+the exact dead-owner lock pair and resume only the journal-authorized phase. If
+it rejects recovery, preserve the journal, prepared/ready receipts, scheduler
+XML and manifest, rollback checkout/bundle, and current task state for review;
+use the rollback command only with the matching verified receipt. An operator
+must not manufacture an all-pinned state to make preflight pass.
 
 Re-running a completed exact activation returns its valid receipt. A partial
 activation fails closed instead of guessing which directory is authoritative.
@@ -246,20 +354,24 @@ After activation, rebind the delayed-SIP task to the exact runtime and only
 enable it with separately hashed, current provider inputs:
 
 ```powershell
-& 'C:\Program Files\Dawnstrike\bin\dawnstrike_release_launcher.ps1' `
-  -Mode RebindCapture `
-  -CandidateRoot C:\r\dawnstrike-main `
-  -ExpectedSha <accepted-origin-main-sha> `
-  -RuntimeRoot C:\r\dawnstrike-runtime `
-  -StateRoot C:\r\dawnstrike-state `
-  -SymbolsManifest <absolute-path> `
-  -SymbolsManifestSha256 <64-lowercase-hex> `
-  -EntitlementReceipt <absolute-path> `
-  -EntitlementReceiptSha256 <64-lowercase-hex> `
-  -SourceConfig <absolute-path> `
-  -SourceConfigSha256 <64-lowercase-hex> `
-  -RunAsCredential $runAs `
-  -EnableCapture
+C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe `
+  -NoProfile -ExecutionPolicy Bypass -Command {
+    $runAs = Get-Credential
+    & 'C:\Program Files\Dawnstrike\bin\dawnstrike_release_launcher.ps1' `
+      -Mode RebindCapture `
+      -CandidateRoot C:\r\dawnstrike-main `
+      -ExpectedSha <accepted-origin-main-sha> `
+      -RuntimeRoot C:\r\dawnstrike-runtime `
+      -StateRoot C:\r\dawnstrike-state `
+      -SymbolsManifest <absolute-path> `
+      -SymbolsManifestSha256 <64-lowercase-hex> `
+      -EntitlementReceipt <absolute-path> `
+      -EntitlementReceiptSha256 <64-lowercase-hex> `
+      -SourceConfig <absolute-path> `
+      -SourceConfigSha256 <64-lowercase-hex> `
+      -RunAsCredential $runAs `
+      -EnableCapture
+  }
 ```
 
 ## Roll back
@@ -267,7 +379,9 @@ enable it with separately hashed, current provider inputs:
 Rollback is permitted from a valid `PREPARED` or `COMPLETE` activation receipt:
 
 ```powershell
-& 'C:\Program Files\Dawnstrike\bin\dawnstrike_release_launcher.ps1' `
+C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe `
+  -NoProfile -ExecutionPolicy Bypass `
+  -File 'C:\Program Files\Dawnstrike\bin\dawnstrike_release_launcher.ps1' `
   -Mode Rollback `
   -CandidateRoot C:\r\dawnstrike-main `
   -ExpectedSha <exact-candidate-sha> `
@@ -295,6 +409,10 @@ reviewed operation under `state_disaster_recovery_runbook.md`.
 
 - Never use an activation receipt to justify Vercel publication.
 - Never activate while any canonical task is running or any daily lock exists.
+- Never use Task Scheduler, `Set-ScheduledTask`, or `schtasks` to normalize,
+  repair, or re-enable a canonical action during activation recovery.
+- Never delete or edit a nonterminal activation journal, lock, ready receipt,
+  scheduler XML backup, rollback checkout, or rollback bundle to force a retry.
 - Never alter task actions to point at a SHA-specific stage or rollback path.
 - Never copy `runtime.env` into a candidate, stage, receipt, or rollback bundle.
 - Never fabricate CI, SOL, market-session, pick, trade, or return evidence.

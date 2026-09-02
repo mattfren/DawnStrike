@@ -19,8 +19,9 @@ cannot support spread, latency, execution-cost, halt, or adjustment research.
 
 ## Safe readiness invocation
 
-Run this from the exact candidate runtime. The command is preview-only unless
-`--execute` is supplied:
+The following command is an offline preview diagnostic only. Run it in a
+disposable evidence root; its output is not production authorization. Never
+add `--execute` or target production state from a checkout invocation:
 
 ```powershell
 py -3.13 scripts/capture_intraday_doctor.py `
@@ -40,10 +41,11 @@ py -3.13 scripts/capture_intraday_doctor.py `
   --env-file C:\r\dawnstrike-state\secrets\runtime.env
 ```
 
-The scheduled task registration script is preview-only by default. Add
-`-Create` only after the exact candidate has passed the doctor and runtime
-cutover gates. It schedules delayed SIP capture at 15:20 Central on weekdays,
-which is 16:20 Eastern, and does not modify existing Dawnstrike tasks. The
+Production capture hardening and rebinding use only the installed release
+launcher's `HardenCapture` and `RebindCapture` modes as documented in
+`runtime_activation_and_rollback.md`. Do not invoke a capture registration
+script or add `-Create` manually. The protected task schedules delayed SIP
+capture at 15:20 Central on weekdays, which is 16:20 Eastern. The
 daily runner generates a write-once expected-session contract for that New
 York market date from the checked-in finite calendar, including holidays and
 early closes; it never reuses a prior day's session file. No credentials or

@@ -1,5 +1,9 @@
 # Windows Task Scheduler Automation
 
+> Historical local automation only. Do not install these tasks on the
+> production host contract or point them at production state. Use
+> `operations/runtime_activation_and_rollback.md` for production.
+
 Use these scripts from the repo root.
 
 Run one pass:

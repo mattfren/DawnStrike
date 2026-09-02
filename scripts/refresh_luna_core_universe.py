@@ -41,6 +41,7 @@ from intraday_scanner.services.luna_core_universe_service import (
 
 MAX_DOWNLOAD_BYTES = 2_000_000
 NDX_SOURCE_ID = "nasdaq-ndx-point-in-time-2026-08-27"
+SPY_SOURCE_ID = "state-street-spy-holdings-proxy-2026-08-24"
 GENERATION_DIRECTORY = "luna_core_universe_generations"
 # The release root anchors trust, but is not a recurring-session gate.  A
 # requested later date is accepted only when the fresh official source still
@@ -622,23 +623,56 @@ def _refresh_locked(
     ndx_artifact: Path | None,
     spy_artifact: Path | None,
     market_date: str,
+    bootstrap_state_street_proxy: bool,
 ) -> dict[str, object]:
     market_date = _normalise_market_date(market_date)
     state_root = state_root.resolve()
     config_root = state_root / "config"
     output_path = config_root / "luna_core_universe.json"
+    if bootstrap_state_street_proxy:
+        if proxy_manifest is not None:
+            raise RuntimeError("State Street bootstrap does not accept an explicit proxy manifest")
+        if os.path.lexists(output_path):
+            raise RuntimeError("State Street bootstrap requires a completely absent active pointer")
     source_path = (proxy_manifest or output_path).resolve()
-    if not source_path.is_file():
-        raise RuntimeError(f"proxy manifest missing: {source_path}")
     prior_output_bytes = output_path.read_bytes() if output_path.is_file() else None
-    wrapper = _read_json(source_path)
-    source_base = source_path.parent
-    try:
-        pointer = json.loads(source_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        pointer = None
-    if isinstance(pointer, dict) and pointer.get("schema_version") == ACTIVE_POINTER_SCHEMA_VERSION:
-        source_base = _active_pointer_target(source_path, pointer).parent
+    proxy_bootstrapped = False
+    if ndx_artifact is not None and market_date != RELEASE_ANCHOR_MARKET_DATE:
+        raise RuntimeError(
+            "later-date NDX refresh requires the authenticated dated source download; "
+            "an explicit artifact has no authenticated date provenance"
+        )
+    if source_path.is_file():
+        wrapper = _read_json(source_path)
+        source_base = source_path.parent
+        try:
+            pointer = json.loads(source_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            pointer = None
+        if (
+            isinstance(pointer, dict)
+            and pointer.get("schema_version") == ACTIVE_POINTER_SCHEMA_VERSION
+        ):
+            source_base = _active_pointer_target(source_path, pointer).parent
+    elif bootstrap_state_street_proxy and proxy_manifest is None:
+        spy_root = _TRUSTED_SOURCE_ROOTS.get(SPY_SOURCE_ID)
+        spy_source_uri = str(spy_root.get("source_uri") or "") if spy_root else ""
+        if not spy_root or spy_source_uri != STATE_STREET_SPY_HOLDINGS_URL:
+            raise RuntimeError("State Street SPY bootstrap trust root is unavailable")
+        wrapper = {
+            "schema_version": "dawnstrike.luna.core_universe_manifest_wrapper.v1",
+            "manifests": [
+                {
+                    "source_id": SPY_SOURCE_ID,
+                    "source_uri": spy_source_uri,
+                    "index_name": "S&P 500",
+                }
+            ],
+        }
+        source_base = config_root
+        proxy_bootstrapped = True
+    else:
+        raise RuntimeError(f"proxy manifest missing: {source_path}")
     children = wrapper.get("manifests")
     if not isinstance(children, list):
         raise RuntimeError("proxy manifest must contain a manifests list")
@@ -655,7 +689,6 @@ def _refresh_locked(
     if len(proxy_children) != 1:
         raise RuntimeError("exactly one existing SPY tracker proxy manifest is required")
 
-    observed_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     ndx_root = _TRUSTED_SOURCE_ROOTS[NDX_SOURCE_ID]
     ndx_url = _source_url(ndx_root, market_date)
     payload = ndx_artifact.read_bytes() if ndx_artifact else _fetch(ndx_url)
@@ -671,6 +704,7 @@ def _refresh_locked(
     spy_payload = (
         spy_artifact.read_bytes() if spy_artifact else _fetch(STATE_STREET_SPY_HOLDINGS_URL)
     )
+    observed_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     ndx_symbols, ndx_attestation = _attest_ndx_payload(payload, market_date=market_date)
     spy_symbols, spy_effective, spy_attestation = _attest_spy_payload(
         spy_payload,
@@ -732,6 +766,19 @@ def _refresh_locked(
             ),
             {},
         )
+        active_spy = next(
+            (
+                child
+                for child in active_wrapper.get("manifests", [])
+                if isinstance(child, dict)
+                and str(child.get("index_name") or child.get("index") or "")
+                .strip()
+                .lower()
+                .replace(" ", "")
+                in {"s&p500", "sp500", "sandp500"}
+            ),
+            {},
+        )
         active_entries = active_ndx.get("source_artifacts")
         active_artifact = active_target.parent / _ndx_artifact_name(market_date)
         active_sha256 = ""
@@ -754,27 +801,75 @@ def _refresh_locked(
                     "",
                 )
             ).lower()
+        active_spy_entries = active_spy.get("source_artifacts")
+        active_spy_artifact = active_target.parent / SPY_ARTIFACT_NAME
+        active_spy_sha256 = ""
+        if isinstance(active_spy_entries, list) and active_spy_entries:
+            spy_entry = active_spy_entries[0]
+            if isinstance(spy_entry, dict):
+                if isinstance(spy_entry.get("path"), str):
+                    active_spy_artifact = Path(str(spy_entry["path"]))
+                    if not active_spy_artifact.is_absolute():
+                        active_spy_artifact = (active_target.parent / active_spy_artifact).resolve()
+                active_spy_sha256 = str(spy_entry.get("sha256") or "").lower()
+        if not active_spy_sha256:
+            active_spy_sha256 = str(
+                next(
+                    (
+                        item.get("raw_artifact_sha256")
+                        for item in installed_contract.get("source_artifacts") or []
+                        if isinstance(item, dict) and item.get("source_id") == spy_source_id
+                    ),
+                    "",
+                )
+            ).lower()
         return {
             "status": "READY",
             "manifest": str(output_path),
             "ndx_artifact": str(active_artifact),
             "ndx_sha256": active_sha256,
             "ndx_member_count": len(active_ndx.get("members", [])),
+            "spy_artifact": str(active_spy_artifact),
+            "spy_sha256": active_spy_sha256,
+            "spy_member_count": len(active_spy.get("members", [])),
+            "spy_effective_date": active_spy.get("effective_date"),
             "observed_at": installed_contract.get("observed_at") or observed_at,
             "generation_id": generation_id,
             "generation_key": generation_key,
             "market_date": market_date,
             "reused": True,
+            "proxy_bootstrapped": False,
         }
     generations_root = config_root / GENERATION_DIRECTORY
     generations_root.mkdir(parents=True, exist_ok=True)
     generation_dir = generations_root / generation_id
-    generation_dir.mkdir()
+    if os.path.lexists(generation_dir):
+        if active_pointer is not None:
+            active_generation_target = _active_pointer_target(output_path, active_pointer)
+            if (
+                active_pointer.get("generation_id") == generation_id
+                or active_generation_target.parent.resolve() == generation_dir.resolve()
+            ):
+                raise RuntimeError("refusing to replace an active core-universe generation")
+        orphan = generations_root / (
+            f"{generation_id}.orphan."
+            f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}."
+            f"{uuid.uuid4().hex[:8]}"
+        )
+        try:
+            os.replace(generation_dir, orphan)
+        except OSError as exc:
+            raise RuntimeError(
+                f"could not preserve inactive core-universe generation: {generation_dir}"
+            ) from exc
     final_artifact = generation_dir / _ndx_artifact_name(market_date)
     final_spy_artifact = generation_dir / SPY_ARTIFACT_NAME
     candidate_path = generation_dir / "luna_core_universe.json"
     pointer_swapped = False
+    generation_created = False
     try:
+        generation_dir.mkdir()
+        generation_created = True
         # The generation is inactive until its pointer is swapped.  Both raw
         # bytes and manifest are written under that generation, then the exact
         # final paths are validated before activation.
@@ -846,7 +941,7 @@ def _refresh_locked(
             _replace_bytes(output_path, prior_output_bytes)
         elif pointer_swapped and prior_output_bytes is None and output_path.exists():
             output_path.unlink()
-        if not pointer_swapped:
+        if generation_created and not pointer_swapped:
             shutil.rmtree(generation_dir, ignore_errors=True)
         raise
     return {
@@ -855,12 +950,16 @@ def _refresh_locked(
         "ndx_artifact": str(final_artifact),
         "ndx_sha256": hashlib.sha256(payload).hexdigest(),
         "spy_artifact": str(final_spy_artifact),
+        "spy_sha256": hashlib.sha256(spy_payload).hexdigest(),
+        "spy_member_count": len(spy_child["members"]),
+        "spy_effective_date": spy_effective,
         "ndx_member_count": len(ndx_child["members"]),
         "observed_at": observed_at,
         "generation_id": generation_id,
         "generation_key": generation_key,
         "market_date": market_date,
         "reused": False,
+        "proxy_bootstrapped": proxy_bootstrapped,
     }
 
 
@@ -871,6 +970,7 @@ def refresh(
     ndx_artifact: Path | None,
     spy_artifact: Path | None = None,
     market_date: str | None = None,
+    bootstrap_state_street_proxy: bool = False,
 ) -> dict[str, object]:
     market_date = _normalise_market_date(market_date)
     state_root = state_root.resolve()
@@ -881,6 +981,7 @@ def refresh(
             ndx_artifact=ndx_artifact,
             spy_artifact=spy_artifact,
             market_date=market_date,
+            bootstrap_state_street_proxy=bootstrap_state_street_proxy,
         )
 
 
@@ -891,6 +992,14 @@ def main() -> int:
     parser.add_argument("--ndx-artifact", default=None)
     parser.add_argument("--spy-artifact", default=None)
     parser.add_argument("--market-date", required=True)
+    parser.add_argument(
+        "--bootstrap-state-street-proxy",
+        action="store_true",
+        help=(
+            "Bootstrap a missing core-universe pointer from the pinned official "
+            "State Street SPY holdings source; never replaces an existing pointer"
+        ),
+    )
     args = parser.parse_args()
     try:
         result = refresh(
@@ -899,6 +1008,7 @@ def main() -> int:
             ndx_artifact=Path(args.ndx_artifact) if args.ndx_artifact else None,
             spy_artifact=Path(args.spy_artifact) if args.spy_artifact else None,
             market_date=args.market_date,
+            bootstrap_state_street_proxy=args.bootstrap_state_street_proxy,
         )
     except (OSError, RuntimeError, ValueError) as exc:
         print(json.dumps({"status": "DATA_UNAVAILABLE", "error": str(exc)}, indent=2))

@@ -13,15 +13,83 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
-SCHEMA = "dawnstrike.vercel_publication_journal.v1"
-COMPENSATED_SCHEMA = "dawnstrike.vercel_publication_journal.v2"
-COMPENSATION_SCHEMA = "dawnstrike.vercel_publication_compensation.v1"
+LEGACY_SCHEMA = "dawnstrike.vercel_publication_journal.v1"
+LEGACY_COMPENSATED_SCHEMA = "dawnstrike.vercel_publication_journal.v2"
+SCHEMA = "dawnstrike.vercel_publication_journal.v3"
+COMPENSATED_SCHEMA = "dawnstrike.vercel_publication_journal.v4"
+LEGACY_COMPENSATION_SCHEMA = "dawnstrike.vercel_publication_compensation.v1"
+COMPENSATION_SCHEMA = "dawnstrike.vercel_publication_compensation.v2"
 LOCK_SCHEMA = "dawnstrike.vercel_publication_lock.v1"
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
+DNS_LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 PHASES = {"PRE_MUTATION": 0, "POST_ALIASES": 1, "COMPLETE": 2, "COMPENSATED": 3}
+ARCHIVE_INTENT_SCHEMA = "dawnstrike.vercel_publication_archive_intent.v1"
+ARCHIVE_INTENT_KEYS = {
+    "archive_relative_path",
+    "broker_execution_enabled",
+    "candidate_market_date",
+    "compensation_relative_path",
+    "compensation_sha256",
+    "intent_self_sha256",
+    "journal_sha256",
+    "project_id",
+    "project_name",
+    "provider_scope",
+    "research_only",
+    "schema_version",
+    "status",
+}
+CANONICAL_JOURNAL_NAME = "vercel-publication-operation.json"
+PUBLICATION_LOCK_NAME = "vercel-publication-operation.lock"
+COMPENSATED_ARCHIVE = re.compile(r"^vercel-publication-operation-compensated-([0-9a-f]{64})\.json$")
+COMPENSATED_ARCHIVE_INTENT = re.compile(
+    r"^vercel-publication-operation-compensated-([0-9a-f]{64})\.intent\.json$"
+)
+
+# A one-time migration may roll back only to this exact pre-source-manifest
+# deployment.  It is not a general stale-readiness exception: every immutable
+# provider/source/build/asset identity and the only accepted clock-staleness
+# failure tuple is pinned here.  Once the aliases move away from this
+# deployment the exception is unreachable.
+PINNED_LEGACY_ATTESTATION = {
+    "schema_version": "dawnstrike.vercel_pinned_legacy_attestation.v1",
+    "deployment_id": "dpl_H7UQb8hWkwxLVbNwSM1BAQq1t9g8",
+    "deployment_url": (
+        "https://dawnstrike-command-center-x3-jte5klucs-mattfrens-projects.vercel.app"
+    ),
+    "source_sha": "5190ab6beb1b81556bfc70640c43a4cff48bd1f8",  # pragma: allowlist secret
+    "source_tree": "5ad147c8813de9f841655f27c30b3aa59ccac1d6",  # pragma: allowlist secret
+    "market_date": "2026-08-28",
+    "build_id": "1476e74cf607c056c5f0",
+    "build_sha": "1476e74cf607c056c5f070eecfff0632507145c4a37f9186eb1ad9b0ea4bf8b7",  # pragma: allowlist secret  # noqa: E501
+    "build_manifest_sha256": (
+        "38165e0f80c5044b8cf18b664098dd90ee3f4bac83ee4ab685ab47e6e545bdbe"  # pragma: allowlist secret  # noqa: E501
+    ),
+    "release_manifest_sha256": (
+        "6fd7b2e4701e9ef0f4b0c4989e0088f493bfdc1a919f6fff1bb8fea1766308e1"  # pragma: allowlist secret  # noqa: E501
+    ),
+    "asset_count": 18,
+    "total_bytes": 3_286_836,
+    "file_hashes_sha256": (
+        "335bcff3e359ced371356eeed4a9373253968650d77c6d0ecb6da723fbf53f9c"  # pragma: allowlist secret  # noqa: E501
+    ),
+    "readiness_reason": "public_integrity_check_failed",
+    "readiness_failed_checks": [
+        "calendar_freshness_stale_by_clock",
+        "market_date_stale",
+    ],
+    "source_manifest_http_status": 404,
+}
+PINNED_LEGACY_ATTESTATION_SHA256 = "6846a6dd24bc905fee86d2b1c541140d2da3420cc5101c57c0793959b9efaa30"  # pragma: allowlist secret  # noqa: E501
+PINNED_LEGACY_ALIASES = {
+    "https://dawnstrike-command-center-x3.vercel.app",
+    "https://dawnstrike-command-center-x3-mattfrens-projects.vercel.app",
+    "https://dawnstrike-command-center-x3-mattfren-mattfrens-projects.vercel.app",
+}
 KEYS = {
     "schema_version",
     "operation",
@@ -122,6 +190,61 @@ def canonical_json(value: Any) -> bytes:
     ).encode("utf-8")
 
 
+def _canonical_https_origin(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{label} is invalid")
+    parsed = urlsplit(value)
+    host = parsed.hostname
+    if (
+        parsed.scheme != "https"
+        or not host
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.port is not None
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+        or value != f"https://{host}"
+    ):
+        raise ValueError(f"{label} is not a canonical HTTPS origin")
+    try:
+        host.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{label} host is not ASCII") from exc
+    labels = host.split(".")
+    if len(host) > 253 or any(not DNS_LABEL.fullmatch(part) for part in labels):
+        raise ValueError(f"{label} host is invalid")
+    return host
+
+
+def _vercel_deployment_origin(
+    value: Any,
+    label: str,
+    *,
+    production_aliases: set[str],
+    project_name: str | None = None,
+    provider_scope: str | None = None,
+) -> None:
+    host = _canonical_https_origin(value, label)
+    if not host.endswith(".vercel.app") or value in production_aliases:
+        raise ValueError(f"{label} is not an immutable Vercel deployment origin")
+    if project_name is None or provider_scope is None:
+        return
+    prefix = f"{project_name}-"
+    suffix = f"-{provider_scope}.vercel.app"
+    if not host.startswith(prefix) or not host.endswith(suffix):
+        raise ValueError(f"{label} does not match the Vercel project and scope")
+    generated_label = host[len(prefix) : -len(suffix)]
+    if not DNS_LABEL.fullmatch(generated_label):
+        raise ValueError(f"{label} generated deployment label is invalid")
+
+
+if hashlib.sha256(canonical_json(PINNED_LEGACY_ATTESTATION)).hexdigest() != (
+    PINNED_LEGACY_ATTESTATION_SHA256
+):
+    raise RuntimeError("pinned legacy Vercel attestation hash is inconsistent")
+
+
 def _safe_relative(value: Any) -> None:
     if not isinstance(value, str) or not value or "\\" in value:
         raise ValueError("relative path is invalid")
@@ -138,6 +261,17 @@ def _utc(value: Any) -> None:
         datetime.fromisoformat(text + "+00:00")
     except ValueError as exc:
         raise ValueError("recorded_at_utc is invalid") from exc
+
+
+def _market_date(value: Any, label: str) -> None:
+    if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        raise ValueError(f"{label} is invalid")
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError(f"{label} is not a real calendar date") from exc
+    if parsed.strftime("%Y-%m-%d") != value:
+        raise ValueError(f"{label} is not canonical")
 
 
 def _identity(value: Any, field: str) -> None:
@@ -163,9 +297,7 @@ def _result_authorization(value: Any, expected_market_date: str) -> None:
     if not isinstance(report, dict):
         raise ValueError("production result account-session report is missing")
     _hash(value.get("account_session_report_sha256"), "account_session_report_sha256")
-    if hashlib.sha256(canonical_json(report)).hexdigest() != value[
-        "account_session_report_sha256"
-    ]:
+    if hashlib.sha256(canonical_json(report)).hexdigest() != value["account_session_report_sha256"]:
         raise ValueError("production result account-session report hash mismatch")
     expected_identity = {
         "account_id": "alphaops_v5_simulated",
@@ -195,10 +327,7 @@ def _result_authorization(value: Any, expected_market_date: str) -> None:
         or not isinstance(series, list)
         or len(series) != 1
         or not isinstance(series[0], dict)
-        or any(
-            series[0].get(field) != expected
-            for field, expected in expected_identity.items()
-        )
+        or any(series[0].get(field) != expected for field, expected in expected_identity.items())
         or series[0].get("status") != "COMPLETE"
         or series[0].get("market_date") != expected_market_date
         or series[0].get("code_sha") != value.get("source_sha")
@@ -218,7 +347,11 @@ def _result_authorization(value: Any, expected_market_date: str) -> None:
 
 
 def _artifact_proofs(
-    result: dict[str, Any], *, preview_url: str, aliases: list[str], build_sha: str,
+    result: dict[str, Any],
+    *,
+    preview_url: str,
+    aliases: list[str],
+    build_sha: str,
     public_artifact_root_sha256: str,
 ) -> None:
     keys = {"endpoint", "build_sha", "asset_count", "total_bytes", "file_hashes_sha256"}
@@ -256,7 +389,7 @@ def _artifact_proofs(
             raise ValueError("cross-alias governed artifact proof tuples diverge")
 
 
-ALIAS_KEYS = {
+LEGACY_ALIAS_KEYS = {
     "alias",
     "deployment_id",
     "deployment_url",
@@ -270,6 +403,7 @@ ALIAS_KEYS = {
     "release_manifest_sha256",
     "artifact_proof",
 }
+ALIAS_KEYS = LEGACY_ALIAS_KEYS | {"rollback_contract"}
 ARTIFACT_PROOF_KEYS = {
     "endpoint",
     "build_sha",
@@ -277,6 +411,17 @@ ARTIFACT_PROOF_KEYS = {
     "total_bytes",
     "file_hashes_sha256",
 }
+ROLLBACK_CONTRACT_KEYS = {
+    "schema_version",
+    "mode",
+    "health_status",
+    "readiness_status",
+    "readiness_http_status",
+    "readiness_reason",
+    "readiness_failed_checks",
+    "source_proof",
+}
+SOURCE_PROOF_KEYS = {"kind", "sha256"}
 
 
 def _single_artifact_proof(value: Any, endpoint: str) -> None:
@@ -292,19 +437,101 @@ def _single_artifact_proof(value: Any, endpoint: str) -> None:
         raise ValueError("governed artifact proof byte count is invalid")
 
 
-def _alias(value: Any) -> None:
-    if not isinstance(value, dict) or set(value) != ALIAS_KEYS:
+def _rollback_contract(value: Any, alias: dict[str, Any]) -> None:
+    if not isinstance(value, dict) or set(value) != ROLLBACK_CONTRACT_KEYS:
+        raise ValueError("prior alias rollback contract keys are not exact")
+    if value["schema_version"] != "dawnstrike.vercel_rollback_target.v1":
+        raise ValueError("prior alias rollback contract schema is invalid")
+    source_proof = value["source_proof"]
+    if not isinstance(source_proof, dict) or set(source_proof) != SOURCE_PROOF_KEYS:
+        raise ValueError("prior alias source proof keys are not exact")
+    _hash(source_proof["sha256"], "prior alias source proof sha256")
+    if value["health_status"] != alias["health_status"]:
+        raise ValueError("prior alias rollback health status diverges")
+    if value["readiness_status"] != alias["readiness_status"]:
+        raise ValueError("prior alias rollback readiness status diverges")
+    if value["readiness_http_status"] != alias["readiness_http_status"]:
+        raise ValueError("prior alias rollback readiness HTTP status diverges")
+    if not isinstance(value["readiness_reason"], str) or not value["readiness_reason"]:
+        raise ValueError("prior alias rollback readiness reason is invalid")
+    failed_checks = value["readiness_failed_checks"]
+    if not isinstance(failed_checks, list) or any(
+        not isinstance(item, str) or not item for item in failed_checks
+    ):
+        raise ValueError("prior alias rollback failed-check tuple is invalid")
+
+    if value["mode"] == "READY_SOURCE_MANIFEST":
+        if (
+            value["health_status"] != "alive"
+            or value["readiness_status"] != "ready"
+            or value["readiness_http_status"] != 200
+            or failed_checks
+            or source_proof["kind"] != "deployed_source_manifest"
+            or source_proof["sha256"] != alias["source_manifest_sha256"]
+            or alias["source_manifest_sha256"] == EMPTY_SHA256
+        ):
+            raise ValueError("ready rollback contract is not exact")
+        return
+
+    if value["mode"] != "PINNED_LEGACY_CLOCK_STALE":
+        raise ValueError("prior alias rollback mode is invalid")
+    expected = PINNED_LEGACY_ATTESTATION
+    if (
+        alias["alias"] not in PINNED_LEGACY_ALIASES
+        or alias["deployment_id"] != expected["deployment_id"]
+        or alias["deployment_url"] != expected["deployment_url"]
+        or alias["health_status"] != "alive"
+        or alias["readiness_status"] != "not_ready"
+        or alias["readiness_http_status"] != 503
+        or alias["source_sha"] != expected["source_sha"]
+        or alias["source_tree"] != expected["source_tree"]
+        or alias["source_manifest_sha256"] != EMPTY_SHA256
+        or alias["build_manifest_sha256"] != expected["build_manifest_sha256"]
+        or alias["release_manifest_sha256"] != expected["release_manifest_sha256"]
+        or alias["artifact_proof"]["build_sha"] != expected["build_sha"]
+        or alias["artifact_proof"]["asset_count"] != expected["asset_count"]
+        or alias["artifact_proof"]["total_bytes"] != expected["total_bytes"]
+        or alias["artifact_proof"]["file_hashes_sha256"] != expected["file_hashes_sha256"]
+        or value["readiness_reason"] != expected["readiness_reason"]
+        or failed_checks != expected["readiness_failed_checks"]
+        or source_proof["kind"] != "pinned_legacy_attestation"
+        or source_proof["sha256"] != PINNED_LEGACY_ATTESTATION_SHA256
+    ):
+        raise ValueError("pinned legacy rollback contract is not the authorized tuple")
+
+
+def _alias(
+    value: Any,
+    *,
+    current: bool,
+    production_aliases: set[str] | None = None,
+    project_name: str | None = None,
+    provider_scope: str | None = None,
+) -> None:
+    expected_keys = ALIAS_KEYS if current else LEGACY_ALIAS_KEYS
+    if not isinstance(value, dict) or set(value) != expected_keys:
         raise ValueError("prior alias keys are not exact")
-    if not isinstance(value["alias"], str) or not value["alias"].startswith("https://"):
+    if current:
+        _canonical_https_origin(value["alias"], "prior alias")
+    elif not isinstance(value["alias"], str) or not value["alias"].startswith("https://"):
         raise ValueError("prior alias is invalid")
     if not isinstance(value["deployment_id"], str) or not value["deployment_id"]:
         raise ValueError("prior alias deployment ID is invalid")
     if not isinstance(value["deployment_url"], str) or not value["deployment_url"]:
         raise ValueError("prior alias deployment URL is invalid")
-    if value["health_status"] != "alive":
-        raise ValueError("prior alias health status is invalid")
-    if value["readiness_status"] != "ready" or value["readiness_http_status"] != 200:
-        raise ValueError("prior alias readiness status is invalid")
+    if current:
+        _vercel_deployment_origin(
+            value["deployment_url"],
+            "prior alias deployment URL",
+            production_aliases=production_aliases or {value["alias"]},
+            project_name=project_name,
+            provider_scope=provider_scope,
+        )
+    if not current:
+        if value["health_status"] != "alive":
+            raise ValueError("prior alias health status is invalid")
+        if value["readiness_status"] != "ready" or value["readiness_http_status"] != 200:
+            raise ValueError("prior alias readiness status is invalid")
     _identity(value["source_sha"], "prior alias source SHA")
     _identity(value["source_tree"], "prior alias source tree")
     for field in (
@@ -313,11 +540,17 @@ def _alias(value: Any) -> None:
         "release_manifest_sha256",
     ):
         _hash(value[field], f"prior alias {field}")
-    _single_artifact_proof(value["artifact_proof"], value["alias"])
+    _single_artifact_proof(
+        value["artifact_proof"], value["deployment_url"] if current else value["alias"]
+    )
+    if current:
+        _rollback_contract(value["rollback_contract"], value)
 
 
-def _rollback_evidence(value: Any) -> None:
-    keys = {
+def _rollback_evidence(
+    value: Any, *, current: bool, production_aliases: set[str] | None = None
+) -> None:
+    legacy_keys = {
         "alias",
         "expected_deployment_id",
         "expected_deployment_url",
@@ -334,9 +567,12 @@ def _rollback_evidence(value: Any) -> None:
         "release_manifest_sha256",
         "artifact_proof",
     }
+    keys = legacy_keys | ({"rollback_contract"} if current else set())
     if not isinstance(value, dict) or set(value) != keys:
         raise ValueError("rollback evidence keys are not exact")
-    if not isinstance(value["alias"], str) or not value["alias"].startswith("https://"):
+    if current:
+        _canonical_https_origin(value["alias"], "rollback evidence alias")
+    elif not isinstance(value["alias"], str) or not value["alias"].startswith("https://"):
         raise ValueError("rollback evidence alias is invalid")
     for field in ("expected_deployment_id", "observed_deployment_id"):
         if not isinstance(value[field], str) or not value[field]:
@@ -344,16 +580,23 @@ def _rollback_evidence(value: Any) -> None:
     for field in ("expected_deployment_url", "observed_deployment_url"):
         if not isinstance(value[field], str) or not value[field].startswith("https://"):
             raise ValueError(f"rollback evidence {field} is invalid")
+        if current:
+            _vercel_deployment_origin(
+                value[field],
+                f"rollback evidence {field}",
+                production_aliases=production_aliases or {value["alias"]},
+            )
     if value["restored"] is not True:
         raise ValueError("rollback evidence is not restored")
     if value["observed_deployment_id"] != value["expected_deployment_id"]:
         raise ValueError("rollback evidence observed deployment mismatch")
     if value["observed_deployment_url"] != value["expected_deployment_url"]:
         raise ValueError("rollback evidence observed URL mismatch")
-    if value["health_status"] != "alive":
-        raise ValueError("rollback evidence health status is invalid")
-    if value["readiness_status"] != "ready" or value["readiness_http_status"] != 200:
-        raise ValueError("rollback evidence readiness status is invalid")
+    if not current:
+        if value["health_status"] != "alive":
+            raise ValueError("rollback evidence health status is invalid")
+        if value["readiness_status"] != "ready" or value["readiness_http_status"] != 200:
+            raise ValueError("rollback evidence readiness status is invalid")
     _identity(value["source_sha"], "rollback source SHA")
     _identity(value["source_tree"], "rollback source tree")
     for field in (
@@ -362,7 +605,18 @@ def _rollback_evidence(value: Any) -> None:
         "release_manifest_sha256",
     ):
         _hash(value[field], f"rollback {field}")
-    _single_artifact_proof(value["artifact_proof"], value["alias"])
+    _single_artifact_proof(
+        value["artifact_proof"], value["expected_deployment_url"] if current else value["alias"]
+    )
+    if current:
+        alias = {
+            key: value[key]
+            for key in LEGACY_ALIAS_KEYS
+            if key not in {"deployment_id", "deployment_url"}
+        }
+        alias["deployment_id"] = value["expected_deployment_id"]
+        alias["deployment_url"] = value["expected_deployment_url"]
+        _rollback_contract(value["rollback_contract"], alias)
 
 
 def validate(
@@ -379,8 +633,15 @@ def validate(
     if not isinstance(value, dict) or set(value) not in (KEYS, AUTHORIZATION_KEYS):
         raise ValueError("journal keys are not exact")
     has_authorization = set(value) == AUTHORIZATION_KEYS
-    if value["schema_version"] not in {SCHEMA, COMPENSATED_SCHEMA}:
+    schema = value["schema_version"]
+    if schema not in {
+        LEGACY_SCHEMA,
+        LEGACY_COMPENSATED_SCHEMA,
+        SCHEMA,
+        COMPENSATED_SCHEMA,
+    }:
         raise ValueError("journal schema is invalid")
+    current_schema = schema in {SCHEMA, COMPENSATED_SCHEMA}
     if value["operation"] != "vercel_publication":
         raise ValueError("journal operation is invalid")
     phase = value["phase"]
@@ -390,10 +651,13 @@ def validate(
         or value["sequence"] != PHASES[phase]
     ):
         raise ValueError("journal phase sequence is invalid")
-    if phase == "COMPENSATED" and value["schema_version"] != COMPENSATED_SCHEMA:
-        raise ValueError("compensation requires the v2 schema")
-    if phase != "COMPENSATED" and value["schema_version"] != SCHEMA:
-        raise ValueError("non-compensated journal requires the v1 schema")
+    if phase == "COMPENSATED" and schema not in {
+        LEGACY_COMPENSATED_SCHEMA,
+        COMPENSATED_SCHEMA,
+    }:
+        raise ValueError("compensation requires a compensated journal schema")
+    if phase != "COMPENSATED" and schema not in {LEGACY_SCHEMA, SCHEMA}:
+        raise ValueError("non-compensated journal requires an active journal schema")
     for field in ("candidate_source_sha", "candidate_source_tree"):
         _identity(value[field], field)
     for field in (
@@ -415,38 +679,58 @@ def validate(
         raise ValueError("project name is invalid")
     if not isinstance(value["provider_scope"], str) or not value["provider_scope"]:
         raise ValueError("provider scope is invalid")
-    if (
-        not isinstance(value["production_aliases"], list)
-        or not value["production_aliases"]
-        or value["production_aliases"] != sorted(set(value["production_aliases"]))
-    ):
+    if not isinstance(value["production_aliases"], list) or not value["production_aliases"]:
         raise ValueError("production aliases must be sorted and unique")
     if any(
         not isinstance(item, str) or not item.startswith("https://")
         for item in value["production_aliases"]
     ):
         raise ValueError("production aliases are invalid")
+    if value["production_aliases"] != sorted(set(value["production_aliases"])):
+        raise ValueError("production aliases must be sorted and unique")
+    production_aliases = set(value["production_aliases"])
+    if current_schema:
+        for alias in value["production_aliases"]:
+            _canonical_https_origin(alias, "production alias")
     if not isinstance(value["prior_aliases"], list) or len(value["prior_aliases"]) != len(
         value["production_aliases"]
     ):
         raise ValueError("prior aliases are incomplete")
     for expected, item in zip(value["production_aliases"], value["prior_aliases"], strict=True):
-        _alias(item)
+        _alias(
+            item,
+            current=current_schema,
+            production_aliases=production_aliases,
+            project_name=value["project_name"] if current_schema else None,
+            provider_scope=value["provider_scope"] if current_schema else None,
+        )
         if item["alias"] != expected:
             raise ValueError("prior alias order or identity is invalid")
+    if current_schema:
+        rollback_modes = {item["rollback_contract"]["mode"] for item in value["prior_aliases"]}
+        if "PINNED_LEGACY_CLOCK_STALE" in rollback_modes:
+            if rollback_modes != {"PINNED_LEGACY_CLOCK_STALE"}:
+                raise ValueError("pinned legacy rollback targets cannot be mixed")
+            if set(value["production_aliases"]) != PINNED_LEGACY_ALIASES:
+                raise ValueError("pinned legacy rollback aliases are not the governed set")
     if not isinstance(value["candidate_preview_url"], str) or not value[
         "candidate_preview_url"
     ].startswith("https://"):
         raise ValueError("candidate preview URL is invalid")
+    if current_schema:
+        _vercel_deployment_origin(
+            value["candidate_preview_url"],
+            "candidate preview URL",
+            production_aliases=production_aliases,
+            project_name=value["project_name"],
+            provider_scope=value["provider_scope"],
+        )
     if (
         not isinstance(value["candidate_preview_deployment_id"], str)
         or not value["candidate_preview_deployment_id"]
     ):
         raise ValueError("candidate preview deployment ID is invalid")
-    if not isinstance(value["candidate_market_date"], str) or not re.fullmatch(
-        r"\d{4}-\d{2}-\d{2}", value["candidate_market_date"]
-    ):
-        raise ValueError("candidate market date is invalid")
+    _market_date(value["candidate_market_date"], "candidate market date")
     if has_authorization:
         if value["expected_market_date"] != value["candidate_market_date"]:
             raise ValueError("journal expected market date mismatch")
@@ -481,25 +765,31 @@ def validate(
         if value["production_result_sha256"] != EMPTY_SHA256 or value["result_payload"] is not None:
             raise ValueError("PRE_MUTATION carries result proof")
     elif phase == "COMPENSATED":
-        if (value["promoted_deployment_id"] is None) != (
-            value["promoted_deployment_url"] is None
-        ):
+        if (value["promoted_deployment_id"] is None) != (value["promoted_deployment_url"] is None):
             raise ValueError("compensated promoted identity is incomplete")
         if value["promoted_deployment_id"] is not None:
-            if not isinstance(value["promoted_deployment_id"], str) or not value[
-                "promoted_deployment_id"
-            ]:
+            if (
+                not isinstance(value["promoted_deployment_id"], str)
+                or not value["promoted_deployment_id"]
+            ):
                 raise ValueError("promoted deployment ID is invalid")
             if not isinstance(value["promoted_deployment_url"], str) or not value[
                 "promoted_deployment_url"
             ].startswith("https://"):
                 raise ValueError("promoted deployment URL is invalid")
+            if current_schema:
+                _vercel_deployment_origin(
+                    value["promoted_deployment_url"],
+                    "promoted deployment URL",
+                    production_aliases=production_aliases,
+                    project_name=value["project_name"],
+                    provider_scope=value["provider_scope"],
+                )
         result = value["result_payload"]
         if not isinstance(result, dict) or set(result) != COMPENSATED_RESULT_KEYS:
             raise ValueError("COMPENSATED journal result tombstone is invalid")
         if value["production_result_sha256"] == EMPTY_SHA256 or (
-            hashlib.sha256(canonical_json(result)).hexdigest()
-            != value["production_result_sha256"]
+            hashlib.sha256(canonical_json(result)).hexdigest() != value["production_result_sha256"]
         ):
             raise ValueError("COMPENSATED journal result tombstone hash mismatch")
         expected_tombstone = {
@@ -508,9 +798,7 @@ def validate(
             "market_date": value["candidate_market_date"],
             "candidate_source_sha": value["candidate_source_sha"],
             "candidate_source_tree": value["candidate_source_tree"],
-            "candidate_preview_deployment_id": value[
-                "candidate_preview_deployment_id"
-            ],
+            "candidate_preview_deployment_id": value["candidate_preview_deployment_id"],
             "compensation_sha256": value["compensation_sha256"],
             "research_only": True,
             "broker_execution_enabled": False,
@@ -527,6 +815,14 @@ def validate(
             "promoted_deployment_url"
         ].startswith("https://"):
             raise ValueError("promoted deployment URL is missing")
+        if current_schema:
+            _vercel_deployment_origin(
+                value["promoted_deployment_url"],
+                "promoted deployment URL",
+                production_aliases=production_aliases,
+                project_name=value["project_name"],
+                provider_scope=value["provider_scope"],
+            )
     if phase in {"POST_ALIASES", "COMPLETE"}:
         if (
             not isinstance(value["result_payload"], dict)
@@ -560,15 +856,9 @@ def validate(
             "production_deployment_id": value["promoted_deployment_id"],
             "vercel_source_manifest_sha256": value["candidate_manifest_sha256"],
             "vercel_package_manifest_sha256": value["candidate_package_manifest_sha256"],
-            "authorized_build_manifest_sha256": value[
-                "candidate_build_manifest_sha256"
-            ],
-            "authorized_release_manifest_sha256": value[
-                "candidate_release_manifest_sha256"
-            ],
-            "public_artifact_root_sha256": value[
-                "candidate_public_artifact_root_sha256"
-            ],
+            "authorized_build_manifest_sha256": value["candidate_build_manifest_sha256"],
+            "authorized_release_manifest_sha256": value["candidate_release_manifest_sha256"],
+            "public_artifact_root_sha256": value["candidate_public_artifact_root_sha256"],
             "toolchain_identity_sha256": value["toolchain_identity_sha256"],
             "allow_degraded": False,
             "promoted": True,
@@ -651,13 +941,17 @@ def validate(
         if hashlib.sha256(compensation_raw).hexdigest() != value["compensation_sha256"]:
             raise ValueError("compensation receipt raw hash mismatch")
         compensation = validate_compensation(compensation_raw)
-        if compensation["candidate_source_sha"] != value["candidate_source_sha"] or compensation[
-            "candidate_source_tree"
-        ] != value["candidate_source_tree"]:
+        if current_schema != (compensation["schema_version"] == COMPENSATION_SCHEMA):
+            raise ValueError("compensation receipt schema family mismatch")
+        if (
+            compensation["candidate_source_sha"] != value["candidate_source_sha"]
+            or compensation["candidate_source_tree"] != value["candidate_source_tree"]
+        ):
             raise ValueError("compensation candidate identity mismatch")
-        if compensation["candidate_preview_deployment_id"] != value[
-            "candidate_preview_deployment_id"
-        ]:
+        if (
+            compensation["candidate_preview_deployment_id"]
+            != value["candidate_preview_deployment_id"]
+        ):
             raise ValueError("compensation candidate deployment mismatch")
         if compensation["prior_aliases"] != value["prior_aliases"]:
             raise ValueError("compensation prior aliases mismatch")
@@ -675,11 +969,13 @@ def validate_compensation(raw: bytes) -> dict[str, Any]:
         raise ValueError(f"invalid strict compensation JSON: {exc}") from exc
     if not isinstance(value, dict) or set(value) != COMPENSATION_KEYS:
         raise ValueError("compensation keys are not exact")
+    schema = value["schema_version"]
     if (
-        value["schema_version"] != COMPENSATION_SCHEMA
+        schema not in {LEGACY_COMPENSATION_SCHEMA, COMPENSATION_SCHEMA}
         or value["status"] != "COMPENSATED"
     ):
         raise ValueError("compensation schema or status is invalid")
+    current_schema = schema == COMPENSATION_SCHEMA
     if value["operation"] != "vercel_publication":
         raise ValueError("compensation operation is invalid")
     _identity(value["candidate_source_sha"], "candidate_source_sha")
@@ -691,8 +987,28 @@ def validate_compensation(raw: bytes) -> dict[str, Any]:
         raise ValueError("compensation candidate deployment ID is invalid")
     if not isinstance(value["prior_aliases"], list) or not value["prior_aliases"]:
         raise ValueError("compensation prior aliases are invalid")
+    compensation_aliases = [
+        item.get("alias") if isinstance(item, dict) else None for item in value["prior_aliases"]
+    ]
+    if current_schema:
+        if any(not isinstance(alias, str) for alias in compensation_aliases):
+            raise ValueError("compensation prior aliases are invalid")
+        if compensation_aliases != sorted(set(compensation_aliases)):
+            raise ValueError("compensation prior aliases must be sorted and unique")
+    compensation_alias_set = set(compensation_aliases)
     for item in value["prior_aliases"]:
-        _alias(item)
+        _alias(
+            item,
+            current=current_schema,
+            production_aliases=compensation_alias_set,
+        )
+    if current_schema:
+        rollback_modes = {item["rollback_contract"]["mode"] for item in value["prior_aliases"]}
+        if "PINNED_LEGACY_CLOCK_STALE" in rollback_modes and (
+            rollback_modes != {"PINNED_LEGACY_CLOCK_STALE"}
+            or {item["alias"] for item in value["prior_aliases"]} != PINNED_LEGACY_ALIASES
+        ):
+            raise ValueError("compensation pinned legacy aliases are not exact")
     promoted_id = value["promoted_deployment_id"]
     promoted_url = value["promoted_deployment_url"]
     if (promoted_id is None) != (promoted_url is None):
@@ -704,18 +1020,28 @@ def validate_compensation(raw: bytes) -> dict[str, Any]:
         or not promoted_url.startswith("https://")
     ):
         raise ValueError("compensation promoted identity is invalid")
+    if current_schema and promoted_id is not None:
+        _vercel_deployment_origin(
+            promoted_url,
+            "compensation promoted deployment URL",
+            production_aliases=compensation_alias_set,
+        )
     evidence = value["rollback_evidence"]
     if not isinstance(evidence, list) or len(evidence) != len(value["prior_aliases"]):
         raise ValueError("compensation rollback evidence is incomplete")
     for item, prior in zip(evidence, value["prior_aliases"], strict=True):
-        _rollback_evidence(item)
+        _rollback_evidence(
+            item,
+            current=current_schema,
+            production_aliases=compensation_alias_set,
+        )
         if item["alias"] != prior["alias"]:
             raise ValueError("compensation rollback evidence order is invalid")
         if item["expected_deployment_id"] != prior["deployment_id"]:
             raise ValueError("compensation rollback expected deployment mismatch")
         if item["expected_deployment_url"] != prior["deployment_url"]:
             raise ValueError("compensation rollback expected URL mismatch")
-        for field in (
+        comparison_fields = (
             "health_status",
             "readiness_status",
             "readiness_http_status",
@@ -725,7 +1051,8 @@ def validate_compensation(raw: bytes) -> dict[str, Any]:
             "build_manifest_sha256",
             "release_manifest_sha256",
             "artifact_proof",
-        ):
+        ) + (("rollback_contract",) if current_schema else ())
+        for field in comparison_fields:
             if item[field] != prior[field]:
                 raise ValueError(f"compensation rollback evidence mismatch: {field}")
     if value["rollback_status"] != "ROLLED_BACK":
@@ -807,6 +1134,248 @@ def _atomic_write(path: Path, raw: bytes, *, exclusive: bool = False) -> None:
             os.unlink(temporary)
 
 
+def validate_archive_intent(raw: bytes) -> dict[str, Any]:
+    try:
+        value = json.loads(raw.decode("utf-8"), object_pairs_hook=_pairs)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError(f"invalid strict archive-intent JSON: {exc}") from exc
+    if not isinstance(value, dict) or set(value) != ARCHIVE_INTENT_KEYS:
+        raise ValueError("archive-intent keys are not exact")
+    if value["schema_version"] != ARCHIVE_INTENT_SCHEMA or value["status"] != "ARCHIVE_REQUIRED":
+        raise ValueError("archive-intent schema or status is invalid")
+    for field in ("journal_sha256", "compensation_sha256", "intent_self_sha256"):
+        _hash(value[field], f"archive intent {field}")
+    _market_date(value["candidate_market_date"], "archive-intent market date")
+    for field in ("project_id", "project_name", "provider_scope"):
+        if not isinstance(value[field], str) or not value[field]:
+            raise ValueError(f"archive-intent {field} is invalid")
+    _safe_relative(value["archive_relative_path"])
+    _safe_relative(value["compensation_relative_path"])
+    if value["research_only"] is not True or value["broker_execution_enabled"] is not False:
+        raise ValueError("archive-intent safety boundary is invalid")
+    unsigned = dict(value)
+    claimed = unsigned.pop("intent_self_sha256")
+    if hashlib.sha256(canonical_json(unsigned)).hexdigest() != claimed:
+        raise ValueError("archive-intent self hash mismatch")
+    if raw != canonical_json(value):
+        raise ValueError("archive-intent raw bytes are not canonical JSON")
+    return value
+
+
+def _path_entry_exists(path: Path) -> bool:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _history_artifact_paths(history_root: Path, state_root: Path) -> list[Path]:
+    _contained(history_root, state_root)
+    if not _path_entry_exists(history_root):
+        return []
+    root_stat = history_root.lstat()
+    if _is_reparse(history_root) or not stat.S_ISDIR(root_stat.st_mode):
+        raise ValueError("publication history root must be a regular non-reparse directory")
+
+    artifacts: list[Path] = []
+    pending: list[tuple[Path, int]] = [(history_root, 0)]
+    entry_count = 0
+    while pending:
+        directory, depth = pending.pop()
+        if depth > 8:
+            raise ValueError("publication history nesting exceeds the governed bound")
+        for item in directory.iterdir():
+            entry_count += 1
+            if entry_count > 10_000:
+                raise ValueError("publication history entry count exceeds the governed bound")
+            info = item.lstat()
+            if _is_reparse(item):
+                raise ValueError("publication history contains a reparse entry")
+            if stat.S_ISDIR(info.st_mode):
+                pending.append((item, depth + 1))
+                continue
+            lower = item.name.lower()
+            relevant = lower == CANONICAL_JOURNAL_NAME or (
+                lower.startswith("vercel-publication-operation-compensated-")
+                and lower.endswith(".json")
+            )
+            if relevant:
+                if not stat.S_ISREG(info.st_mode):
+                    raise ValueError("publication history artifact is not a regular file")
+                artifacts.append(item)
+                if len(artifacts) > 1_024:
+                    raise ValueError(
+                        "publication history artifact count exceeds the governed bound"
+                    )
+    return sorted(artifacts, key=lambda item: item.relative_to(history_root).as_posix())
+
+
+def _assert_history_journal_identity(
+    value: dict[str, Any],
+    *,
+    market_date: str,
+    project_id: str,
+    project_name: str,
+    provider_scope: str,
+    production_aliases: list[str],
+) -> None:
+    if value["candidate_market_date"] != market_date:
+        raise ValueError("publication journal dated-directory identity is invalid")
+    if (
+        value["project_id"] != project_id
+        or value["project_name"] != project_name
+        or value["provider_scope"] != provider_scope
+    ):
+        raise ValueError("publication journal belongs to a foreign provider boundary")
+    if value["production_aliases"] != production_aliases:
+        raise ValueError("publication journal aliases do not match the governed set")
+
+
+def verify_history(
+    *,
+    history_root: Path,
+    state_root: Path,
+    project_id: str,
+    project_name: str,
+    provider_scope: str,
+    production_aliases: list[str],
+    require_no_lock: bool,
+) -> dict[str, Any]:
+    """Verify durable publication history without provider or runtime access."""
+
+    state_root = state_root.resolve(strict=True)
+    history_root = Path(os.path.abspath(history_root))
+    _contained(history_root, state_root)
+    if not project_id or not project_name or not provider_scope:
+        raise ValueError("governed publication project identity is incomplete")
+    if not production_aliases or production_aliases != sorted(set(production_aliases)):
+        raise ValueError("governed production aliases must be sorted and unique")
+    for alias in production_aliases:
+        _canonical_https_origin(alias, "governed production alias")
+
+    lock_path = history_root / PUBLICATION_LOCK_NAME
+    if require_no_lock and _path_entry_exists(lock_path):
+        raise ValueError("a Vercel publication lock exists")
+    paths = _history_artifact_paths(history_root, state_root)
+    raw_hashes: dict[str, str] = {}
+    canonical_count = 0
+    complete_count = 0
+    compensated_count = 0
+    archives: dict[tuple[str, str], tuple[Path, dict[str, Any]]] = {}
+    intents: dict[tuple[str, str], tuple[Path, dict[str, Any]]] = {}
+
+    for path in paths:
+        relative = path.relative_to(history_root)
+        if len(relative.parts) != 2:
+            raise ValueError("publication history artifact is outside canonical dated layout")
+        market_date, name = relative.parts
+        _market_date(market_date, "publication history directory date")
+        raw = _read_regular(path)
+        raw_hash = hashlib.sha256(raw).hexdigest()
+        relative_text = relative.as_posix()
+        raw_hashes[relative_text] = raw_hash
+
+        if name.lower() == CANONICAL_JOURNAL_NAME:
+            if name != CANONICAL_JOURNAL_NAME:
+                raise ValueError("canonical publication journal filename casing is invalid")
+            value = validate(
+                raw,
+                state_root=state_root,
+                journal_path=path,
+                runtime_root=None,
+            )
+            _assert_history_journal_identity(
+                value,
+                market_date=market_date,
+                project_id=project_id,
+                project_name=project_name,
+                provider_scope=provider_scope,
+                production_aliases=production_aliases,
+            )
+            if value["phase"] not in {"COMPLETE", "COMPENSATED"}:
+                raise ValueError("publication history contains a nonterminal journal")
+            canonical_count += 1
+            complete_count += int(value["phase"] == "COMPLETE")
+            compensated_count += int(value["phase"] == "COMPENSATED")
+            continue
+
+        archive_match = COMPENSATED_ARCHIVE.fullmatch(name)
+        intent_match = COMPENSATED_ARCHIVE_INTENT.fullmatch(name)
+        if archive_match:
+            journal_hash = archive_match.group(1)
+            if raw_hash != journal_hash:
+                raise ValueError("compensated archive filename hash mismatch")
+            value = validate(
+                raw,
+                state_root=state_root,
+                journal_path=path,
+                runtime_root=None,
+            )
+            _assert_history_journal_identity(
+                value,
+                market_date=market_date,
+                project_id=project_id,
+                project_name=project_name,
+                provider_scope=provider_scope,
+                production_aliases=production_aliases,
+            )
+            if value["phase"] != "COMPENSATED":
+                raise ValueError("only a compensated journal may be archived")
+            archives[(market_date, journal_hash)] = (path, value)
+            continue
+        if intent_match:
+            journal_hash = intent_match.group(1)
+            intent = validate_archive_intent(raw)
+            if (
+                intent["journal_sha256"] != journal_hash
+                or intent["candidate_market_date"] != market_date
+                or intent["project_id"] != project_id
+                or intent["project_name"] != project_name
+                or intent["provider_scope"] != provider_scope
+            ):
+                raise ValueError("compensated archive intent identity is invalid")
+            intents[(market_date, journal_hash)] = (path, intent)
+            continue
+        raise ValueError("compensated publication history filename is invalid")
+
+    if set(archives) != set(intents):
+        raise ValueError("compensated archive and intent pairs are incomplete")
+    for archive_identity, (archive_path, journal) in archives.items():
+        _, intent = intents[archive_identity]
+        expected_archive_relative = archive_path.relative_to(state_root).as_posix()
+        if (
+            intent["archive_relative_path"] != expected_archive_relative
+            or intent["compensation_relative_path"] != journal["compensation_relative_path"]
+            or intent["compensation_sha256"] != journal["compensation_sha256"]
+        ):
+            raise ValueError("compensated archive does not match its durable intent")
+
+    paths_after = _history_artifact_paths(history_root, state_root)
+    if [item.relative_to(history_root).as_posix() for item in paths_after] != list(raw_hashes):
+        raise ValueError("publication history artifact set changed during verification")
+    for path in paths_after:
+        relative_text = path.relative_to(history_root).as_posix()
+        if hashlib.sha256(_read_regular(path)).hexdigest() != raw_hashes[relative_text]:
+            raise ValueError("publication history artifact changed during verification")
+    if require_no_lock and _path_entry_exists(lock_path):
+        raise ValueError("a Vercel publication lock appeared during history verification")
+
+    rows = "".join(f"{relative}\0{raw_hashes[relative]}\n" for relative in sorted(raw_hashes))
+    return {
+        "schema_version": "dawnstrike.vercel_publication_history_verification.v1",
+        "status": "PASS",
+        "journal_count": canonical_count,
+        "complete_count": complete_count,
+        "compensated_count": compensated_count,
+        "archive_count": len(archives),
+        "intent_count": len(intents),
+        "history_contract_sha256": hashlib.sha256(rows.encode()).hexdigest(),
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+
+
 @contextmanager
 def _publication_os_gate(path: Path, state_root: Path):
     """Serialize stale-owner adoption and release across processes.
@@ -853,11 +1422,7 @@ def _process_start_time_utc(pid: int) -> str:
         import psutil  # type: ignore[import-not-found]
 
         created = psutil.Process(pid).create_time()
-        return (
-            datetime.fromtimestamp(created, tz=timezone.utc)
-            .isoformat()
-            .replace("+00:00", "Z")
-        )
+        return datetime.fromtimestamp(created, tz=timezone.utc).isoformat().replace("+00:00", "Z")
     except Exception:
         # Windows' process start API is deliberately avoided here because the
         # lock still fails closed for a live owner; dead-owner adoption only
@@ -886,9 +1451,7 @@ def _process_owner_is_live(pid: int, expected_start_time_utc: str) -> bool:
         except (psutil.AccessDenied, OSError):
             return True
         observed = (
-            datetime.fromtimestamp(created, tz=timezone.utc)
-            .isoformat()
-            .replace("+00:00", "Z")
+            datetime.fromtimestamp(created, tz=timezone.utc).isoformat().replace("+00:00", "Z")
         )
         return observed == expected_start_time_utc
     except ImportError:
@@ -929,14 +1492,9 @@ def _validate_lock(value: dict[str, Any]) -> None:
         raise ValueError("publication lock owner is invalid")
     if type(value["pid"]) is not int or value["pid"] <= 0:
         raise ValueError("publication lock PID is invalid")
-    if not isinstance(value["process_start_time_utc"], str) or not value[
-        "process_start_time_utc"
-    ]:
+    if not isinstance(value["process_start_time_utc"], str) or not value["process_start_time_utc"]:
         raise ValueError("publication lock process start is invalid")
-    if not isinstance(value["candidate_market_date"], str) or not re.fullmatch(
-        r"\d{4}-\d{2}-\d{2}", value["candidate_market_date"]
-    ):
-        raise ValueError("publication lock market date is invalid")
+    _market_date(value["candidate_market_date"], "publication lock market date")
     _safe_relative(value["journal_path"])
     _utc(value["acquired_at_utc"])
     unsigned = dict(value)
@@ -1010,9 +1568,7 @@ def acquire_lock(
             )
             if owner_is_live:
                 raise ValueError("publication lock is held by a live owner") from None
-            stale = path.with_name(
-                f"{path.name}.stale-{os.getpid()}-{os.urandom(8).hex()}"
-            )
+            stale = path.with_name(f"{path.name}.stale-{os.getpid()}-{os.urandom(8).hex()}")
             os.replace(path, stale)
             try:
                 _atomic_write(path, raw, exclusive=True)
@@ -1105,6 +1661,14 @@ def transition(
         raise ValueError("journal prior raw hash mismatch")
     if value["operation"] != prior["operation"]:
         raise ValueError("journal operation changed")
+    prior_is_current = prior["schema_version"] in {SCHEMA, COMPENSATED_SCHEMA}
+    expected_schema = (
+        (COMPENSATED_SCHEMA if value["phase"] == "COMPENSATED" else SCHEMA)
+        if prior_is_current
+        else (LEGACY_COMPENSATED_SCHEMA if value["phase"] == "COMPENSATED" else LEGACY_SCHEMA)
+    )
+    if value["schema_version"] != expected_schema:
+        raise ValueError("journal schema family changed")
     if value["phase"] != "COMPENSATED":
         expected = PHASES[prior["phase"]] + 1
         if value["sequence"] != expected or PHASES.get(value["phase"]) != expected:
@@ -1160,6 +1724,14 @@ def main() -> int:
     verify.add_argument("path", type=Path)
     verify.add_argument("--state-root", required=True, type=Path)
     verify.add_argument("--runtime-root", required=True, type=Path)
+    history_parser = subs.add_parser("verify-history")
+    history_parser.add_argument("--history-root", required=True, type=Path)
+    history_parser.add_argument("--state-root", required=True, type=Path)
+    history_parser.add_argument("--project-id", required=True)
+    history_parser.add_argument("--project-name", required=True)
+    history_parser.add_argument("--provider-scope", required=True)
+    history_parser.add_argument("--production-alias", required=True, action="append")
+    history_parser.add_argument("--require-no-lock", action="store_true")
     seal_parser = subs.add_parser("seal")
     seal_parser.add_argument("input", type=Path)
     seal_parser.add_argument("output", type=Path)
@@ -1190,7 +1762,19 @@ def main() -> int:
     release_parser.add_argument("--pid", required=True, type=int)
     args = parser.parse_args()
     result: dict[str, Any]
-    if args.command == "verify":
+    if args.command == "verify-history":
+        result = {
+            "payload": verify_history(
+                history_root=args.history_root,
+                state_root=args.state_root,
+                project_id=args.project_id,
+                project_name=args.project_name,
+                provider_scope=args.provider_scope,
+                production_aliases=args.production_alias,
+                require_no_lock=args.require_no_lock,
+            )
+        }
+    elif args.command == "verify":
         _contained(args.path, args.state_root)
         raw = _read_regular(args.path)
         result = {

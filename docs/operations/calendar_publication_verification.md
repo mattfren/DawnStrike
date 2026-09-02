@@ -41,14 +41,19 @@ The expected date and due time are explicit inputs so an unattended caller
 cannot silently treat a weekend, holiday, or pre-finalize window as stale:
 
 ```powershell
-py scripts\verify_calendar_publication.py `
+$sha = '<exact-current-origin-main-sha>'
+& 'C:\Program Files\Dawnstrike\Python313\python.exe' -I -B -S `
+  C:\r\dawnstrike-runtime\scripts\dawnstrike_python_bootstrap.py `
+  --release-root C:\r\dawnstrike-runtime `
+  --expected-sha $sha `
+  --script C:\r\dawnstrike-runtime\scripts\verify_calendar_publication.py -- `
   --root C:\r\dawnstrike-runtime\build\public `
-  --expected-source-sha (git -C C:\r\dawnstrike-runtime rev-parse HEAD) `
-  --expected-market-date 2026-08-19 `
+  --expected-source-sha $sha `
+  --expected-market-date <expected-YYYY-MM-DD> `
   --deployment-url https://dawnstrike-command-center-x3.vercel.app
 ```
 
-For a pre-finalize check, add `--due-at 2026-08-20T17:30:00-05:00` and expect
+For a pre-finalize check, add `--due-at <YYYY-MM-DDT17:30:00-05:00>` and expect
 `NOT_DUE` until the Daily Finalize owner has run.
 
 ## Calendar pipeline and timing audit
@@ -67,7 +72,10 @@ Daily Finalize 17:30, and Weekly Training Monday 21:00 America/Chicago. The
 Calendar publication owner is `Dawnstrike 10of10 Daily Finalize`; upstream
 research tasks do not own Vercel publication.
 
-## 2026-08-20 read-only evidence
+## Historical 2026-08-20 read-only evidence
+
+The identities below are an immutable historical snapshot, not current
+production proof or an authorization to replay that date.
 
 The active runtime was clean at
 `be64a84e02bedd805bc27ea8121de7b2b4dc2300`. Its latest completed publication

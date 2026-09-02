@@ -1,6 +1,14 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)][ValidateSet('Prepare', 'HardenCapture', 'Activate', 'RebindCapture', 'Rollback')][string]$Mode,
+    [Parameter(Mandatory = $true)][ValidateSet(
+        'Prepare',
+        'HardenCapture',
+        'Activate',
+        'RebindCapture',
+        'Rollback',
+        'BootstrapUniverse',
+        'RecoverPublication'
+    )][string]$Mode,
     [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedSha,
     [Parameter(Mandatory = $true)][string]$CandidateRoot,
     [string]$MarketDate = '',
@@ -26,6 +34,13 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+if (
+    [string]$PSVersionTable.PSEdition -cne 'Desktop' -or
+    [int]$PSVersionTable.PSVersion.Major -ne 5 -or
+    [int]$PSVersionTable.PSVersion.Minor -ne 1
+) {
+    throw 'The Dawnstrike release launcher requires Windows PowerShell 5.1 Desktop.'
+}
 
 $script:DawnstrikeReleaseLauncherPath = 'C:\Program Files\Dawnstrike\bin\dawnstrike_release_launcher.ps1'
 $script:DawnstrikeReleaseGitPath = 'C:\Program Files\Git\cmd\git.exe'
@@ -172,6 +187,45 @@ function Get-DawnstrikeLauncherGitDirectory {
     return [IO.Path]::GetFullPath((Join-Path $Root $value))
 }
 
+function Assert-DawnstrikeLauncherEntryPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$RelativePath
+    )
+
+    $rootFull = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+    $normalized = $RelativePath.Replace('/', '\')
+    if (
+        [IO.Path]::IsPathRooted($RelativePath) -or
+        $normalized -match '(^|\\)\.\.?($|\\)'
+    ) {
+        throw 'Trusted release entry path is unsafe.'
+    }
+    $path = [IO.Path]::GetFullPath((Join-Path $rootFull $normalized))
+    $prefix = $rootFull + '\'
+    if (-not $path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Trusted release entry escapes the candidate root.'
+    }
+    $cursor = $rootFull
+    $segments = @($path.Substring($prefix.Length) -split '\\')
+    for ($index = 0; $index -lt $segments.Count; $index++) {
+        $segment = [string]$segments[$index]
+        if ([string]::IsNullOrWhiteSpace($segment)) {
+            throw 'Trusted release entry path contains an empty component.'
+        }
+        $cursor = Join-Path $cursor $segment
+        $item = Get-Item -LiteralPath $cursor -Force -ErrorAction Stop
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Trusted release entry path contains a reparse point.'
+        }
+        if ($index -lt ($segments.Count - 1) -and -not $item.PSIsContainer) {
+            throw 'Trusted release entry parent is not a regular directory.'
+        }
+    }
+    return $path
+}
+
 function Assert-DawnstrikeLauncherCandidate {
     [CmdletBinding()]
     param(
@@ -238,11 +292,7 @@ function Open-DawnstrikeLauncherEntry {
         [Parameter(Mandatory = $true)][string]$RelativePath
     )
 
-    $path = [IO.Path]::GetFullPath((Join-Path $Root $RelativePath))
-    $prefix = $Root.TrimEnd('\') + '\'
-    if (-not $path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
-        throw 'Trusted release entry escapes the candidate root.'
-    }
+    $path = Assert-DawnstrikeLauncherEntryPath -Root $Root -RelativePath $RelativePath
     $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
     if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw 'Trusted release entry is not a regular file.'
@@ -289,6 +339,24 @@ $candidateTree = (Invoke-DawnstrikeLauncherGit -Root $candidate -Arguments @('re
 if ($candidateTree -notmatch '^[0-9a-f]{40}$') {
     throw 'Trusted release launcher could not resolve the exact candidate tree.'
 }
+$lunaCoreEntries = @()
+if ($Mode -eq 'BootstrapUniverse') {
+    $treeText = Invoke-DawnstrikeLauncherGit `
+        -Root $candidate `
+        -Arguments @('ls-tree', '-r', '--name-only', $ExpectedSha, '--', 'intraday_scanner')
+    $lunaCoreEntries = @(
+        $treeText -split "`n" | Where-Object { $_ -match '\.py$' } | ForEach-Object {
+            $relative = ([string]$_).Trim().Replace('/', '\')
+            if ($relative -notmatch '^intraday_scanner\\[A-Za-z0-9._\\/-]+\.py$') {
+                throw 'Trusted release launcher found an unsafe Luna core source path.'
+            }
+            $relative
+        }
+    )
+    if ($lunaCoreEntries.Count -eq 0) {
+        throw 'Trusted release launcher found no committed Luna core Python sources.'
+    }
+}
 $modeEntries = switch ($Mode) {
     'Prepare' { @('scripts\prepare_dawnstrike_state.ps1', 'scripts\activate_dawnstrike_runtime.ps1') }
     'HardenCapture' {
@@ -311,6 +379,33 @@ $modeEntries = switch ($Mode) {
         )
     }
     'Rollback' { @('scripts\rollback_dawnstrike_runtime.ps1', 'scripts\activate_dawnstrike_runtime.ps1') }
+    'BootstrapUniverse' {
+        @(
+            'scripts\bootstrap_luna_core_universe.ps1',
+            'scripts\protected_operation_contract.ps1',
+            'scripts\dawnstrike_process_runner.ps1',
+            'scripts\dawnstrike_job_process.ps1',
+            'scripts\runtime_activation_lock.ps1',
+            'scripts\invoke_dawnstrike_stage.ps1',
+            'scripts\dawnstrike_python_bootstrap.py',
+            'scripts\refresh_luna_core_universe.py'
+        ) + $lunaCoreEntries
+    }
+    'RecoverPublication' {
+        @(
+            'scripts\recover_vercel_publication.ps1',
+            'scripts\protected_operation_contract.ps1',
+            'scripts\runtime_activation_lock.ps1',
+            'scripts\import_dawnstrike_environment.ps1',
+            'scripts\publish_vercel_public.ps1',
+            'scripts\dawnstrike_job_process.ps1',
+            'scripts\dawnstrike_process_runner.ps1',
+            'scripts\dawnstrike_python_bootstrap.py',
+            'scripts\vercel_source_contract.ps1',
+            'scripts\vercel_toolchain_contract.py',
+            'scripts\vercel_publication_journal.py'
+        )
+    }
 }
 $relativeEntries = @($modeEntries | Select-Object -Unique)
 $entryLocks = @()
@@ -343,6 +438,13 @@ try {
         if ([string]::IsNullOrWhiteSpace($MarketDate) -or [string]::IsNullOrWhiteSpace($CiEvidencePath) -or [string]::IsNullOrWhiteSpace($SolEvidencePath)) {
             throw 'Activate mode requires MarketDate, CiEvidencePath, and SolEvidencePath.'
         }
+        if (-not $PreflightOnly) {
+            $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+            $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+            if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+                throw 'Activate mode requires an elevated administrator process.'
+            }
+        }
         & $entryLocks[0].path `
             -ExpectedSha $ExpectedSha `
             -MarketDate $MarketDate `
@@ -355,7 +457,8 @@ try {
             -BackupRetention $BackupRetention `
             -ProcessTimeoutSeconds $ProcessTimeoutSeconds `
             -RunAsCredential $RunAsCredential `
-            -PreflightOnly:$PreflightOnly
+            -PreflightOnly:$PreflightOnly `
+            -AllowLegacyCanonicalExecute
     }
     elseif ($Mode -eq 'RebindCapture') {
         if (
@@ -383,7 +486,7 @@ try {
             -Enable:$EnableCapture `
             -ProcessTimeoutSeconds $ProcessTimeoutSeconds
     }
-    else {
+    elseif ($Mode -eq 'Rollback') {
         if ([string]::IsNullOrWhiteSpace($ActivationReceipt)) {
             throw 'Rollback mode requires ActivationReceipt.'
         }
@@ -396,6 +499,37 @@ try {
             -BackupRoot $BackupRoot `
             -ProcessTimeoutSeconds $ProcessTimeoutSeconds `
             -RunAsCredential $RunAsCredential
+    }
+    elseif ($Mode -eq 'BootstrapUniverse') {
+        if ([string]::IsNullOrWhiteSpace($MarketDate)) {
+            throw 'BootstrapUniverse mode requires MarketDate.'
+        }
+        $mountedRuntime = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $RuntimeRoot).Path).TrimEnd('\')
+        if (-not [string]::Equals($mountedRuntime, $candidate, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'BootstrapUniverse mode requires CandidateRoot to be the exact mounted runtime.'
+        }
+        & $entryLocks[0].path `
+            -ExpectedSha $ExpectedSha `
+            -MarketDate $MarketDate `
+            -RuntimeRoot $mountedRuntime `
+            -StateRoot $StateRoot `
+            -ProtectedLauncherGrant
+    }
+    else {
+        if ([string]::IsNullOrWhiteSpace($MarketDate)) {
+            throw 'RecoverPublication mode requires MarketDate.'
+        }
+        $mountedRuntime = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $RuntimeRoot).Path).TrimEnd('\')
+        if (-not [string]::Equals($mountedRuntime, $candidate, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'RecoverPublication mode requires CandidateRoot to be the exact mounted runtime.'
+        }
+        & $entryLocks[0].path `
+            -ExpectedSha $ExpectedSha `
+            -MarketDate $MarketDate `
+            -RuntimeRoot $mountedRuntime `
+            -StateRoot $StateRoot `
+            -ProjectId 'prj_5pef3EZF1u5YadebEz3dFjnkWOXy' `
+            -ProtectedLauncherGrant
     }
 }
 finally {

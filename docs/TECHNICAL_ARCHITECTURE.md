@@ -254,6 +254,8 @@ Empirical scoring is held back until enough real audited days exist.
 
 ## Windows Task Scheduler
 
-`scripts/register_alphaops_tasks.ps1` registers the active scheduled workflow.
+The administrator-installed release launcher journals and installs the active
+exact-SHA five-task workflow; checkout registration scripts are not a
+production entry point.
 The tasks run least privilege, interactive token, weekdays only, with no broker
 order execution.

@@ -3,6 +3,11 @@
 Dawnstrike is research/watchlist software only. It does not place orders or hold
 broker credentials.
 
+This page describes local research CLI workflows. Production tasks, runtime
+activation, recovery, and rollback are governed exclusively by
+`operations/runtime_activation_and_rollback.md`; do not point these manual
+commands at the production runtime or state.
+
 ## Morning Flow
 
 1. Run source doctor:
@@ -59,9 +64,9 @@ py -m intraday_scanner.cli alpha-cycle --config config\web_sources.yaml --db-pat
 
 Windows scheduled-task registration:
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\register_alphaops_tasks.ps1
-```
+Do not register or repair production tasks from this checkout. Use the
+administrator-installed release launcher and the exact-SHA activation journal
+described in `operations/runtime_activation_and_rollback.md`.
 
 ## Outcomes
 

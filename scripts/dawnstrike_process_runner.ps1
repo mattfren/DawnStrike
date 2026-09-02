@@ -44,7 +44,8 @@ function Assert-DawnstrikeProcessSourceBoundToHead {
     param(
         [Parameter(Mandatory = $true)][string]$ReleaseRoot,
         [string]$ExpectedSha = "",
-        [string]$EntryScript = ""
+        [string]$EntryScript = "",
+        [string[]]$AdditionalSourceFiles = @()
     )
 
     $root = [System.IO.Path]::GetFullPath($ReleaseRoot).TrimEnd('\')
@@ -197,13 +198,38 @@ function Assert-DawnstrikeProcessSourceBoundToHead {
         if ($LASTEXITCODE -ne 0) {
             throw "Scheduled Python release differs from exact HEAD."
         }
-        foreach ($relative in @(
+        $sourceFiles = @(
             ".gitattributes",
             "scripts/dawnstrike_process_runner.ps1",
             "scripts/dawnstrike_job_process.ps1",
             "scripts/runtime_activation_lock.ps1",
             "scripts/dawnstrike_python_bootstrap.py"
-        )) {
+        )
+        foreach ($additional in @($AdditionalSourceFiles)) {
+            if ([string]::IsNullOrWhiteSpace($additional)) {
+                throw "Scheduled Python additional source path is empty."
+            }
+            $normalizedAdditional = $additional.Replace('\', '/')
+            if (
+                [System.IO.Path]::IsPathRooted($additional) -or
+                $normalizedAdditional.StartsWith('/') -or
+                $normalizedAdditional -match '(^|/)\.\.(/|$)'
+            ) {
+                throw "Scheduled Python additional source path is unsafe."
+            }
+            $additionalPath = [System.IO.Path]::GetFullPath(
+                (Join-Path $root ($normalizedAdditional.Replace('/', '\')))
+            )
+            $rootPrefix = $root.TrimEnd('\') + '\'
+            if (-not $additionalPath.StartsWith(
+                $rootPrefix,
+                [System.StringComparison]::OrdinalIgnoreCase
+            )) {
+                throw "Scheduled Python additional source path escapes the exact release root."
+            }
+            $sourceFiles += $normalizedAdditional
+        }
+        foreach ($relative in @($sourceFiles | Select-Object -Unique)) {
             $relative = $relative.Replace('\', '/')
             $path = Join-Path $root ($relative.Replace('/', '\'))
             Assert-DawnstrikeSharedLockNoReparse $path "Scheduled Python helper"
@@ -248,6 +274,93 @@ function Assert-DawnstrikeProcessSourceBoundToHead {
     }
 }
 
+function Get-DawnstrikeLunaCoreSourceFiles {
+    [CmdletBinding()]
+    param(
+        [ValidatePattern('^$|^[0-9a-f]{40}$')][string]$ExpectedSha = ''
+    )
+
+    $releaseRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')).TrimEnd('\')
+    $packageRoot = Join-Path $releaseRoot 'intraday_scanner'
+    Assert-DawnstrikeSharedLockNoReparse $packageRoot 'Luna core Python source root'
+    $releasePrefix = $releaseRoot + '\'
+    $diskSources = @()
+    foreach ($item in @(
+        Get-ChildItem -LiteralPath $packageRoot -Recurse -File -Filter '*.py' -Force |
+            Sort-Object -Property FullName
+    )) {
+        Assert-DawnstrikeSharedLockNoReparse $item.FullName 'Luna core Python source'
+        $full = [IO.Path]::GetFullPath($item.FullName)
+        if (-not $full.StartsWith($releasePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Luna core Python source escaped the exact release root.'
+        }
+        $relative = $full.Substring($releasePrefix.Length).Replace('\', '/')
+        if ($relative -notmatch '^intraday_scanner/[A-Za-z0-9._/-]+\.py$') {
+            throw 'Luna core Python source path is unsafe.'
+        }
+        $diskSources += $relative
+    }
+
+    # The committed tree, not mutable filesystem enumeration, is authoritative.
+    # Returning every HEAD-listed Python path means a file hidden during the
+    # directory walk is still required and opened by the caller's admission
+    # pass before Python can import anything.
+    $git = [string](Get-DawnstrikeApprovedGit).path
+    $treeish = if ($ExpectedSha) { $ExpectedSha.ToLowerInvariant() } else { 'HEAD' }
+    $gitArgs = @(
+        '-c', 'core.autocrlf=true', '-c', 'core.fsmonitor=false',
+        '-c', 'core.untrackedCache=false', '-c', 'core.hooksPath=NUL',
+        '-c', 'core.attributesFile=NUL', '-c', 'protocol.ext.allow=never',
+        '-C', $releaseRoot
+    )
+    $savedGitEnvironment = @{}
+    foreach ($entry in @(Get-ChildItem Env: | Where-Object { $_.Name -like 'GIT_*' })) {
+        $savedGitEnvironment[[string]$entry.Name] = [string]$entry.Value
+        Remove-Item -LiteralPath ('Env:' + [string]$entry.Name) -ErrorAction SilentlyContinue
+    }
+    try {
+        $env:GIT_CONFIG_NOSYSTEM = '1'
+        $env:GIT_CONFIG_SYSTEM = 'NUL'
+        $env:GIT_CONFIG_GLOBAL = 'NUL'
+        $env:GIT_TERMINAL_PROMPT = '0'
+        $env:GIT_OPTIONAL_LOCKS = '0'
+        $env:GIT_NO_REPLACE_OBJECTS = '1'
+        $env:GIT_ATTR_NOSYSTEM = '1'
+        $rawTree = ((& $git @gitArgs ls-tree -r --name-only -z $treeish -- intraday_scanner 2>$null) -join '')
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Luna core Python source tree could not be derived from exact Git.'
+        }
+    }
+    finally {
+        foreach ($entry in @(Get-ChildItem Env: | Where-Object { $_.Name -like 'GIT_*' })) {
+            Remove-Item -LiteralPath ('Env:' + [string]$entry.Name) -ErrorAction SilentlyContinue
+        }
+        foreach ($name in $savedGitEnvironment.Keys) {
+            Set-Item -LiteralPath ('Env:' + $name) -Value $savedGitEnvironment[$name]
+        }
+    }
+    $headSources = @(
+        $rawTree -split "`0" | Where-Object { $_ } | ForEach-Object {
+            $relative = [string]$_
+            if ($relative -match '\.py$') {
+                if ($relative -notmatch '^intraday_scanner/[A-Za-z0-9._/-]+\.py$') {
+                    throw 'Exact Git contains an unsafe Luna core Python source path.'
+                }
+                $relative
+            }
+        }
+    )
+    if ($headSources.Count -eq 0) {
+        throw 'Exact Git contains no Luna core Python source files.'
+    }
+    $diskIdentity = @($diskSources | Sort-Object) -join "`n"
+    $headIdentity = @($headSources | Sort-Object) -join "`n"
+    if ($diskIdentity -cne $headIdentity) {
+        throw 'Luna core Python filesystem inventory differs from exact Git.'
+    }
+    return @('scripts/refresh_luna_core_universe.py') + @($headSources)
+}
+
 function Get-DawnstrikeScheduledLaunchFiles {
     [CmdletBinding()]
     param(
@@ -259,7 +372,8 @@ function Get-DawnstrikeScheduledLaunchFiles {
             "run_alphaops_weekly_training.ps1",
             "run_daily_finalize.ps1"
         )]
-        [string]$TaskScript
+        [string]$TaskScript,
+        [ValidatePattern('^$|^[0-9a-f]{40}$')][string]$ExpectedSha = ''
     )
 
     $common = @(
@@ -277,6 +391,9 @@ function Get-DawnstrikeScheduledLaunchFiles {
     )
     if ($TaskScript -in @("run_alphaops_morning.ps1", "run_alphaops_monitor.ps1")) {
         $common += "scripts/alpha_cycle_artifact.ps1"
+    }
+    if ($TaskScript -eq "run_alphaops_morning.ps1") {
+        $common += Get-DawnstrikeLunaCoreSourceFiles -ExpectedSha $ExpectedSha
     }
     if ($TaskScript -eq "run_alphaops_monitor.ps1") {
         $common += "scripts/monitor_schedule_helper.ps1"
@@ -332,7 +449,9 @@ function New-DawnstrikeScheduledLaunchManifest {
     $path = Join-Path $root ($ExpectedSha.ToLowerInvariant() + '-' + $safeTask + '.json')
     $entries = @()
     $runtimePrefix = $runtime.TrimEnd('\') + '\'
-    foreach ($relative in @(Get-DawnstrikeScheduledLaunchFiles -TaskScript $TaskScript)) {
+    foreach ($relative in @(
+        Get-DawnstrikeScheduledLaunchFiles -TaskScript $TaskScript -ExpectedSha $ExpectedSha
+    )) {
         $full = [IO.Path]::GetFullPath((Join-Path $runtime ($relative.Replace('/', '\'))))
         if (-not $full.StartsWith($runtimePrefix, [StringComparison]::OrdinalIgnoreCase)) {
             throw "Scheduled launch manifest entry escaped the runtime root: $relative"
@@ -414,7 +533,10 @@ function Assert-DawnstrikeScheduledLaunchManifest {
         $expected = @{}
         foreach ($entry in @($payload.files)) {
             $relative = [string]$entry.path
-            if ($relative -notmatch '^scripts/[A-Za-z0-9._/-]+$' -or $expected.ContainsKey($relative)) {
+            if (
+                $relative -notmatch '^(?:scripts|intraday_scanner)/[A-Za-z0-9._/-]+$' -or
+                $expected.ContainsKey($relative)
+            ) {
                 throw 'Scheduled launch manifest contains an invalid or duplicate path.'
             }
             $full = [IO.Path]::GetFullPath((Join-Path $runtime ($relative.Replace('/', '\'))))
@@ -434,7 +556,9 @@ function Assert-DawnstrikeScheduledLaunchManifest {
             }
             $expected[$relative] = $true
         }
-        $required = @(Get-DawnstrikeScheduledLaunchFiles -TaskScript $TaskScript)
+        $required = @(
+            Get-DawnstrikeScheduledLaunchFiles -TaskScript $TaskScript -ExpectedSha $ExpectedSha
+        )
         if ((@($expected.Keys | Sort-Object) -join "`n") -cne (@($required | Sort-Object) -join "`n")) {
             throw 'Scheduled launch manifest does not cover the complete trusted helper set.'
         }
@@ -638,7 +762,8 @@ function Invoke-DawnstrikeNativeProcess {
         [Parameter()][ValidateRange(1, 60)][int]$OutputDrainTimeoutSeconds = 5,
         [Parameter()][string]$WorkingDirectory = (Get-Location).Path,
         [Parameter()][hashtable]$EnvironmentOverrides = @{},
-        [Parameter()][switch]$NoSite
+        [Parameter()][switch]$NoSite,
+        [Parameter()][switch]$SuppressConsoleReplay
     )
 
     $startedAt = (Get-Date).ToUniversalTime()
@@ -789,9 +914,11 @@ function Invoke-DawnstrikeNativeProcess {
     }
     $receipt | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $receiptPath -Encoding UTF8
 
-    foreach ($path in @($stdoutPath, $stderrPath)) {
-        if (Test-Path -LiteralPath $path -PathType Leaf) {
-            Get-Content -LiteralPath $path | ForEach-Object { [Console]::Out.WriteLine($_) }
+    if (-not $SuppressConsoleReplay) {
+        foreach ($path in @($stdoutPath, $stderrPath)) {
+            if (Test-Path -LiteralPath $path -PathType Leaf) {
+                Get-Content -LiteralPath $path | ForEach-Object { [Console]::Out.WriteLine($_) }
+            }
         }
     }
     $receipt["receipt_path"] = $receiptPath

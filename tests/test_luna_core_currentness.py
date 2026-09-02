@@ -612,6 +612,135 @@ def test_direct_source_download_failure_is_explicitly_blocked(
         refresh_script._fetch(core.NASDAQ_NDX_SOD_2026_08_27_URL)
 
 
+def test_explicit_state_street_bootstrap_installs_a_missing_active_pointer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ndx_symbols: list[str],
+) -> None:
+    output, ndx_payload, spy_payload = _refresh_fixture(tmp_path, monkeypatch, ndx_symbols)
+    output.unlink()
+    monkeypatch.setattr(refresh_script, "SPY_SOURCE_ID", "test-spy-refresh")
+    monkeypatch.setattr(
+        refresh_script,
+        "STATE_STREET_SPY_HOLDINGS_URL",
+        "https://example.test/spy.xlsx",
+    )
+
+    with pytest.raises(RuntimeError, match="proxy manifest missing"):
+        refresh_script.refresh(
+            state_root=tmp_path,
+            proxy_manifest=None,
+            ndx_artifact=tmp_path / "ndx.xlsx",
+            spy_artifact=tmp_path / "spy.xlsx",
+            market_date="2026-08-27",
+        )
+
+    result = refresh_script.refresh(
+        state_root=tmp_path,
+        proxy_manifest=None,
+        ndx_artifact=tmp_path / "ndx.xlsx",
+        spy_artifact=tmp_path / "spy.xlsx",
+        market_date="2026-08-27",
+        bootstrap_state_street_proxy=True,
+    )
+
+    assert result["status"] == "READY"
+    assert result["proxy_bootstrapped"] is True
+    assert result["ndx_sha256"] == hashlib.sha256(ndx_payload).hexdigest()
+    assert result["spy_sha256"] == hashlib.sha256(spy_payload).hexdigest()
+    assert result["ndx_member_count"] == 102
+    assert result["spy_member_count"] == 503
+    installed = core.build_core_universe_contract(
+        output,
+        observed_at=result["observed_at"],
+        market_date="2026-08-27",
+    )
+    assert installed["status"] == "READY"
+
+
+def test_state_street_bootstrap_never_substitutes_for_a_missing_explicit_proxy(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(RuntimeError, match="does not accept an explicit proxy manifest"):
+        refresh_script.refresh(
+            state_root=tmp_path,
+            proxy_manifest=tmp_path / "missing-proxy.json",
+            ndx_artifact=tmp_path / "ndx.xlsx",
+            spy_artifact=tmp_path / "spy.xlsx",
+            market_date="2026-08-27",
+            bootstrap_state_street_proxy=True,
+        )
+
+
+def test_state_street_bootstrap_rejects_an_existing_pointer_byte_identically(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ndx_symbols: list[str],
+) -> None:
+    output, _ndx_payload, _spy_payload = _refresh_fixture(tmp_path, monkeypatch, ndx_symbols)
+    prior = output.read_bytes()
+
+    with pytest.raises(RuntimeError, match="requires a completely absent active pointer"):
+        refresh_script.refresh(
+            state_root=tmp_path,
+            proxy_manifest=None,
+            ndx_artifact=tmp_path / "ndx.xlsx",
+            spy_artifact=tmp_path / "spy.xlsx",
+            market_date="2026-08-27",
+            bootstrap_state_street_proxy=True,
+        )
+
+    assert output.read_bytes() == prior
+
+    malformed = b"{not-json"
+    output.write_bytes(malformed)
+    with pytest.raises(RuntimeError, match="requires a completely absent active pointer"):
+        refresh_script.refresh(
+            state_root=tmp_path,
+            proxy_manifest=None,
+            ndx_artifact=tmp_path / "ndx.xlsx",
+            spy_artifact=tmp_path / "spy.xlsx",
+            market_date="2026-08-27",
+            bootstrap_state_street_proxy=True,
+        )
+    assert output.read_bytes() == malformed
+
+
+def test_state_street_bootstrap_rejects_non_file_and_dangling_output_entries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config"
+    config.mkdir()
+    output = config / "luna_core_universe.json"
+    output.mkdir()
+    with pytest.raises(RuntimeError, match="requires a completely absent active pointer"):
+        refresh_script.refresh(
+            state_root=tmp_path,
+            proxy_manifest=None,
+            ndx_artifact=tmp_path / "ndx.xlsx",
+            market_date="2026-08-27",
+            bootstrap_state_street_proxy=True,
+        )
+    assert output.is_dir()
+
+    output.rmdir()
+    original_lexists = refresh_script.os.path.lexists
+    monkeypatch.setattr(
+        refresh_script.os.path,
+        "lexists",
+        lambda path: Path(path) == output or original_lexists(path),
+    )
+    with pytest.raises(RuntimeError, match="requires a completely absent active pointer"):
+        refresh_script.refresh(
+            state_root=tmp_path,
+            proxy_manifest=None,
+            ndx_artifact=tmp_path / "ndx.xlsx",
+            market_date="2026-08-27",
+            bootstrap_state_street_proxy=True,
+        )
+
+
 def test_refresh_preserves_prior_manifest_when_raw_capture_is_not_governed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -633,7 +762,7 @@ def test_refresh_preserves_prior_manifest_when_raw_capture_is_not_governed(
     assert not json.loads(output.read_text(encoding="utf-8")).get("generation_id")
 
 
-def test_refresh_accepts_later_market_date_only_for_same_semantic_sets(
+def test_refresh_accepts_later_market_date_only_from_the_exact_dated_download(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     ndx_symbols: list[str],
@@ -649,10 +778,17 @@ def test_refresh_accepts_later_market_date_only_for_same_semantic_sets(
             effective_date="2026-08-27",
         )
     )
+    requested: list[str] = []
+
+    def fetch_exact_date(url: str) -> bytes:
+        requested.append(url)
+        return future_ndx.read_bytes()
+
+    monkeypatch.setattr(refresh_script, "_fetch", fetch_exact_date)
     result = refresh_script.refresh(
         state_root=tmp_path,
         proxy_manifest=None,
-        ndx_artifact=future_ndx,
+        ndx_artifact=None,
         spy_artifact=future_spy,
         market_date="2026-08-28",
     )
@@ -665,6 +801,25 @@ def test_refresh_accepts_later_market_date_only_for_same_semantic_sets(
     )
     assert installed["status"] == "READY"
     assert installed["effective_date"] == "2026-08-28"
+    assert requested == [core._nasdaq_sod_url_for_date("2026-08-28")]
+
+
+def test_refresh_rejects_a_later_date_explicit_artifact_without_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ndx_symbols: list[str],
+) -> None:
+    output, _ndx_payload, _spy_payload = _refresh_fixture(tmp_path, monkeypatch, ndx_symbols)
+    prior = output.read_bytes()
+    with pytest.raises(RuntimeError, match="no authenticated date provenance"):
+        refresh_script.refresh(
+            state_root=tmp_path,
+            proxy_manifest=None,
+            ndx_artifact=tmp_path / "ndx.xlsx",
+            spy_artifact=tmp_path / "spy.xlsx",
+            market_date="2026-08-28",
+        )
+    assert output.read_bytes() == prior
 
 
 def test_refresh_rejects_stale_spy_capture_and_preserves_pointer(
@@ -672,13 +827,14 @@ def test_refresh_rejects_stale_spy_capture_and_preserves_pointer(
     monkeypatch: pytest.MonkeyPatch,
     ndx_symbols: list[str],
 ) -> None:
-    output, _ndx_payload, _spy_payload = _refresh_fixture(tmp_path, monkeypatch, ndx_symbols)
+    output, ndx_payload, _spy_payload = _refresh_fixture(tmp_path, monkeypatch, ndx_symbols)
     prior = output.read_bytes()
+    monkeypatch.setattr(refresh_script, "_fetch", lambda _url: ndx_payload)
     with pytest.raises(RuntimeError, match="SPY workbook is stale"):
         refresh_script.refresh(
             state_root=tmp_path,
             proxy_manifest=None,
-            ndx_artifact=tmp_path / "ndx.xlsx",
+            ndx_artifact=None,
             spy_artifact=tmp_path / "spy.xlsx",
             market_date="2026-08-31",
         )
@@ -739,9 +895,46 @@ def test_refresh_reuses_same_content_addressed_generation_byte_identically(
     assert second["reused"] is True
     assert second["generation_id"] == first["generation_id"]
     assert second["generation_key"] == first["generation_key"]
+    assert second["spy_sha256"] == first["spy_sha256"]
+    assert second["spy_member_count"] == first["spy_member_count"]
+    assert second["spy_effective_date"] == first["spy_effective_date"]
     assert output.read_bytes() == pointer_before
     assert sorted((output.parent / refresh_script.GENERATION_DIRECTORY).iterdir()) == generations
     assert not (output.parent / refresh_script.REFRESH_LOCK_NAME).exists()
+
+
+def test_refresh_preserves_a_partial_inactive_generation_before_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ndx_symbols: list[str],
+) -> None:
+    output, _ndx_payload, _spy_payload = _refresh_fixture(tmp_path, monkeypatch, ndx_symbols)
+    legacy_wrapper = output.read_bytes()
+    first = refresh_script.refresh(
+        state_root=tmp_path,
+        proxy_manifest=None,
+        ndx_artifact=tmp_path / "ndx.xlsx",
+        spy_artifact=tmp_path / "spy.xlsx",
+    )
+    pointer = json.loads(output.read_text(encoding="utf-8"))
+    generation = (output.parent / pointer["manifest_path"]).resolve().parent
+    output.write_bytes(legacy_wrapper)
+    (generation / "luna_core_universe.json").unlink()
+    (generation / "operator-note.txt").write_text("preserve me", encoding="utf-8")
+
+    second = refresh_script.refresh(
+        state_root=tmp_path,
+        proxy_manifest=None,
+        ndx_artifact=tmp_path / "ndx.xlsx",
+        spy_artifact=tmp_path / "spy.xlsx",
+    )
+
+    assert second["status"] == "READY"
+    assert second["generation_id"] == first["generation_id"]
+    orphans = list(generation.parent.glob(f"{generation.name}.orphan.*"))
+    assert len(orphans) == 1
+    assert (orphans[0] / "operator-note.txt").read_text(encoding="utf-8") == "preserve me"
+    assert (generation / "luna_core_universe.json").is_file()
 
 
 def test_concurrent_refresh_writer_is_rejected_without_pointer_corruption(
@@ -857,6 +1050,26 @@ def test_refresh_rolls_back_active_pointer_when_post_swap_validation_fails(
     assert json.loads(output.read_text(encoding="utf-8"))["manifests"][0]["source_id"] == (
         "test-spy-refresh"
     )
+    failed_generations = list(
+        (output.parent / refresh_script.GENERATION_DIRECTORY).glob("ndx-sod-*")
+    )
+    assert len(failed_generations) == 1
+
+    retry = refresh_script.refresh(
+        state_root=tmp_path,
+        proxy_manifest=None,
+        ndx_artifact=tmp_path / "ndx.xlsx",
+        spy_artifact=tmp_path / "spy.xlsx",
+    )
+    assert retry["status"] == "READY"
+    assert json.loads(output.read_text(encoding="utf-8"))["generation_id"] == retry["generation_id"]
+    orphans = list(
+        (output.parent / refresh_script.GENERATION_DIRECTORY).glob(
+            f"{retry['generation_id']}.orphan.*"
+        )
+    )
+    assert len(orphans) == 1
+    assert (orphans[0] / "luna_core_universe.json").is_file()
 
 
 def test_refresh_changed_member_attestation_leaves_prior_generation_intact(
@@ -869,11 +1082,12 @@ def test_refresh_changed_member_attestation_leaves_prior_generation_intact(
     changed = ["EA" if symbol == "HONA" else symbol for symbol in ndx_symbols]
     changed_path = tmp_path / "changed-ndx.xlsx"
     changed_path.write_bytes(_ndx_xlsx(changed, company_prefix="Current Company"))
+    monkeypatch.setattr(refresh_script, "_fetch", lambda _url: changed_path.read_bytes())
     with pytest.raises(RuntimeError, match="not the governed currentness root"):
         refresh_script.refresh(
             state_root=tmp_path,
             proxy_manifest=None,
-            ndx_artifact=changed_path,
+            ndx_artifact=None,
             spy_artifact=tmp_path / "spy.xlsx",
             market_date="2026-08-28",
         )

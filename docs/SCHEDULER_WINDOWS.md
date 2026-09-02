@@ -3,6 +3,11 @@
 Dawnstrike can run locally with Windows Task Scheduler. The app remains
 research/watchlist only; no broker orders are placed.
 
+This page's helper commands are local-development examples only. Production
+uses the exact-SHA five-task contract and protected activation procedure in
+`operations/runtime_activation_and_rollback.md`; never register, repair, or
+replay production tasks from this page.
+
 Use `py -m intraday_scanner.cli ...` in scheduled actions unless you have added
 the Python Scripts directory to PATH. Scheduler JSON includes market-day,
 holiday, early-close, retry, and skip-reason fields from the local static market
@@ -60,15 +65,9 @@ intraday-scan monitor-open ^
 
 ## Existing Helper Script
 
-The repo also includes:
-
-```powershell
-.\scripts\register_dawnstrike_tasks.ps1
-```
-
-Use the dashboard `5-Min Monitor` button or this script for the current local
-5-minute task setup. Use `monitor-open --continuous` when you want 1-minute
-market-open monitoring.
+The repository contains older local scheduler helpers, but they are not a
+production registration or repair path. Use the dashboard only with a
+disposable local research database.
 
 ## AlphaOps EOD Truth Rules
 
@@ -83,20 +82,11 @@ still fails closed, and missing shadow outcomes remain missing and
 learning-ineligible.
 
 If a historical PaperOps forward session never ran, do not synthesize a zero
-return or replay it as forward evidence. After confirming that the session has
-no calendar row, completed report, or ledger event, record the terminal gap:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass `
-  -File C:\r\dawnstrike-runtime\scripts\ensure_forward_gap_signing_key.ps1 `
-  -StateRoot C:\r\dawnstrike-state
-. C:\r\dawnstrike-runtime\scripts\import_dawnstrike_environment.ps1
-Import-DawnstrikeEnvironment -StateRoot C:\r\dawnstrike-state
-py -m intraday_scanner.v2.paper_ops record-forward-gap `
-  --date 2026-07-31 `
-  --reason-code scheduler_run_absent `
-  --output-root C:\r\dawnstrike-state\v2_paper_ops_live
-```
+return or replay it as forward evidence. The former July 2026 manual
+`record-forward-gap` procedure is archived and authorizes no current mutation.
+A production gap must be emitted by the exact-SHA scheduled finalizer or by a
+separately reviewed, protected, exact-date recovery operation after proving the
+absence of conflicting calendar, report, and ledger evidence.
 
 The strict-schema record is sequence-chained and bound to a separately chained,
 HMAC-signed anchor journal containing the exact ledger digest. The signing key

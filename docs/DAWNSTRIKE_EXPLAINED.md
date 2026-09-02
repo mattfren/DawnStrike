@@ -18,16 +18,18 @@ command to trade.
 
 ## Daily Routine
 
-The intended Windows Task Scheduler workflow is defined in
-`scripts/register_alphaops_tasks.ps1`. If Task Scheduler was registered before a
-script update, run the registration script again so the Windows task command
-matches the repo.
+The production Windows Task Scheduler workflow is an exact-SHA five-task
+contract installed only through the protected release launcher. Never repair
+it by invoking a registration script from a checkout; use
+`operations/runtime_activation_and_rollback.md`.
 
 | Time | Scheduled task | What it runs | Result |
 | --- | --- | --- | --- |
-| 8:00 AM CT | `Dawnstrike AlphaOps Morning` | `alpha-cycle` | Collects sources, scores candidates, sends official candidates plus an always-labeled conditional research radar. |
-| 8:35 AM CT | `Dawnstrike AlphaOps Monitor 5m` | `alpha-monitor` every 5 minutes for 6 hours | Re-checks saved AlphaOps names and sends manual review/status messages. |
-| 3:15 PM CT | `Dawnstrike AlphaOps EOD Report` | `alpha-report`, `attribute-returns`, `historical-report` | Writes end-of-day evidence, return-attribution, and historical-report files from saved outcomes. |
+| 8:00 AM CT | `Dawnstrike AlphaOps Morning` | Guarded Morning runner | Collects sources and produces research candidates or an explicit no-edge/unavailable state. |
+| 8:35 AM CT | `Dawnstrike AlphaOps Monitor 5m` | Guarded Monitor runner every 5 minutes | Re-checks the saved research cohort. |
+| 3:15 PM CT | `Dawnstrike AlphaOps EOD Full Report` | Guarded EOD runner | Reconciles outcomes and produces end-of-day evidence. |
+| Monday 9:00 PM CT | `Dawnstrike AlphaOps V6 Weekly Training` | Guarded Weekly runner | Performs governed research-only learning. |
+| 5:30 PM CT | `Dawnstrike 10of10 Daily Finalize` | Guarded Finalize runner | Seals the daily ledger and alone owns eligible publication. |
 
 Outcome data is still manual unless a future reliable price feed is added. The
 app can remind you that outcomes are missing, but it cannot invent the actual
