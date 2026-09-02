@@ -897,6 +897,35 @@ def test_activation_requires_live_pinned_github_ci_authority(
         )
 
 
+def test_owner_authorization_accepts_current_codex_share_url() -> None:
+    sol = _sol_payload()
+    sol["codex_share_url"] = "https://chatgpt.com/s/cx_test-owner-report"
+
+    body = activation_contract._owner_authorization_body(
+        sol, candidate_sha=CANDIDATE_SHA, candidate_tree=CANDIDATE_TREE
+    )
+
+    assert json.loads(body)["codex_share_url"] == sol["codex_share_url"]
+
+
+@pytest.mark.parametrize(
+    "url",
+    (
+        "https://chatgpt.com/s/not-a-codex-share",
+        "https://chatgpt.com/s/cx_report/extra",
+        "https://example.com/s/cx_report",
+    ),
+)
+def test_owner_authorization_rejects_unrecognized_share_url(url: str) -> None:
+    sol = _sol_payload()
+    sol["codex_share_url"] = url
+
+    with pytest.raises(ActivationContractError, match="not immutable"):
+        activation_contract._owner_authorization_body(
+            sol, candidate_sha=CANDIDATE_SHA, candidate_tree=CANDIDATE_TREE
+        )
+
+
 def test_live_owner_commit_comment_authorizes_exact_sol_report(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

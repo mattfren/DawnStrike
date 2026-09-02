@@ -73,7 +73,9 @@ _GITHUB_COMMENT_HTML = re.compile(
 _GITHUB_COMMENT_API = re.compile(
     r"^https://api\.github\.com/repos/mattfren/DawnStrike/comments/([1-9][0-9]*)$"
 )
-_CODEX_SHARE_URL = re.compile(r"^https://chatgpt\.com/share/[A-Za-z0-9_-]+$")
+_CODEX_SHARE_URL = re.compile(
+    r"^https://chatgpt\.com/(?:share/[A-Za-z0-9_-]+|s/cx_[A-Za-z0-9_-]+)$"
+)
 _CI_JOB_NAMES = frozenset(
     {
         *(f"Pytest shard {index} of 16" for index in range(16)),
