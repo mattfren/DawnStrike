@@ -23,7 +23,11 @@ SAFE_GIT_CONFIGURATION = (
 )
 _FIXED_LOCAL_GIT_CONFIG = {
     "core.repositoryformatversion": "0",
-    "core.filemode": "false",
+    # Git records the platform-native executable-bit model at repository
+    # creation. Keep that value exact for each supported host instead of
+    # hard-coding Windows metadata into the Linux CI checkout that
+    # independently verifies this production boundary.
+    "core.filemode": "false" if os.name == "nt" else "true",
     "core.bare": "false",
     "core.logallrefupdates": "true",
     "core.symlinks": "false",

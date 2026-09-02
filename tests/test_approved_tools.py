@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -9,6 +10,28 @@ from pathlib import Path
 import pytest
 
 from intraday_scanner import approved_tools
+
+
+def test_run_git_accepts_only_platform_native_filemode(tmp_path: Path) -> None:
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    git = str(approved_tools.approved_git_path())
+    subprocess.run([git, "init", "-q", str(repository)], check=True)
+    native = "false" if os.name == "nt" else "true"
+    opposite = "true" if native == "false" else "false"
+
+    subprocess.run(
+        [git, "-C", str(repository), "config", "--local", "core.filemode", native],
+        check=True,
+    )
+    assert approved_tools.run_git(repository, "status", "--porcelain=v1").returncode == 0
+
+    subprocess.run(
+        [git, "-C", str(repository), "config", "--local", "core.filemode", opposite],
+        check=True,
+    )
+    with pytest.raises(approved_tools.ApprovedToolError, match="core.filemode"):
+        approved_tools.run_git(repository, "status", "--porcelain=v1")
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="production host is Windows")
