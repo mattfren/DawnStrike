@@ -71,6 +71,10 @@ def test_process_runner_rejects_identity_substitution_and_git_execution_hooks() 
     assert "Get-Acl -LiteralPath" in text
 
 
+@pytest.mark.skipif(
+    not Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe").is_file(),
+    reason="scheduled-entry file-lock proof requires Windows PowerShell 5.1",
+)
 def test_task_guard_holds_entry_and_helper_bytes_against_concurrent_swap(tmp_path: Path) -> None:
     state = tmp_path / "state"
     script = """

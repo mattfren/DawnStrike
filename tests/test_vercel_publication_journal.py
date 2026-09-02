@@ -708,6 +708,7 @@ def test_recovery_retry_reauthorizes_current_session_before_mutation() -> None:
     assert script.rfind("Assert-GovernedPublicationAuthorization", 0, promotion) > fresh_build_guard
 
 
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows PowerShell 5.1")
 def test_result_atomic_publish_executes_under_windows_powershell_51(tmp_path: Path) -> None:
     script = (Path(__file__).parents[1] / "scripts" / "publish_vercel_public.ps1").read_text(
         encoding="utf-8"
@@ -772,6 +773,7 @@ def test_publisher_governed_asset_proof_is_bounded_and_covers_every_alias() -> N
     )
 
 
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows PowerShell 5.1")
 def test_vercel_token_precedes_native_curl_separator_under_powershell_51() -> None:
     script = (Path(__file__).parents[1] / "scripts" / "publish_vercel_public.ps1").read_text(
         encoding="utf-8"
@@ -809,6 +811,7 @@ def test_vercel_token_precedes_native_curl_separator_under_powershell_51() -> No
     assert argv[argv.index("--token") + 1] == "sentinel"
 
 
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows PowerShell 5.1")
 def test_state_relative_path_executes_under_windows_powershell_51(tmp_path: Path) -> None:
     script = (Path(__file__).parents[1] / "scripts" / "publish_vercel_public.ps1").read_text(
         encoding="utf-8"
@@ -840,6 +843,7 @@ def test_state_relative_path_executes_under_windows_powershell_51(tmp_path: Path
     assert "[System.IO.Path]::GetRelativePath" not in script
 
 
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows PowerShell 5.1")
 def test_publication_write_guard_rejects_windows_reparse_component(tmp_path: Path) -> None:
     root = tmp_path / "root"
     outside = tmp_path / "outside"
@@ -876,6 +880,7 @@ def test_publication_write_guard_rejects_windows_reparse_component(tmp_path: Pat
     assert "reparse component" in completed.stderr
 
 
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows PowerShell 5.1")
 @pytest.mark.parametrize("foreign", ["project", "aliases"])
 def test_prior_date_foreign_identity_never_calls_alias_provider(
     tmp_path: Path, foreign: str
@@ -924,6 +929,7 @@ def test_prior_date_foreign_identity_never_calls_alias_provider(
     assert "$script:allProductionAliases = @($verified.payload.production_aliases)" not in script
 
 
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows PowerShell 5.1")
 @pytest.mark.parametrize("scenario", ["multiple_prior", "future"])
 def test_ambiguous_or_future_nonterminal_history_never_calls_alias_provider(
     tmp_path: Path, scenario: str
