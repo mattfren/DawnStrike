@@ -127,7 +127,14 @@ def test_runner_child_uses_isolated_exact_interpreter(tmp_path: Path, monkeypatc
 
     assert module.main() == 0
     command = captured["command"]
-    assert command[:6] == [sys.executable, "-I", "-B", "-S", "-u", "-c"]
+    assert command[:6] == [
+        str(Path(sys.executable).resolve(strict=True)),
+        "-I",
+        "-B",
+        "-S",
+        "-u",
+        "-c",
+    ]
     assert command[6] == module._BOOTSTRAP_PRELOADER
     assert Path(command[7]).resolve() == Path("scripts/dawnstrike_python_bootstrap.py").resolve()
     assert command[8] == hashlib.sha256(Path(command[7]).read_bytes()).hexdigest()
