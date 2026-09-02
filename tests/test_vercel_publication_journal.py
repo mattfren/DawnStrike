@@ -1614,22 +1614,46 @@ def test_publisher_governed_asset_proof_is_bounded_and_covers_every_alias() -> N
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows PowerShell 5.1")
-def test_vercel_token_precedes_native_curl_separator_under_powershell_51() -> None:
+def test_vercel_token_precedes_native_curl_separator_under_powershell_51(
+    tmp_path: Path,
+) -> None:
     script = (Path(__file__).parents[1] / "scripts" / "publish_vercel_public.ps1").read_text(
         encoding="utf-8"
     )
     function = script.split("function Invoke-VercelProcess", 1)[1].split(
         "function Assert-RemoteVercelSourceManifest", 1
     )[0]
+
+    fake_executables = {
+        "node": tmp_path / "node" / "node.exe",
+        "git": tmp_path / "git" / "git.exe",
+        "python": tmp_path / "python" / "python.exe",
+        "uv": tmp_path / "uv" / "uv.exe",
+    }
+    for executable in fake_executables.values():
+        executable.parent.mkdir()
+        executable.touch()
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+
+    def quote(path: Path) -> str:
+        return str(path).replace("'", "''")
+
     command = (
+        "$ErrorActionPreference='Stop';Set-StrictMode -Version Latest;"
         "$vercelEntryPath='vc.js';$vercel=@('--scope','scope');"
         "$vercelAuth=@('--token','sentinel');"
-        "$nodePath='C:\\Program Files\\nodejs\\node.exe';"
+        f"$nodePath='{quote(fake_executables['node'])}';"
         "$expectedCurlPath='C:\\Windows\\System32\\curl.exe';"
-        "$gitPath='C:\\Program Files\\Git\\cmd\\git.exe';"
-        "$uvPath='C:\\Users\\MattFields\\AppData\\Local\\Programs\\Python\\Python313\\Scripts\\uv.exe';"
-        "$approvedPython=[pscustomobject]@{path='C:\\Users\\MattFields\\AppData\\Local\\Programs\\Python\\Python313\\python.exe'};"
+        f"$gitPath='{quote(fake_executables['git'])}';"
+        f"$uvPath='{quote(fake_executables['uv'])}';"
+        f"$approvedPython=[pscustomobject]@{{path='{quote(fake_executables['python'])}'}};"
+        f"$resolvedStateRoot='{quote(state_root)}';"
+        "$providerConfigRoot=Join-Path $resolvedStateRoot 'provider-config';"
+        "$script:captured=@();"
+        "function Assert-VercelPublicationSourceStable {};"
         "function Assert-VercelPublicationToolchainStable {};"
+        "function Assert-VercelContainedPathNoReparse { param($Root,$Target,$Label) };"
         "function Assert-DawnstrikeSharedLockNoReparse { param($Path,$Label) };"
         "function Invoke-DawnstrikeJobProcess { param($FilePath,$ArgumentList,$WorkingDirectory,"
         "$Label,$TimeoutSeconds,$OutputDrainTimeoutSeconds,$EnvironmentOverrides);"
