@@ -65,6 +65,25 @@ def test_run_git_accepts_only_platform_native_filemode(tmp_path: Path) -> None:
         approved_tools.run_git(repository, "status", "--porcelain=v1")
 
 
+def test_run_git_accepts_only_disabled_local_gc(tmp_path: Path) -> None:
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    git = str(approved_tools.approved_git_path())
+    subprocess.run([git, "init", "-q", str(repository)], check=True)
+    subprocess.run(
+        [git, "-C", str(repository), "config", "--local", "gc.auto", "0"],
+        check=True,
+    )
+    assert approved_tools.run_git(repository, "status", "--porcelain=v1").returncode == 0
+
+    subprocess.run(
+        [git, "-C", str(repository), "config", "--local", "gc.auto", "1"],
+        check=True,
+    )
+    with pytest.raises(approved_tools.ApprovedToolError, match="gc.auto"):
+        approved_tools.run_git(repository, "status", "--porcelain=v1")
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="production host is Windows")
 def test_run_git_disables_repo_local_fsmonitor_execution(tmp_path: Path) -> None:
     repository = tmp_path / "repo"

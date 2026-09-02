@@ -32,6 +32,9 @@ _FIXED_LOCAL_GIT_CONFIG = {
     "core.logallrefupdates": "true",
     "core.symlinks": "false",
     "core.ignorecase": "true",
+    # actions/checkout disables automatic repository maintenance in its
+    # ephemeral checkout. This has no command/path execution surface.
+    "gc.auto": "0",
     "remote.origin.fetch": "+refs/heads/*:refs/remotes/origin/*",
     "lfs.repositoryformatversion": "0",
 }
