@@ -43,6 +43,7 @@ if (
 }
 
 $script:DawnstrikeReleaseLauncherPath = 'C:\Program Files\Dawnstrike\bin\dawnstrike_release_launcher.ps1'
+$script:DawnstrikeReleaseStateBoundaryPath = 'C:\Program Files\Dawnstrike\bin\state_root_boundary.ps1'
 $script:DawnstrikeReleaseGitPath = 'C:\Program Files\Git\cmd\git.exe'
 $script:DawnstrikeReleaseGitSha256 = '37c5725818d602e951ba2563b870d62763322956b73373da4c33a0b566a80bc9' # pragma: allowlist secret
 $script:DawnstrikeReleaseGitSubject = 'CN=Johannes Schindelin, O=Johannes Schindelin, S=Nordrhein-Westfalen, C=DE'
@@ -187,6 +188,38 @@ function Get-DawnstrikeLauncherGitDirectory {
     return [IO.Path]::GetFullPath((Join-Path $Root $value))
 }
 
+function Get-DawnstrikeLauncherRequestFileContract {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    if ([string]::IsNullOrWhiteSpace($Path)) { throw "$Label is required." }
+    $full = [IO.Path]::GetFullPath($Path)
+    $lease = Open-DawnstrikeStateBoundaryPath -Path $full -Label $Label
+    $stream = $null
+    try {
+        if ($lease.is_directory) { throw "$Label is not a regular file." }
+        $stream = [IO.File]::Open(
+            $full, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read
+        )
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try { $digest = ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-', '').ToLowerInvariant() }
+        finally { $sha.Dispose() }
+        return [pscustomobject]@{
+            path = $full
+            sha256 = $digest
+            stream = $stream
+            lease = $lease.handle
+        }
+    }
+    catch {
+        if ($null -ne $stream) { $stream.Dispose() }
+        $lease.handle.Dispose()
+        throw
+    }
+}
+
 function Assert-DawnstrikeLauncherEntryPath {
     [CmdletBinding()]
     param(
@@ -320,6 +353,14 @@ if (-not [string]::Equals($actualLauncher, $script:DawnstrikeReleaseLauncherPath
     throw 'The Dawnstrike release launcher must run from its administrator-installed path.'
 }
 Assert-DawnstrikeLauncherProtectedPath -Path $actualLauncher
+Assert-DawnstrikeLauncherProtectedPath -Path $script:DawnstrikeReleaseStateBoundaryPath
+$script:DawnstrikeReleaseStateBoundarySourceLock = [IO.File]::Open(
+    $script:DawnstrikeReleaseStateBoundaryPath,
+    [IO.FileMode]::Open,
+    [IO.FileAccess]::Read,
+    [IO.FileShare]::Read
+)
+. $script:DawnstrikeReleaseStateBoundaryPath
 if ((Get-DawnstrikeLauncherSha256 $script:DawnstrikeReleaseGitPath) -cne $script:DawnstrikeReleaseGitSha256) {
     throw 'Trusted release launcher rejected the Git executable hash.'
 }
@@ -409,11 +450,161 @@ $modeEntries = switch ($Mode) {
 }
 $relativeEntries = @($modeEntries | Select-Object -Unique)
 $entryLocks = @()
+$taskMutationMode = $Mode -in @('HardenCapture', 'RebindCapture', 'Rollback') -or
+    ($Mode -eq 'Activate' -and -not $PreflightOnly)
+$stateBoundary = $null
+$requestAdmission = $null
+$requestInputLocks = @()
+$taskMutationAlreadyCompleted = $false
+$taskMutationTerminalReceipt = ''
+$taskMutationTerminalJournal = ''
+$modeOutput = @()
+$taskMutationRequestContractSha256 = ''
 try {
+if ($taskMutationMode) {
+    # No task-mutation request file, including a StateRoot receipt, is read
+    # before the protected boundary admits this exact mode/SHA/tree. These
+    # admission and per-file leases remain held through request hashing and are
+    # replaced by the mutation admission leases before dispatch.
+    $requestAdmission = Get-DawnstrikeStateBoundaryTaskMutationReadAdmission `
+        -StateRoot $StateRoot -Mode $Mode `
+        -ExpectedSha $ExpectedSha -ExpectedTree $candidateTree
+}
+$requestedWriterSid = if ($null -ne $RunAsCredential) {
+    Resolve-DawnstrikeStateBoundaryPrincipalSid -Principal ([string]$RunAsCredential.UserName)
+}
+else { 'NONE' }
+if ($taskMutationMode) {
+    $requestComponents = @(
+        'dawnstrike.state_boundary_task_mutation_request.v1',
+        ('mode=' + $Mode),
+        ('candidate_sha=' + $ExpectedSha),
+        ('candidate_tree=' + $candidateTree),
+        ('runtime_root=' + [IO.Path]::GetFullPath($RuntimeRoot).TrimEnd('\')),
+        ('state_root=' + [IO.Path]::GetFullPath($StateRoot).TrimEnd('\')),
+        ('run_as_sid=' + $requestedWriterSid)
+    )
+    switch ($Mode) {
+        'HardenCapture' {
+            if ($null -eq $RunAsCredential) {
+                throw 'HardenCapture mode requires a locally prompted RunAsCredential.'
+            }
+        }
+        'Activate' {
+            if ([string]::IsNullOrWhiteSpace($MarketDate)) { throw 'Activate mode requires MarketDate.' }
+            $ciRequest = Get-DawnstrikeLauncherRequestFileContract `
+                -Path $CiEvidencePath -Label 'Activate CI evidence'
+            $requestInputLocks += @($ciRequest.stream, $ciRequest.lease)
+            $solRequest = Get-DawnstrikeLauncherRequestFileContract `
+                -Path $SolEvidencePath -Label 'Activate Sol evidence'
+            $requestInputLocks += @($solRequest.stream, $solRequest.lease)
+            $requestComponents += @(
+                ('market_date=' + $MarketDate),
+                ('ci_evidence_path=' + $ciRequest.path),
+                ('ci_evidence_sha256=' + $ciRequest.sha256),
+                ('sol_evidence_path=' + $solRequest.path),
+                ('sol_evidence_sha256=' + $solRequest.sha256),
+                ('backup_root=' + [IO.Path]::GetFullPath($BackupRoot).TrimEnd('\')),
+                ('backup_retention=' + $BackupRetention),
+                ('process_timeout_seconds=' + $ProcessTimeoutSeconds)
+            )
+        }
+        'RebindCapture' {
+            if (-not $EnableCapture) { throw 'RebindCapture mode requires explicit EnableCapture.' }
+            if (
+                $SymbolsManifestSha256 -notmatch '^[0-9a-f]{64}$' -or
+                $EntitlementReceiptSha256 -notmatch '^[0-9a-f]{64}$' -or
+                $SourceConfigSha256 -notmatch '^[0-9a-f]{64}$'
+            ) { throw 'RebindCapture mode requires exact lowercase SHA-256 input bindings.' }
+            $activationRequest = Get-DawnstrikeLauncherRequestFileContract `
+                -Path $ActivationReceipt -Label 'Rebind activation receipt'
+            $requestInputLocks += @($activationRequest.stream, $activationRequest.lease)
+            $symbolsRequest = Get-DawnstrikeLauncherRequestFileContract `
+                -Path $SymbolsManifest -Label 'Rebind symbols manifest'
+            $requestInputLocks += @($symbolsRequest.stream, $symbolsRequest.lease)
+            $entitlementRequest = Get-DawnstrikeLauncherRequestFileContract `
+                -Path $EntitlementReceipt -Label 'Rebind entitlement receipt'
+            $requestInputLocks += @($entitlementRequest.stream, $entitlementRequest.lease)
+            $sourceRequest = Get-DawnstrikeLauncherRequestFileContract `
+                -Path $SourceConfig -Label 'Rebind source config'
+            $requestInputLocks += @($sourceRequest.stream, $sourceRequest.lease)
+            $requestComponents += @(
+                ('activation_receipt_path=' + $activationRequest.path),
+                ('activation_receipt_sha256=' + $activationRequest.sha256),
+                ('symbols_manifest_path=' + $symbolsRequest.path),
+                ('symbols_manifest_actual_sha256=' + $symbolsRequest.sha256),
+                ('symbols_manifest_claimed_sha256=' + $SymbolsManifestSha256),
+                ('entitlement_receipt_path=' + $entitlementRequest.path),
+                ('entitlement_receipt_actual_sha256=' + $entitlementRequest.sha256),
+                ('entitlement_receipt_claimed_sha256=' + $EntitlementReceiptSha256),
+                ('source_config_path=' + $sourceRequest.path),
+                ('source_config_actual_sha256=' + $sourceRequest.sha256),
+                ('source_config_claimed_sha256=' + $SourceConfigSha256),
+                'enable_capture=true',
+                ('process_timeout_seconds=' + $ProcessTimeoutSeconds)
+            )
+        }
+        'Rollback' {
+            $activationRequest = Get-DawnstrikeLauncherRequestFileContract `
+                -Path $ActivationReceipt -Label 'Rollback activation receipt'
+            $requestInputLocks += @($activationRequest.stream, $activationRequest.lease)
+            $effectiveContractRoot = if ([string]::IsNullOrWhiteSpace($ContractRoot)) {
+                $candidate
+            }
+            else { [IO.Path]::GetFullPath($ContractRoot).TrimEnd('\') }
+            $requestComponents += @(
+                ('activation_receipt_path=' + $activationRequest.path),
+                ('activation_receipt_sha256=' + $activationRequest.sha256),
+                ('contract_root=' + $effectiveContractRoot),
+                ('backup_root=' + [IO.Path]::GetFullPath($BackupRoot).TrimEnd('\')),
+                ('process_timeout_seconds=' + $ProcessTimeoutSeconds)
+            )
+        }
+    }
+    $taskMutationRequestContractSha256 = Get-DawnstrikeStateBoundarySha256Text (
+        ($requestComponents -join "`0") + "`n"
+    )
+
+    # Request hashing is complete under the admission leases. Release only the
+    # current-receipt stream before Enter: pending completion adoption may need
+    # to atomically replace that receipt. Retain both StateRoot namespace leases
+    # until Enter has revalidated the receipt and returned mutation leases.
+    if ($null -eq $requestAdmission -or @($requestAdmission.locks).Count -lt 3 -or
+        $null -eq $requestAdmission.locks[0]) {
+        throw 'StateRoot task-mutation request admission did not retain its exact receipt and namespace leases.'
+    }
+    $requestAdmission.locks[0].Dispose()
+    $requestAdmission.locks = @($requestAdmission.locks | Select-Object -Skip 1)
+}
+$stateBoundary = if ($taskMutationMode) {
+    Enter-DawnstrikeStateBoundaryTaskMutation `
+        -StateRoot $StateRoot -Mode $Mode `
+        -ExpectedSha $ExpectedSha -ExpectedTree $candidateTree `
+        -RequestContractSha256 $taskMutationRequestContractSha256
+}
+else { Assert-DawnstrikeStateRootBoundary -StateRoot $StateRoot }
+if ($null -ne $requestAdmission) {
+    foreach ($requestAdmissionLock in @($requestAdmission.locks)) {
+        if ($null -ne $requestAdmissionLock) { $requestAdmissionLock.Dispose() }
+    }
+    $requestAdmission = $null
+}
+if ($taskMutationMode) {
+    $taskMutationAlreadyCompleted = [bool]$stateBoundary.already_completed
+}
+    if ($null -ne $RunAsCredential) {
+        if ($requestedWriterSid -notin @($stateBoundary.writer_sids)) {
+            throw 'RunAsCredential is not an exact ACL-admitted StateRoot writer SID.'
+        }
+    }
     foreach ($relative in $relativeEntries) {
         $entryLocks += Open-DawnstrikeLauncherEntry -Root $candidate -Sha $ExpectedSha -RelativePath $relative
     }
-    if ($Mode -eq 'Prepare') {
+    if ($taskMutationAlreadyCompleted) {
+        $stateBoundary | Select-Object status, operation_id, mode, receipt_sha256,
+            research_only, broker_execution_enabled | ConvertTo-Json -Depth 4
+    }
+    elseif ($Mode -eq 'Prepare') {
         & $entryLocks[0].path `
             -CandidateRoot $candidate `
             -RuntimeRoot $RuntimeRoot `
@@ -427,12 +618,12 @@ try {
         if ($null -eq $RunAsCredential) {
             throw 'HardenCapture mode requires a locally prompted RunAsCredential.'
         }
-        & $entryLocks[0].path `
+        $modeOutput = @(& $entryLocks[0].path `
             -RuntimeRoot $RuntimeRoot `
             -StateRoot $StateRoot `
             -CandidateSha $ExpectedSha `
             -CandidateTree $candidateTree `
-            -RunAsCredential $RunAsCredential
+            -RunAsCredential $RunAsCredential)
     }
     elseif ($Mode -eq 'Activate') {
         if ([string]::IsNullOrWhiteSpace($MarketDate) -or [string]::IsNullOrWhiteSpace($CiEvidencePath) -or [string]::IsNullOrWhiteSpace($SolEvidencePath)) {
@@ -445,7 +636,7 @@ try {
                 throw 'Activate mode requires an elevated administrator process.'
             }
         }
-        & $entryLocks[0].path `
+        $modeOutput = @(& $entryLocks[0].path `
             -ExpectedSha $ExpectedSha `
             -MarketDate $MarketDate `
             -CiEvidencePath $CiEvidencePath `
@@ -457,8 +648,9 @@ try {
             -BackupRetention $BackupRetention `
             -ProcessTimeoutSeconds $ProcessTimeoutSeconds `
             -RunAsCredential $RunAsCredential `
+            -StateBoundaryTaskMutationOperationId ([string]$stateBoundary.operation_id) `
             -PreflightOnly:$PreflightOnly `
-            -AllowLegacyCanonicalExecute
+            -AllowLegacyCanonicalExecute)
     }
     elseif ($Mode -eq 'RebindCapture') {
         if (
@@ -472,7 +664,7 @@ try {
         ) {
             throw 'RebindCapture mode requires a credential and exact input files with SHA-256 bindings.'
         }
-        & $entryLocks[0].path `
+        $modeOutput = @(& $entryLocks[0].path `
             -RuntimeRoot $RuntimeRoot `
             -StateRoot $StateRoot `
             -CandidateSha $ExpectedSha `
@@ -484,21 +676,21 @@ try {
             -SourceConfigSha256 $SourceConfigSha256 `
             -RunAsCredential $RunAsCredential `
             -Enable:$EnableCapture `
-            -ProcessTimeoutSeconds $ProcessTimeoutSeconds
+            -ProcessTimeoutSeconds $ProcessTimeoutSeconds)
     }
     elseif ($Mode -eq 'Rollback') {
         if ([string]::IsNullOrWhiteSpace($ActivationReceipt)) {
             throw 'Rollback mode requires ActivationReceipt.'
         }
         if ([string]::IsNullOrWhiteSpace($ContractRoot)) { $ContractRoot = $candidate }
-        & $entryLocks[0].path `
+        $modeOutput = @(& $entryLocks[0].path `
             -ActivationReceipt $ActivationReceipt `
             -ContractRoot $ContractRoot `
             -RuntimeRoot $RuntimeRoot `
             -StateRoot $StateRoot `
             -BackupRoot $BackupRoot `
             -ProcessTimeoutSeconds $ProcessTimeoutSeconds `
-            -RunAsCredential $RunAsCredential
+            -RunAsCredential $RunAsCredential)
     }
     elseif ($Mode -eq 'BootstrapUniverse') {
         if ([string]::IsNullOrWhiteSpace($MarketDate)) {
@@ -531,9 +723,89 @@ try {
             -ProjectId 'prj_5pef3EZF1u5YadebEz3dFjnkWOXy' `
             -ProtectedLauncherGrant
     }
+    if ($taskMutationMode -and -not $taskMutationAlreadyCompleted) {
+        if ($modeOutput.Count -eq 0) { throw 'Task-mutating release mode returned no terminal receipt.' }
+        try { $terminal = [string]$modeOutput[-1] | ConvertFrom-Json }
+        catch { throw 'Task-mutating release mode did not return a terminal JSON receipt.' }
+        $expectedTerminal = switch ($Mode) {
+            'HardenCapture' { @('dawnstrike.capture_task_hardening_receipt.v2', 'COMPLETE') }
+            'RebindCapture' { @('dawnstrike.capture_task_rebind_receipt.v2', 'COMPLETE') }
+            'Activate' { @('dawnstrike.runtime_activation_receipt.v2', 'COMPLETE') }
+            'Rollback' { @('dawnstrike.runtime_rollback_receipt.v1', 'ROLLED_BACK') }
+        }
+        if (
+            [string]$terminal.schema_version -cne [string]$expectedTerminal[0] -or
+            [string]$terminal.status -cne [string]$expectedTerminal[1] -or
+            [string]$terminal.candidate_sha -cne $ExpectedSha -or
+            [string]$terminal.candidate_tree -cne $candidateTree -or
+            $terminal.research_only -ne $true -or
+            $terminal.broker_execution_enabled -ne $false
+        ) { throw 'Task-mutating release mode returned the wrong terminal safety identity.' }
+        if ($Mode -eq 'HardenCapture') {
+            $taskMutationTerminalReceipt = Join-Path $StateRoot "receipts\capture-task\capture-task-hardening-$ExpectedSha.json"
+            $taskMutationTerminalJournal = Join-Path $StateRoot "receipts\runtime-operation\capture-task-hardening-$ExpectedSha.json"
+        }
+        elseif ($Mode -eq 'RebindCapture') {
+            $taskMutationTerminalReceipt = Join-Path $StateRoot "receipts\capture-task\capture-task-rebind-$ExpectedSha.json"
+            $taskMutationTerminalJournal = Join-Path $StateRoot "receipts\runtime-operation\capture-task-rebind-$ExpectedSha.json"
+        }
+        else {
+            $activationId = [string]$terminal.activation_id
+            if ($activationId -notmatch '^[0-9a-f]{24}$') {
+                throw 'Task-mutating release receipt has an invalid activation identity.'
+            }
+            $receiptFolder = if ($Mode -eq 'Activate') { 'runtime-activation' } else { 'runtime-rollback' }
+            $receiptStem = if ($Mode -eq 'Activate') { 'runtime-activation-' } else { 'runtime-rollback-' }
+            $taskMutationTerminalReceipt = Join-Path $StateRoot ("receipts\$receiptFolder\$receiptStem$activationId.json")
+            $taskMutationTerminalJournal = Join-Path $StateRoot ("receipts\runtime-operation\$receiptStem$activationId.json")
+        }
+        # Keep every exact candidate entry and StateRoot namespace lease held
+        # through terminal receipt verification and the protected ProgramData
+        # reseal. Only the current-receipt stream itself must be released so
+        # Complete can atomically replace that file.
+        if ($null -eq $stateBoundary.locks -or @($stateBoundary.locks).Count -lt 3) {
+            throw 'Task-mutation completion lost its retained StateRoot leases.'
+        }
+        $stateBoundary.locks[0].Dispose()
+        $stateBoundary.locks = @($stateBoundary.locks | Select-Object -Skip 1)
+        $taskBindingCompletion = Complete-DawnstrikeStateBoundaryTaskMutation `
+            -StateRoot $StateRoot -Mode $Mode `
+            -ExpectedSha $ExpectedSha -ExpectedTree $candidateTree `
+            -OperationId ([string]$stateBoundary.operation_id) `
+            -TerminalReceiptPath $taskMutationTerminalReceipt `
+            -TerminalJournalPath $taskMutationTerminalJournal
+        $modeOutput | Write-Output
+        $taskBindingCompletion | ConvertTo-Json -Depth 5
+    }
+}
+catch {
+    if ($taskMutationMode -and -not $taskMutationAlreadyCompleted -and $null -ne $stateBoundary) {
+        try {
+            $null = Cancel-DawnstrikeStateBoundaryTaskMutationIfUnchanged `
+                -StateRoot $StateRoot -OperationId ([string]$stateBoundary.operation_id)
+        }
+        catch { }
+    }
+    throw
 }
 finally {
     foreach ($entryLock in $entryLocks) {
         if ($null -ne $entryLock -and $null -ne $entryLock.stream) { $entryLock.stream.Dispose() }
+    }
+    if ($null -ne $stateBoundary -and $null -ne $stateBoundary.locks) {
+        foreach ($stateLock in @($stateBoundary.locks)) {
+            if ($null -ne $stateLock) { $stateLock.Dispose() }
+        }
+    }
+    foreach ($requestInputLock in @($requestInputLocks)) {
+        if ($null -ne $requestInputLock) { $requestInputLock.Dispose() }
+    }
+    if ($null -ne $requestAdmission -and $null -ne $requestAdmission.locks) {
+        foreach ($requestAdmissionLock in @($requestAdmission.locks)) {
+            if ($null -ne $requestAdmissionLock) { $requestAdmissionLock.Dispose() }
+        }
+    }
+    if ($null -ne $script:DawnstrikeReleaseStateBoundarySourceLock) {
+        $script:DawnstrikeReleaseStateBoundarySourceLock.Dispose()
     }
 }

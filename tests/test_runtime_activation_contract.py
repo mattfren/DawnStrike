@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata
 import json
+import os
 import re
 import shutil
 import sqlite3
@@ -270,6 +271,23 @@ def _install_local_interpreter_fixture_seam(candidate: Path) -> None:
         path.write_text(text.replace(production, fixture), encoding="utf-8")
 
 
+def _install_local_bootstrap_origin_fixture_seam(
+    bootstrap_script: Path, *, origin: Path
+) -> None:
+    """Authorize one exact disposable bare origin in a copied bootstrap only."""
+
+    text = bootstrap_script.read_text(encoding="utf-8")
+    anchor = (
+        "    if origin_url is not None and origin_url not in _GOVERNED_ORIGIN_URLS:\n"
+    )
+    assert text.count(anchor) == 1
+    replacement = (
+        f"    fixture_governed_origins = _GOVERNED_ORIGIN_URLS | {{{str(origin)!r}}}\n"
+        "    if origin_url is not None and origin_url not in fixture_governed_origins:\n"
+    )
+    bootstrap_script.write_text(text.replace(anchor, replacement, 1), encoding="utf-8")
+
+
 def _install_local_github_ci_fixture_seam(contract_script: Path) -> None:
     """Use deterministic GitHub authority responses in a copied candidate only."""
 
@@ -504,6 +522,550 @@ $functions = @($ast.FindAll(
         "valid": True,
         "declaration": True,
         "identity": True,
+    }
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
+@pytest.mark.parametrize(
+    ("now_local", "eod_last", "finalizer_last", "weekly_last", "weekly_next", "pending", "error"),
+    [
+        (
+            "2026-09-03T18:00:00",
+            "2026-09-03T15:15:00",
+            "2026-09-03T17:30:00",
+            "2026-08-31T21:00:00",
+            "2026-09-07T21:00:00",
+            False,
+            None,
+        ),
+        (
+            "2026-09-03T18:00:00",
+            "2026-09-02T15:15:00",
+            "2026-09-02T17:30:00",
+            "2026-08-31T21:00:00",
+            "2026-09-07T21:00:00",
+            False,
+            "post-Finalizer window",
+        ),
+        (
+            "2026-09-03T18:00:00",
+            "2026-09-03T15:15:00",
+            "2026-09-03T17:30:00",
+            "2026-08-31T21:00:00",
+            "2026-09-07T21:00:00",
+            True,
+            "pending same-day canonical trigger",
+        ),
+        (
+            "2026-09-07T22:00:00",
+            "2026-09-07T15:15:00",
+            "2026-09-07T17:30:00",
+            "2026-08-31T21:00:00",
+            "2026-09-14T21:00:00",
+            False,
+            "same-day Weekly task",
+        ),
+        (
+            "2026-09-07T22:00:00",
+            "2026-09-07T15:15:00",
+            "2026-09-07T17:30:00",
+            "2026-09-07T21:00:00",
+            "2026-09-14T21:00:00",
+            False,
+            None,
+        ),
+    ],
+)
+def test_activation_post_finalizer_snapshot_is_exact_and_fail_closed(
+    now_local: str,
+    eod_last: str,
+    finalizer_last: str,
+    weekly_last: str,
+    weekly_next: str,
+    pending: bool,
+    error: str | None,
+) -> None:
+    names = [
+        "Dawnstrike AlphaOps Morning",
+        "Dawnstrike AlphaOps Monitor 5m",
+        "Dawnstrike AlphaOps EOD Full Report",
+        "Dawnstrike AlphaOps V6 Weekly Training",
+        "Dawnstrike 10of10 Daily Finalize",
+    ]
+    next_day = (datetime.fromisoformat(now_local) + timedelta(days=1)).strftime(
+        "%Y-%m-%dT08:00:00"
+    )
+    snapshots = [
+        {
+            "name": name,
+            "state": "Ready",
+            "last_run_time": "2026-09-01T08:00:00",
+            "next_run_time": next_day,
+        }
+        for name in names
+    ]
+    snapshots[2]["last_run_time"] = eod_last
+    snapshots[3]["last_run_time"] = weekly_last
+    snapshots[3]["next_run_time"] = weekly_next
+    snapshots[4]["last_run_time"] = finalizer_last
+    if pending:
+        snapshots[4]["next_run_time"] = now_local[:10] + "T19:00:00"
+    script = str(Path("scripts/activate_dawnstrike_runtime.ps1").resolve()).replace("'", "''")
+    payload = json.dumps(snapshots, separators=(",", ":"))
+    command = rf"""
+$ErrorActionPreference = 'Stop'
+. '{script}'
+$snapshots = @((ConvertFrom-Json @'
+{payload}
+'@) | ForEach-Object {{ $_ }})
+$local = [DateTime]::SpecifyKind(
+    [DateTime]::ParseExact(
+        '{now_local}', 'yyyy-MM-ddTHH:mm:ss',
+        [Globalization.CultureInfo]::InvariantCulture
+    ),
+    [DateTimeKind]::Unspecified
+)
+$nowUtc = [DateTimeOffset]::new(
+    $local,
+    [TimeZoneInfo]::Local.GetUtcOffset($local)
+).ToUniversalTime()
+$null = Assert-DawnstrikePostFinalizerBoundarySnapshot `
+    -NowUtc $nowUtc -TaskSnapshots $snapshots
+'PASS'
+"""
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=Path.cwd(),
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    if error is None:
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        assert result.stdout.strip().splitlines()[-1] == "PASS"
+    else:
+        assert result.returncode != 0
+        assert error in result.stderr
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
+def test_activation_source_admission_rejects_config_swap_between_validation_and_lock(
+    tmp_path: Path,
+) -> None:
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    _git(candidate, "init")
+    config = candidate / ".git" / "config"
+    safe_config = config.read_text(encoding="utf-8")
+    script = str(Path("scripts/activate_dawnstrike_runtime.ps1").resolve()).replace("'", "''")
+    candidate_ps = str(candidate.resolve()).replace("'", "''")
+    command = rf"""
+$ErrorActionPreference = 'Stop'
+. '{script}'
+$env:DAWNSTRIKE_TEST_ACTIVATION_METADATA_RACE = '1'
+$env:DAWNSTRIKE_TEST_ACTIVATION_CLOCK = '1'
+try {{
+    $held = Assert-DawnstrikeActivationSourceAdmission `
+        -CandidateRoot '{candidate_ps}' `
+        -ExpectedSha '{CANDIDATE_SHA}'
+    foreach ($stream in @($held)) {{ $stream.Dispose() }}
+    [Console]::Error.WriteLine('hostile metadata swap unexpectedly passed')
+    exit 9
+}}
+catch {{
+    [Console]::Error.WriteLine($_.Exception.Message)
+    exit 23
+}}
+"""
+    process = subprocess.Popen(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=candidate,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert process.stdout is not None
+    marker = process.stdout.readline().strip()
+    if marker != "DAWNSTRIKE_TEST_METADATA_LOCK_DELAY_READY":
+        stdout, stderr = process.communicate(timeout=10)
+        pytest.fail(
+            f"metadata race did not reach synchronization point: {marker!r} {stdout!r} {stderr!r}"
+        )
+    config.write_text(
+        safe_config + '\n[url "https://attacker.invalid/"]\n\tinsteadOf = https://github.com/\n',
+        encoding="utf-8",
+    )
+    stdout, stderr = process.communicate(timeout=15)
+    assert process.returncode == 23, (marker, stdout, stderr)
+    assert "changed before its exact-byte handle lock was acquired" in stderr
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
+def test_git_value_keeps_long_repo_authority_out_of_process_current_directory(
+    tmp_path: Path,
+) -> None:
+    activation_path = Path("scripts/activate_dawnstrike_runtime.ps1").resolve()
+    controller_directory = activation_path.parent
+    long_root = tmp_path / "state" / "recovery-quarantine"
+    while len(str(long_root)) <= 270:
+        long_root /= "compensated-activation-segment"
+    (long_root / ".git").mkdir(parents=True)
+    long_root_text = str(long_root.resolve())
+    assert len(long_root_text) > 260
+
+    activation = str(activation_path).replace("'", "''")
+    root = long_root_text.replace("'", "''")
+    command = rf"""
+$ErrorActionPreference = 'Stop'
+. '{activation}'
+$global:CapturedGitLaunch = $null
+function Invoke-DawnstrikeJobProcess {{
+    [CmdletBinding()]
+    param(
+        [string]$FilePath,
+        [string[]]$ArgumentList,
+        [string]$WorkingDirectory,
+        [string]$Label,
+        [int]$TimeoutSeconds,
+        [int]$OutputDrainTimeoutSeconds,
+        [hashtable]$EnvironmentOverrides
+    )
+    $global:CapturedGitLaunch = [pscustomobject]@{{
+        file_path = $FilePath
+        arguments = @($ArgumentList)
+        working_directory = $WorkingDirectory
+        label = $Label
+        timeout_seconds = $TimeoutSeconds
+        git_dir = [string]$EnvironmentOverrides.GIT_DIR
+        git_common_dir = [string]$EnvironmentOverrides.GIT_COMMON_DIR
+        git_work_tree = [string]$EnvironmentOverrides.GIT_WORK_TREE
+    }}
+    [pscustomobject]@{{ Stdout = '  MOCK_GIT_OUTPUT  '; ExitCode = 0 }}
+}}
+$value = Get-DawnstrikeGitValue `
+    -GitPath '{PRODUCTION_GIT_PATH}' `
+    -Root '{root}' `
+    -Arguments @('rev-parse', 'HEAD') `
+    -Label 'Long quarantine Git authority regression' `
+    -TimeoutSeconds 30
+$arguments = @($global:CapturedGitLaunch.arguments)
+$cIndex = [array]::IndexOf([object[]]$arguments, '-C')
+[pscustomobject]@{{
+    root_length = '{root}'.Length
+    c_index = $cIndex
+    git_target = if ($cIndex -ge 0) {{ [string]$arguments[$cIndex + 1] }} else {{ '' }}
+    working_directory = [string]$global:CapturedGitLaunch.working_directory
+    git_dir = [string]$global:CapturedGitLaunch.git_dir
+    git_common_dir = [string]$global:CapturedGitLaunch.git_common_dir
+    git_work_tree = [string]$global:CapturedGitLaunch.git_work_tree
+    value = $value
+}} | ConvertTo-Json -Compress
+"""
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=Path.cwd(),
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert payload["root_length"] > 260
+    assert payload["c_index"] >= 0
+    assert payload["git_target"] == long_root_text
+    assert Path(payload["working_directory"]).resolve() == controller_directory
+    assert payload["working_directory"] != long_root_text
+    assert Path(payload["git_dir"]).resolve() == (long_root / ".git").resolve()
+    assert Path(payload["git_common_dir"]).resolve() == (long_root / ".git").resolve()
+    assert Path(payload["git_work_tree"]).resolve() == long_root.resolve()
+    assert payload["value"] == "MOCK_GIT_OUTPUT"
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
+def test_git_value_launches_real_job_with_over_260_c_root(tmp_path: Path) -> None:
+    git_path = shutil.which("git.exe")
+    if git_path is None:
+        pytest.skip("Git for Windows unavailable")
+
+    repository = tmp_path / "native-repo"
+    subprocess.run(
+        [git_path, "init", "--quiet", str(repository)],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=True,
+    )
+    repository = repository.resolve()
+    (repository / "authority.txt").write_text("fixture authority\n", encoding="utf-8")
+    _git(repository, "add", "authority.txt")
+    _git(
+        repository,
+        "-c",
+        "user.name=Dawnstrike Test",
+        "-c",
+        "user.email=dawnstrike-test@example.invalid",
+        "commit",
+        "--quiet",
+        "-m",
+        "fixture authority",
+    )
+    fixture_sha = _git(repository, "rev-parse", "HEAD")
+    assert fixture_sha != _git(Path.cwd(), "rev-parse", "HEAD")
+    lexical_root = str(repository)
+    while len(lexical_root) <= 270:
+        lexical_root += r"\."
+    assert len(lexical_root) > 260
+
+    activation = str(Path("scripts/activate_dawnstrike_runtime.ps1").resolve()).replace(
+        "'", "''"
+    )
+    runner = str(Path("scripts/dawnstrike_job_process.ps1").resolve()).replace("'", "''")
+    git = git_path.replace("'", "''")
+    root = lexical_root.replace("'", "''")
+    command = rf"""
+$ErrorActionPreference = 'Stop'
+. '{activation}'
+. '{runner}'
+$head = Get-DawnstrikeGitValue `
+    -GitPath '{git}' `
+    -Root '{root}' `
+    -Arguments @('rev-parse', 'HEAD') `
+    -Label 'Native long Git root regression' `
+    -TimeoutSeconds 30
+[pscustomobject]@{{ root_length = '{root}'.Length; head = $head }} |
+    ConvertTo-Json -Compress
+"""
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=repository,
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert payload["root_length"] > 260
+    assert payload["head"] == fixture_sha
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
+def test_activation_source_admission_rejects_linked_worktree_pointer(tmp_path: Path) -> None:
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    _git(candidate, "init")
+    linked_metadata = tmp_path / "linked-metadata"
+    (candidate / ".git").rename(linked_metadata)
+    (candidate / ".git").write_text(f"gitdir: {linked_metadata}\n", encoding="utf-8")
+    script = str(Path("scripts/activate_dawnstrike_runtime.ps1").resolve()).replace("'", "''")
+    candidate_ps = str(candidate.resolve()).replace("'", "''")
+    command = rf"""
+$ErrorActionPreference = 'Stop'
+. '{script}'
+try {{
+    $null = Assert-DawnstrikeActivationSourceAdmission `
+        -CandidateRoot '{candidate_ps}' `
+        -ExpectedSha '{CANDIDATE_SHA}'
+    exit 9
+}}
+catch {{
+    [Console]::Error.WriteLine($_.Exception.Message)
+    exit 23
+}}
+"""
+
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=candidate,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 23, (result.stdout, result.stderr)
+    assert "self-contained clone" in result.stderr
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
+def test_activation_source_admission_rejects_commondir_created_after_config_lock(
+    tmp_path: Path,
+) -> None:
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    relative_files = (
+        ".gitattributes",
+        "scripts/activate_dawnstrike_runtime.ps1",
+        "scripts/dawnstrike_process_runner.ps1",
+        "scripts/dawnstrike_job_process.ps1",
+        "scripts/runtime_activation_lock.ps1",
+        "scripts/runtime_activation_lock_contract.py",
+        "scripts/runtime_operation_journal.py",
+        "scripts/runtime_activation_contract.py",
+        "scripts/vercel_publication_journal.py",
+        "scripts/dawnstrike_python_bootstrap.py",
+        "scripts/state_disaster_recovery.py",
+        "scripts/capture_task_safety.ps1",
+        "scripts/invoke_dawnstrike_stage.ps1",
+    )
+    for relative in relative_files:
+        path = candidate / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("* text=auto\n" if relative == ".gitattributes" else "fixture\n")
+    _git(candidate, "init", "--initial-branch=main")
+    _git(candidate, "config", "user.email", "activation-test@example.invalid")
+    _git(candidate, "config", "user.name", "Activation Test")
+    _git(candidate, "add", ".")
+    _git(candidate, "commit", "-m", "fixture")
+    expected_sha = _git(candidate, "rev-parse", "HEAD")
+    hostile_common = tmp_path / "hostile-common"
+    shutil.copytree(candidate / ".git", hostile_common)
+    hostile_config = hostile_common / "config"
+    hostile_config.write_text(
+        hostile_config.read_text(encoding="utf-8")
+        + '\n[url "https://attacker.invalid/"]\n\tinsteadOf = https://github.com/\n',
+        encoding="utf-8",
+    )
+    script = str(Path("scripts/activate_dawnstrike_runtime.ps1").resolve()).replace("'", "''")
+    candidate_ps = str(candidate.resolve()).replace("'", "''")
+    command = rf"""
+$ErrorActionPreference = 'Stop'
+. '{script}'
+$env:DAWNSTRIKE_TEST_ACTIVATION_METADATA_ABSENCE_RACE = '1'
+$env:DAWNSTRIKE_TEST_ACTIVATION_CLOCK = '1'
+try {{
+    $held = Assert-DawnstrikeActivationSourceAdmission `
+        -CandidateRoot '{candidate_ps}' `
+        -ExpectedSha '{expected_sha}'
+    foreach ($stream in @($held)) {{ $stream.Dispose() }}
+    exit 9
+}}
+catch {{
+    [Console]::Error.WriteLine($_.Exception.Message)
+    exit 23
+}}
+"""
+    process = subprocess.Popen(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=candidate,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert process.stdout is not None
+    marker = process.stdout.readline().strip()
+    if marker != "DAWNSTRIKE_TEST_METADATA_ABSENCE_GUARD_READY":
+        stdout, stderr = process.communicate(timeout=10)
+        pytest.fail(f"metadata absence race did not synchronize: {marker!r} {stdout!r} {stderr!r}")
+    (candidate / ".git" / "commondir").write_text(str(hostile_common), encoding="utf-8")
+    stdout, stderr = process.communicate(timeout=15)
+
+    assert process.returncode == 23, (marker, stdout, stderr)
+    assert "metadata absence changed before source admission" in stderr
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
+def test_fresh_activation_boundary_blocks_crossed_clock_before_caller_mutation() -> None:
+    script = str(Path("scripts/activate_dawnstrike_runtime.ps1").resolve()).replace("'", "''")
+    command = rf"""
+. '{script}'
+$env:DAWNSTRIKE_TEST_ACTIVATION_CLOCK = '1'
+$global:ObservedActivationClocks = @()
+function Invoke-DawnstrikeActivationBoundary {{
+    [CmdletBinding()]
+    param(
+        [string]$PythonPath,
+        [string]$CandidateRoot,
+        [string]$MarketDate,
+        [string]$RuntimeRoot,
+        [string]$StateRoot,
+        [DateTimeOffset]$NowUtc,
+        [int]$TimeoutSeconds
+    )
+    $global:ObservedActivationClocks += $NowUtc.ToUniversalTime().ToString('o')
+    if ($NowUtc -ge [DateTimeOffset]::Parse('2026-09-03T13:00:00Z')) {{
+        throw 'crossed activation window'
+    }}
+    [pscustomobject]@{{ status='PASS'; ready=$true }}
+}}
+$early = Invoke-DawnstrikeFreshActivationBoundary `
+    -PythonPath 'unused' -CandidateRoot 'unused' -MarketDate '2026-09-03' `
+    -RuntimeRoot 'unused' -StateRoot 'unused' -TimeoutSeconds 30 `
+    -TestNowUtc '2026-09-03T12:59:00Z'
+$protectedIntervalBlocked = $false
+try {{
+    $null = Invoke-DawnstrikeFreshActivationBoundary `
+        -PythonPath 'unused' -CandidateRoot 'unused' -MarketDate '2026-09-03' `
+        -RuntimeRoot 'unused' -StateRoot 'unused' -TimeoutSeconds 30 `
+        -MinimumMorningLeadSeconds 120 `
+        -TestNowUtc '2026-09-03T12:58:30Z'
+}}
+catch {{
+    $protectedIntervalBlocked = $_.Exception.Message -match 'required Morning safety margin'
+}}
+$mutationCount = 0
+$durableJournalWrites = 0
+$blocked = $false
+try {{
+    # Model the durable PRE_SWAP transition between the earlier admission and
+    # the final boundary immediately before the first runtime rename.
+    $durableJournalWrites++
+    $null = Invoke-DawnstrikeFreshActivationBoundary `
+        -PythonPath 'unused' -CandidateRoot 'unused' -MarketDate '2026-09-03' `
+        -RuntimeRoot 'unused' -StateRoot 'unused' -TimeoutSeconds 30 `
+        -TestNowUtc '2026-09-03T13:00:00Z'
+    $mutationCount++
+}}
+catch {{ $blocked = $_.Exception.Message -eq 'crossed activation window' }}
+$delayedWorkerBlocked = $false
+try {{
+    $null = Invoke-DawnstrikeFreshActivationBoundary `
+        -PythonPath 'unused' -CandidateRoot 'unused' -MarketDate '2026-09-03' `
+        -RuntimeRoot 'unused' -StateRoot 'unused' -TimeoutSeconds 30 `
+        -TestNowUtc '2026-09-03T12:59:00Z' `
+        -TestCompletionNowUtc '2026-09-03T13:00:00Z'
+}}
+catch {{
+    $delayedWorkerBlocked = $_.Exception.Message -match 'expired during validation'
+}}
+[pscustomobject]@{{
+    early_status=$early.status
+    blocked=$blocked
+    durable_journal_writes=$durableJournalWrites
+    mutation_count=$mutationCount
+    delayed_worker_blocked=$delayedWorkerBlocked
+    protected_interval_blocked=$protectedIntervalBlocked
+    observed=@($global:ObservedActivationClocks)
+}} | ConvertTo-Json -Depth 4 -Compress
+"""
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=Path.cwd(),
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert payload == {
+        "early_status": "PASS",
+        "blocked": True,
+        "durable_journal_writes": 1,
+        "mutation_count": 0,
+        "delayed_worker_blocked": True,
+        "protected_interval_blocked": True,
+        "observed": [
+            "2026-09-03T12:59:00.0000000+00:00",
+            "2026-09-03T12:58:30.0000000+00:00",
+            "2026-09-03T13:00:00.0000000+00:00",
+            "2026-09-03T12:59:00.0000000+00:00",
+        ],
     }
 
 
@@ -785,11 +1347,13 @@ def test_pre_quiesce_recovery_restores_exact_scheduler_xml_not_candidate_sha() -
     recovery = activation.split('if ([string]$journal.payload.phase -eq "PRE_QUIESCE")', 1)[
         1
     ].split("$prepared = Invoke-DawnstrikeContractCli", 1)[0]
-    assert "Get-DawnstrikeCanonicalTaskActionMutationSet" in recovery
-    assert "PIN_EXECUTABLE" in recovery
-    assert "Restore-DawnstrikeCanonicalTasksFromXmlBackup" in recovery
-    assert "-EnableAfterRestore" in recovery
-    assert "Set-DawnstrikeCanonicalTaskExpectedSha" not in recovery
+    compensation = activation.split(
+        "function Invoke-DawnstrikeActivationCompensationStateMachine", 1
+    )[1].split("function Get-DawnstrikeActivation", 1)[0]
+    assert "$completeExpiredRecoveryCompensation" in recovery
+    assert "Restore-DawnstrikeCanonicalTasksFromXmlBackup" in compensation
+    assert "-EnableAfterRestore:$enableRestoredTasks" in compensation
+    assert "Set-DawnstrikeCanonicalTaskExpectedSha" not in compensation
 
 
 @pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
@@ -1146,12 +1710,13 @@ def test_first_rename_bootstrap_recovery_precedes_runtime_git_admission() -> Non
         "previousRuntimeIdentityRoot = [string]$runtimeBootstrapRecovery.previous_root" in admission
     )
     bootstrap = activation[helper:entry]
-    assert 'phase -cne "PRE_SWAP"' in bootstrap
+    assert '$missingPhase -eq "PRE_SWAP"' in bootstrap
+    assert '$missingPhase -in @("POST_SWAP", "POST_SWAP_READY")' in bootstrap
     assert "-not $runtimePresent" in bootstrap
     assert "Test-DawnstrikeRuntimeLockOwnerDead" in bootstrap
     assert "Runtime activation bootstrap journal does not bind the exact runtime lock." in bootstrap
     assert (
-        "Missing runtime is admissible only at the exact first-rename PRE_SWAP boundary."
+        "Missing runtime is admissible only at an exact activation compensation boundary."
         in bootstrap
     )
 
@@ -1991,7 +2556,6 @@ def test_activation_and_rollback_receipts_are_strict_self_hashed_and_atomic(
     assert activation["status"] == "COMPLETE"
     with pytest.raises(ActivationContractError, match="already exists"):
         seal_receipt(_receipt_payload(), activation_path)
-
     rollback_path = tmp_path / "receipts" / "rollback.json"
     rollback = seal_receipt(
         _receipt_payload(schema=ROLLBACK_SCHEMA, status="ROLLED_BACK"),
@@ -2000,6 +2564,96 @@ def test_activation_and_rollback_receipts_are_strict_self_hashed_and_atomic(
     assert load_receipt(rollback_path) == rollback
     assert rollback["restored_sha"] == PREVIOUS_SHA
     assert not list(activation_path.parent.glob("*.tmp"))
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
+def test_activation_receipt_guard_blocks_transient_same_metadata_substitution(
+    tmp_path: Path,
+) -> None:
+    """One held receipt handle denies mutation during verify and journal commit."""
+
+    receipt = tmp_path / "held-receipt.json"
+    original = b'{"proof":"trusted-exact-bytes"}'
+    hostile = b'{"proof":"hostile-exact-bytes"}'
+    assert len(hostile) == len(original)
+    receipt.write_bytes(original)
+    original_stat = receipt.stat()
+    original_hash = hashlib.sha256(original).hexdigest()
+    script = str(Path("scripts/activate_dawnstrike_runtime.ps1").resolve()).replace("'", "''")
+    receipt_ps = str(receipt.resolve()).replace("'", "''")
+    command = rf"""
+$ErrorActionPreference = 'Stop'
+. '{script}'
+function Invoke-DawnstrikeContractCli {{
+    [CmdletBinding()]
+    param(
+        [string]$PythonPath,
+        [string]$CandidateRoot,
+        [string[]]$Arguments,
+        [string]$Label,
+        [int]$TimeoutSeconds
+    )
+    $receiptIndex = [Array]::IndexOf($Arguments, '--receipt')
+    $receiptPath = [string]$Arguments[$receiptIndex + 1]
+    [Console]::Out.WriteLine('VERIFY_HANDLE_HELD')
+    [Console]::Out.Flush()
+    $null = [Console]::In.ReadLine()
+    [pscustomobject]@{{ receipt_sha256 = Get-DawnstrikeSha256File $receiptPath }}
+}}
+$guard = Open-DawnstrikeActivationReceiptGuard `
+    -Path '{receipt_ps}' -ExpectedStatus PREPARED `
+    -PythonPath 'mock-python' -ToolRoot 'mock-root' -TimeoutSeconds 30
+[Console]::Out.WriteLine('JOURNAL_TRANSITION_HANDLE_HELD')
+[Console]::Out.Flush()
+$null = [Console]::In.ReadLine()
+$null = Confirm-DawnstrikeActivationReceiptGuard $guard
+$result = [pscustomobject]@{{
+    hash = [string]$guard.sha256
+    length = [long]$guard.length
+}}
+Close-DawnstrikeActivationReceiptGuard $guard
+$result | ConvertTo-Json -Compress
+"""
+    process = subprocess.Popen(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=Path.cwd(),
+        text=True,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+
+    def assert_locked_substitution_is_denied(label: str) -> None:
+        replacement = tmp_path / f"{label}-replacement.json"
+        replacement.write_bytes(hostile)
+        os.utime(
+            replacement,
+            ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+        )
+        with pytest.raises(OSError):
+            receipt.write_bytes(hostile)
+        with pytest.raises(OSError):
+            os.replace(replacement, receipt)
+        with pytest.raises(OSError):
+            receipt.unlink()
+        assert receipt.read_bytes() == original
+        assert receipt.stat().st_size == original_stat.st_size
+        assert receipt.stat().st_mtime_ns == original_stat.st_mtime_ns
+
+    assert process.stdout.readline().strip() == "VERIFY_HANDLE_HELD"
+    assert_locked_substitution_is_denied("verify")
+    process.stdin.write("continue\n")
+    process.stdin.flush()
+    assert process.stdout.readline().strip() == "JOURNAL_TRANSITION_HANDLE_HELD"
+    assert_locked_substitution_is_denied("journal")
+    process.stdin.write("continue\n")
+    process.stdin.flush()
+    stdout, stderr = process.communicate(timeout=30)
+    assert process.returncode == 0, (stdout, stderr)
+    result = json.loads(stdout.strip().splitlines()[-1])
+    assert result == {"hash": original_hash, "length": len(original)}
 
 
 def test_rollback_ready_receipt_is_strict_and_not_terminal(tmp_path: Path) -> None:
@@ -2198,16 +2852,16 @@ def test_runtime_compensation_attempts_use_immutable_unique_evidence_paths() -> 
     activation = Path("scripts/activate_dawnstrike_runtime.ps1").read_text(encoding="utf-8")
     rollback = Path("scripts/rollback_dawnstrike_runtime.ps1").read_text(encoding="utf-8")
 
-    assert "$compensationAttemptKey = [string]$journalBefore.raw_file_sha256" in activation
-    assert "runtime-activation-$activationId.compensated-$compensationAttemptKey.json" in activation
-    assert "runtime-activation-$activationId.failed-$compensationAttemptKey.json" in activation
+    assert "$attemptKey = [string]$journalBefore.raw_file_sha256" in activation
+    assert "runtime-activation-$ActivationId.compensated-$attemptKey.json" in activation
+    assert "runtime-activation-$ActivationId.failed-$attemptKey.json" in activation
     assert "recovery-quarantine\\compensated-$activationId-$compensationAttemptKey" in activation
     assert (
         "compensated-$activationId-$compensationAttemptKey-$preparedHash.prepared.json"
         in activation
     )
-    assert "$compensatedPreparedHash = if (" in activation
-    assert "-PreparedReceiptSha256 $compensatedPreparedHash" in activation
+    assert "$preparedHash = if (" in activation
+    assert "-PreparedReceiptSha256 $preparedHash" in activation
     assert "-PreparedReceiptSha256 (if (" not in activation
     assert "runtime-activation-$activationId.compensated.json" not in activation
 
@@ -2419,6 +3073,209 @@ def test_activation_seals_init_before_first_stage_filesystem_mutation() -> None:
     assert "Staging failure journal identity is invalid" in activation
 
 
+def test_activation_refreshes_clock_at_each_normal_mutation_boundary() -> None:
+    activation = Path("scripts/activate_dawnstrike_runtime.ps1").read_text(encoding="utf-8")
+    entry = activation.index("function Invoke-DawnstrikeRuntimeActivation")
+    body = activation[entry:]
+    assert "$activationNowUtc" not in body
+    assert body.count("Invoke-DawnstrikeFreshActivationBoundary") == 11
+    assert "Activation fresh-clock override is test-only" in body
+
+    init_lock = body.index("$activationLock = Enter-DawnstrikeGovernedRuntimeLockWithJournal")
+    pre_init_recheck = body.rindex("$null = Invoke-DawnstrikeFreshActivationBoundary", 0, init_lock)
+    daily_lock = body.index("$dailyLock = Enter-DawnstrikeDailyRunLock", init_lock)
+    locked_recheck = body.index("$null = Invoke-DawnstrikeFreshActivationBoundary", daily_lock)
+    task_backup = body.index("$taskBackup = New-DawnstrikeTaskXmlBackup", locked_recheck)
+    pre_quiesce = body.index("-Operation runtime_activation -Phase PRE_QUIESCE", task_backup)
+    task_recheck = body.index("$null = Invoke-DawnstrikeFreshActivationBoundary", pre_quiesce)
+    task_disable = body.index("Disable-DawnstrikeCanonicalTasks", task_recheck)
+    publication_recheck = body.index("$finalPublicationBoundary =", task_disable)
+    swap_recheck = body.index(
+        "$null = Invoke-DawnstrikeFreshActivationBoundary", publication_recheck
+    )
+    pre_swap = body.index("-Operation runtime_activation -Phase PRE_SWAP", swap_recheck)
+    durable_pre_swap = body.index('$journalPhase = "PRE_SWAP"', pre_swap)
+    final_swap_recheck = body.index(
+        "$null = Invoke-DawnstrikeFreshActivationBoundary", durable_pre_swap
+    )
+    swap_started = body.index("$swapStarted = $true", final_swap_recheck)
+    first_rename = body.index(
+        "[System.IO.Directory]::Move($runtime, $rollbackCheckout)", swap_started
+    )
+    second_rename = body.index("[System.IO.Directory]::Move($stage, $runtime)", first_rename)
+
+    assert pre_init_recheck < init_lock < daily_lock < locked_recheck < task_backup
+    pre_init_region = body[pre_init_recheck:init_lock]
+    assert "Assert-DawnstrikePostFinalizerMutationWindow" in pre_init_region
+    assert pre_quiesce < task_recheck < task_disable
+    assert (
+        publication_recheck
+        < swap_recheck
+        < pre_swap
+        < durable_pre_swap
+        < final_swap_recheck
+        < swap_started
+        < first_rename
+        < second_rename
+    )
+    between_renames = body[first_rename:second_rename]
+    assert "Invoke-DawnstrikeFreshActivationBoundary" not in between_renames
+    assert "installing C immediately" in between_renames
+
+    normal_ready = body.rindex('$journalPhase = "POST_SWAP_READY"')
+    normal_enable_recheck = body.index(
+        "$null = Invoke-DawnstrikeFreshActivationBoundary", normal_ready
+    )
+    normal_enable = body.index("Enable-DawnstrikeCanonicalTasks", normal_enable_recheck)
+    assert normal_ready < normal_enable_recheck < normal_enable
+
+
+def test_every_runtime_lock_adoption_or_creation_rechecks_post_finalizer_window() -> None:
+    activation = Path("scripts/activate_dawnstrike_runtime.ps1").read_text(encoding="utf-8")
+    entry = activation.index("function Invoke-DawnstrikeRuntimeActivation")
+    body = activation[entry:]
+    calls = list(
+        re.finditer(
+            r"(?m)^\s*\$[A-Za-z][A-Za-z0-9]*\s*=\s*"
+            r"(?:Adopt|Enter)-DawnstrikeGovernedRuntimeLockWithJournal\b",
+            body,
+        )
+    )
+    assert len(calls) == 6
+    for call in calls:
+        prior_boundary = body.rfind("Assert-DawnstrikePostFinalizerMutationWindow", 0, call.start())
+        prior_adopt = body.rfind("Adopt-DawnstrikeGovernedRuntimeLockWithJournal", 0, call.start())
+        prior_enter = body.rfind("Enter-DawnstrikeGovernedRuntimeLockWithJournal", 0, call.start())
+        assert prior_boundary > max(prior_adopt, prior_enter)
+
+
+def test_activation_preflight_reports_terminal_compensation_cleanup_required() -> None:
+    activation = Path("scripts/activate_dawnstrike_runtime.ps1").read_text(encoding="utf-8")
+    classification = activation.index("$recoveryTaskAdmission = $recoveryTaskAdmissionPhase")
+    preflight = activation.index("if ($PreflightOnly -and $recoveryTaskAdmission)", classification)
+    classified = activation[classification:preflight]
+    recovery_result = activation[preflight : activation.index("if ($PreflightOnly)", preflight)]
+    assert '"COMPENSATED"' in classified
+    assert 'status = "RECOVERY_REQUIRED"' in recovery_result
+
+
+def test_activation_recovery_never_uses_an_earlier_clock_to_cut_over_or_enable() -> None:
+    activation = Path("scripts/activate_dawnstrike_runtime.ps1").read_text(encoding="utf-8")
+    recovery = activation.index("$completeExpiredRecoveryCompensation = {")
+    recovery_end = activation.index(
+        "# Any strict recovery failure must retain the adopted runtime lock", recovery
+    )
+    region = activation[recovery:recovery_end]
+
+    pre_swap = region.index('if ([string]$journal.payload.phase -eq "PRE_SWAP")')
+    publication = region.index("Assert-DawnstrikeVercelPublicationCutoverBoundary", pre_swap)
+    fresh = region.index("$null = Invoke-DawnstrikeFreshActivationBoundary", publication)
+    expired = region.index("$completeExpiredRecoveryCompensation", fresh)
+    first_rename = region.index("[IO.Directory]::Move($runtime,$rollbackCheckout)", expired)
+    second_rename = region.index("[IO.Directory]::Move($stage,$runtime)", first_rename)
+    assert publication < fresh < expired < first_rename < second_rename
+
+    post_swap_ready = region.index(
+        'elseif ([string]$journal.payload.phase -eq "POST_SWAP_READY")', second_rename
+    )
+    disable = region.index("Set-DawnstrikeTasksFailClosedDisabled", post_swap_ready)
+    ready_fresh = region.index("$null = Invoke-DawnstrikeFreshActivationBoundary", disable)
+    ready_expired = region.index("$completeExpiredRecoveryCompensation", ready_fresh)
+    ready_enable = region.index("Enable-DawnstrikeCanonicalTasks", ready_expired)
+    assert post_swap_ready < disable < ready_fresh < ready_expired < ready_enable
+
+    recovered_ready = region.index('$journalPhase = "POST_SWAP_READY"', ready_enable)
+    recovered_fresh = region.index(
+        "$null = Invoke-DawnstrikeFreshActivationBoundary", recovered_ready
+    )
+    recovered_expired = region.index(
+        "$completeExpiredRecoveryCompensation", recovered_fresh
+    )
+    recovered_enable = region.index("Enable-DawnstrikeCanonicalTasks", recovered_expired)
+    assert recovered_ready < recovered_fresh < recovered_expired < recovered_enable
+
+    compensation_start = activation.index(
+        "function Invoke-DawnstrikeActivationCompensationStateMachine"
+    )
+    compensation_end = activation.index(
+        "function Invoke-DawnstrikeContractCli", compensation_start
+    )
+    compensation = activation[compensation_start:compensation_end]
+    for filesystem_state in (
+        "OLD_RUNTIME_INTACT",
+        "AFTER_FIRST_RENAME",
+        "AFTER_SECOND_RENAME",
+    ):
+        assert f'{{ "{filesystem_state}" }}' in compensation
+    intent = compensation.index("Write-DawnstrikeActivationJsonExact $intentPayload $intentPath")
+    assert "[IO.Directory]::Move($RuntimeRoot, $failedCandidate)" in compensation
+    assert "[IO.Directory]::Move($RollbackCheckout, $RuntimeRoot)" in compensation
+    stage_preserve = compensation.index("[IO.Directory]::Move($Stage, $failedCandidate)")
+    shape_proof = compensation.index(
+        "Activation compensation did not reach its exact filesystem boundary",
+        stage_preserve,
+    )
+    candidate_proof = compensation.index("$preservedCandidate = Get-DawnstrikeGitContract")
+    terminal = compensation.index(
+        "-Operation runtime_activation -Phase COMPENSATED", candidate_proof
+    )
+    assert intent < stage_preserve < shape_proof < candidate_proof < terminal
+    assert "Restore-DawnstrikeCanonicalTasksFromXmlBackup" in compensation
+    assert "Restore-DawnstrikeAuxiliaryCaptureTask" in compensation
+    assert 'status = "RECOVERED_EXPIRED_COMPENSATED"' in compensation
+    assert "recovered_filesystem_state = [string]$intent.origin_filesystem_state" in compensation
+
+    daily = compensation.index("$terminalDaily = Enter-DawnstrikeDailyRunLock", terminal)
+    handshake = compensation.index("Confirm-DawnstrikeActivationDailyLockHandshake", daily)
+    daily_release = compensation.index("Exit-DawnstrikeDailyRunLock $terminalDaily", handshake)
+    daily_absent = compensation.index(
+        "Activation compensation did not release its exact daily lock", daily_release
+    )
+    activation_release = compensation.index(
+        "Exit-DawnstrikeGovernedRuntimeLock $ActivationLock", daily_absent
+    )
+    activation_absent = compensation.index(
+        "Activation compensation did not release its exact runtime lock",
+        activation_release,
+    )
+    assert (
+        terminal
+        < daily
+        < handshake
+        < daily_release
+        < daily_absent
+        < activation_release
+        < activation_absent
+    )
+
+
+def test_activation_source_admission_revalidates_locked_metadata_bytes() -> None:
+    activation = Path("scripts/activate_dawnstrike_runtime.ps1").read_text(encoding="utf-8")
+    start = activation.index("function Assert-DawnstrikeActivationSourceAdmission")
+    end = activation.index("if ($InjectCrashBetweenRuntimeRenames", start)
+    admission = activation[start:end]
+    initial_validation = admission.index("$localConfig =")
+    open_handle = admission.index("$metadataStream = [IO.File]::Open", initial_validation)
+    exact_compare = admission.index("[Convert]::ToBase64String", open_handle)
+    git_read = admission.index("rev-parse HEAD", exact_compare)
+    assert initial_validation < open_handle < exact_compare < git_read
+    assert "requires a self-contained clone" in admission
+    assert "Git metadata absence changed before source admission" in admission
+    assert "$safeEnvironment.GIT_COMMON_DIR = $gitMetadata" in admission
+    assert "rejected a locked local Git execution/filter configuration" in admission
+    assert "requires the Git worktree config extension disabled" in admission
+    assert "extensions.worktreeConfig=false" in admission
+    process = activation[
+        activation.index("function Invoke-DawnstrikeActivationProcess") : activation.index(
+            "function Get-DawnstrikeActivationNowUtc"
+        )
+    ]
+    assert "extensions.worktreeConfig=false" in process
+    assert "-ceq '-C'" in process
+    assert "-eq '-C'" not in process
+    assert "$environment.GIT_COMMON_DIR = $boundGitDirectory" in process
+
+
 def test_activation_recovery_teardown_keeps_journal_until_locks_are_released() -> None:
     activation = Path("scripts/activate_dawnstrike_runtime.ps1").read_text(encoding="utf-8")
 
@@ -2438,23 +3295,23 @@ def test_activation_recovery_teardown_keeps_journal_until_locks_are_released() -
     assert init_release < init_kill < init_journal_remove
 
     pre_swap = activation.index('if ([string]$journal.payload.phase -eq "PRE_SWAP")', pre_quiesce)
+    pre_quiesce_compensation = activation.index(
+        "& $completeExpiredRecoveryCompensation", pre_quiesce, pre_swap
+    )
+    assert pre_quiesce < pre_quiesce_compensation < pre_swap
+
+    compensation = activation.index("function Invoke-DawnstrikeActivationCompensationStateMachine")
+    compensation_end = activation.index("function ", compensation + 10)
+    compensated = activation.index("-Phase COMPENSATED", compensation, compensation_end)
     daily_release = activation.index(
-        "Exit-DawnstrikeDailyRunLock $recoveryDaily", pre_quiesce, pre_swap
+        "Exit-DawnstrikeDailyRunLock $terminalDaily", compensated, compensation_end
     )
     activation_release = activation.index(
-        "Exit-DawnstrikeGovernedRuntimeLock $activationLock", daily_release, pre_swap
+        "Exit-DawnstrikeGovernedRuntimeLock $ActivationLock",
+        daily_release,
+        compensation_end,
     )
-    quiesce_kill = activation.index(
-        'if ($TestStageCrashPoint -eq "after_pre_quiesce_recovery_lock_release")',
-        activation_release,
-        pre_swap,
-    )
-    quiesce_journal_remove = activation.index(
-        "Remove-Item -LiteralPath $operationJournal -Force",
-        quiesce_kill,
-        pre_swap,
-    )
-    assert daily_release < activation_release < quiesce_kill < quiesce_journal_remove
+    assert compensated < daily_release < activation_release
     assert "Recovery tombstone owner is still active" in activation
     assert "Recovery tombstone changed during validation" in activation
 
@@ -2524,14 +3381,18 @@ def test_rollback_seals_ready_then_terminal_evidence_after_task_enablement() -> 
 def test_legacy_activation_compensation_uses_sealed_backup_actions() -> None:
     activation = Path("scripts/activate_dawnstrike_runtime.ps1").read_text(encoding="utf-8")
     rollback = Path("scripts/rollback_dawnstrike_runtime.ps1").read_text(encoding="utf-8")
+    activation_start = activation.index("$restoredRuntime = Get-DawnstrikeGitContract")
     activation_compensation = activation[
-        activation.index("$restoredRuntime = Get-DawnstrikeGitContract") : activation.index(
-            "# Once the previous runtime and exact Ready task contract have"
+        activation_start : activation.index(
+            "$journalBefore = Get-DawnstrikeStrictRuntimeOperationJournal",
+            activation_start,
         )
     ]
     assert "Restore-DawnstrikeCanonicalTasksFromXmlBackup" in activation_compensation
     assert "-EnableAfterRestore" in activation_compensation
     assert "Set-DawnstrikeCanonicalTaskExpectedSha" not in activation_compensation
+    assert "Assert-DawnstrikeCanonicalTaskSemantics" not in activation_compensation
+    assert "exact sealed XML backup is the compatibility authority for P" in activation_compensation
     rollback_restore = rollback[
         rollback.index("# The restored runtime must be disabled and rebound") : rollback.index(
             'if ($journalPhase -eq "PRE_SWAP")',
@@ -2547,19 +3408,20 @@ def test_legacy_activation_compensation_uses_sealed_backup_actions() -> None:
 def test_lock_adoption_recovers_a_replace_completed_before_process_death() -> None:
     lock = Path("scripts/runtime_activation_lock.ps1").read_text(encoding="utf-8")
     recovered_round = lock.index(
-        "elseif($current.raw_file_sha256-eq$payload.next_lock_file_sha256)"
+        "elseif($current.raw_file_sha256-eq[string]$payload.next_lock_file_sha256)"
     )
-    new_temp = lock.index("$nextName='.next-runtime-lock-'", recovered_round)
+    resumable_round = lock.index("$needsNewRound=$true", recovered_round)
+    new_temp = lock.index("$nextName='.next-runtime-lock-'", resumable_round)
     reseal = lock.index("'ADOPTION_PREPARED'", recovered_round)
-    owner_guard = lock.index("process_started_at_utc -ne $ownerStart", recovered_round)
-    assert recovered_round < new_temp < reseal < owner_guard
-    assert "return [pscustomobject]@{path=$path" in lock
+    owner_guard = lock.index("process_started_at_utc-ne$ownerStart", recovered_round)
+    assert recovered_round < resumable_round < new_temp < reseal < owner_guard
+    assert "New-DawnstrikeRetainedRuntimeLockObject $path" in lock
 
 
 def test_complete_activation_retry_reconciles_only_exact_owned_locks() -> None:
     activation = Path("scripts/activate_dawnstrike_runtime.ps1").read_text(encoding="utf-8")
 
-    complete = activation.index("if (Test-Path -LiteralPath $completeReceipt -PathType Leaf)")
+    complete = activation.index("$existingBackupManifest = Get-DawnstrikeTaskXmlBackupManifest")
     artifact_proof = activation.index("$null = Assert-DawnstrikeReceiptRecoveryArtifacts", complete)
     lock_branch = activation.index(
         "if (Test-Path -LiteralPath $completeRuntimeLockPath -PathType Leaf)",
@@ -2631,7 +3493,7 @@ def test_installed_candidate_complete_retry_releases_stranded_lock_pair() -> Non
     )
 
 
-def test_activation_nonterminal_failure_preserves_adoptable_lock_pair() -> None:
+def test_activation_nonterminal_failure_compensates_or_preserves_adoptable_lock_pair() -> None:
     activation = Path("scripts/activate_dawnstrike_runtime.ps1").read_text(encoding="utf-8")
 
     pre_quiesce = activation.index("-Operation runtime_activation -Phase PRE_QUIESCE")
@@ -2647,12 +3509,26 @@ def test_activation_nonterminal_failure_preserves_adoptable_lock_pair() -> None:
         'if ($journalPhase -in @("PRE_QUIESCE", "PRE_SWAP", "POST_SWAP", "POST_SWAP_READY"))',
         failure_reconcile,
     )
-    preserve_assignment = activation.index("$preserveLocks = $true", preserve)
+    compensation = activation.index(
+        "Invoke-DawnstrikeActivationCompensationStateMachine", preserve
+    )
+    compensation_failure = activation.index(
+        "Runtime activation durable compensation did not reach its terminal proof", compensation
+    )
+    preserve_assignment = activation.rindex(
+        "$preserveLocks = $true", compensation, compensation_failure
+    )
     finally_block = activation.index("finally {", preserve)
     finally_guard = activation.index("if (-not $preserveLocks)", finally_block)
-    assert failure_reconcile < preserve < preserve_assignment < finally_block < finally_guard
-    assert "Nonterminal activation recovery lacks its adoptable lock pair" in activation
-    assert "Nonterminal activation recovery lock pair was not preserved" in activation
+    assert (
+        failure_reconcile
+        < preserve
+        < compensation
+        < preserve_assignment
+        < compensation_failure
+        < finally_block
+        < finally_guard
+    )
     assert "if (-not $activationBodyStarted -and -not $preserveLocks" in activation
 
     recovery_start = activation.index(
@@ -2668,21 +3544,8 @@ def test_activation_nonterminal_failure_preserves_adoptable_lock_pair() -> None:
     assert "Recovered COMPLETE activation could not reacquire its exact daily lock" in activation
     assert "Confirm-DawnstrikeActivationDailyLockHandshake" in recovery_region
 
-    restore_failure = activation.rindex(
-        "Runtime activation failed and automatic restore could not be completed;"
-    )
-    fail_closed = activation.rindex(
-        "Set-DawnstrikeTasksFailClosedDisabled $runtime $state", 0, restore_failure
-    )
-    auxiliary_fail_closed = activation.index(
-        "Disable-DawnstrikeAuxiliaryCaptureTask $runtime $state",
-        fail_closed,
-        restore_failure,
-    )
-    preserve_after_success = activation.index(
-        "$preserveLocks = $true", auxiliary_fail_closed, restore_failure
-    )
-    assert fail_closed < auxiliary_fail_closed < preserve_after_success < restore_failure
+    assert "$activationLock = $null" in activation[compensation:compensation_failure]
+    assert "$dailyLock = $null" in activation[compensation:compensation_failure]
 
 
 def test_production_entrypoint_fault_injection_switches_are_environment_guarded() -> None:
@@ -2899,6 +3762,1315 @@ $result | ConvertTo-Json -Compress
     }
 
 
+def _prepare_disposable_activation_recovery_fixture(tmp_path: Path) -> dict[str, object]:
+    """Build a complete, local-only activation fixture for crash recovery tests."""
+
+    source = Path.cwd()
+    fixture_root = tmp_path
+    if os.name == "nt":
+        # The governed production roots keep the deepest compensation quarantine
+        # comfortably below MAX_PATH (181 characters at the installed StateRoot).
+        # Pytest's descriptive per-test directory can add more than 30 characters
+        # and push the disposable Git checkout past Git for Windows' own path cap,
+        # so use an isolated short sibling while retaining pytest's temp ownership.
+        fixture_token = hashlib.sha256(str(tmp_path).encode("utf-8")).hexdigest()[:12]
+        fixture_root = tmp_path.parent / f"ds-{fixture_token}"
+        fixture_root.mkdir()
+    candidate = fixture_root / "candidate"
+    runtime = fixture_root / "dawnstrike-runtime"
+    state = fixture_root / "state"
+    backup = fixture_root / "backups"
+    remote = fixture_root / "origin.git"
+    candidate.mkdir()
+    runtime.mkdir()
+    state.mkdir()
+
+    (candidate / "scripts").mkdir()
+    for name in (
+        "activate_dawnstrike_runtime.ps1",
+        "runtime_activation_lock.ps1",
+        "runtime_activation_lock_contract.py",
+        "runtime_operation_journal.py",
+        "capture_task_safety.ps1",
+        "rollback_dawnstrike_runtime.ps1",
+        "runtime_activation_contract.py",
+        "dawnstrike_job_process.ps1",
+        "dawnstrike_process_runner.ps1",
+        "state_root_boundary.ps1",
+        "dawnstrike_python_bootstrap.py",
+        "invoke_dawnstrike_stage.ps1",
+        "state_disaster_recovery.py",
+        "run_alphaops_morning.ps1",
+        "run_alphaops_monitor.ps1",
+        "run_alphaops_eod.ps1",
+        "run_alphaops_weekly_training.ps1",
+        "run_daily_finalize.ps1",
+        "import_dawnstrike_environment.ps1",
+        "alpha_cycle_artifact.ps1",
+        "monitor_schedule_helper.ps1",
+        "refresh_luna_core_universe.py",
+        "publish_vercel_public.ps1",
+        "vercel_source_contract.ps1",
+        "vercel_toolchain_contract.py",
+        "vercel_publication_journal.py",
+        "publication_boundary.py",
+        "verify_daily_prepublication.py",
+        "build_vercel_public_stage.ps1",
+        "verify_vercel_candidate.ps1",
+    ):
+        shutil.copy2(source / "scripts" / name, candidate / "scripts" / name)
+    candidate_process_runner = candidate / "scripts" / "dawnstrike_process_runner.ps1"
+    process_runner_source = candidate_process_runner.read_text(encoding="utf-8")
+    luna_fixture_anchor = (
+        "    $releaseRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')).TrimEnd('\\')\n"
+    )
+    assert process_runner_source.count(luna_fixture_anchor) == 1
+    candidate_process_runner.write_text(
+        process_runner_source.replace(
+            luna_fixture_anchor,
+            "    if ($env:DAWNSTRIKE_TEST_ACTIVATION_LUNA_MANIFEST_FIXTURE -eq '1') {\n"
+            "        return @(\n"
+            "            'scripts/refresh_luna_core_universe.py',\n"
+            "            'intraday_scanner/__init__.py'\n"
+            "        )\n"
+            "    }\n"
+            + luna_fixture_anchor,
+            1,
+        ),
+        encoding="utf-8",
+    )
+    candidate_activation = candidate / "scripts" / "activate_dawnstrike_runtime.ps1"
+    direct_python_anchor = """    if ([string]::Equals(
+            [System.IO.Path]::GetFullPath($FilePath),
+            $approvedPythonPath,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) {"""
+    direct_python_fixture = """    if (
+        $env:DAWNSTRIKE_TEST_DIRECT_PYTHON_FIXTURE -ne "1" -and
+        [string]::Equals(
+            [System.IO.Path]::GetFullPath($FilePath),
+            $approvedPythonPath,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )
+    ) {"""
+    candidate_activation_source = candidate_activation.read_text(encoding="utf-8")
+    assert candidate_activation_source.count(direct_python_anchor) == 1
+    candidate_activation.write_text(
+        candidate_activation_source.replace(
+            direct_python_anchor,
+            direct_python_fixture,
+            1,
+        ),
+        encoding="utf-8",
+    )
+    _install_local_origin_fixture_seam(candidate / "scripts" / "runtime_activation_lock.ps1")
+    _install_local_interpreter_fixture_seam(candidate)
+    _install_local_bootstrap_origin_fixture_seam(
+        candidate / "scripts" / "dawnstrike_python_bootstrap.py", origin=remote
+    )
+    _install_local_github_ci_fixture_seam(candidate / "scripts" / "runtime_activation_contract.py")
+    shutil.copytree(
+        source / "intraday_scanner",
+        candidate / "intraday_scanner",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+    )
+    for name in (".gitignore", ".gitattributes", "pyproject.toml", "requirements.lock"):
+        shutil.copy2(source / name, candidate / name)
+    candidate_bootstrap = candidate / "scripts" / "dawnstrike_python_bootstrap.py"
+    candidate_bootstrap.write_text(
+        candidate_bootstrap.read_text(encoding="utf-8").replace(
+            PRODUCTION_RECORD_SET_SHA256,
+            _host_dependency_record_contract(source / "requirements.lock"),
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "init", "--initial-branch=main", str(candidate)],
+        check=True,
+        capture_output=True,
+    )
+    _git(candidate, "config", "user.email", "activation-test@example.invalid")
+    _git(candidate, "config", "user.name", "Activation Test")
+    _git(candidate, "add", ".")
+    _git(candidate, "commit", "-m", "candidate")
+    _git(candidate, "remote", "add", "origin", str(remote))
+    _git(candidate, "push", "-u", "origin", "main")
+    candidate_sha = _git(candidate, "rev-parse", "HEAD")
+    candidate_tree = _git(candidate, "rev-parse", "HEAD^{tree}")
+
+    subprocess.run(
+        ["git", "init", "--initial-branch=main", str(runtime)],
+        check=True,
+        capture_output=True,
+    )
+    _git(runtime, "config", "user.email", "activation-test@example.invalid")
+    _git(runtime, "config", "user.name", "Activation Test")
+    (runtime / "previous.txt").write_text("previous-runtime\n", encoding="utf-8")
+    _git(runtime, "add", "previous.txt")
+    _git(runtime, "commit", "-m", "previous")
+    _git(runtime, "remote", "add", "origin", str(remote))
+    previous_sha = _git(runtime, "rev-parse", "HEAD")
+    previous_tree = _git(runtime, "rev-parse", "HEAD^{tree}")
+
+    db = state / "shadow_real.sqlite"
+    with sqlite3.connect(db) as connection:
+        run_migrations(connection)
+    db_hash_before = hashlib.sha256(db.read_bytes()).hexdigest()
+    evidence_root = state / "evidence"
+    evidence_root.mkdir()
+    ci_payload = _ci_payload()
+    ci_payload["run_url"] = "https://github.com/mattfren/DawnStrike/actions/runs/12345"
+    ci_payload["candidate_sha"] = candidate_sha
+    ci_payload["candidate_tree"] = candidate_tree
+    sol_payload = _sol_payload()
+    sol_payload["candidate_sha"] = candidate_sha
+    sol_payload["candidate_tree"] = candidate_tree
+    owner_comment_body = activation_contract._owner_authorization_body(
+        sol_payload, candidate_sha=candidate_sha, candidate_tree=candidate_tree
+    )
+    ci = evidence_root / "ci.json"
+    sol = evidence_root / "sol.json"
+    _write_json(ci, seal_evidence(ci_payload))
+    _write_json(sol, seal_evidence(sol_payload))
+    return {
+        "source": source,
+        "candidate": candidate,
+        "runtime": runtime,
+        "state": state,
+        "backup": backup,
+        "ci": ci,
+        "sol": sol,
+        "candidate_sha": candidate_sha,
+        "candidate_tree": candidate_tree,
+        "previous_sha": previous_sha,
+        "previous_tree": previous_tree,
+        "db": db,
+        "db_hash_before": db_hash_before,
+        "ci_completed_at": ci_payload["completed_at_utc"],
+        "owner_comment_body": owner_comment_body,
+    }
+
+
+def _persistent_disposable_scheduler_mock(
+    *,
+    runtime: Path,
+    state: Path,
+    persistence_path: Path,
+    phase: str,
+    boundary_date: str = "2026-08-30",
+) -> str:
+    """Return process-persistent scheduled-task mocks for hard-crash tests."""
+
+    template = r"""
+$global:MockRuntime = '__RUNTIME__'
+$global:MockState = '__STATE__'
+$global:MockPersistencePath = '__PERSISTENCE__'
+$global:MockPhase = '__PHASE__'
+$global:MockTaskStates = @{}
+$global:MockTaskExpectedSha = @{}
+$global:MockTaskActions = @{}
+$global:TaskEvents = @()
+
+function Save-MockScheduler {
+    $states = [ordered]@{}
+    $expected = [ordered]@{}
+    $actions = [ordered]@{}
+    foreach ($name in $script:DawnstrikeCanonicalTaskNames) {
+        $states[$name] = [string]$global:MockTaskStates[$name]
+        if ($global:MockTaskExpectedSha.ContainsKey($name)) {
+            $expected[$name] = [string]$global:MockTaskExpectedSha[$name]
+        }
+        if ($global:MockTaskActions.ContainsKey($name)) {
+            $action = $global:MockTaskActions[$name]
+            $actions[$name] = [ordered]@{
+                Execute = [string]$action.Execute
+                Arguments = [string]$action.Arguments
+                WorkingDirectory = [string]$action.WorkingDirectory
+            }
+        }
+    }
+    $payload = [ordered]@{
+        states = $states
+        expected_sha = $expected
+        actions = $actions
+        events = @($global:TaskEvents)
+    }
+    [IO.File]::WriteAllText(
+        $global:MockPersistencePath,
+        ($payload | ConvertTo-Json -Depth 12 -Compress),
+        [Text.UTF8Encoding]::new($false)
+    )
+}
+
+if (Test-Path -LiteralPath $global:MockPersistencePath -PathType Leaf) {
+    $saved = Get-Content -LiteralPath $global:MockPersistencePath -Raw -Encoding UTF8 |
+        ConvertFrom-Json
+    foreach ($property in $saved.states.PSObject.Properties) {
+        $global:MockTaskStates[$property.Name] = [string]$property.Value
+    }
+    foreach ($property in $saved.expected_sha.PSObject.Properties) {
+        $global:MockTaskExpectedSha[$property.Name] = [string]$property.Value
+    }
+    foreach ($property in $saved.actions.PSObject.Properties) {
+        $global:MockTaskActions[$property.Name] = [pscustomobject]@{
+            Execute = [string]$property.Value.Execute
+            Arguments = [string]$property.Value.Arguments
+            WorkingDirectory = [string]$property.Value.WorkingDirectory
+        }
+    }
+    $global:TaskEvents = @($saved.events)
+}
+else {
+    foreach ($name in $script:DawnstrikeCanonicalTaskNames) {
+        $global:MockTaskStates[$name] = 'Ready'
+    }
+    Save-MockScheduler
+}
+
+function Get-ScheduledTask {
+    [CmdletBinding()] param([string]$TaskName)
+    if ($TaskName -eq 'Dawnstrike Delayed SIP Capture') { return @() }
+    $boundSha = [string]$global:MockTaskExpectedSha[$TaskName]
+    $hasPersistedAction = $global:MockTaskActions.ContainsKey($TaskName)
+    # A restored task's sealed action is authoritative.  Derive only the
+    # schedule shape from the legacy policy so this test double does not try
+    # to reconstruct an older runtime's protected launcher command.
+    $policy = if ($hasPersistedAction) {
+        Get-DawnstrikeCanonicalTaskPolicy $TaskName $global:MockRuntime $global:MockState
+    }
+    elseif ($boundSha) {
+        Get-DawnstrikeCanonicalTaskPolicy `
+            $TaskName $global:MockRuntime $global:MockState $boundSha
+    }
+    else {
+        Get-DawnstrikeCanonicalTaskPolicy $TaskName $global:MockRuntime $global:MockState
+    }
+    $currentAction = if ($hasPersistedAction) {
+        $global:MockTaskActions[$TaskName]
+    }
+    else {
+        [pscustomobject]@{
+            Execute = $script:DawnstrikePowerShellExecutable
+            Arguments = $policy.arguments
+            WorkingDirectory = $global:MockRuntime
+        }
+    }
+    $triggerType = if ($policy.weekly) { 'MSFT_TaskWeeklyTrigger' } else { 'MSFT_TaskDailyTrigger' }
+    $dayOfWeek = if ($policy.weekly) { [int]$policy.days } else { $null }
+    $weekInterval = if ($policy.weekly) { 1 } else { $null }
+    $dayInterval = if ($policy.weekly) { $null } else { 1 }
+    $repetition = if ($policy.monitor) {
+        [pscustomobject]@{ Interval='PT5M'; Duration='PT6H35M'; StopAtDurationEnd=$true }
+    }
+    else {
+        [pscustomobject]@{ Interval=''; Duration=''; StopAtDurationEnd=$false }
+    }
+    [pscustomobject]@{
+        State = $global:MockTaskStates[$TaskName]
+        TaskPath = '\'
+        Actions = @($currentAction)
+        Triggers = @([pscustomobject]@{
+            CimClass = [pscustomobject]@{ CimClassName=$triggerType }
+            Enabled = $true
+            DaysOfWeek = $dayOfWeek
+            WeeksInterval = $weekInterval
+            DaysInterval = $dayInterval
+            StartBoundary = ('2026-08-31T' + $policy.start + ':00-05:00')
+            EndBoundary = $null
+            RandomDelay = $null
+            Repetition = $repetition
+        })
+        Principal = [pscustomobject]@{
+            LogonType='Password'; UserId='activation-test'; RunLevel='Limited'
+        }
+        Settings = [pscustomobject]@{
+            Enabled = ($global:MockTaskStates[$TaskName] -eq 'Ready')
+            StartWhenAvailable = $true
+            WakeToRun = $true
+            StopIfGoingOnBatteries = $false
+            DisallowStartIfOnBatteries = $false
+            MultipleInstances = 'IgnoreNew'
+            ExecutionTimeLimit = $policy.execution_limit
+            RestartCount = $policy.restart_count
+            RestartInterval = $policy.restart_interval
+            Hidden = $false
+            RunOnlyIfIdle = $false
+            RunOnlyIfNetworkAvailable = $false
+            UseUnifiedSchedulingEngine = $true
+        }
+    }
+}
+
+function Get-ScheduledTaskInfo {
+    [CmdletBinding()] param([string]$TaskName,[string]$TaskPath)
+    $lastRun = switch ($TaskName) {
+        'Dawnstrike AlphaOps EOD Full Report' { [DateTime]'__BOUNDARY_DATE__T15:15:00' }
+        'Dawnstrike 10of10 Daily Finalize' { [DateTime]'__BOUNDARY_DATE__T17:30:00' }
+        'Dawnstrike AlphaOps V6 Weekly Training' { [DateTime]'__BOUNDARY_DATE__T21:00:00' }
+        default { [DateTime]'__BOUNDARY_DATE__T08:00:00' }
+    }
+    [pscustomobject]@{
+        LastRunTime = $lastRun
+        NextRunTime = if ($TaskName -eq 'Dawnstrike AlphaOps V6 Weekly Training') {
+            [DateTime]'__WEEKLY_NEXT_DATE__T21:00:00'
+        }
+        else { [DateTime]'__NEXT_DATE__T08:00:00' }
+    }
+}
+
+function Export-ScheduledTask {
+    [CmdletBinding()] param([string]$TaskName,[string]$TaskPath)
+    $task = Get-ScheduledTask -TaskName $TaskName
+    $action = @($task.Actions)[0]
+    $enabled = if ($global:MockTaskStates[$TaskName] -eq 'Disabled') { 'false' } else { 'true' }
+    $safeName = [Security.SecurityElement]::Escape([string]$TaskName)
+    $safeCommand = [Security.SecurityElement]::Escape([string]$action.Execute)
+    $safeArguments = [Security.SecurityElement]::Escape([string]$action.Arguments)
+    $safeWorking = [Security.SecurityElement]::Escape([string]$action.WorkingDirectory)
+    "<Task><Name>$safeName</Name><Principal><UserId>activation-test</UserId><LogonType>Password</LogonType></Principal><Triggers><CalendarTrigger><StartBoundary>2026-08-31T08:00:00-05:00</StartBoundary></CalendarTrigger></Triggers><Settings><Enabled>$enabled</Enabled><ExecutionTimeLimit>PT2H</ExecutionTimeLimit></Settings><Actions><Exec><Command>$safeCommand</Command><Arguments>$safeArguments</Arguments><WorkingDirectory>$safeWorking</WorkingDirectory></Exec></Actions></Task>"
+}
+
+function Disable-ScheduledTask {
+    [CmdletBinding()] param([string]$TaskName,[string]$TaskPath)
+    $global:MockTaskStates[$TaskName] = 'Disabled'
+    $global:TaskEvents += [pscustomobject]@{
+        phase=$global:MockPhase; operation='disable'; task=$TaskName; sha='NONE'
+    }
+    Save-MockScheduler
+    [pscustomobject]@{ TaskName=$TaskName }
+}
+
+function Enable-ScheduledTask {
+    [CmdletBinding()] param([string]$TaskName,[string]$TaskPath)
+    $global:MockTaskStates[$TaskName] = 'Ready'
+    $boundSha = [string]$global:MockTaskExpectedSha[$TaskName]
+    if ([string]::IsNullOrWhiteSpace($boundSha)) { $boundSha = 'UNBOUND_PRIOR' }
+    $global:TaskEvents += [pscustomobject]@{
+        phase=$global:MockPhase; operation='enable'; task=$TaskName; sha=$boundSha
+    }
+    Save-MockScheduler
+    [pscustomobject]@{ TaskName=$TaskName }
+}
+
+function New-ScheduledTaskAction {
+    [CmdletBinding()] param([string]$Execute,[string]$Argument,[string]$WorkingDirectory)
+    [pscustomobject]@{ Execute=$Execute; Arguments=$Argument; WorkingDirectory=$WorkingDirectory }
+}
+
+function Set-ScheduledTask {
+    [CmdletBinding()] param([string]$TaskName,[string]$TaskPath,$Action)
+    $global:MockTaskActions[$TaskName] = @($Action)[0]
+    $match = [regex]::Match(
+        [string](@($Action)[0].Arguments),
+        '-ExpectedSha\s+["'']?([0-9a-f]{40})'
+    )
+    if ($match.Success) {
+        $global:MockTaskExpectedSha[$TaskName] = $match.Groups[1].Value
+    }
+    else {
+        $null = $global:MockTaskExpectedSha.Remove($TaskName)
+    }
+    Save-MockScheduler
+    [pscustomobject]@{ TaskName=$TaskName }
+}
+"""
+    boundary_day = datetime.fromisoformat(boundary_date)
+    replacements = {
+        "__RUNTIME__": str(runtime).replace("'", "''"),
+        "__STATE__": str(state).replace("'", "''"),
+        "__PERSISTENCE__": str(persistence_path).replace("'", "''"),
+        "__PHASE__": phase.replace("'", "''"),
+        "__BOUNDARY_DATE__": boundary_day.date().isoformat(),
+        "__NEXT_DATE__": (boundary_day + timedelta(days=1)).date().isoformat(),
+        "__WEEKLY_NEXT_DATE__": (boundary_day + timedelta(days=7)).date().isoformat(),
+    }
+    for marker, value in replacements.items():
+        template = template.replace(marker, value)
+    return template
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
+@pytest.mark.parametrize(
+    (
+        "crash_argument",
+        "expected_phase",
+        "expected_filesystem_state",
+        "expected_ready_count",
+        "candidate_bound_before",
+        "cross_during_recovery_enable",
+    ),
+    (
+        (
+            "-TestStageCrashPoint 'after_prepared_receipt'",
+            "PRE_QUIESCE",
+            "OLD_RUNTIME_INTACT",
+            0,
+            False,
+            False,
+        ),
+        (
+            "-InjectCrashBetweenRuntimeRenames",
+            "PRE_SWAP",
+            "AFTER_FIRST_RENAME",
+            0,
+            False,
+            False,
+        ),
+        (
+            "-TestStageCrashPoint 'after_ready_receipt'",
+            "POST_SWAP",
+            "AFTER_SECOND_RENAME",
+            0,
+            True,
+            False,
+        ),
+        (
+            "-TestStageCrashPoint 'after_complete_receipt'",
+            "POST_SWAP_READY",
+            "AFTER_SECOND_RENAME",
+            5,
+            True,
+            False,
+        ),
+        (
+            "-TestStageCrashPoint 'after_ready_journal'",
+            "POST_SWAP_READY",
+            "AFTER_SECOND_RENAME",
+            0,
+            True,
+            True,
+        ),
+        (
+            "-TestStageCrashPoint 'after_candidate_runtime_rename'",
+            "PRE_SWAP",
+            "AFTER_SECOND_RENAME",
+            0,
+            False,
+            True,
+        ),
+    ),
+    ids=(
+        "prepared-receipt-before-pre-swap-journal",
+        "pre-swap-after-first-rename",
+        "ready-receipt-before-post-swap-ready-journal",
+        "complete-receipt-before-complete-journal",
+        "post-swap-ready-crosses-during-recovery-enable",
+        "post-swap-rebind-crosses-during-recovery-enable",
+    ),
+)
+def test_expired_recovery_compensates_every_runtime_shape_without_late_candidate_enable(
+    tmp_path: Path,
+    crash_argument: str,
+    expected_phase: str,
+    expected_filesystem_state: str,
+    expected_ready_count: int,
+    candidate_bound_before: bool,
+    cross_during_recovery_enable: bool,
+) -> None:
+    fixture = _prepare_disposable_activation_recovery_fixture(tmp_path)
+    candidate = fixture["candidate"]
+    runtime = fixture["runtime"]
+    state = fixture["state"]
+    backup = fixture["backup"]
+    assert isinstance(candidate, Path)
+    assert isinstance(runtime, Path)
+    assert isinstance(state, Path)
+    assert isinstance(backup, Path)
+    candidate_sha = str(fixture["candidate_sha"])
+    candidate_tree = str(fixture["candidate_tree"])
+    previous_sha = str(fixture["previous_sha"])
+    previous_tree = str(fixture["previous_tree"])
+    persistence = tmp_path / "mock-scheduler.json"
+    activation_script = str(
+        (candidate / "scripts" / "activate_dawnstrike_runtime.ps1").resolve()
+    ).replace("'", "''")
+    escaped = {
+        "candidate": str(candidate).replace("'", "''"),
+        "runtime": str(runtime).replace("'", "''"),
+        "state": str(state).replace("'", "''"),
+        "backup": str(backup).replace("'", "''"),
+        "ci": str(fixture["ci"]).replace("'", "''"),
+        "sol": str(fixture["sol"]).replace("'", "''"),
+    }
+    environment = rf"""
+$env:DAWNSTRIKE_TEST_ACTIVATION_LUNA_MANIFEST_FIXTURE = '1'
+$env:DAWNSTRIKE_TEST_ACTIVATION_CLOCK = '1'
+$env:DAWNSTRIKE_TEST_ACTIVATION_STAGE_CRASH = '1'
+$env:DAWNSTRIKE_TEST_ACTIVATION_COMPENSATION_CRASH = '1'
+$env:DAWNSTRIKE_TEST_LOCK_JOURNAL = '1'
+$env:DAWNSTRIKE_TEST_DIRECT_PYTHON_FIXTURE = '1'
+$env:DAWNSTRIKE_TEST_GITHUB_CI_FIXTURE = '1'
+$env:DAWNSTRIKE_TEST_GITHUB_CI_CANDIDATE_SHA = '{candidate_sha}'
+$env:DAWNSTRIKE_TEST_GITHUB_CI_CANDIDATE_TREE = '{candidate_tree}'
+$env:DAWNSTRIKE_TEST_GITHUB_CI_COMPLETED_AT = '{fixture["ci_completed_at"]}'
+$env:DAWNSTRIKE_TEST_GITHUB_OWNER_COMMENT_BODY = '{fixture["owner_comment_body"]}'
+"""
+    invocation = rf"""
+  -ExpectedSha '{candidate_sha}' -MarketDate '2026-08-31' `
+  -CiEvidencePath '{escaped["ci"]}' -SolEvidencePath '{escaped["sol"]}' `
+  -CandidateRoot '{escaped["candidate"]}' -RuntimeRoot '{escaped["runtime"]}' `
+  -StateRoot '{escaped["state"]}' -BackupRoot '{escaped["backup"]}' `
+  -BackupRetention 5 -ProcessTimeoutSeconds 120 `
+  -TestNowUtc '2026-08-30T23:00:00Z'
+""".strip()
+    crash_mock = _persistent_disposable_scheduler_mock(
+        runtime=runtime,
+        state=state,
+        persistence_path=persistence,
+        phase="crash",
+    )
+    crash_command = rf"""
+$ErrorActionPreference = 'Stop'
+. '{activation_script}'
+{environment}
+{crash_mock}
+$null = Invoke-DawnstrikeRuntimeActivation `
+{invocation} `
+  -TestFreshNowUtc '2026-08-30T23:00:00Z' {crash_argument}
+throw 'activation crash seam returned unexpectedly'
+"""
+    crashed = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", crash_command],
+        cwd=fixture["source"],
+        text=True,
+        capture_output=True,
+        timeout=600,
+        check=False,
+    )
+    assert crashed.returncode != 0, (crashed.stdout, crashed.stderr)
+
+    journals = list((state / "receipts" / "runtime-operation").glob("runtime-activation-*.json"))
+    assert len(journals) == 1, (crashed.stdout, crashed.stderr, journals)
+    journal_path = journals[0]
+    journal_before = json.loads(journal_path.read_text(encoding="utf-8"))
+    assert journal_before["phase"] == expected_phase
+    activation_id = journal_path.stem.removeprefix("runtime-activation-")
+    assert re.fullmatch(r"[0-9a-f]{24}", activation_id)
+    scheduler_before = json.loads(persistence.read_text(encoding="utf-8"))
+    assert (
+        list(scheduler_before["states"].values()).count("Ready")
+        == expected_ready_count
+    )
+    if expected_ready_count == 0:
+        assert set(scheduler_before["states"].values()) == {"Disabled"}
+    if candidate_bound_before:
+        assert set(scheduler_before["expected_sha"].values()) == {candidate_sha}
+    else:
+        assert not scheduler_before["expected_sha"]
+
+    recovery_fresh_clock = (
+        "2026-08-30T23:00:00Z"
+        if cross_during_recovery_enable
+        else "2026-09-01T03:00:00Z"
+    )
+    recovery_boundary_date = (
+        datetime.fromisoformat(recovery_fresh_clock.replace("Z", "+00:00"))
+        .astimezone()
+        .date()
+        .isoformat()
+    )
+    recovery_mock = _persistent_disposable_scheduler_mock(
+        runtime=runtime,
+        state=state,
+        persistence_path=persistence,
+        phase="recovery",
+        boundary_date=recovery_boundary_date,
+    )
+    recovery_cross_argument = (
+        "-TestEnableBoundaryCrossAfter 2" if cross_during_recovery_enable else ""
+    )
+    recovery_compensation_crash_argument = (
+        "-TestCompensationCrashPoint 'after_stage_preserve'"
+        if expected_phase == "PRE_QUIESCE"
+        else ""
+    )
+    recovery_extra_arguments = " ".join(
+        argument
+        for argument in (
+            recovery_cross_argument,
+            recovery_compensation_crash_argument,
+        )
+        if argument
+    )
+    recovery_command = rf"""
+$ErrorActionPreference = 'Stop'
+. '{activation_script}'
+{environment}
+{recovery_mock}
+    $recovered = Invoke-DawnstrikeRuntimeActivation `
+    {invocation} `
+      -TestFreshNowUtc '{recovery_fresh_clock}' {recovery_extra_arguments}
+[pscustomobject]@{{
+    recovered = $recovered
+    task_states = $global:MockTaskStates
+    task_expected_sha = $global:MockTaskExpectedSha
+    task_events = @($global:TaskEvents)
+}} | ConvertTo-Json -Depth 12 -Compress
+"""
+    if recovery_compensation_crash_argument:
+        compensation_crashed = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", recovery_command],
+            cwd=fixture["source"],
+            text=True,
+            capture_output=True,
+            timeout=600,
+            check=False,
+        )
+        assert compensation_crashed.returncode != 0, (
+            compensation_crashed.stdout,
+            compensation_crashed.stderr,
+        )
+        recovery_command = recovery_command.replace(
+            recovery_compensation_crash_argument, ""
+        )
+    recovered = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", recovery_command],
+        cwd=fixture["source"],
+        text=True,
+        capture_output=True,
+        timeout=600,
+        check=False,
+    )
+    assert recovered.returncode == 0, (recovered.stdout, recovered.stderr)
+    payload = json.loads(recovered.stdout.strip().splitlines()[-1])
+    recovery = payload["recovered"]
+    assert recovery["status"] == "RECOVERED_EXPIRED_COMPENSATED"
+    recovered_phase = (
+        "POST_SWAP_READY"
+        if expected_phase == "POST_SWAP"
+        or (cross_during_recovery_enable and expected_phase == "PRE_SWAP")
+        else expected_phase
+    )
+    assert recovery["recovered_phase"] == recovered_phase
+    assert recovery["recovered_filesystem_state"] == expected_filesystem_state
+    assert recovery["candidate_sha"] == candidate_sha
+    assert recovery["candidate_tree"] == candidate_tree
+    assert recovery["restored_sha"] == previous_sha
+    assert recovery["restored_tree"] == previous_tree
+    assert set(payload["task_states"].values()) == {"Ready"}
+    assert not payload["task_expected_sha"]
+    recovery_enable_events = [
+        event
+        for event in payload["task_events"]
+        if event["phase"] == "recovery" and event["operation"] == "enable"
+    ]
+    prior_enable_events = [
+        event for event in recovery_enable_events if event["sha"] == "UNBOUND_PRIOR"
+    ]
+    candidate_enable_events = [
+        event for event in recovery_enable_events if event["sha"] == candidate_sha
+    ]
+    assert len(prior_enable_events) == 5
+    assert len(candidate_enable_events) == (2 if cross_during_recovery_enable else 0)
+
+    assert _git(runtime, "rev-parse", "HEAD") == previous_sha
+    assert _git(runtime, "rev-parse", "HEAD^{tree}") == previous_tree
+    rollback_root = state / "runtime-rollbacks" / activation_id
+    failed_candidate = rollback_root / "failed-candidate-runtime"
+    assert _git(failed_candidate, "rev-parse", "HEAD") == candidate_sha
+    assert _git(failed_candidate, "rev-parse", "HEAD^{tree}") == candidate_tree
+    assert not Path(f"{runtime}.stage-{activation_id}").exists()
+    assert not (rollback_root / "previous-runtime").exists()
+    lock_root = state / "locks"
+    assert not (lock_root / "dawnstrike-runtime-activation.lock").exists()
+    assert not list(lock_root.glob("dawnstrike-daily-*.lock"))
+    stale_lock_evidence = list(lock_root.glob("recovered-stale-*.lock"))
+    expected_stale_runtime_locks = 2 if recovery_compensation_crash_argument else 1
+    assert len(stale_lock_evidence) == expected_stale_runtime_locks
+    assert all(
+        re.fullmatch(r"recovered-stale-[0-9a-f]{64}\.lock", path.name)
+        for path in stale_lock_evidence
+    )
+    assert len({path.name for path in stale_lock_evidence}) == len(stale_lock_evidence)
+    assert hashlib.sha256(Path(fixture["db"]).read_bytes()).hexdigest() == fixture["db_hash_before"]
+
+    verified_journal = subprocess.run(
+        [
+            sys.executable,
+            str(candidate / "scripts" / "runtime_operation_journal.py"),
+            "verify",
+            str(journal_path),
+            "--state-root",
+            str(state),
+        ],
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert verified_journal.returncode == 0, verified_journal.stderr
+    journal_after = json.loads(verified_journal.stdout)["payload"]
+    assert journal_after["phase"] == "COMPENSATED"
+    assert journal_after["current_sha"] == previous_sha
+    assert journal_after["current_tree"] == previous_tree
+    assert journal_after["task_contract_sha256"] == recovery["restored_task_contract_sha256"]
+
+    compensation_path = state.joinpath(*recovery["compensation_receipt_relative_path"].split("/"))
+    verified_compensation = subprocess.run(
+        [
+            sys.executable,
+            str(candidate / "scripts" / "runtime_operation_journal.py"),
+            "verify-compensation",
+            "--receipt",
+            str(compensation_path),
+            "--state-root",
+            str(state),
+        ],
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert verified_compensation.returncode == 0, verified_compensation.stderr
+    compensation = json.loads(verified_compensation.stdout)["payload"]
+    assert compensation["status"] == "COMPENSATED"
+    assert compensation["candidate_sha"] == candidate_sha
+    assert compensation["task_state"] == "Ready"
+    assert compensation["task_contract_sha256"] == recovery["restored_task_contract_sha256"]
+    scheduler_backups = list((state / "scheduler-backups").glob("*/manifest.json"))
+    assert len(scheduler_backups) == 1
+    scheduler_manifest = json.loads(scheduler_backups[0].read_text(encoding="utf-8"))
+    assert scheduler_manifest["task_contract_sha256"] == recovery["restored_task_contract_sha256"]
+
+    if expected_filesystem_state == "AFTER_FIRST_RENAME" and not cross_during_recovery_enable:
+        cleanup_mock = _persistent_disposable_scheduler_mock(
+            runtime=runtime,
+            state=state,
+            persistence_path=persistence,
+            phase="cleanup",
+            boundary_date=(
+                datetime.fromisoformat("2026-09-01T03:00:00+00:00")
+                .astimezone()
+                .date()
+                .isoformat()
+            ),
+        )
+        cleanup_command = rf"""
+$ErrorActionPreference = 'Stop'
+. '{activation_script}'
+{environment}
+{cleanup_mock}
+$blocked = $false
+$message = ''
+try {{
+    $null = Invoke-DawnstrikeRuntimeActivation `
+{invocation} `
+      -TestFreshNowUtc '2026-09-01T03:00:00Z'
+}}
+catch {{
+    $blocked = $true
+    $message = $_.Exception.Message
+}}
+[pscustomobject]@{{ blocked=$blocked; message=$message }} |
+    ConvertTo-Json -Compress
+"""
+        cleaned = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", cleanup_command],
+            cwd=fixture["source"],
+            text=True,
+            capture_output=True,
+            timeout=600,
+            check=False,
+        )
+        assert cleaned.returncode == 0, (cleaned.stdout, cleaned.stderr)
+        cleanup_result = json.loads(cleaned.stdout.strip().splitlines()[-1])
+        assert cleanup_result["blocked"] is True
+        assert "boundary" in cleanup_result["message"].lower()
+        assert not journal_path.exists()
+        journal_archives = list(
+            (state / "receipts" / "runtime-operation" / "archive").glob(
+                "compensated-*.json"
+            )
+        )
+        assert len(journal_archives) == 1
+        receipt_archive = state / "receipts" / "runtime-activation" / "archive"
+        assert len(list(receipt_archive.glob("*.prepared.json"))) == 1
+        assert len(list(receipt_archive.glob("*.intent.json"))) == 1
+        assert not (
+            receipt_archive.parent
+            / f"runtime-activation-{activation_id}.compensating.json"
+        ).exists()
+        quarantine = (
+            state
+            / "recovery-quarantine"
+            / f"compensated-{activation_id}-{journal_after['prior_journal_file_sha256']}"
+        )
+        assert (quarantine / "rollback" / "failed-candidate-runtime").is_dir()
+        assert (quarantine / "scheduler-backup" / "manifest.json").is_file()
+        assert not rollback_root.exists()
+        assert not scheduler_backups[0].parent.exists()
+        verified_after_archive = subprocess.run(
+            [
+                sys.executable,
+                str(candidate / "scripts" / "runtime_operation_journal.py"),
+                "verify-compensation",
+                "--receipt",
+                str(compensation_path),
+                "--state-root",
+                str(state),
+            ],
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        assert verified_after_archive.returncode == 0, verified_after_archive.stderr
+        assert not (lock_root / "dawnstrike-runtime-activation.lock").exists()
+        assert not list(lock_root.glob("dawnstrike-daily-*.lock"))
+
+
+def _restore_activation_crash_snapshot(
+    *,
+    runtime: Path,
+    state: Path,
+    persistence: Path,
+    snapshot: Path,
+) -> None:
+    def remove_readonly(function: object, path: str, _error: BaseException) -> None:
+        Path(path).chmod(0o700)
+        function(path)  # type: ignore[operator]
+
+    if runtime.exists():
+        shutil.rmtree(runtime, onexc=remove_readonly)
+    shutil.copytree(snapshot / "runtime", runtime)
+    # The activation worker can briefly outlive a forced PowerShell parent
+    # while it closes its read-only SQLite handle.  Compensation never mutates
+    # the database, so reset only the durable transaction namespaces rather
+    # than racing that unrelated handle during the matrix.
+    for name in (
+        "locks",
+        "receipts",
+        "scheduler-backups",
+        "runtime-rollbacks",
+        "recovery-quarantine",
+        "task-launch-manifests",
+    ):
+        live = state / name
+        source = snapshot / "state" / name
+        if live.exists():
+            shutil.rmtree(live, onexc=remove_readonly)
+        if source.exists():
+            shutil.copytree(source, live)
+    shutil.copy2(snapshot / "mock-scheduler.json", persistence)
+
+
+def _exact_directory_bytes_digest(root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
+        relative = path.relative_to(root).as_posix().encode("utf-8")
+        if path.is_dir():
+            digest.update(b"D\0" + relative + b"\0")
+        elif path.is_file():
+            digest.update(b"F\0" + relative + b"\0")
+            digest.update(hashlib.sha256(path.read_bytes()).digest())
+        else:
+            raise AssertionError(f"unexpected non-file activation artifact: {path}")
+    return digest.hexdigest()
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
+def test_activation_compensation_and_cleanup_hard_crash_boundaries_replay(
+    tmp_path: Path,
+) -> None:
+    """Every durable compensation mutation survives a process kill and retry."""
+
+    fixture = _prepare_disposable_activation_recovery_fixture(tmp_path)
+    candidate = fixture["candidate"]
+    runtime = fixture["runtime"]
+    state = fixture["state"]
+    backup = fixture["backup"]
+    assert isinstance(candidate, Path)
+    assert isinstance(runtime, Path)
+    assert isinstance(state, Path)
+    assert isinstance(backup, Path)
+    candidate_sha = str(fixture["candidate_sha"])
+    candidate_tree = str(fixture["candidate_tree"])
+    previous_sha = str(fixture["previous_sha"])
+    previous_tree = str(fixture["previous_tree"])
+    persistence = tmp_path / "mock-scheduler.json"
+    activation_script = str(
+        (candidate / "scripts" / "activate_dawnstrike_runtime.ps1").resolve()
+    ).replace("'", "''")
+    escaped = {
+        "candidate": str(candidate).replace("'", "''"),
+        "runtime": str(runtime).replace("'", "''"),
+        "state": str(state).replace("'", "''"),
+        "backup": str(backup).replace("'", "''"),
+        "ci": str(fixture["ci"]).replace("'", "''"),
+        "sol": str(fixture["sol"]).replace("'", "''"),
+    }
+    environment = rf"""
+$env:DAWNSTRIKE_TEST_ACTIVATION_LUNA_MANIFEST_FIXTURE = '1'
+$env:DAWNSTRIKE_TEST_ACTIVATION_CLOCK = '1'
+$env:DAWNSTRIKE_TEST_ACTIVATION_STAGE_CRASH = '1'
+$env:DAWNSTRIKE_TEST_ACTIVATION_COMPENSATION_CRASH = '1'
+$env:DAWNSTRIKE_TEST_LOCK_JOURNAL = '1'
+$env:DAWNSTRIKE_TEST_DIRECT_PYTHON_FIXTURE = '1'
+$env:DAWNSTRIKE_TEST_GITHUB_CI_FIXTURE = '1'
+$env:DAWNSTRIKE_TEST_GITHUB_CI_CANDIDATE_SHA = '{candidate_sha}'
+$env:DAWNSTRIKE_TEST_GITHUB_CI_CANDIDATE_TREE = '{candidate_tree}'
+$env:DAWNSTRIKE_TEST_GITHUB_CI_COMPLETED_AT = '{fixture["ci_completed_at"]}'
+$env:DAWNSTRIKE_TEST_GITHUB_OWNER_COMMENT_BODY = '{fixture["owner_comment_body"]}'
+"""
+    invocation = rf"""
+  -ExpectedSha '{candidate_sha}' -MarketDate '2026-08-31' `
+  -CiEvidencePath '{escaped["ci"]}' -SolEvidencePath '{escaped["sol"]}' `
+  -CandidateRoot '{escaped["candidate"]}' -RuntimeRoot '{escaped["runtime"]}' `
+  -StateRoot '{escaped["state"]}' -BackupRoot '{escaped["backup"]}' `
+  -BackupRetention 5 -ProcessTimeoutSeconds 120 `
+  -TestNowUtc '2026-08-30T23:00:00Z'
+""".strip()
+    scheduler_mock = _persistent_disposable_scheduler_mock(
+        runtime=runtime,
+        state=state,
+        persistence_path=persistence,
+        phase="compensation-matrix",
+    )
+    initial_crash = rf"""
+$ErrorActionPreference = 'Stop'
+. '{activation_script}'
+. (Join-Path '{escaped["candidate"]}' 'scripts\runtime_activation_lock.ps1')
+. (Join-Path '{escaped["candidate"]}' 'scripts\dawnstrike_process_runner.ps1')
+. (Join-Path '{escaped["candidate"]}' 'scripts\capture_task_safety.ps1')
+. (Join-Path '{escaped["candidate"]}' 'scripts\invoke_dawnstrike_stage.ps1')
+{environment}
+{scheduler_mock}
+$null = Invoke-DawnstrikeRuntimeActivation `
+{invocation} `
+  -TestFreshNowUtc '2026-08-30T23:00:00Z' `
+  -TestStageCrashPoint 'after_complete_receipt'
+throw 'initial compensation fixture did not crash'
+"""
+    seeded = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", initial_crash],
+        cwd=fixture["source"],
+        text=True,
+        capture_output=True,
+        timeout=600,
+        check=False,
+    )
+    assert seeded.returncode != 0, (seeded.stdout, seeded.stderr)
+    journal_paths = list(
+        (state / "receipts" / "runtime-operation").glob("runtime-activation-*.json")
+    )
+    assert len(journal_paths) == 1
+    activation_id = journal_paths[0].stem.removeprefix("runtime-activation-")
+    rollback_root = state / "runtime-rollbacks" / activation_id
+    assert (
+        json.loads(journal_paths[0].read_text(encoding="utf-8"))["phase"]
+        == "POST_SWAP_READY"
+    )
+
+    baseline = tmp_path / "compensation-baseline"
+    shutil.copytree(runtime, baseline / "runtime")
+    shutil.copytree(state, baseline / "state")
+    shutil.copy2(persistence, baseline / "mock-scheduler.json")
+
+    def direct_compensation_command(crash_point: str) -> str:
+        return rf"""
+$ErrorActionPreference = 'Stop'
+. '{activation_script}'
+. (Join-Path '{escaped["candidate"]}' 'scripts\runtime_activation_lock.ps1')
+. (Join-Path '{escaped["candidate"]}' 'scripts\dawnstrike_process_runner.ps1')
+. (Join-Path '{escaped["candidate"]}' 'scripts\capture_task_safety.ps1')
+. (Join-Path '{escaped["candidate"]}' 'scripts\invoke_dawnstrike_stage.ps1')
+{environment}
+{scheduler_mock}
+$script:DawnstrikeActivationEnableCrashAfter = 0
+$gitPath = (Get-DawnstrikeApprovedGit).path
+$interpreter = Get-DawnstrikeApprovedLockInterpreter
+$journalRoot = Join-Path '{escaped["state"]}' 'receipts\runtime-operation'
+$journalPath = (Get-ChildItem -LiteralPath $journalRoot `
+    -Filter 'runtime-activation-*.json' -File).FullName
+$journal = Get-DawnstrikeStrictRuntimeOperationJournal `
+    $journalPath $interpreter.path $interpreter.sha256
+$activationName = [IO.Path]::GetFileNameWithoutExtension($journalPath)
+$activationId = $activationName.Substring('runtime-activation-'.Length)
+$receiptRoot = Join-Path '{escaped["state"]}' 'receipts\runtime-activation'
+$rollbackRoot = Join-Path '{escaped["state"]}' "runtime-rollbacks\$activationId"
+$rollbackCheckout = Join-Path $rollbackRoot 'previous-runtime'
+$previousRoot = if (Test-Path -LiteralPath $rollbackCheckout) {{
+    $rollbackCheckout
+}} else {{
+    '{escaped["runtime"]}'
+}}
+$previousOrigin = Get-DawnstrikeGitValue `
+    $gitPath $previousRoot @('remote','get-url','origin') `
+    'Matrix previous origin' 120
+$activationLock = Adopt-DawnstrikeGovernedRuntimeLockWithJournal `
+    -StateRoot '{escaped["state"]}' -JournalPath $journalPath `
+    -CandidateSha '{candidate_sha}' -CandidateTree '{candidate_tree}' `
+    -OriginIdentity ([string]$journal.payload.origin_identity) `
+    -PythonPath $interpreter.path -PythonSha256 $interpreter.sha256
+try {{ throw [InvalidOperationException]::new('matrix compensation') }} catch {{ $failure = $_ }}
+$result = Invoke-DawnstrikeActivationCompensationStateMachine `
+    -Failure $failure -FailurePhase ([string]$journal.payload.phase) `
+    -ActivationLock $activationLock -MarketDate '2026-08-31' `
+    -CandidateRoot '{escaped["candidate"]}' -RuntimeRoot '{escaped["runtime"]}' `
+    -StateRoot '{escaped["state"]}' -ActivationId $activationId `
+    -OperationJournal $journalPath -ExpectedSha '{candidate_sha}' `
+    -ExpectedTree '{candidate_tree}' -PreviousSha '{previous_sha}' `
+    -PreviousTree '{previous_tree}' -OriginIdentity ([string]$journal.payload.origin_identity) `
+    -PreviousOriginSha256 (Get-DawnstrikeSha256Text $previousOrigin) `
+    -SchedulerBackupName ("runtime-activation-" + $activationId) `
+    -PreparedReceipt (Join-Path $receiptRoot "runtime-activation-$activationId.prepared.json") `
+    -ReadyReceipt (Join-Path $receiptRoot "runtime-activation-$activationId.ready.json") `
+    -CompleteReceipt (Join-Path $receiptRoot "runtime-activation-$activationId.json") `
+    -ReceiptRoot $receiptRoot `
+    -Stage ('{escaped["runtime"]}' + ".stage-$activationId") `
+    -RollbackRoot $rollbackRoot -RollbackCheckout $rollbackCheckout `
+    -GitPath $gitPath -PythonPath $interpreter.path `
+    -PythonSha256 $interpreter.sha256 -TimeoutSeconds 120 `
+    -StateDeclaration ([pscustomobject]@{{ required = $false }}) `
+    -AllowLegacyCanonicalExecute -TestCrashPoint '{crash_point}'
+[pscustomobject]@{{
+    recovered=$result
+    states=$global:MockTaskStates
+    expected=$global:MockTaskExpectedSha
+}} |
+    ConvertTo-Json -Depth 12 -Compress
+"""
+
+    def assert_compensated_boundary(
+        *, point: str, result: subprocess.CompletedProcess[str]
+    ) -> None:
+        assert result.returncode == 0, (point, result.stdout, result.stderr)
+        payload = json.loads(result.stdout.strip().splitlines()[-1])
+        assert payload["recovered"]["status"] == "RECOVERED_EXPIRED_COMPENSATED", point
+        assert set(payload["states"].values()) == {"Ready"}, point
+        assert not payload["expected"], point
+        assert _git(runtime, "rev-parse", "HEAD") == previous_sha
+        assert _git(runtime, "rev-parse", "HEAD^{tree}") == previous_tree
+        failed = rollback_root / "failed-candidate-runtime"
+        assert _git(failed, "rev-parse", "HEAD") == candidate_sha
+        assert _git(failed, "rev-parse", "HEAD^{tree}") == candidate_tree
+        assert not (rollback_root / "previous-runtime").exists()
+        assert not Path(f"{runtime}.stage-{activation_id}").exists()
+        lock_root = state / "locks"
+        assert not (lock_root / "dawnstrike-runtime-activation.lock").exists()
+        assert not list(lock_root.glob("dawnstrike-daily-*.lock"))
+        journal = json.loads(journal_paths[0].read_text(encoding="utf-8"))
+        assert journal["phase"] == "COMPENSATED"
+
+    replay_points = (
+        "after_intent",
+        "after_initial_disable",
+        "after_candidate_preserve",
+        "after_previous_restore",
+        "after_final_disable",
+        "after_task_action_1",
+        "after_task_action_2",
+        "after_task_action_3",
+        "after_task_action_4",
+        "after_task_action_5",
+        "after_task_enable_1",
+        "after_task_enable_2",
+        "after_task_enable_3",
+        "after_task_enable_4",
+        "after_task_enable_5",
+        "after_task_restore",
+        "after_failure_receipt",
+        "after_compensation_receipt",
+    )
+    for point in replay_points:
+        print(f"compensation crash/retry: {point}", flush=True)
+        _restore_activation_crash_snapshot(
+            runtime=runtime,
+            state=state,
+            persistence=persistence,
+            snapshot=baseline,
+        )
+        crashed = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                direct_compensation_command(point),
+            ],
+            cwd=fixture["source"],
+            text=True,
+            capture_output=True,
+            timeout=300,
+            check=False,
+        )
+        assert crashed.returncode != 0, (point, crashed.stdout, crashed.stderr)
+        resumed = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                direct_compensation_command(""),
+            ],
+            cwd=fixture["source"],
+            text=True,
+            capture_output=True,
+            timeout=300,
+            check=False,
+        )
+        assert_compensated_boundary(point=point, result=resumed)
+
+    # Create one terminal COMPENSATED snapshot with both stale locks intact.
+    # Every cleanup boundary below starts from these same exact bytes.
+    _restore_activation_crash_snapshot(
+        runtime=runtime,
+        state=state,
+        persistence=persistence,
+        snapshot=baseline,
+    )
+    terminal_crash = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            direct_compensation_command("after_compensated_journal"),
+        ],
+        cwd=fixture["source"],
+        text=True,
+        capture_output=True,
+        timeout=300,
+        check=False,
+    )
+    assert terminal_crash.returncode != 0
+    terminal_journal = json.loads(journal_paths[0].read_text(encoding="utf-8"))
+    assert terminal_journal["phase"] == "COMPENSATED"
+    terminal_attempt = terminal_journal["prior_journal_file_sha256"]
+    terminal_compensation = state.joinpath(
+        *terminal_journal["compensation_receipt_relative_path"].split("/")
+    )
+    terminal = tmp_path / "compensated-terminal-baseline"
+    shutil.copytree(runtime, terminal / "runtime")
+    shutil.copytree(state, terminal / "state")
+    shutil.copy2(persistence, terminal / "mock-scheduler.json")
+    terminal_candidate_digest = _exact_directory_bytes_digest(
+        terminal
+        / "state"
+        / "runtime-rollbacks"
+        / activation_id
+        / "failed-candidate-runtime"
+    )
+
+    cleanup_points = (
+        "cleanup_after_daily_release",
+        "cleanup_after_runtime_release",
+        "cleanup_after_prepared_archive",
+        "cleanup_after_ready_archive",
+        "cleanup_after_complete_archive",
+        "cleanup_after_rollback_quarantine",
+        "cleanup_after_scheduler_quarantine",
+        "cleanup_after_intent_archive",
+        "cleanup_after_journal_clear",
+    )
+    cleanup_mock = _persistent_disposable_scheduler_mock(
+        runtime=runtime,
+        state=state,
+        persistence_path=persistence,
+        phase="cleanup-matrix",
+        boundary_date=(
+            datetime.fromisoformat("2026-09-01T03:00:00+00:00")
+            .astimezone()
+            .date()
+            .isoformat()
+        ),
+    )
+
+    def cleanup_command(point: str) -> str:
+        crash_argument = (
+            f"-TestCompensationCrashPoint '{point}'" if point else ""
+        )
+        return rf"""
+$ErrorActionPreference = 'Stop'
+. '{activation_script}'
+{environment}
+{cleanup_mock}
+$blocked = $false
+$message = ''
+try {{
+    $null = Invoke-DawnstrikeRuntimeActivation `
+{invocation} `
+      -TestFreshNowUtc '2026-09-01T03:00:00Z' {crash_argument}
+}}
+catch {{
+    $blocked = $true
+    $message = $_.Exception.Message
+}}
+[pscustomobject]@{{ blocked=$blocked; message=$message }} | ConvertTo-Json -Compress
+"""
+
+    for point in cleanup_points:
+        print(f"compensated cleanup crash/retry: {point}", flush=True)
+        _restore_activation_crash_snapshot(
+            runtime=runtime,
+            state=state,
+            persistence=persistence,
+            snapshot=terminal,
+        )
+        crashed = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", cleanup_command(point)],
+            cwd=fixture["source"],
+            text=True,
+            capture_output=True,
+            timeout=300,
+            check=False,
+        )
+        assert crashed.returncode != 0, (point, crashed.stdout, crashed.stderr)
+        resumed = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", cleanup_command("")],
+            cwd=fixture["source"],
+            text=True,
+            capture_output=True,
+            timeout=600,
+            check=False,
+        )
+        assert resumed.returncode == 0, (point, resumed.stdout, resumed.stderr)
+        cleanup_result = json.loads(resumed.stdout.strip().splitlines()[-1])
+        assert cleanup_result["blocked"] is True, point
+        assert "boundary" in cleanup_result["message"].lower(), point
+        assert _git(runtime, "rev-parse", "HEAD") == previous_sha
+        assert set(json.loads(persistence.read_text(encoding="utf-8"))["states"].values()) == {
+            "Ready"
+        }
+        assert not journal_paths[0].exists()
+        lock_root = state / "locks"
+        assert not (lock_root / "dawnstrike-runtime-activation.lock").exists()
+        assert not list(lock_root.glob("dawnstrike-daily-*.lock"))
+        archive = state / "receipts" / "runtime-activation" / "archive"
+        assert len(list(archive.glob("*.prepared.json"))) == 1
+        assert len(list(archive.glob("*.ready.json"))) == 1
+        assert len(list(archive.glob("*.complete.json"))) == 1
+        assert len(list(archive.glob("*.intent.json"))) == 1
+        quarantine = (
+            state
+            / "recovery-quarantine"
+            / f"compensated-{activation_id}-{terminal_attempt}"
+        )
+        assert _exact_directory_bytes_digest(
+            quarantine / "rollback" / "failed-candidate-runtime"
+        ) == terminal_candidate_digest
+        assert (quarantine / "scheduler-backup" / "manifest.json").is_file()
+        verified = subprocess.run(
+            [
+                sys.executable,
+                str(candidate / "scripts" / "runtime_operation_journal.py"),
+                "verify-compensation",
+                "--receipt",
+                str(terminal_compensation),
+                "--state-root",
+                str(state),
+            ],
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        assert verified.returncode == 0, (point, verified.stderr)
+
+
 @pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
 def test_disposable_activation_and_rollback_preserve_exact_runtime_and_state(
     tmp_path: Path,
@@ -2924,6 +5096,7 @@ def test_disposable_activation_and_rollback_preserve_exact_runtime_and_state(
         "runtime_activation_contract.py",
         "dawnstrike_job_process.ps1",
         "dawnstrike_process_runner.ps1",
+        "state_root_boundary.ps1",
         "dawnstrike_python_bootstrap.py",
         "invoke_dawnstrike_stage.ps1",
         "state_disaster_recovery.py",
@@ -2965,6 +5138,9 @@ def test_disposable_activation_and_rollback_preserve_exact_runtime_and_state(
     candidate_process_runner.write_text(process_runner_source, encoding="utf-8")
     _install_local_origin_fixture_seam(candidate / "scripts" / "runtime_activation_lock.ps1")
     _install_local_interpreter_fixture_seam(candidate)
+    _install_local_bootstrap_origin_fixture_seam(
+        candidate / "scripts" / "dawnstrike_python_bootstrap.py", origin=remote
+    )
     _install_local_github_ci_fixture_seam(candidate / "scripts" / "runtime_activation_contract.py")
     shutil.copytree(
         source / "intraday_scanner",
@@ -3072,13 +5248,18 @@ foreach ($name in $script:DawnstrikeCanonicalTaskNames) {{
         [CmdletBinding()] param([string]$TaskName)
         if ($TaskName -eq 'Dawnstrike Delayed SIP Capture') {{ return @() }}
         $boundSha = [string]$global:MockTaskExpectedSha[$TaskName]
-        $policy = if ($boundSha) {{
+        $hasPersistedAction = $global:MockTaskActions.ContainsKey($TaskName)
+        # Persisted task actions represent the exact scheduler state.  Avoid
+        # regenerating an older runtime's protected launcher command.
+        $policy = if ($hasPersistedAction) {{
+            Get-DawnstrikeCanonicalTaskPolicy $TaskName $global:MockRuntime $global:MockState
+        }} elseif ($boundSha) {{
             Get-DawnstrikeCanonicalTaskPolicy `
                 $TaskName $global:MockRuntime $global:MockState $boundSha
         }} else {{
             Get-DawnstrikeCanonicalTaskPolicy $TaskName $global:MockRuntime $global:MockState
         }}
-        $currentAction = if ($global:MockTaskActions.ContainsKey($TaskName)) {{
+        $currentAction = if ($hasPersistedAction) {{
             $global:MockTaskActions[$TaskName]
         }} else {{
             [pscustomobject]@{{
@@ -3132,6 +5313,19 @@ foreach ($name in $script:DawnstrikeCanonicalTaskNames) {{
             }}
         }}
     }}
+    function Get-ScheduledTaskInfo {{
+        [CmdletBinding()] param([string]$TaskName,[string]$TaskPath)
+        $lastRun = switch ($TaskName) {{
+            'Dawnstrike AlphaOps EOD Full Report' {{ [DateTime]'2026-08-30T15:15:00' }}
+            'Dawnstrike 10of10 Daily Finalize' {{ [DateTime]'2026-08-30T17:30:00' }}
+            'Dawnstrike AlphaOps V6 Weekly Training' {{ [DateTime]'2026-08-24T21:00:00' }}
+            default {{ [DateTime]'2026-08-29T08:00:00' }}
+        }}
+        [pscustomobject]@{{
+            LastRunTime=$lastRun;
+            NextRunTime=[DateTime]'2026-08-31T08:00:00'
+        }}
+    }}
     function Export-ScheduledTask {{
         [CmdletBinding()] param([string]$TaskName,[string]$TaskPath)
         $task = Get-ScheduledTask -TaskName $TaskName
@@ -3180,7 +5374,7 @@ $activated = Invoke-DawnstrikeRuntimeActivation `
   -CiEvidencePath '{values["ci"]}' -SolEvidencePath '{values["sol"]}' `
   -CandidateRoot '{values["candidate"]}' -RuntimeRoot '{values["runtime"]}' `
   -StateRoot '{values["state"]}' -BackupRoot '{values["backup"]}' `
-  -BackupRetention 5 -ProcessTimeoutSeconds 120 -TestNowUtc '2026-08-30T14:00:00Z'
+  -BackupRetention 5 -ProcessTimeoutSeconds 120 -TestNowUtc '2026-08-30T23:00:00Z'
 $bundlePath = Join-Path `
     '{values["state"]}' `
     ('runtime-rollbacks\' + $activated.activation_id + '\previous-runtime.bundle')
@@ -3193,7 +5387,7 @@ try {{
       -CiEvidencePath '{values["ci"]}' -SolEvidencePath '{values["sol"]}' `
       -CandidateRoot '{values["candidate"]}' -RuntimeRoot '{values["runtime"]}' `
       -StateRoot '{values["state"]}' -BackupRoot '{values["backup"]}' `
-      -BackupRetention 5 -ProcessTimeoutSeconds 120 -TestNowUtc '2026-08-30T14:00:00Z'
+      -BackupRetention 5 -ProcessTimeoutSeconds 120 -TestNowUtc '2026-08-30T23:00:00Z'
 }}
 catch {{ $activationMissingBundleBlocked = $true }}
 finally {{ [System.IO.File]::Move($heldBundlePath, $bundlePath) }}
@@ -3202,7 +5396,7 @@ $activatedAgain = Invoke-DawnstrikeRuntimeActivation `
   -CiEvidencePath '{values["ci"]}' -SolEvidencePath '{values["sol"]}' `
   -CandidateRoot '{values["candidate"]}' -RuntimeRoot '{values["runtime"]}' `
   -StateRoot '{values["state"]}' -BackupRoot '{values["backup"]}' `
-  -BackupRetention 5 -ProcessTimeoutSeconds 120 -TestNowUtc '2026-08-30T14:00:00Z'
+  -BackupRetention 5 -ProcessTimeoutSeconds 120 -TestNowUtc '2026-08-30T23:00:00Z'
 $receiptName = 'runtime-activation-' + $activated.activation_id + '.json'
             $receiptForRollback = Join-Path `
                 '{values["state"]}' ('receipts\runtime-activation\' + $receiptName)

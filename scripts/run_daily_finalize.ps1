@@ -131,7 +131,8 @@ if (-not (Test-Path -LiteralPath $dbPath -PathType Leaf)) {
 New-Item -ItemType Directory -Path $paperOpsRoot -Force | Out-Null
 New-Item -ItemType Directory -Path (Split-Path -Parent $resultPath) -Force | Out-Null
 New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
-$dailyLock = Enter-DawnstrikeDailyRunLock -StateRoot $state -MarketDate $MarketDate -Owner "daily_finalize"
+$dailyLock = Enter-DawnstrikeDailyRunLock `
+    -StateRoot $state -MarketDate $MarketDate -Owner "daily_finalize" -RetainHandle
 if (-not $dailyLock.acquired) {
     $receiptWritten = Write-DawnstrikeLockDenialReceipt -StateRoot $state -MarketDate $MarketDate -Owner "daily_finalize" -Lock $dailyLock
     [Console]::Error.WriteLine(

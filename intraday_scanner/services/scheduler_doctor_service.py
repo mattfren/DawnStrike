@@ -14,7 +14,10 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from intraday_scanner.providers.web_source_base import validate_web_source_config
+from intraday_scanner.providers.web_source_base import validate_web_source_config_bytes
+
+_HOST_FSTAT = os.fstat
+_HOST_OS_NAME = os.name
 
 CANONICAL_TASK_NAME = "Dawnstrike 10of10 Daily Finalize"
 AUXILIARY_TASK_NAME = "Dawnstrike Delayed SIP Capture"
@@ -29,9 +32,7 @@ AUXILIARY_BOOTSTRAP_PRELOADER = (
     "RuntimeError('bootstrap hash mismatch')); r=sys.argv[3:]; sys.argv=[p,*r]; "
     "exec(compile(b,p,'exec'),{'__name__':'__main__','__file__':p})"
 )
-AUXILIARY_INTERPRETER = Path(
-    r"C:\Program Files\Dawnstrike\Python313\python.exe"
-)
+AUXILIARY_INTERPRETER = Path(r"C:\Program Files\Dawnstrike\Python313\python.exe")
 AUXILIARY_INTERPRETER_SHA256 = "ef8f51028ac5329641985112f8efb1c2d4c47c86b8011ddf7e6fae21e2b4e5a1"
 AUXILIARY_INTERPRETER_VERSION = "3.13.14"
 AUXILIARY_INTERPRETER_SIGNER_SUBJECT = (
@@ -64,6 +65,7 @@ SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 MAX_AUXILIARY_ACTIVATION_RECEIPTS = 64
 MAX_AUXILIARY_ACTIVATION_DIRECTORY_ENTRIES = 256
 MAX_AUXILIARY_ACTIVATION_RECEIPT_BYTES = 1024 * 1024
+MAX_DURABLE_SOURCE_CONFIG_BYTES = 1024 * 1024
 APPROVED_RUNTIME_ORIGINS = frozenset(
     {
         "https://github.com/mattfren/DawnStrike.git",
@@ -162,10 +164,26 @@ def scheduler_doctor(
     root: str | Path,
     state_root: str | Path = r"C:\r\dawnstrike-state",
 ) -> dict[str, Any]:
+    """Verify the task DAG while keeping every consumed authority handle alive."""
+
+    held_authorities: list[tuple[Path, Any, tuple[int, ...]]] = []
+    try:
+        return _scheduler_doctor_with_held_authorities(root, state_root, held_authorities)
+    finally:
+        _close_identity_locked_files(held_authorities)
+
+
+def _scheduler_doctor_with_held_authorities(
+    root: str | Path,
+    state_root: str | Path,
+    held_authorities: list[tuple[Path, Any, tuple[int, ...]]],
+) -> dict[str, Any]:
     """Verify every enabled Dawnstrike V6 task uses one runtime and state root."""
 
-    runtime = Path(root).resolve()
-    state = Path(state_root).resolve()
+    from scripts.capture_task_contract import _assert_no_reparse_components
+
+    runtime = _assert_no_reparse_components(root).resolve()
+    state = _assert_no_reparse_components(state_root).resolve()
     runtime_identity_before = _runtime_git_contract(runtime)
     expected_runtime_sha = (
         runtime_identity_before.get("candidate_sha", "")
@@ -183,11 +201,32 @@ def scheduler_doctor(
         "durable_source_config": state / "config" / "web_sources.yaml",
     }
     present = {name: path.is_file() for name, path in required.items()}
-    source_config = validate_web_source_config(required["durable_source_config"])
+    try:
+        _assert_no_reparse_components(required["durable_source_config"])
+        source_config_raw = _read_identity_locked_bytes(
+            required["durable_source_config"],
+            label="durable web-source configuration",
+            max_bytes=MAX_DURABLE_SOURCE_CONFIG_BYTES,
+            held=held_authorities,
+        )
+        source_config = validate_web_source_config_bytes(
+            required["durable_source_config"], source_config_raw
+        )
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        source_config = {
+            "status": "BLOCKED_CONFIGURATION",
+            "ready": False,
+            "config_path": str(required["durable_source_config"]),
+            "config_sha256": None,
+            "violations": ["source_config_unreadable_or_invalid"],
+            "detail": str(exc),
+        }
     queried = _query_scheduled_tasks()
     task_rows = _normalize_task_rows(queried)
     observation_date = datetime.now(SCHEDULE_TIMEZONE).date()
-    activation_completed_at = _load_exact_activation_completion(runtime, state)
+    activation_completed_at = _load_exact_activation_completion(
+        runtime, state, held=held_authorities
+    )
     by_name: dict[str, dict[str, Any]] = {}
     for row in task_rows:
         name = str(row.get("name") or "")
@@ -213,7 +252,11 @@ def scheduler_doctor(
         )
     auxiliary_rows = [row for row in task_rows if str(row.get("name") or "") == AUXILIARY_TASK_NAME]
     auxiliary_check = _auxiliary_task_check(
-        auxiliary_rows, runtime, state, observation_date=observation_date
+        auxiliary_rows,
+        runtime,
+        state,
+        observation_date=observation_date,
+        held=held_authorities,
     )
     if auxiliary_check is not None:
         checks.append(auxiliary_check)
@@ -296,7 +339,7 @@ def scheduler_doctor(
         (check for check in checks if check.get("name") == CANONICAL_TASK_NAME),
         _missing_task(CANONICAL_TASK_NAME),
     )
-    return {
+    result = {
         "schema_version": "dawnstrike.scheduler_doctor.v4",
         "status": status,
         "runtime_root": str(runtime),
@@ -336,6 +379,8 @@ def scheduler_doctor(
         "forbidden_legacy_root": FORBIDDEN_LEGACY_ROOT,
         "next_action": next_action,
     }
+    _assert_identity_locked_files_unchanged(held_authorities)
+    return result
 
 
 def _task_check(
@@ -563,9 +608,10 @@ def _auxiliary_task_check(
     state: Path,
     *,
     observation_date: date | None = None,
+    held: list[tuple[Path, Any, tuple[int, ...]]] | None = None,
 ) -> dict[str, Any] | None:
     if not rows:
-        contract = _load_auxiliary_contract(runtime, state)
+        contract = _load_auxiliary_contract(runtime, state, held=held)
         if not contract["declared"]:
             activation_evidence = _load_auxiliary_activation_presence(runtime, state)
             failure_reason = (
@@ -623,7 +669,7 @@ def _auxiliary_task_check(
         enabled = False
     elif task_state in {"Ready", "Running", "Queued"}:
         enabled = True
-    contract = _load_auxiliary_contract(runtime, state)
+    contract = _load_auxiliary_contract(runtime, state, held=held)
     if not enabled and not contract["declared"]:
         return {
             **row,
@@ -641,7 +687,7 @@ def _auxiliary_task_check(
             "failure_reason": contract["reason"],
             "last_task_result": row.get("last_task_result"),
         }
-    action = _validate_auxiliary_action(row, runtime, state, contract)
+    action = _validate_auxiliary_action(row, runtime, state, contract, held=held)
     health = _validate_auxiliary_health(row, enabled, contract, observation_date=observation_date)
     health_valid = health["valid"]
     definition_integrity_valid = action["valid"] and health["definition_integrity_valid"]
@@ -693,16 +739,141 @@ def _auxiliary_unexpected_rows(
     return rows if enabled and check.get("status") != "LOCAL_VERIFIED" else []
 
 
-def _load_auxiliary_contract(runtime: Path, state: Path) -> dict[str, Any]:
-    declaration_path = runtime / AUXILIARY_DECLARATION_FILE
-    if not declaration_path.is_file():
-        return {"declared": False, "valid": False, "reason": "sidecar declaration is missing"}
+def _read_identity_locked_bytes(
+    path: Path,
+    *,
+    label: str,
+    max_bytes: int,
+    held: list[tuple[Path, Any, tuple[int, ...]]],
+) -> bytes:
+    """Capture one exact file once while denying Windows writes and replacement."""
+
+    from scripts.dawnstrike_python_bootstrap import _read_locked_exact_file
+
+    handles: list[Any] = []
     try:
+        raw = _read_locked_exact_file(path, handles)
+        if len(raw) > max_bytes:
+            raise ValueError(f"{label} exceeds its byte ceiling")
+        handle = handles[0]
+        details = _HOST_FSTAT(handle.fileno())
+        fields: tuple[int, ...] = (
+            details.st_dev,
+            details.st_ino,
+            details.st_size,
+            details.st_mtime_ns,
+        )
+        if _HOST_OS_NAME != "nt":
+            fields += (details.st_ctime_ns,)
+        held.append((path, handle, tuple(int(value) for value in fields)))
+        handles.clear()
+        return raw
+    except OSError as exc:
+        raise ValueError(f"{label} is unavailable") from exc
+    finally:
+        for handle in handles:
+            handle.close()
+
+
+def _assert_identity_locked_files_unchanged(
+    held: list[tuple[Path, Any, tuple[int, ...]]],
+) -> None:
+    for path, handle, admitted in held:
+        opened = _HOST_FSTAT(handle.fileno())
+        current = path.lstat()
+        fields: tuple[str, ...] = ("st_dev", "st_ino", "st_size", "st_mtime_ns")
+        if _HOST_OS_NAME != "nt":
+            fields += ("st_ctime_ns",)
+        if (
+            tuple(int(getattr(opened, field)) for field in fields) != admitted
+            or tuple(int(getattr(current, field)) for field in fields) != admitted
+        ):
+            raise ValueError("identity-locked receipt changed during validation")
+
+
+def _close_identity_locked_files(held: list[tuple[Path, Any, tuple[int, ...]]]) -> None:
+    for _path, handle, _snapshot in held:
+        handle.close()
+    held.clear()
+
+
+def _decode_strict_json_object(raw: bytes, *, label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(
+            raw.decode("utf-8", "strict"), object_pairs_hook=_reject_duplicate_json_keys
+        )
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ValueError(f"{label} is invalid") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} is not an object")
+    return value
+
+
+def _validate_activation_receipt_bytes(raw: bytes) -> dict[str, Any]:
+    from scripts.runtime_activation_contract import validate_receipt
+
+    return validate_receipt(_decode_strict_json_object(raw, label="activation receipt"))
+
+
+def _validate_capture_receipt_bytes(
+    raw: bytes,
+    *,
+    candidate_sha: str,
+    candidate_tree: str,
+) -> dict[str, Any]:
+    from scripts.capture_task_contract import validate_receipt
+
+    return validate_receipt(
+        _decode_strict_json_object(raw, label="capture-task receipt"),
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+    )
+
+
+def _validate_hardening_receipt_bytes(
+    raw: bytes,
+    *,
+    candidate_sha: str,
+    candidate_tree: str,
+) -> dict[str, Any]:
+    from scripts.capture_task_hardening_contract import validate_receipt
+
+    return validate_receipt(
+        _decode_strict_json_object(raw, label="hardening attestation"),
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+    )
+
+
+def _load_auxiliary_contract(
+    runtime: Path,
+    state: Path,
+    *,
+    held: list[tuple[Path, Any, tuple[int, ...]]] | None = None,
+) -> dict[str, Any]:
+    declaration_path = runtime / AUXILIARY_DECLARATION_FILE
+    try:
+        from intraday_scanner.approved_tools import read_admitted_release_bytes
+
+        admitted_declaration = read_admitted_release_bytes(
+            runtime,
+            AUXILIARY_DECLARATION_FILE.as_posix(),
+        )
+        if admitted_declaration is None:
+            if not declaration_path.is_file():
+                return {
+                    "declared": False,
+                    "valid": False,
+                    "reason": "sidecar declaration is missing",
+                }
+            declaration_text = declaration_path.read_text(encoding="utf-8")
+        else:
+            declaration_text = admitted_declaration.decode("utf-8", "strict")
         declaration = json.loads(
-            declaration_path.read_text(encoding="utf-8"),
+            declaration_text,
             object_pairs_hook=_reject_duplicate_json_keys,
         )
-    except (OSError, UnicodeDecodeError, ValueError):
+    except (OSError, RuntimeError, UnicodeDecodeError, ValueError):
         return {"declared": True, "valid": False, "reason": "sidecar declaration is invalid"}
     expected = {
         "schema_version": "dawnstrike.state_preparation_contract.v1",
@@ -734,11 +905,24 @@ def _load_auxiliary_contract(runtime: Path, state: Path) -> dict[str, Any]:
             "valid": False,
             "reason": "capture sidecar receipt is missing or ambiguous",
         }
+    owns_receipt_guards = held is None
+    receipt_guards = [] if held is None else held
     try:
-        from scripts.capture_task_contract import load_receipt
+        from scripts.capture_task_contract import (
+            _assert_no_reparse_components as assert_capture_path,
+        )
 
-        receipt = load_receipt(
-            receipt_paths[0], candidate_sha=runtime_sha, candidate_tree=runtime_tree
+        assert_capture_path(receipt_paths[0])
+        capture_raw = _read_identity_locked_bytes(
+            receipt_paths[0],
+            label="capture-task receipt",
+            max_bytes=MAX_AUXILIARY_ACTIVATION_RECEIPT_BYTES,
+            held=receipt_guards,
+        )
+        receipt = _validate_capture_receipt_bytes(
+            capture_raw,
+            candidate_sha=runtime_sha,
+            candidate_tree=runtime_tree,
         )
         if str(receipt.get("activation_id") or "") != str(
             receipt.get("activation_receipt_name") or ""
@@ -754,16 +938,18 @@ def _load_auxiliary_contract(runtime: Path, state: Path) -> dict[str, Any]:
         ):
             raise ValueError("activation receipt is missing")
         from scripts.runtime_activation_contract import _assert_no_reparse_components
-        from scripts.runtime_activation_contract import (
-            load_receipt as load_activation_receipt,
-        )
 
         _assert_no_reparse_components(activation_path)
-        activation_raw = activation_path.read_bytes()
+        activation_raw = _read_identity_locked_bytes(
+            activation_path,
+            label="activation receipt",
+            max_bytes=MAX_AUXILIARY_ACTIVATION_RECEIPT_BYTES,
+            held=receipt_guards,
+        )
         if hashlib.sha256(activation_raw).hexdigest() != receipt["activation_receipt_sha256"]:
             raise ValueError("activation receipt hash mismatch")
 
-        activation = load_activation_receipt(activation_path)
+        activation = _validate_activation_receipt_bytes(activation_raw)
         if (
             activation.get("schema_version") != "dawnstrike.runtime_activation_receipt.v2"
             or activation.get("status") != "COMPLETE"
@@ -789,13 +975,25 @@ def _load_auxiliary_contract(runtime: Path, state: Path) -> dict[str, Any]:
         hardening_path = state / Path(hardening_relative)
         if hardening_path.resolve().parent != (state / "receipts" / "capture-task").resolve():
             raise ValueError("hardening attestation path escaped the capture receipt root")
-        hardening_path_hash = hashlib.sha256(hardening_path.read_bytes()).hexdigest()
+        from scripts.capture_task_hardening_contract import (
+            _assert_no_reparse_components as assert_hardening_path,
+        )
+
+        assert_hardening_path(hardening_path)
+        hardening_raw = _read_identity_locked_bytes(
+            hardening_path,
+            label="hardening attestation",
+            max_bytes=1_048_576,
+            held=receipt_guards,
+        )
+        hardening_path_hash = hashlib.sha256(hardening_raw).hexdigest()
         if hardening_path_hash != activation.get("capture_hardening_receipt_raw_sha256"):
             raise ValueError("hardening attestation raw hash mismatch")
-        from scripts.capture_task_hardening_contract import load_receipt as load_hardening_receipt
 
-        hardening = load_hardening_receipt(
-            hardening_path, candidate_sha=runtime_sha, candidate_tree=runtime_tree
+        hardening = _validate_hardening_receipt_bytes(
+            hardening_raw,
+            candidate_sha=runtime_sha,
+            candidate_tree=runtime_tree,
         )
         if (
             hardening.get("schema_version") != "dawnstrike.capture_task_hardening_receipt.v2"
@@ -820,12 +1018,16 @@ def _load_auxiliary_contract(runtime: Path, state: Path) -> dict[str, Any]:
             raise ValueError("capture rebind receipt is not bound to the hardening attestation")
         if _runtime_git_contract(runtime) != runtime_contract:
             raise ValueError("runtime identity changed during contract validation")
+        _assert_identity_locked_files_unchanged(receipt_guards)
     except (ImportError, KeyError, OSError, TypeError, ValueError):
         return {
             "declared": True,
             "valid": False,
             "reason": "capture sidecar receipt is invalid",
         }
+    finally:
+        if owns_receipt_guards:
+            _close_identity_locked_files(receipt_guards)
     return {
         "declared": True,
         "valid": True,
@@ -973,7 +1175,7 @@ def _runtime_git_origin_sha(runtime: Path) -> str | None:
             capture_output=True,
             check=True,
             text=True,
-            env=_governed_git_environment(),
+            env=_governed_git_environment(runtime),
             timeout=SCHEDULER_QUERY_TIMEOUT_SECONDS,
         )
     except (OSError, RuntimeError, subprocess.SubprocessError):
@@ -1018,6 +1220,26 @@ def _runtime_git_snapshot(runtime: Path) -> dict[str, str] | None:
 def _runtime_git_contract(runtime: Path) -> dict[str, str] | None:
     """Return only a stable, clean exact-origin runtime identity."""
 
+    try:
+        from intraday_scanner.approved_tools import admitted_git_contract
+
+        admitted = admitted_git_contract(runtime)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return None
+    if admitted is not None:
+        candidate_sha = str(admitted["candidate_sha"])
+        origin_main_sha = admitted.get("origin_main_sha")
+        origin = admitted.get("origin_url")
+        if origin not in APPROVED_RUNTIME_ORIGINS or origin_main_sha != candidate_sha:
+            return None
+        return {
+            "candidate_sha": candidate_sha,
+            "candidate_tree": str(admitted["candidate_tree"]),
+            "runtime_origin_sha256": hashlib.sha256(str(origin).encode("utf-8")).hexdigest(),
+            "origin_main_sha": str(origin_main_sha),
+            "git_executable_sha256": str(admitted["git_executable_sha256"]),
+        }
+
     before = _runtime_git_snapshot(runtime)
     if before is None or not _runtime_git_clean(runtime):
         return None
@@ -1046,7 +1268,7 @@ def _runtime_git_clean(runtime: Path) -> bool:
             capture_output=True,
             check=True,
             text=True,
-            env=_governed_git_environment(),
+            env=_governed_git_environment(runtime),
             timeout=SCHEDULER_QUERY_TIMEOUT_SECONDS,
         )
         if status.stdout.strip():
@@ -1065,7 +1287,7 @@ def _runtime_git_clean(runtime: Path) -> bool:
             capture_output=True,
             check=True,
             text=False,
-            env=_governed_git_environment(),
+            env=_governed_git_environment(runtime),
             timeout=SCHEDULER_QUERY_TIMEOUT_SECONDS,
         )
     except (OSError, RuntimeError, subprocess.SubprocessError):
@@ -1094,22 +1316,19 @@ def _runtime_git_clean(runtime: Path) -> bool:
             capture_output=True,
             check=True,
             text=False,
-            env=_governed_git_environment(),
+            env=_governed_git_environment(runtime),
             timeout=SCHEDULER_QUERY_TIMEOUT_SECONDS,
         )
         # ``git ls-files -v`` reports ordinary tracked files with an uppercase
         # ``H``.  Only the lowercase assume-unchanged form and either
         # skip-worktree form weaken the clean-check contract.
-        if any(
-            entry and entry[:1] in {b"h", b"s", b"S"}
-            for entry in flags.stdout.split(b"\0")
-        ):
+        if any(entry and entry[:1] in {b"h", b"s", b"S"} for entry in flags.stdout.split(b"\0")):
             return False
         diff = subprocess.run(
             [str(git_path), "-C", str(runtime), "diff-index", "--quiet", "HEAD", "--"],
             capture_output=True,
             check=False,
-            env=_governed_git_environment(),
+            env=_governed_git_environment(runtime),
             timeout=SCHEDULER_QUERY_TIMEOUT_SECONDS,
         )
         if diff.returncode != 0:
@@ -1119,7 +1338,7 @@ def _runtime_git_clean(runtime: Path) -> bool:
             capture_output=True,
             check=True,
             text=True,
-            env=_governed_git_environment(),
+            env=_governed_git_environment(runtime),
             timeout=SCHEDULER_QUERY_TIMEOUT_SECONDS,
         )
         if replacements.stdout.strip():
@@ -1130,7 +1349,7 @@ def _runtime_git_clean(runtime: Path) -> bool:
                 capture_output=True,
                 check=False,
                 text=True,
-                env=_governed_git_environment(),
+                env=_governed_git_environment(runtime),
                 timeout=SCHEDULER_QUERY_TIMEOUT_SECONDS,
             )
             if config.returncode == 0 and config.stdout.strip():
@@ -1140,17 +1359,25 @@ def _runtime_git_clean(runtime: Path) -> bool:
     return True
 
 
-def _governed_git_environment() -> dict[str, str]:
+def _governed_git_environment(runtime: Path) -> dict[str, str]:
+    resolved_runtime = runtime.resolve(strict=False)
+    git_dir = resolved_runtime / ".git"
     env = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
     env.update(
         {
             "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_SYSTEM": os.devnull,
             "GIT_CONFIG_GLOBAL": os.devnull,
             "GIT_NO_REPLACE_OBJECTS": "1",
             "GIT_OPTIONAL_LOCKS": "0",
             "GIT_TERMINAL_PROMPT": "0",
+            "GIT_ATTR_NOSYSTEM": "1",
+            "GIT_WORK_TREE": str(resolved_runtime),
         }
     )
+    if git_dir.is_dir():
+        env["GIT_DIR"] = str(git_dir)
+        env["GIT_COMMON_DIR"] = str(git_dir)
     return env
 
 
@@ -1162,7 +1389,7 @@ def _runtime_git_value(runtime: Path, revision: str) -> str | None:
             capture_output=True,
             check=True,
             text=True,
-            env=_governed_git_environment(),
+            env=_governed_git_environment(runtime),
             timeout=SCHEDULER_QUERY_TIMEOUT_SECONDS,
         )
     except (OSError, RuntimeError, subprocess.SubprocessError):
@@ -1212,29 +1439,35 @@ def _safe_regular_path(path: Path) -> bool:
         return False
 
 
-def _safe_file_sha256(path_text: str, expected: Any) -> bool:
+def _safe_file_sha256(
+    path_text: str,
+    expected: Any,
+    *,
+    held: list[tuple[Path, Any, tuple[int, ...]]] | None = None,
+) -> bool:
     if not isinstance(expected, str) or SHA256_PATTERN.fullmatch(expected) is None:
         return False
     path = Path(path_text)
     if not _safe_regular_path(path):
         return False
+    local_held: list[tuple[Path, Any, tuple[int, ...]]] = []
+    target_held = local_held if held is None else held
     try:
         from scripts.capture_task_contract import _assert_no_reparse_components
 
         supplied = _assert_no_reparse_components(path)
-        before = supplied.stat()
-        digest = hashlib.sha256()
-        with supplied.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-        _assert_no_reparse_components(supplied)
-        after = supplied.stat()
-        identity = ("st_dev", "st_ino", "st_size", "st_mtime_ns")
-        if any(getattr(before, field) != getattr(after, field) for field in identity):
-            return False
-        return digest.hexdigest() == expected
+        raw = _read_identity_locked_bytes(
+            supplied,
+            label="scheduler action authority",
+            max_bytes=64 * 1024 * 1024,
+            held=target_held,
+        )
+        return hashlib.sha256(raw).hexdigest() == expected
     except (OSError, ValueError):
         return False
+    finally:
+        if held is None:
+            _close_identity_locked_files(local_held)
 
 
 def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -1349,7 +1582,12 @@ def _acceptable_last_result(value: Any) -> bool:
 
 
 def _validate_auxiliary_action(
-    row: dict[str, Any], runtime: Path, state: Path, contract: dict[str, Any]
+    row: dict[str, Any],
+    runtime: Path,
+    state: Path,
+    contract: dict[str, Any],
+    *,
+    held: list[tuple[Path, Any, tuple[int, ...]]] | None = None,
 ) -> dict[str, Any]:
     execute = str(row.get("execute") or "")
     arguments = str(row.get("arguments") or "")
@@ -1418,8 +1656,7 @@ def _validate_auxiliary_action(
         not duplicate_options
         and not unknown_options
         and not unexpected_arguments
-        and tuple(option_order)
-        == (*AUXILIARY_REQUIRED_OPTION_ORDER, "--execute")
+        and tuple(option_order) == (*AUXILIARY_REQUIRED_OPTION_ORDER, "--execute")
         and set(option_values) == AUXILIARY_REQUIRED_OPTIONS | {"--execute"}
         and AUXILIARY_REQUIRED_OPTIONS.issubset(option_values)
         and option_values.get("--execute") == ""
@@ -1493,9 +1730,8 @@ def _validate_auxiliary_action(
             and Path(bootstrap).resolve() == runtime / AUXILIARY_PYTHON_BOOTSTRAP
             and _safe_regular_path(Path(bootstrap))
         )
-        bootstrap_sha_matches = (
-            bootstrap is not None
-            and _safe_file_sha256(bootstrap, bootstrap_sha)
+        bootstrap_sha_matches = bootstrap is not None and _safe_file_sha256(
+            bootstrap, bootstrap_sha, held=held
         )
         runner_matches = (
             runner is not None
@@ -1532,7 +1768,7 @@ def _validate_auxiliary_action(
         )
     )
     input_files_match = all(
-        _safe_file_sha256(option_values.get(option, ""), contract.get(contract_key))
+        _safe_file_sha256(option_values.get(option, ""), contract.get(contract_key), held=held)
         for option, contract_key in (
             ("--symbols-manifest", "symbols_manifest_sha256"),
             ("--entitlement-receipt", "entitlement_receipt_sha256"),
@@ -1547,7 +1783,7 @@ def _validate_auxiliary_action(
         interpreter_matches = (
             interpreter.is_absolute()
             and interpreter.resolve() == AUXILIARY_INTERPRETER.resolve()
-            and _safe_file_sha256(str(interpreter), AUXILIARY_INTERPRETER_SHA256)
+            and _safe_file_sha256(str(interpreter), AUXILIARY_INTERPRETER_SHA256, held=held)
         )
     except (OSError, RuntimeError):
         interpreter_matches = False
@@ -1882,7 +2118,12 @@ def _history_superseded_by_exact_runtime_activation(
     return activation_completed_at > last_run
 
 
-def _load_exact_activation_completion(runtime: Path, state: Path) -> datetime | None:
+def _load_exact_activation_completion(
+    runtime: Path,
+    state: Path,
+    *,
+    held: list[tuple[Path, Any, tuple[int, ...]]] | None = None,
+) -> datetime | None:
     """Load one strict COMPLETE receipt that supersedes prior task history.
 
     A missing, malformed, stale, or ambiguous receipt is deliberately treated
@@ -1897,28 +2138,35 @@ def _load_exact_activation_completion(runtime: Path, state: Path) -> datetime | 
     runtime_tree = runtime_contract["candidate_tree"]
     runtime_origin_sha = runtime_contract["runtime_origin_sha256"]
     try:
-        from scripts.runtime_activation_contract import (
-            _assert_no_reparse_components,
-            load_receipt,
-        )
+        from scripts.runtime_activation_contract import _assert_no_reparse_components
     except ImportError:
         return None
+    owns_receipt_guards = held is None
+    receipt_guards = [] if held is None else held
     matches: list[datetime] = []
     receipt_root = state / "receipts" / "runtime-activation"
     try:
         paths = sorted(receipt_root.glob("runtime-activation-*.json"))
     except OSError:
         return None
-    for path in paths:
-        name_match = re.fullmatch(r"runtime-activation-([0-9a-f]{24})\.json", path.name)
-        if name_match is None:
-            # Prepared, failure, compensation, and other governed sidecars are
-            # not activation-completion receipts and must not poison exact
-            # COMPLETE-history supersession.
-            continue
-        try:
+    if len(paths) > MAX_AUXILIARY_ACTIVATION_RECEIPTS:
+        return None
+    try:
+        for path in paths:
+            name_match = re.fullmatch(r"runtime-activation-([0-9a-f]{24})\.json", path.name)
+            if name_match is None:
+                # Prepared, failure, compensation, and other governed sidecars are
+                # not activation-completion receipts and must not poison exact
+                # COMPLETE-history supersession.
+                continue
             _assert_no_reparse_components(path)
-            payload = load_receipt(path)
+            raw = _read_identity_locked_bytes(
+                path,
+                label="activation history receipt",
+                max_bytes=MAX_AUXILIARY_ACTIVATION_RECEIPT_BYTES,
+                held=receipt_guards,
+            )
+            payload = _validate_activation_receipt_bytes(raw)
             activation_id = name_match.group(1)
             if str(payload.get("activation_id") or "") != activation_id:
                 return None
@@ -1934,11 +2182,15 @@ def _load_exact_activation_completion(runtime: Path, state: Path) -> datetime | 
             if completed is None:
                 return None
             matches.append(completed)
-        except (OSError, TypeError, ValueError):
+        if _runtime_git_contract(runtime) != runtime_contract:
             return None
-    if _runtime_git_contract(runtime) != runtime_contract:
+        _assert_identity_locked_files_unchanged(receipt_guards)
+        return matches[0] if len(matches) == 1 else None
+    except (OSError, TypeError, ValueError):
         return None
-    return matches[0] if len(matches) == 1 else None
+    finally:
+        if owns_receipt_guards:
+            _close_identity_locked_files(receipt_guards)
 
 
 def _parse_aware_datetime(value: str) -> datetime | None:

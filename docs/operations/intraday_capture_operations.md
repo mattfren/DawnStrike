@@ -34,6 +34,7 @@ py -3.13 scripts/capture_intraday_doctor.py `
   --symbols-manifest C:\r\dawnstrike-forward-evidence\symbols.json `
   --symbols-manifest-sha256 <manifest-sha256> `
   --expected-session C:\r\dawnstrike-forward-evidence\expected-session.json `
+  --expected-session-sha256 <expected-session-sha256> `
   --entitlement-receipt C:\r\dawnstrike-state\receipts\sip-entitlement.json `
   --entitlement-receipt-sha256 <receipt-sha256> `
   --source-config C:\r\dawnstrike-state\config\web_sources.yaml `

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import importlib.util
 import json
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -51,6 +53,35 @@ def test_strict_lock_accepts_exact_contract_and_preserves_raw_hash():
     assert hashlib.sha256(raw).hexdigest() != hashlib.sha256(raw + b"\n").hexdigest()
 
 
+def test_strict_lock_cli_accepts_only_explicit_captured_bytes() -> None:
+    raw = json.dumps(payload(), separators=(",", ":")).encode()
+    encoded = base64.b64encode(raw).decode("ascii")
+    result = subprocess.run(
+        [sys.executable, "-I", "-B", "-S", str(CONTRACT), "--captured-base64", encoded],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["raw_file_sha256"] == hashlib.sha256(raw).hexdigest()
+    ambiguous = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-B",
+            "-S",
+            str(CONTRACT),
+            str(CONTRACT),
+            "--captured-base64",
+            encoded,
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert ambiguous.returncode != 0
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -80,7 +111,10 @@ def test_shared_powershell_contract_has_guarded_atomic_adoption():
     assert "Global\\DawnstrikeRuntimeActivationLockV2" in source
     assert "Test-DawnstrikeRuntimeLockOwnerDead" in source
     assert "return $true" in source
-    assert "[IO.File]::Replace($temp,$path,$archive,$true)" in source
+    assert "RuntimeLockNative]::RenameNoReplace" in source
+    assert "RuntimeLockNative]::MarkDelete" in source
+    assert "Open-DawnstrikeRetainedRuntimeLockRoot" in source
+    assert "Confirm-DawnstrikeGovernedRuntimeLock" in source
     assert "Get-DawnstrikeRuntimeLockHash $archive" in source
     assert "lock retained" in source
     assert "pscredential" not in source.lower()
@@ -92,8 +126,10 @@ def test_executed_lock_acquire_and_release(tmp_path: Path):
     state.mkdir()
     module = str(PS).replace("'", "''")
     state_q = str(state).replace("'", "''")
+    python_q = str(Path(sys.executable).resolve()).replace("'", "''")
     command = rf"""
 . '{module}'
+$script:DawnstrikeApprovedPythonPath='{python_q}'
 $approved=Get-DawnstrikeApprovedLockInterpreter
 $python=$approved.path
 $pythonSha=$approved.sha256
@@ -141,10 +177,12 @@ def test_executed_huge_tampered_and_reparse_locks_are_preserved(tmp_path: Path):
     locks = state / "locks"
     locks.mkdir(parents=True)
     module = str(PS).replace("'", "''")
+    python_q = str(Path(sys.executable).resolve()).replace("'", "''")
     lock_q = str(locks / "dawnstrike-runtime-activation.lock").replace("'", "''")
     target_q = str(locks / "target.lock").replace("'", "''")
     command = rf"""
 . '{module}'
+$script:DawnstrikeApprovedPythonPath='{python_q}'
 $approved=Get-DawnstrikeApprovedLockInterpreter
 $path='{lock_q}'
 [IO.File]::WriteAllText($path,('x'*17000))
@@ -192,8 +230,10 @@ def test_dead_child_lock_is_atomically_adopted_and_released(tmp_path: Path):
     state.mkdir()
     module = str(PS).replace("'", "''")
     state_q = str(state).replace("'", "''")
+    python_q = str(Path(sys.executable).resolve()).replace("'", "''")
     common = rf"""
 . '{module}'
+$script:DawnstrikeApprovedPythonPath='{python_q}'
 $approved=Get-DawnstrikeApprovedLockInterpreter
 $python=$approved.path
 $pythonSha=$approved.sha256
@@ -245,13 +285,154 @@ Exit-DawnstrikeGovernedRuntimeLock $lock
 
 
 @WINDOWS_RUNTIME
+@pytest.mark.parametrize("mode", ["new", "adopted"])
+def test_retained_runtime_lock_blocks_hostile_path_and_root_substitution(
+    tmp_path: Path, mode: str
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    module = str(PS.resolve()).replace("'", "''")
+    state_q = str(state).replace("'", "''")
+    python_q = str(Path(sys.executable).resolve()).replace("'", "''")
+    ready = tmp_path / "owner-ready"
+    release = tmp_path / "owner-release"
+    ready_q = str(ready).replace("'", "''")
+    release_q = str(release).replace("'", "''")
+    common = rf"""
+. '{module}'
+$script:DawnstrikeApprovedPythonPath='{python_q}'
+$approved=Get-DawnstrikeApprovedLockInterpreter
+"""
+    if mode == "adopted":
+        seed = common + rf"""
+$null=Enter-DawnstrikeGovernedRuntimeLock -StateRoot '{state_q}' `
+ -Operation runtime_activation -CandidateSha ('a'*40) -CandidateTree ('b'*40) `
+ -OriginIdentity 'github.com/mattfren/dawnstrike' `
+ -PythonPath $approved.path -PythonSha256 $approved.sha256
+exit 137
+"""
+        seeded = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", seed],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert seeded.returncode == 137, (seeded.stdout, seeded.stderr)
+        acquire = rf"""
+$path=Join-Path '{state_q}' 'locks\dawnstrike-runtime-activation.lock'
+$stale=Get-DawnstrikeStrictRuntimeLock $path $approved.path $approved.sha256
+$lock=Adopt-DawnstrikeGovernedRuntimeLock -StateRoot '{state_q}' `
+ -ExpectedToken $stale.payload.lock_token `
+ -ExpectedFileSha256 $stale.raw_file_sha256 `
+ -ExpectedOperation runtime_activation -CandidateSha ('a'*40) -CandidateTree ('b'*40) `
+ -OriginIdentity 'github.com/mattfren/dawnstrike' `
+ -PythonPath $approved.path -PythonSha256 $approved.sha256
+"""
+    else:
+        acquire = rf"""
+$lock=Enter-DawnstrikeGovernedRuntimeLock -StateRoot '{state_q}' `
+ -Operation runtime_activation -CandidateSha ('a'*40) -CandidateTree ('b'*40) `
+ -OriginIdentity 'github.com/mattfren/dawnstrike' `
+ -PythonPath $approved.path -PythonSha256 $approved.sha256
+"""
+    owner_command = common + acquire + rf"""
+if(-not $lock.retained -or $null-eq$lock.retained_handle -or $null-eq$lock.root_handle){{
+ throw 'retained runtime handle identity is absent'
+}}
+[IO.File]::WriteAllText('{ready_q}',[string]$lock.token)
+while(-not(Test-Path -LiteralPath '{release_q}')){{Start-Sleep -Milliseconds 25}}
+$null=Confirm-DawnstrikeGovernedRuntimeLock $lock
+Exit-DawnstrikeGovernedRuntimeLock $lock
+'OWNER_OK'
+"""
+    owner = subprocess.Popen(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", owner_command],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    for _ in range(400):
+        if ready.exists() or owner.poll() is not None:
+            break
+        time.sleep(0.025)
+    assert ready.exists(), owner.communicate(timeout=5)
+
+    lock_path = state / "locks" / "dawnstrike-runtime-activation.lock"
+    lock_root = lock_path.parent
+    replacement = lock_root / "same-metadata-replacement.lock"
+    lock_q = str(lock_path).replace("'", "''")
+    root_q = str(lock_root).replace("'", "''")
+    replacement_q = str(replacement).replace("'", "''")
+    moved_root_q = str(state / "locks-moved").replace("'", "''")
+    renamed_q = str(lock_root / "renamed-runtime.lock").replace("'", "''")
+    backup_q = str(lock_root / "hostile-backup.lock").replace("'", "''")
+    attacker_command = rf"""
+$ErrorActionPreference='Stop'
+$path='{lock_q}';$root='{root_q}';$replacement='{replacement_q}'
+try{{
+    $share=[IO.FileShare]::ReadWrite-bor[IO.FileShare]::Delete
+    $reader=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,$share)
+    try{{
+        $raw=[byte[]]::new([int]$reader.Length);$offset=0
+        while($offset-lt$raw.Length){{
+            $count=$reader.Read($raw,$offset,$raw.Length-$offset)
+            if($count-le0){{throw 'short read'}}
+            $offset+=$count
+        }}
+    }}finally{{$reader.Dispose()}}
+    $raw[$raw.Length-1]=if($raw[$raw.Length-1]-eq[byte][char]'{{'){{[byte][char]'}}'}}else{{[byte][char]'{{'}}
+    [IO.File]::WriteAllBytes($replacement,$raw)
+    [IO.File]::SetLastWriteTimeUtc($replacement,(Get-Item -LiteralPath $path).LastWriteTimeUtc)
+    $writeBlocked=$false
+    try{{[IO.File]::WriteAllBytes($path,[IO.File]::ReadAllBytes($replacement))}}catch{{$writeBlocked=$true}}
+    $timeBlocked=$false
+    try{{[IO.File]::SetLastWriteTimeUtc($path,[DateTime]::UtcNow)}}catch{{$timeBlocked=$true}}
+    $deleteBlocked=$false
+    try{{Remove-Item -LiteralPath $path -Force -ErrorAction Stop}}catch{{$deleteBlocked=$true}}
+    $renameBlocked=$false
+    try{{[IO.File]::Move($path,'{renamed_q}')}}catch{{$renameBlocked=$true}}
+    $replaceBlocked=$false
+    try{{[IO.File]::Replace($replacement,$path,'{backup_q}',$true)}}catch{{$replaceBlocked=$true}}
+    $rootBlocked=$false
+    try{{[IO.Directory]::Move($root,'{moved_root_q}')}}catch{{$rootBlocked=$true}}
+    $reacquireBlocked=$false
+    try{{
+     $stream=[IO.File]::Open($path,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+     $stream.Dispose()
+    }}catch{{$reacquireBlocked=$true}}
+    if(-not($writeBlocked-and$timeBlocked-and$deleteBlocked-and$renameBlocked-and$replaceBlocked-and$rootBlocked-and$reacquireBlocked)){{
+     throw 'retained runtime lock allowed hostile mutation'
+    }}
+    'ATTACKS_BLOCKED'
+}}finally{{[IO.File]::WriteAllText('{release_q}','release')}}
+"""
+    attacked = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", attacker_command],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+    assert attacked.returncode == 0, (attacked.stdout, attacked.stderr)
+    assert "ATTACKS_BLOCKED" in attacked.stdout
+    stdout, stderr = owner.communicate(timeout=30)
+    assert owner.returncode == 0, (stdout, stderr)
+    assert "OWNER_OK" in stdout
+    assert not lock_path.exists()
+    assert lock_root.is_dir()
+    assert replacement.is_file()
+
+
+@WINDOWS_RUNTIME
 def test_journal_adoption_survives_two_consecutive_crashes(tmp_path: Path) -> None:
     state = tmp_path / "state"
     state.mkdir()
     module = str(PS.resolve()).replace("'", "''")
     state_q = str(state).replace("'", "''")
+    python_q = str(Path(sys.executable).resolve()).replace("'", "''")
     create = rf"""
 . '{module}'
+$script:DawnstrikeApprovedPythonPath='{python_q}'
 $approved=Get-DawnstrikeApprovedLockInterpreter
 $lock=Enter-DawnstrikeGovernedRuntimeLock -StateRoot '{state_q}' `
  -Operation runtime_activation -CandidateSha ('a'*40) -CandidateTree ('b'*40) `
@@ -309,12 +490,15 @@ exit 137
         ],
         check=True, capture_output=True, text=True,
     )
+    initial_journal_bytes = journal.read_bytes()
+    initial_journal_hash = hashlib.sha256(initial_journal_bytes).hexdigest()
 
     def adopt(crash: str = "") -> subprocess.CompletedProcess[str]:
         crash_arg = f" -TestCrashPoint {crash}" if crash else ""
         journal_q = str(journal).replace("'", "''")
         command = rf"""
 . '{module}'
+$script:DawnstrikeApprovedPythonPath='{python_q}'
 $approved=Get-DawnstrikeApprovedLockInterpreter
 $lock=Adopt-DawnstrikeGovernedRuntimeLockWithJournal -StateRoot '{state_q}' `
  -JournalPath '{journal_q}' -CandidateSha ('a'*40) -CandidateTree ('b'*40) `
@@ -330,6 +514,20 @@ $lock|ConvertTo-Json -Compress
         )
 
     assert adopt("after_prepared").returncode == 137
+    prepared_payload = json.loads(journal.read_text(encoding="utf-8"))
+    assert prepared_payload["prior_journal_file_sha256"] == initial_journal_hash
+    initial_lineage = (
+        journal.parent
+        / "adoption-lineage"
+        / f"adoption-predecessor-{initial_journal_hash}.json"
+    )
+    assert initial_lineage.read_bytes() == initial_journal_bytes
+    assert adopt("after_archive").returncode == 137
+    lock_root = state / "locks"
+    assert not (lock_root / "dawnstrike-runtime-activation.lock").exists()
+    prepared_after_archive = json.loads(journal.read_text(encoding="utf-8"))
+    assert (state / prepared_after_archive["old_lock_archive_relative_path"]).is_file()
+    assert (state / prepared_after_archive["next_lock_relative_path"]).is_file()
     assert adopt("after_replace").returncode == 137
     recovered = adopt()
     assert recovered.returncode == 0, (recovered.stdout, recovered.stderr)
@@ -341,14 +539,156 @@ $lock|ConvertTo-Json -Compress
     # The standalone recovery process exits after returning, but the lock must
     # have been minted by that third process rather than either crashed child.
     assert lock_payload["lock_token"] == recovered_handle["token"]
+    final_payload = json.loads(journal.read_text(encoding="utf-8"))
+    final_predecessor = final_payload["prior_journal_file_sha256"]
+    final_lineage = (
+        journal.parent
+        / "adoption-lineage"
+        / f"adoption-predecessor-{final_predecessor}.json"
+    )
+    assert hashlib.sha256(final_lineage.read_bytes()).hexdigest() == final_predecessor
+
+
+@WINDOWS_RUNTIME
+def test_compensated_journal_adoption_preserves_receipt_predecessor_and_records_lineage(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    module = str(PS.resolve()).replace("'", "''")
+    state_q = str(state).replace("'", "''")
+    python_q = str(Path(sys.executable).resolve()).replace("'", "''")
+    create = rf"""
+. '{module}'
+$script:DawnstrikeApprovedPythonPath='{python_q}'
+$approved=Get-DawnstrikeApprovedLockInterpreter
+$lock=Enter-DawnstrikeGovernedRuntimeLock -StateRoot '{state_q}' `
+ -Operation runtime_activation -CandidateSha ('a'*40) -CandidateTree ('b'*40) `
+ -OriginIdentity 'github.com/mattfren/dawnstrike' `
+ -PythonPath $approved.path -PythonSha256 $approved.sha256
+$lock|ConvertTo-Json -Compress
+exit 137
+"""
+    created = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", create],
+        text=True, capture_output=True, check=False,
+    )
+    assert created.returncode == 137, created.stderr
+    handle = json.loads(created.stdout.strip().splitlines()[-1])
+
+    empty = hashlib.sha256(b"").hexdigest()
+    compensation_predecessor = "c" * 64
+    origin = "github.com/mattfren/dawnstrike"
+    journal_input = state / "journal-input.json"
+    journal = state / "receipts" / "runtime-operation" / "activation.json"
+    data = {
+        "schema_version": "dawnstrike.runtime_operation_journal.v2",
+        "operation": "runtime_activation", "phase": "COMPENSATED", "sequence": 6,
+        "candidate_sha": "a" * 40, "candidate_tree": "b" * 40,
+        "current_sha": "e" * 40, "current_tree": "f" * 40,
+        "previous_sha": "e" * 40, "previous_tree": "f" * 40,
+        "origin_identity": origin,
+        "origin_identity_sha256": hashlib.sha256(origin.encode()).hexdigest(),
+        "state_root_sha256": hashlib.sha256(
+            str(state.resolve()).rstrip("\\").lower().encode()
+        ).hexdigest(),
+        "lock_token": handle["token"],
+        "lock_file_sha256": handle["bytes_sha256"],
+        "prior_journal_file_sha256": compensation_predecessor,
+        "prepared_receipt_relative_path": "receipts/runtime-activation/prepared.json",
+        "prepared_receipt_sha256": "1" * 64,
+        "complete_receipt_relative_path": "receipts/runtime-activation/complete.json",
+        "complete_receipt_sha256": empty,
+        "compensation_receipt_relative_path": (
+            "receipts/runtime-activation/compensated.json"
+        ),
+        "compensation_receipt_sha256": "9" * 64,
+        "backup_contract_sha256": "2" * 64,
+        "task_contract_sha256": "5" * 64,
+        "runtime_stage_contract_sha256": empty,
+        "recorded_at_utc": "2026-08-31T23:01:02.1234567Z",
+        "research_only": True, "broker_execution_enabled": False,
+        "adoption_state": "NONE", "old_lock_token": handle["token"],
+        "old_lock_file_sha256": handle["bytes_sha256"],
+        "next_lock_token": handle["token"],
+        "next_lock_file_sha256": handle["bytes_sha256"],
+        "old_lock_archive_relative_path": "NONE",
+        "next_lock_relative_path": "NONE",
+        "init_owner_process_id": 1234,
+        "init_owner_started_at_utc": "2026-08-31T23:01:01.1234567Z",
+    }
+    journal_input.write_text(json.dumps(data), encoding="utf-8")
+    subprocess.run(
+        [
+            "py", "-3.13", str(ROOT / "scripts" / "runtime_operation_journal.py"),
+            "seal", str(journal_input), str(journal), "--state-root", str(state),
+        ],
+        check=True, capture_output=True, text=True,
+    )
+    initial_journal_bytes = journal.read_bytes()
+    initial_journal_hash = hashlib.sha256(initial_journal_bytes).hexdigest()
+
+    def adopt(crash: str = "") -> subprocess.CompletedProcess[str]:
+        crash_arg = f" -TestCrashPoint {crash}" if crash else ""
+        journal_q = str(journal).replace("'", "''")
+        command = rf"""
+. '{module}'
+$script:DawnstrikeApprovedPythonPath='{python_q}'
+$approved=Get-DawnstrikeApprovedLockInterpreter
+$lock=Adopt-DawnstrikeGovernedRuntimeLockWithJournal -StateRoot '{state_q}' `
+ -JournalPath '{journal_q}' -CandidateSha ('a'*40) -CandidateTree ('b'*40) `
+ -OriginIdentity 'github.com/mattfren/dawnstrike' `
+ -PythonPath $approved.path -PythonSha256 $approved.sha256{crash_arg}
+$lock|ConvertTo-Json -Compress
+"""
+        environment = dict(os.environ)
+        environment["DAWNSTRIKE_TEST_LOCK_JOURNAL"] = "1"
+        return subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+            text=True, capture_output=True, check=False, env=environment,
+        )
+
+    assert adopt("after_prepared").returncode == 137
+    first_adoption_hash = hashlib.sha256(journal.read_bytes()).hexdigest()
+    assert json.loads(journal.read_text(encoding="utf-8"))[
+        "prior_journal_file_sha256"
+    ] == compensation_predecessor
+    assert adopt("after_replace").returncode == 137
+    assert hashlib.sha256(journal.read_bytes()).hexdigest() == first_adoption_hash
+    recovered = adopt()
+    assert recovered.returncode == 0, (recovered.stdout, recovered.stderr)
+
+    final_payload = json.loads(journal.read_text(encoding="utf-8"))
+    assert final_payload["phase"] == "COMPENSATED"
+    assert final_payload["adoption_state"] == "ADOPTED"
+    assert final_payload["prior_journal_file_sha256"] == compensation_predecessor
+
+    lineage = sorted((journal.parent / "adoption-lineage").glob("*.json"))
+    assert len(lineage) == 3
+    archived_hashes = set()
+    for archived in lineage:
+        archived_hash = archived.name.removeprefix(
+            "adoption-predecessor-"
+        ).removesuffix(".json")
+        assert hashlib.sha256(archived.read_bytes()).hexdigest() == archived_hash
+        archived_hashes.add(archived_hash)
+    assert initial_journal_hash in archived_hashes
+    assert first_adoption_hash in archived_hashes
+    assert (
+        journal.parent
+        / "adoption-lineage"
+        / f"adoption-predecessor-{initial_journal_hash}.json"
+    ).read_bytes() == initial_journal_bytes
 
 
 @WINDOWS_RUNTIME
 def test_operation_journal_enforces_adjacent_owned_transitions(tmp_path: Path) -> None:
     state_q = str(tmp_path / "state").replace("'", "''")
     module = str(PS.resolve()).replace("'", "''")
+    python_q = str(Path(sys.executable).resolve()).replace("'", "''")
     command = rf"""
 . '{module}'
+$script:DawnstrikeApprovedPythonPath='{python_q}'
 $approved=Get-DawnstrikeApprovedLockInterpreter
 $origin='github.com/mattfren/dawnstrike';$empty=Get-DawnstrikeSharedLockSha256Text ''
 $lock=Enter-DawnstrikeGovernedRuntimeLock -StateRoot '{state_q}' `
@@ -414,6 +754,7 @@ def test_journal_aware_enter_recovers_acquisition_crashes(
     state.mkdir()
     module = str(PS.resolve()).replace("'", "''")
     state_q = str(state).replace("'", "''")
+    python_q = str(Path(sys.executable).resolve()).replace("'", "''")
     journal_q = str(
         state / "receipts" / "runtime-operation" / "activation.json"
     ).replace("'", "''")
@@ -429,6 +770,7 @@ def test_journal_aware_enter_recovers_acquisition_crashes(
         )
         return rf"""
 . '{module}'
+$script:DawnstrikeApprovedPythonPath='{python_q}'
 $approved=Get-DawnstrikeApprovedLockInterpreter
 $lock=Enter-DawnstrikeGovernedRuntimeLockWithJournal -StateRoot '{state_q}' `
  -JournalPath '{journal_q}' -Operation runtime_activation `
@@ -479,11 +821,13 @@ def test_journal_aware_enter_rejects_live_owner(tmp_path: Path) -> None:
     state.mkdir()
     module = str(PS.resolve()).replace("'", "''")
     state_q = str(state).replace("'", "''")
+    python_q = str(Path(sys.executable).resolve()).replace("'", "''")
     journal_q = str(
         state / "receipts" / "runtime-operation" / "activation.json"
     ).replace("'", "''")
     base = rf"""
 . '{module}'
+$script:DawnstrikeApprovedPythonPath='{python_q}'
 $approved=Get-DawnstrikeApprovedLockInterpreter
 $lock=Enter-DawnstrikeGovernedRuntimeLockWithJournal -StateRoot '{state_q}' `
  -JournalPath '{journal_q}' -Operation runtime_activation `
@@ -522,8 +866,10 @@ def test_journal_aware_enter_enforces_daily_lock_and_task_hash(tmp_path: Path) -
     state.mkdir()
     module = str(PS.resolve()).replace("'", "''")
     state_q = str(state).replace("'", "''")
+    python_q = str(Path(sys.executable).resolve()).replace("'", "''")
     command = rf"""
 . '{module}'
+$script:DawnstrikeApprovedPythonPath='{python_q}'
 $approved=Get-DawnstrikeApprovedLockInterpreter
 $journal=Join-Path '{state_q}' 'receipts\runtime-operation\activation.json'
 $common=@{{StateRoot='{state_q}';JournalPath=$journal;Operation='runtime_activation';
@@ -603,11 +949,13 @@ def test_journal_aware_enter_rejects_reparse_components(
             )
     module = str(PS.resolve()).replace("'", "''")
     state_q = str(state).replace("'", "''")
+    python_q = str(Path(sys.executable).resolve()).replace("'", "''")
     journal_q = str(
         state / "receipts" / "runtime-operation" / "activation.json"
     ).replace("'", "''")
     command = rf"""
 . '{module}'
+$script:DawnstrikeApprovedPythonPath='{python_q}'
 $approved=Get-DawnstrikeApprovedLockInterpreter
 $null=Enter-DawnstrikeGovernedRuntimeLockWithJournal -StateRoot '{state_q}' `
  -JournalPath '{journal_q}' -Operation runtime_activation `
@@ -634,10 +982,12 @@ def test_adopted_lock_transitions_preserve_original_init_owner(tmp_path: Path) -
     state.mkdir()
     module = str(PS.resolve()).replace("'", "''")
     state_q = str(state).replace("'", "''")
+    python_q = str(Path(sys.executable).resolve()).replace("'", "''")
     journal = state / "receipts" / "runtime-operation" / "activation.json"
     journal_q = str(journal).replace("'", "''")
     acquire = rf"""
 . '{module}'
+$script:DawnstrikeApprovedPythonPath='{python_q}'
 $approved=Get-DawnstrikeApprovedLockInterpreter
 $lock=Enter-DawnstrikeGovernedRuntimeLockWithJournal -StateRoot '{state_q}' `
  -JournalPath '{journal_q}' -Operation runtime_activation `

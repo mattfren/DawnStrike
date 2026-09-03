@@ -16,6 +16,9 @@ if (
 if (-not (Get-Command Get-DawnstrikeApprovedLockInterpreter -ErrorAction SilentlyContinue)) {
     . (Join-Path $PSScriptRoot "runtime_activation_lock.ps1")
 }
+if (-not (Get-Command Assert-DawnstrikeStateRootBoundary -ErrorAction SilentlyContinue)) {
+    . (Join-Path $PSScriptRoot "state_root_boundary.ps1")
+}
 
 function Get-DawnstrikeGitBlobSha1 {
     [CmdletBinding()]
@@ -387,6 +390,7 @@ function Get-DawnstrikeScheduledLaunchFiles {
         "scripts/runtime_activation_contract.py",
         "scripts/dawnstrike_python_bootstrap.py",
         "scripts/state_disaster_recovery.py",
+        "scripts/state_root_boundary.ps1",
         "scripts/invoke_dawnstrike_stage.ps1"
     )
     if ($TaskScript -in @("run_alphaops_morning.ps1", "run_alphaops_monitor.ps1")) {
@@ -443,6 +447,11 @@ function New-DawnstrikeScheduledLaunchManifest {
 
     $runtime = [System.IO.Path]::GetFullPath($RuntimeRoot).TrimEnd('\')
     $state = [System.IO.Path]::GetFullPath($StateRoot).TrimEnd('\')
+    $stateBoundary = $null
+    if ([string]::Equals($state, $script:DawnstrikeStateBoundaryFixedRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        $stateBoundary = Assert-DawnstrikeStateRootBoundary -StateRoot $state
+    }
+    try {
     $safeTask = $TaskScript -replace '[^A-Za-z0-9._-]', '_'
     $root = Join-Path $state 'receipts\scheduler-launch'
     New-Item -ItemType Directory -Path $root -Force | Out-Null
@@ -484,6 +493,12 @@ function New-DawnstrikeScheduledLaunchManifest {
         sha256 = Get-DawnstrikeLaunchSha256Bytes ([IO.File]::ReadAllBytes($path))
         files = @($entries)
     }
+    }
+    finally {
+        if ($null -ne $stateBoundary -and $null -ne $stateBoundary.locks) {
+            foreach ($lock in @($stateBoundary.locks)) { if ($null -ne $lock) { $lock.Dispose() } }
+        }
+    }
 }
 
 function Assert-DawnstrikeScheduledLaunchManifest {
@@ -508,11 +523,17 @@ function Assert-DawnstrikeScheduledLaunchManifest {
 
     $manifest = [System.IO.Path]::GetFullPath($ManifestPath)
     $runtime = [System.IO.Path]::GetFullPath($RuntimeRoot).TrimEnd('\')
+    $state = [System.IO.Path]::GetFullPath($StateRoot).TrimEnd('\')
     if (-not $manifest.StartsWith(([System.IO.Path]::GetFullPath($StateRoot).TrimEnd('\') + '\'), [StringComparison]::OrdinalIgnoreCase)) {
         throw 'Scheduled launch manifest is outside the approved state root.'
     }
     Assert-DawnstrikeSharedLockNoReparse $manifest "Scheduled launch manifest"
+    $stateBoundary = $null
+    if ([string]::Equals($state, $script:DawnstrikeStateBoundaryFixedRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        $stateBoundary = Assert-DawnstrikeStateRootBoundary -StateRoot $state
+    }
     $locks = @()
+    if ($null -ne $stateBoundary) { $locks += @($stateBoundary.locks) }
     try {
         $manifestStream = [IO.File]::Open($manifest, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
         $locks += $manifestStream
@@ -658,10 +679,15 @@ function Get-DawnstrikeScheduledLaunchCommand {
     $state = Quote-Launch $StateRoot
     $manifest = Quote-Launch $ManifestPath
     $runnerName = Quote-Launch ([IO.Path]::GetFileName($Runner))
+    $stateBoundaryHelper = Join-Path $RuntimeRoot 'scripts\state_root_boundary.ps1'
+    $stateBoundaryHelperSha256 = Get-DawnstrikeLaunchSha256Bytes ([IO.File]::ReadAllBytes($stateBoundaryHelper))
+    $commandPrefix = "`$ErrorActionPreference='Stop'; `$hp=$(Quote-Launch $stateBoundaryHelper); `$hi=Get-Item -LiteralPath `$hp -Force -ErrorAction Stop; if ((`$hi.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Scheduled StateRoot helper is a reparse point.' }; `$hs=[IO.File]::Open(`$hp,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read); `$boundaryLocks=@(`$hs); try { `$hx=[Security.Cryptography.SHA256]::Create(); try { `$hh=([BitConverter]::ToString(`$hx.ComputeHash(`$hs))).Replace('-','').ToLowerInvariant() } finally { `$hx.Dispose(); `$hs.Position=0 }; if (`$hh -cne $(Quote-Launch $stateBoundaryHelperSha256)) { throw 'Scheduled StateRoot helper hash mismatch.' }; . `$hp; `$sb=Assert-DawnstrikeStateRootBoundary -StateRoot $(Quote-Launch $StateRoot); `$boundaryLocks += @(`$sb.locks); "
     $command = "`$ErrorActionPreference='Stop'; `$m=$(Quote-Launch $ManifestPath); `$expected=$(Quote-Launch $ManifestSha256.ToLowerInvariant()); `$s=[IO.File]::Open(`$m,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read); try { `$b=[IO.MemoryStream]::new(); `$s.CopyTo(`$b); `$x=[Security.Cryptography.SHA256]::Create(); try { `$actual=([BitConverter]::ToString(`$x.ComputeHash(`$b.ToArray()))).Replace('-','').ToLowerInvariant() } finally { `$x.Dispose() }; if (`$actual -cne `$expected) { throw 'Scheduled launch manifest hash mismatch.' }; `$j=[Text.Encoding]::UTF8.GetString(`$b.ToArray()) | ConvertFrom-Json; if ([string]`$j.schema_version -cne 'dawnstrike.scheduled_launch_manifest.v1' -or [string]`$j.release_sha -cne $(Quote-Launch $ExpectedSha.ToLowerInvariant()) -or [string]`$j.task_script -cne `$runnerName -or `$j.research_only -ne `$true -or `$j.broker_execution_enabled -ne `$false) { throw 'Scheduled launch manifest identity is invalid.' }; `$locks=@(`$s); foreach(`$f in @(`$j.files)) { `$p=Join-Path $(Quote-Launch $RuntimeRoot) ([string]`$f.path -replace '/', '\\'); `$h=[IO.File]::Open(`$p,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read); `$locks += `$h; `$v=[IO.MemoryStream]::new(); `$h.CopyTo(`$v); `$y=[Security.Cryptography.SHA256]::Create(); try { `$fh=([BitConverter]::ToString(`$y.ComputeHash(`$v.ToArray()))).Replace('-','').ToLowerInvariant() } finally { `$y.Dispose() }; if (`$fh -cne ([string]`$f.sha256).ToLowerInvariant()) { throw ('Scheduled launch bytes mismatch: ' + [string]`$f.path) } }; & $(Quote-Launch $Runner) -RuntimeRoot $(Quote-Launch $RuntimeRoot) -StateRoot $(Quote-Launch $StateRoot) -ExpectedSha $(Quote-Launch $ExpectedSha.ToLowerInvariant()) -LaunchManifestPath `$m -LaunchManifestSha256 `$expected"
+    $command = $commandPrefix + $command
     if ($PublicationMode) { $command += " -PublicationMode $(Quote-Launch $PublicationMode)" }
     if ($VercelProjectId) { $command += " -VercelProjectId $(Quote-Launch $VercelProjectId)" }
     $command += ' } finally { foreach($h in $locks){$h.Dispose()} }'
+    $command += ' } finally { foreach($h in $boundaryLocks){if($null -ne $h){$h.Dispose()}} }'
     return $command
 }
 

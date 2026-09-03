@@ -28,7 +28,8 @@ $releaseSha = Resolve-DawnstrikeReleaseSha -RuntimeRoot $runtime -LogRoot $logRo
 $dailyLock = Enter-DawnstrikeDailyRunLock `
     -StateRoot $state `
     -MarketDate $MarketDate `
-    -Owner "alphaops_v6_weekly_training"
+    -Owner "alphaops_v6_weekly_training" `
+    -RetainHandle
 if (-not $dailyLock.acquired) {
     $receiptWritten = Write-DawnstrikeLockDenialReceipt -StateRoot $state -MarketDate $MarketDate -Owner "alphaops_v6_weekly_training" -Lock $dailyLock
     Write-Error "V6 weekly training could not acquire the daily state lock: $($dailyLock.reason)"

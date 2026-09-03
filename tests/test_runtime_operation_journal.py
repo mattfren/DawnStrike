@@ -8,6 +8,7 @@ import pytest
 
 from scripts.runtime_operation_journal import (
     _validate_compensation,
+    _validate_compensation_reference,
     seal,
     seal_compensation,
     transition,
@@ -474,6 +475,32 @@ def test_compensation_rejects_missing_or_tampered_prior_receipt(tmp_path: Path) 
         seal_compensation(source, target, tmp_path)
 
 
+def test_compensation_verifier_accepts_exactly_one_bound_source_or_archive(
+    tmp_path: Path,
+) -> None:
+    payload = _compensation_payload(tmp_path)
+    payload["schema_version"] = "dawnstrike.runtime_compensation_receipt.v2"
+    payload["prior_receipt_archive_relative_path"] = "archive/prior-receipt.json"
+    source = tmp_path / "input.json"
+    target = tmp_path / "output.json"
+    source.write_text(json.dumps(payload), encoding="utf-8")
+    seal_compensation(source, target, tmp_path)
+    prior = tmp_path / "prior-receipt.json"
+    archive = tmp_path / "archive" / "prior-receipt.json"
+    archive.parent.mkdir()
+    prior.replace(archive)
+
+    sealed = _validate_compensation(target.read_bytes())
+    _validate_compensation_reference(sealed, tmp_path)
+    prior.write_bytes(archive.read_bytes())
+    with pytest.raises(ValueError, match="source/archive state is not exact"):
+        _validate_compensation_reference(sealed, tmp_path)
+    prior.unlink()
+    archive.write_text("tampered", encoding="utf-8")
+    with pytest.raises(ValueError, match="changed or is missing"):
+        _validate_compensation_reference(sealed, tmp_path)
+
+
 def test_compensation_rejects_inconsistent_prior_receipt_sentinel(tmp_path: Path) -> None:
     payload = _compensation_payload(tmp_path)
     payload["prior_receipt_relative_path"] = "NONE"
@@ -578,7 +605,7 @@ def test_consumers_reconcile_complete_before_any_compensation_or_restore() -> No
         ),
         (
             "scripts/activate_dawnstrike_runtime.ps1",
-            "Set-DawnstrikeTasksFailClosedDisabled",
+            "Invoke-DawnstrikeActivationCompensationStateMachine",
             "Complete activation evidence could not be reconciled",
         ),
         (

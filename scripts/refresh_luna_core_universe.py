@@ -9,18 +9,20 @@ it does not touch broker configuration or the runtime checkout.
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
-import shutil
 import socket
+import stat
 import sys
 import tempfile
 import uuid
 import zipfile
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
+from typing import BinaryIO
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
@@ -52,7 +54,492 @@ RELEASE_ANCHOR_MARKET_DATE = "2026-08-27"
 SUPPORTED_MARKET_DATE = RELEASE_ANCHOR_MARKET_DATE
 REFRESH_LOCK_NAME = ".luna_core_universe.refresh.lock"
 REFRESH_LOCK_SCHEMA_VERSION = "dawnstrike.luna.core_universe_refresh_lock.v1"
+DIRECTORY_BOUNDARY_MARKER_NAME = ".luna_core_universe.directory_boundary.v1"
+DIRECTORY_BOUNDARY_MARKER_BYTES = b"dawnstrike.luna.core_universe.directory_boundary.v1\n"
 SPY_ARTIFACT_NAME = "spy-holdings.xlsx"
+
+
+def _absolute_without_reparse_resolution(path: Path) -> Path:
+    return Path(os.path.abspath(os.fspath(path)))
+
+
+def _is_reparse_stat(value: os.stat_result) -> bool:
+    return stat.S_ISLNK(value.st_mode) or bool(int(getattr(value, "st_file_attributes", 0)) & 0x400)
+
+
+def _assert_no_reparse_components(path: Path, *, label: str) -> Path:
+    """Return an absolute lexical path after rejecting every existing link component."""
+
+    absolute = _absolute_without_reparse_resolution(path)
+    missing_parent = False
+    for component in [*reversed(absolute.parents), absolute]:
+        try:
+            metadata = os.lstat(component)
+        except FileNotFoundError:
+            missing_parent = True
+            continue
+        except OSError as exc:
+            raise RuntimeError(f"{label} metadata is unavailable: {component}") from exc
+        if missing_parent:
+            raise RuntimeError(f"{label} changed below a missing parent: {component}")
+        if _is_reparse_stat(metadata):
+            raise RuntimeError(
+                f"{label} contains a symlink, junction, or reparse point: {component}"
+            )
+        if component != absolute and not stat.S_ISDIR(metadata.st_mode):
+            raise RuntimeError(f"{label} has a non-directory parent: {component}")
+    return absolute
+
+
+def _assert_path_type(
+    path: Path,
+    *,
+    label: str,
+    expected: str,
+    allow_missing: bool = False,
+) -> Path:
+    absolute = _assert_no_reparse_components(path, label=label)
+    try:
+        metadata = os.lstat(absolute)
+    except FileNotFoundError:
+        if allow_missing:
+            return absolute
+        raise RuntimeError(f"{label} is missing: {absolute}") from None
+    except OSError as exc:
+        raise RuntimeError(f"{label} metadata is unavailable: {absolute}") from exc
+    valid = (
+        stat.S_ISDIR(metadata.st_mode)
+        if expected == "directory"
+        else stat.S_ISREG(metadata.st_mode)
+    )
+    if not valid:
+        raise RuntimeError(f"{label} is not a regular {expected}: {absolute}")
+    return absolute
+
+
+def _ensure_regular_directory(path: Path, *, label: str) -> Path:
+    absolute = _assert_no_reparse_components(path, label=label)
+    try:
+        absolute.mkdir()
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        raise RuntimeError(f"{label} could not be created safely: {absolute}") from exc
+    return _assert_path_type(absolute, label=label, expected="directory")
+
+
+def _same_file_identity(left: os.stat_result, right: os.stat_result) -> bool:
+    return (int(left.st_dev), int(left.st_ino)) == (int(right.st_dev), int(right.st_ino))
+
+
+def _same_file_snapshot(left: os.stat_result, right: os.stat_result) -> bool:
+    # Windows' CRT fstat reports creation time in st_ctime_ns while lstat can
+    # expose a slightly different conversion for the same handle identity.
+    # The opened handle denies writes; POSIX additionally compares change time.
+    fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns")
+    if os.name != "nt":
+        fields += ("st_ctime_ns",)
+    return all(int(getattr(left, field)) == int(getattr(right, field)) for field in fields)
+
+
+@contextmanager
+def _open_refresh_lock_handle(
+    path: Path,
+    *,
+    label: str,
+    allow_delete_share: bool = False,
+    exact_namespace_mutation: bool = False,
+):
+    """Open one exact inode while denying competing readers/writers.
+
+    A stale lock must remain renameable by this process, so that admission uses
+    DELETE sharing only.  A live lock instead uses READ sharing only and is
+    therefore immutable and non-deletable for its full critical section.
+    An exact Windows namespace-mutation source additionally requests DELETE
+    access while continuing to deny competing writes and deletes.  That access
+    is used for both handle-bound rename and handle-bound deletion.
+    POSIX contenders are serialized with an advisory exclusive lock in
+    addition to the no-follow descriptor identity checks.
+    """
+
+    absolute = _assert_path_type(path, label=label, expected="file")
+    before = os.lstat(absolute)
+    if int(getattr(before, "st_nlink", 1)) != 1:
+        raise RuntimeError(f"{label} must have exactly one filesystem link: {absolute}")
+
+    stream: BinaryIO | None = None
+    if os.name == "nt":
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        create_file.restype = wintypes.HANDLE
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [wintypes.HANDLE]
+        close_handle.restype = wintypes.BOOL
+        if allow_delete_share and exact_namespace_mutation:
+            raise RuntimeError(f"{label} requested incompatible handle rights")
+        share_mode = 0x4 if allow_delete_share else 0x1
+        desired_access = 0x80000000 | (0x00010000 if exact_namespace_mutation else 0)
+        raw_handle = create_file(
+            str(absolute),
+            desired_access,
+            share_mode,
+            None,
+            3,
+            0x00200000,
+            None,
+        )
+        if raw_handle == ctypes.c_void_p(-1).value:
+            error = ctypes.get_last_error()
+            raise OSError(error, f"{label} could not be identity-locked")
+        try:
+            descriptor = msvcrt.open_osfhandle(
+                int(raw_handle), os.O_RDONLY | int(getattr(os, "O_BINARY", 0))
+            )
+        except Exception:
+            close_handle(raw_handle)
+            raise
+        stream = os.fdopen(descriptor, "rb", closefd=True)
+    else:
+        flags = os.O_RDONLY | int(getattr(os, "O_NOFOLLOW", 0))
+        descriptor = os.open(absolute, flags)
+        try:
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except Exception:
+            os.close(descriptor)
+            raise
+        stream = os.fdopen(descriptor, "rb", closefd=True)
+
+    try:
+        opened = os.fstat(stream.fileno())
+        current = os.lstat(absolute)
+        if (
+            _is_reparse_stat(current)
+            or not stat.S_ISREG(opened.st_mode)
+            or not _same_file_snapshot(before, opened)
+            or not _same_file_snapshot(opened, current)
+            or int(getattr(opened, "st_nlink", 1)) != 1
+        ):
+            raise RuntimeError(f"{label} changed while its exact handle was acquired")
+        yield stream
+    finally:
+        stream.close()
+
+
+def _windows_delete_from_handle(handle: BinaryIO) -> None:
+    """Mark the exact already-open Windows file for deletion."""
+
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class _FileDispositionInfo(ctypes.Structure):
+        _fields_ = [("delete_file", wintypes.BOOLEAN)]
+
+    information = _FileDispositionInfo(True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    set_information = kernel32.SetFileInformationByHandle
+    set_information.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    ]
+    set_information.restype = wintypes.BOOL
+    if not set_information(
+        msvcrt.get_osfhandle(handle.fileno()),
+        4,  # FileDispositionInfo
+        ctypes.byref(information),
+        ctypes.sizeof(information),
+    ):
+        error = ctypes.get_last_error()
+        raise OSError(error, os.strerror(error))
+
+
+def _delete_refresh_lock_from_exact_handle(
+    handle: BinaryIO,
+    lock_path: Path,
+    owner_bytes: bytes,
+) -> None:
+    """Delete only the admitted live lock while its exact handle remains held."""
+
+    admitted = os.fstat(handle.fileno())
+    handle.seek(0)
+    if handle.read() != owner_bytes:
+        raise RuntimeError("core universe refresh lock bytes changed before cleanup")
+    current = os.lstat(lock_path)
+    if not _same_file_snapshot(admitted, current):
+        raise RuntimeError("core universe refresh lock was replaced before cleanup")
+    if os.name == "nt":
+        _windows_delete_from_handle(handle)
+        return
+
+    # Cooperative POSIX contenders must hold the advisory flock acquired by
+    # _open_refresh_lock_handle. Keep that exact descriptor open across the
+    # identity check and unlink, then prove the admitted inode lost its name.
+    os.unlink(lock_path)
+    if int(getattr(os.fstat(handle.fileno()), "st_nlink", 1)) != 0:
+        raise RuntimeError("core universe refresh lock cleanup removed the wrong identity")
+
+
+@contextmanager
+def _hold_regular_directory(
+    path: Path,
+    *,
+    label: str,
+    allow_write_share: bool = False,
+):
+    """Hold a Windows directory against replacement and bind its POSIX identity."""
+
+    absolute = _assert_path_type(path, label=label, expected="directory")
+    before = os.lstat(absolute)
+    windows_handle: int | None = None
+    windows_close = None
+    descriptor: int | None = None
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        create_file.restype = wintypes.HANDLE
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [wintypes.HANDLE]
+        close_handle.restype = wintypes.BOOL
+        windows_close = close_handle
+        # FILE_SHARE_DELETE is never admitted, so the guarded directory cannot
+        # be renamed or replaced. A write phase may admit FILE_SHARE_WRITE only
+        # while an immutable child marker is held open below; that marker keeps
+        # the directory nonempty and prevents an in-place reparse conversion
+        # without breaking atomic child-file replacement.
+        windows_handle = create_file(
+            str(absolute),
+            0x80000000,
+            0x1 | (0x2 if allow_write_share else 0),
+            None,
+            3,
+            0x02000000 | 0x00200000,
+            None,
+        )
+        if windows_handle == ctypes.c_void_p(-1).value:
+            error = ctypes.get_last_error()
+            raise RuntimeError(f"{label} could not be held safely (Windows error {error})")
+    else:
+        flags = os.O_RDONLY | int(getattr(os, "O_DIRECTORY", 0)) | int(getattr(os, "O_NOFOLLOW", 0))
+        try:
+            descriptor = os.open(absolute, flags)
+        except OSError as exc:
+            raise RuntimeError(f"{label} could not be held safely") from exc
+    try:
+        after_open = os.lstat(absolute)
+        if _is_reparse_stat(after_open) or not _same_file_identity(before, after_open):
+            raise RuntimeError(f"{label} changed while its replacement guard was acquired")
+        if descriptor is not None and not _same_file_identity(os.fstat(descriptor), after_open):
+            raise RuntimeError(f"{label} descriptor identity changed during admission")
+        yield absolute
+        final = os.lstat(absolute)
+        if _is_reparse_stat(final) or not _same_file_identity(after_open, final):
+            raise RuntimeError(f"{label} changed while its replacement guard was held")
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if windows_handle is not None and windows_close is not None:
+            windows_close(windows_handle)
+
+
+@contextmanager
+def _hold_regular_file(path: Path, *, label: str, expected_bytes: bytes):
+    """Hold one exact regular file against writes, replacement, and deletion."""
+
+    absolute = _assert_path_type(path, label=label, expected="file")
+    before = os.lstat(absolute)
+    if int(getattr(before, "st_nlink", 1)) != 1:
+        raise RuntimeError(f"{label} must have exactly one filesystem link: {absolute}")
+    windows_handle: int | None = None
+    windows_close = None
+    descriptor: int | None = None
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        create_file.restype = wintypes.HANDLE
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [wintypes.HANDLE]
+        close_handle.restype = wintypes.BOOL
+        windows_close = close_handle
+        windows_handle = create_file(
+            str(absolute),
+            0x80000000,
+            0x1,
+            None,
+            3,
+            0x00200000,
+            None,
+        )
+        if windows_handle == ctypes.c_void_p(-1).value:
+            error = ctypes.get_last_error()
+            raise RuntimeError(f"{label} could not be held safely (Windows error {error})")
+    else:
+        flags = os.O_RDONLY | int(getattr(os, "O_NOFOLLOW", 0))
+        try:
+            descriptor = os.open(absolute, flags)
+        except OSError as exc:
+            raise RuntimeError(f"{label} could not be held safely") from exc
+    try:
+        after_open = os.lstat(absolute)
+        if (
+            _is_reparse_stat(after_open)
+            or not _same_file_identity(before, after_open)
+            or int(getattr(after_open, "st_nlink", 1)) != 1
+        ):
+            raise RuntimeError(f"{label} changed while its identity guard was acquired")
+        if descriptor is not None and not _same_file_identity(os.fstat(descriptor), after_open):
+            raise RuntimeError(f"{label} descriptor identity changed during admission")
+        if absolute.read_bytes() != expected_bytes:
+            raise RuntimeError(f"{label} has unexpected bytes: {absolute}")
+        yield absolute
+        final = os.lstat(absolute)
+        if (
+            _is_reparse_stat(final)
+            or not _same_file_identity(after_open, final)
+            or int(getattr(final, "st_nlink", 1)) != 1
+            or absolute.read_bytes() != expected_bytes
+        ):
+            raise RuntimeError(f"{label} changed while its identity guard was held")
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if windows_handle is not None and windows_close is not None:
+            windows_close(windows_handle)
+
+
+def _ensure_directory_boundary_marker(directory: Path, *, label: str) -> Path:
+    marker = _assert_path_type(
+        directory / DIRECTORY_BOUNDARY_MARKER_NAME,
+        label=label,
+        expected="file",
+        allow_missing=True,
+    )
+    if not os.path.lexists(marker):
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            with os.fdopen(descriptor, "wb") as handle:
+                descriptor = None
+                handle.write(DIRECTORY_BOUNDARY_MARKER_BYTES)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise RuntimeError(f"{label} could not be created safely: {marker}") from exc
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+    marker = _assert_path_type(marker, label=label, expected="file")
+    if marker.read_bytes() != DIRECTORY_BOUNDARY_MARKER_BYTES:
+        raise RuntimeError(f"{label} has unexpected bytes: {marker}")
+    return marker
+
+
+@contextmanager
+def _hold_directory_write_boundary(path: Path, *, label: str):
+    """Hold a directory through writes without admitting reparse conversion."""
+
+    with ExitStack() as strict:
+        absolute = strict.enter_context(_hold_regular_directory(path, label=label))
+        marker = _ensure_directory_boundary_marker(
+            absolute,
+            label=f"{label} boundary marker",
+        )
+        with ExitStack() as held:
+            held.enter_context(
+                _hold_regular_file(
+                    marker,
+                    label=f"{label} boundary marker",
+                    expected_bytes=DIRECTORY_BOUNDARY_MARKER_BYTES,
+                )
+            )
+            held.enter_context(
+                _hold_regular_directory(
+                    absolute,
+                    label=label,
+                    allow_write_share=True,
+                )
+            )
+            # The immutable child and relaxed no-delete directory handle now
+            # overlap the strict handle, so there is no unguarded transition.
+            strict.close()
+            yield absolute
+
+
+def _assert_universe_state_layout(state_root: Path, *, require_config: bool) -> Path:
+    state = _assert_path_type(
+        state_root,
+        label="core-universe state root",
+        expected="directory",
+    )
+    config = _assert_path_type(
+        state / "config",
+        label="core-universe config root",
+        expected="directory",
+        allow_missing=not require_config,
+    )
+    if not os.path.lexists(config):
+        return state
+    _assert_path_type(
+        config / REFRESH_LOCK_NAME,
+        label="core-universe refresh lock",
+        expected="file",
+        allow_missing=True,
+    )
+    _assert_path_type(
+        config / "luna_core_universe.json",
+        label="core-universe active pointer",
+        expected="file",
+        allow_missing=True,
+    )
+    _assert_path_type(
+        config / GENERATION_DIRECTORY,
+        label="core-universe generation root",
+        expected="directory",
+        allow_missing=True,
+    )
+    return state
 
 
 def _normalise_market_date(value: str | None) -> str:
@@ -440,15 +927,31 @@ def _canonical_json_sha256(value: object) -> str:
 def _refresh_lock(config_root: Path):
     """Serialize refreshes with identity-bound, recoverable owner metadata."""
 
+    config_root = _assert_path_type(
+        config_root,
+        label="core-universe config root",
+        expected="directory",
+    )
     lock_path = config_root / REFRESH_LOCK_NAME
-    config_root.mkdir(parents=True, exist_ok=True)
+    _assert_path_type(
+        lock_path,
+        label="core-universe refresh lock",
+        expected="file",
+        allow_missing=True,
+    )
     owner = _lock_owner_metadata()
+    owner_bytes = (json.dumps(owner, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
     descriptor: int | None = None
     for _attempt in range(3):
         try:
             descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             break
         except FileExistsError as exc:
+            _assert_path_type(
+                lock_path,
+                label="core-universe refresh lock",
+                expected="file",
+            )
             if not _archive_provably_dead_lock(lock_path):
                 raise RuntimeError("core universe refresh already in progress") from exc
         except OSError as exc:
@@ -456,27 +959,45 @@ def _refresh_lock(config_root: Path):
     if descriptor is None:
         raise RuntimeError("core universe refresh lock could not be acquired")
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(owner, handle, sort_keys=True, separators=(",", ":"))
-            handle.write("\n")
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(owner_bytes)
             handle.flush()
             os.fsync(handle.fileno())
-        yield
-    finally:
-        try:
-            current = json.loads(lock_path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError):
-            current = None
-        if isinstance(current, dict) and current.get("owner_token") == owner["owner_token"]:
+        _assert_path_type(
+            lock_path,
+            label="core-universe refresh lock",
+            expected="file",
+        )
+        with _open_refresh_lock_handle(
+            lock_path,
+            label="core-universe refresh lock",
+            exact_namespace_mutation=True,
+        ) as lock_handle:
+            admitted = os.fstat(lock_handle.fileno())
+            if lock_handle.read() != owner_bytes:
+                raise RuntimeError("core universe refresh lock bytes changed during admission")
+            lock_handle.seek(0)
             try:
-                lock_path.unlink()
-            except FileNotFoundError:
-                pass
-            except OSError as exc:
-                # The refresh result is still governed by the atomic pointer;
-                # leave a lock owned by this process visible rather than
-                # allowing a concurrent writer after cleanup failure.
-                raise RuntimeError(f"could not remove refresh lock: {lock_path}") from exc
+                yield
+            finally:
+                final = os.fstat(lock_handle.fileno())
+                lock_handle.seek(0)
+                if (
+                    not _same_file_snapshot(admitted, final)
+                    or lock_handle.read() != owner_bytes
+                    or not _same_file_snapshot(final, os.lstat(lock_path))
+                ):
+                    raise RuntimeError("core universe refresh lock changed while held")
+                try:
+                    _delete_refresh_lock_from_exact_handle(lock_handle, lock_path, owner_bytes)
+                except OSError as exc:
+                    # Leave the exact lock visible on cleanup failure so another
+                    # refresh can never overlap this owner.
+                    raise RuntimeError(f"could not remove refresh lock: {lock_path}") from exc
+    finally:
+        # Successful cleanup is handle-bound above. If admission itself fails,
+        # retain stale evidence instead of deleting an unbound pathname here.
+        pass
 
 
 def _process_start_time(pid: int) -> str | None:
@@ -573,39 +1094,331 @@ def _process_is_live(pid: int) -> bool | None:
     return True
 
 
-def _archive_provably_dead_lock(lock_path: Path) -> bool:
-    try:
-        metadata = json.loads(lock_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+def _linux_renameat2(source: Path, destination: Path, flags: int) -> bool:
+    """Call Linux renameat2, returning False only when the primitive is absent."""
+
+    if not sys.platform.startswith("linux"):
         return False
-    if not _lock_owner_is_dead(metadata):
+    import ctypes
+
+    renameat2 = getattr(ctypes.CDLL(None, use_errno=True), "renameat2", None)
+    if renameat2 is None:
         return False
-    archive = lock_path.with_name(
-        f"{lock_path.name}.dead.{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.{uuid.uuid4().hex[:8]}"
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(
+        -100,  # AT_FDCWD
+        os.fsencode(source),
+        -100,
+        os.fsencode(destination),
+        flags,
     )
-    try:
-        os.replace(lock_path, archive)
-    except (FileNotFoundError, OSError):
+    if result == 0:
+        return True
+    error = ctypes.get_errno()
+    if error in {errno.ENOSYS, errno.EINVAL, errno.ENOTSUP}:
         return False
+    raise OSError(error, os.strerror(error), os.fspath(destination))
+
+
+def _rename_no_replace(source: Path, destination: Path) -> bool:
+    """Atomically move ``source`` only while ``destination`` is absent."""
+
+    if os.name == "nt":
+        try:
+            os.rename(source, destination)
+        except FileExistsError:
+            return False
+        return True
+
+    # Linux exposes the exact primitive needed here. Calling libc avoids a
+    # check/rename sequence and therefore cannot overwrite a third contender.
+    try:
+        if _linux_renameat2(source, destination, 1):  # RENAME_NOREPLACE
+            return True
+    except FileExistsError:
+        return False
+
+    # Same-directory hard-link publication is also atomically no-clobber. The
+    # brief two-link state is fail-closed to this module's nlink==1 admission.
+    try:
+        os.link(source, destination, follow_symlinks=False)
+    except FileExistsError:
+        return False
+    source_identity = os.lstat(source)
+    destination_identity = os.lstat(destination)
+    if not _same_file_identity(source_identity, destination_identity):
+        raise RuntimeError("no-replace lock restoration published the wrong identity")
+    source.unlink()
     return True
 
 
-def _replace_bytes(path: Path, payload: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+def _windows_rename_from_handle(
+    handle: BinaryIO,
+    destination: Path,
+    *,
+    replace_if_exists: bool,
+) -> None:
+    """Atomically rename the exact already-open Windows file."""
+
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class _FileRenameInfo(ctypes.Structure):
+        _fields_ = [
+            ("replace_if_exists", wintypes.BOOLEAN),
+            ("root_directory", wintypes.HANDLE),
+            ("file_name_length", wintypes.DWORD),
+            ("file_name", wintypes.WCHAR * 1),
+        ]
+
+    encoded = os.fspath(destination).encode("utf-16-le")
+    name_offset = _FileRenameInfo.file_name.offset
+    buffer_size = name_offset + len(encoded) + 2
+    buffer = ctypes.create_string_buffer(buffer_size)
+    information = _FileRenameInfo.from_buffer(buffer)
+    information.replace_if_exists = replace_if_exists
+    information.root_directory = None
+    information.file_name_length = len(encoded)
+    ctypes.memmove(ctypes.addressof(buffer) + name_offset, encoded, len(encoded))
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    set_information = kernel32.SetFileInformationByHandle
+    set_information.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    ]
+    set_information.restype = wintypes.BOOL
+    if not set_information(
+        msvcrt.get_osfhandle(handle.fileno()),
+        3,  # FileRenameInfo
+        buffer,
+        buffer_size,
+    ):
+        error = ctypes.get_last_error()
+        if not replace_if_exists and error in {80, 183}:
+            raise FileExistsError(error, os.strerror(error), os.fspath(destination))
+        raise OSError(error, os.strerror(error), os.fspath(destination))
+
+
+def _windows_replace_from_handle(handle: BinaryIO, destination: Path) -> None:
+    """Atomically replace a Windows path with the exact already-open file."""
+
+    _windows_rename_from_handle(handle, destination, replace_if_exists=True)
+
+
+def _windows_rename_from_handle_no_replace(handle: BinaryIO, destination: Path) -> None:
+    """Atomically publish an exact Windows handle without clobbering a path."""
+
+    _windows_rename_from_handle(handle, destination, replace_if_exists=False)
+
+
+def _replace_from_exact_handle(
+    handle: BinaryIO,
+    source: Path,
+    destination: Path,
+    expected_bytes: bytes,
+) -> None:
+    """Replace with the opened inode or restore prior POSIX truth on mismatch."""
+
+    admitted = os.fstat(handle.fileno())
+    current_source = os.lstat(source)
+    if not _same_file_snapshot(admitted, current_source):
+        raise RuntimeError("core-universe atomic temporary changed before replacement")
+    if os.name == "nt":
+        _windows_replace_from_handle(handle, destination)
+    else:
+        destination_existed = os.path.lexists(destination)
+        prior_destination = os.lstat(destination) if destination_existed else None
+        if destination_existed:
+            if not _linux_renameat2(source, destination, 2):  # RENAME_EXCHANGE
+                raise RuntimeError("identity-bound POSIX exchange is unavailable")
+        elif not _linux_renameat2(source, destination, 1):  # RENAME_NOREPLACE
+            raise RuntimeError("identity-bound POSIX replacement is unavailable")
+        installed = os.lstat(destination)
+        if not _same_file_snapshot(admitted, installed):
+            if destination_existed:
+                if not _linux_renameat2(source, destination, 2):
+                    raise RuntimeError("atomic output rollback primitive is unavailable")
+                restored = os.lstat(destination)
+                if prior_destination is None or not _same_file_snapshot(
+                    prior_destination, restored
+                ):
+                    raise RuntimeError("atomic output rollback did not restore prior truth")
+            else:
+                if not _rename_no_replace(destination, source):
+                    raise RuntimeError("atomic output rollback could not restore absence")
+                if os.path.lexists(destination):
+                    raise RuntimeError("atomic output rollback did not restore absence")
+            raise RuntimeError("core-universe atomic temporary was replaced during commit")
+    installed = os.lstat(destination)
+    if not _same_file_snapshot(admitted, installed):
+        raise RuntimeError("core-universe atomic output has the wrong installed identity")
+    handle.seek(0)
+    if handle.read() != expected_bytes:
+        raise RuntimeError("core-universe atomic output bytes changed during commit")
+
+
+def _archive_provably_dead_lock(lock_path: Path) -> bool:
+    # POSIX has no generally available compare-and-rename primitive that binds
+    # the source pathname to this already-open inode. An advisory flock cannot
+    # exclude a hostile non-cooperating rename, so automatic recovery is
+    # deliberately unavailable there. Leaving the dead lock visible is the
+    # fail-closed outcome; an operator can inspect and remove it explicitly.
+    if os.name != "nt":
+        return False
+
+    stack = ExitStack()
     try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+        handle = stack.enter_context(
+            _open_refresh_lock_handle(
+                lock_path,
+                label="core-universe refresh lock",
+                exact_namespace_mutation=True,
+            )
+        )
+    except OSError:
+        stack.close()
+        return False
+    with stack:
+        admitted = os.fstat(handle.fileno())
+        raw = handle.read()
+        try:
+            metadata = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return False
+        if not _lock_owner_is_dead(metadata):
+            return False
+        current = os.lstat(lock_path)
+        if not _same_file_snapshot(admitted, current):
+            raise RuntimeError("core universe refresh lock changed before stale archival")
+        archive = lock_path.with_name(
+            f"{lock_path.name}.dead."
+            f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}."
+            f"{uuid.uuid4().hex[:8]}"
+        )
+        _assert_path_type(
+            archive,
+            label="core-universe dead-lock archive",
+            expected="file",
+            allow_missing=True,
+        )
+        try:
+            _windows_rename_from_handle_no_replace(handle, archive)
+        except (FileExistsError, FileNotFoundError):
+            return False
+        archived = os.lstat(archive)
+        if not _same_file_snapshot(admitted, archived):
+            raise RuntimeError("core universe refresh lock archive has the wrong identity")
+        handle.seek(0)
+        if handle.read() != raw:
+            raise RuntimeError("core universe refresh lock bytes changed during stale archival")
+        return True
+
+
+def _replace_bytes(path: Path, payload: bytes) -> None:
+    path = _assert_path_type(
+        path,
+        label="core-universe atomic output",
+        expected="file",
+        allow_missing=True,
+    )
+    parent = _assert_path_type(
+        path.parent,
+        label="core-universe atomic output parent",
+        expected="directory",
+    )
+    with _hold_directory_write_boundary(
+        parent,
+        label="core-universe atomic output parent",
+    ):
+        path = _assert_path_type(
+            path,
+            label="core-universe atomic output",
+            expected="file",
+            allow_missing=True,
+        )
+        fd, temporary = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=parent,
+        )
+        descriptor_open = True
+        try:
+            temporary_path = _assert_path_type(
+                Path(temporary),
+                label="core-universe atomic temporary",
+                expected="file",
+            )
+            temporary_identity = os.fstat(fd)
+            if not _same_file_identity(temporary_identity, os.lstat(temporary_path)):
+                raise RuntimeError("core-universe atomic temporary identity changed")
+            handle = os.fdopen(fd, "wb")
+            descriptor_open = False
+            with handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+                temporary_identity = os.fstat(handle.fileno())
+            if not _same_file_identity(temporary_identity, os.lstat(temporary_path)):
+                raise RuntimeError("core-universe atomic temporary identity changed")
+            with _open_refresh_lock_handle(
+                temporary_path,
+                label="core-universe atomic temporary",
+                exact_namespace_mutation=True,
+            ) as exact_temporary:
+                exact_temporary.seek(0)
+                if exact_temporary.read() != payload:
+                    raise RuntimeError(
+                        "core-universe atomic temporary bytes changed before replacement"
+                    )
+                exact_temporary.seek(0)
+                _assert_path_type(
+                    path,
+                    label="core-universe atomic output",
+                    expected="file",
+                    allow_missing=True,
+                )
+                _replace_from_exact_handle(
+                    exact_temporary,
+                    temporary_path,
+                    path,
+                    payload,
+                )
+            _assert_path_type(
+                path,
+                label="core-universe atomic output",
+                expected="file",
+            )
+        finally:
+            if descriptor_open:
+                os.close(fd)
+            temporary_path = Path(temporary)
+            if os.path.lexists(temporary_path):
+                _assert_path_type(
+                    temporary_path,
+                    label="core-universe atomic temporary cleanup",
+                    expected="file",
+                )
+                temporary_path.unlink()
 
 
 def _read_active_pointer(path: Path) -> dict[str, object] | None:
-    if not path.is_file():
+    path = _assert_path_type(
+        path,
+        label="core-universe active pointer",
+        expected="file",
+        allow_missing=True,
+    )
+    if not os.path.lexists(path):
         return None
     try:
         parsed = json.loads(path.read_bytes().decode("utf-8"))
@@ -614,6 +1427,40 @@ def _read_active_pointer(path: Path) -> dict[str, object] | None:
     if isinstance(parsed, dict) and parsed.get("schema_version") == ACTIVE_POINTER_SCHEMA_VERSION:
         return parsed
     return None
+
+
+def _validated_active_pointer_target(
+    path: Path,
+    pointer: dict[str, object],
+    *,
+    config_root: Path,
+) -> Path:
+    target_text = pointer.get("manifest_path")
+    if not isinstance(target_text, str) or not target_text.strip():
+        raise RuntimeError("active pointer manifest path missing")
+    relative = Path(target_text)
+    if relative.is_absolute():
+        raise RuntimeError("active pointer manifest path must be relative")
+    lexical = _absolute_without_reparse_resolution(path.parent / relative)
+    root = _absolute_without_reparse_resolution(config_root)
+    try:
+        common = Path(os.path.commonpath((os.fspath(root), os.fspath(lexical))))
+    except ValueError as exc:
+        raise RuntimeError("active pointer target escapes config root") from exc
+    if os.path.normcase(os.fspath(common)) != os.path.normcase(os.fspath(root)):
+        raise RuntimeError("active pointer target escapes config root")
+    lexical = _assert_path_type(
+        lexical,
+        label="core-universe active target",
+        expected="file",
+    )
+    try:
+        service_target = _active_pointer_target(path, pointer)
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+    if os.path.normcase(os.fspath(service_target)) != os.path.normcase(os.fspath(lexical)):
+        raise RuntimeError("active pointer target changed through path resolution")
+    return lexical
 
 
 def _refresh_locked(
@@ -626,23 +1473,37 @@ def _refresh_locked(
     bootstrap_state_street_proxy: bool,
 ) -> dict[str, object]:
     market_date = _normalise_market_date(market_date)
-    state_root = state_root.resolve()
-    config_root = state_root / "config"
-    output_path = config_root / "luna_core_universe.json"
+    state_root = _assert_universe_state_layout(state_root, require_config=True)
+    config_root = _assert_path_type(
+        state_root / "config",
+        label="core-universe config root",
+        expected="directory",
+    )
+    output_path = _assert_path_type(
+        config_root / "luna_core_universe.json",
+        label="core-universe active pointer",
+        expected="file",
+        allow_missing=True,
+    )
     if bootstrap_state_street_proxy:
         if proxy_manifest is not None:
             raise RuntimeError("State Street bootstrap does not accept an explicit proxy manifest")
         if os.path.lexists(output_path):
             raise RuntimeError("State Street bootstrap requires a completely absent active pointer")
-    source_path = (proxy_manifest or output_path).resolve()
-    prior_output_bytes = output_path.read_bytes() if output_path.is_file() else None
+    source_path = _assert_path_type(
+        proxy_manifest or output_path,
+        label="core-universe proxy manifest",
+        expected="file",
+        allow_missing=True,
+    )
+    prior_output_bytes = output_path.read_bytes() if os.path.lexists(output_path) else None
     proxy_bootstrapped = False
     if ndx_artifact is not None and market_date != RELEASE_ANCHOR_MARKET_DATE:
         raise RuntimeError(
             "later-date NDX refresh requires the authenticated dated source download; "
             "an explicit artifact has no authenticated date provenance"
         )
-    if source_path.is_file():
+    if os.path.lexists(source_path):
         wrapper = _read_json(source_path)
         source_base = source_path.parent
         try:
@@ -653,7 +1514,11 @@ def _refresh_locked(
             isinstance(pointer, dict)
             and pointer.get("schema_version") == ACTIVE_POINTER_SCHEMA_VERSION
         ):
-            source_base = _active_pointer_target(source_path, pointer).parent
+            source_base = _validated_active_pointer_target(
+                source_path,
+                pointer,
+                config_root=config_root,
+            ).parent
     elif bootstrap_state_street_proxy and proxy_manifest is None:
         spy_root = _TRUSTED_SOURCE_ROOTS.get(SPY_SOURCE_ID)
         spy_source_uri = str(spy_root.get("source_uri") or "") if spy_root else ""
@@ -691,6 +1556,12 @@ def _refresh_locked(
 
     ndx_root = _TRUSTED_SOURCE_ROOTS[NDX_SOURCE_ID]
     ndx_url = _source_url(ndx_root, market_date)
+    if ndx_artifact is not None:
+        ndx_artifact = _assert_path_type(
+            ndx_artifact,
+            label="core-universe NDX source artifact",
+            expected="file",
+        )
     payload = ndx_artifact.read_bytes() if ndx_artifact else _fetch(ndx_url)
     spy_source_id = str(proxy_children[0].get("source_id") or "").strip()
     if not spy_source_id:
@@ -701,6 +1572,12 @@ def _refresh_locked(
         spy_url = str(root.get("source_uri") or "") if root else ""
     if not spy_url:
         raise RuntimeError("SPY proxy source_uri missing")
+    if spy_artifact is not None:
+        spy_artifact = _assert_path_type(
+            spy_artifact,
+            label="core-universe SPY source artifact",
+            expected="file",
+        )
     spy_payload = (
         spy_artifact.read_bytes() if spy_artifact else _fetch(STATE_STREET_SPY_HOLDINGS_URL)
     )
@@ -741,6 +1618,11 @@ def _refresh_locked(
         # Validate the byte-identical active pair before reusing it.  A
         # corrupted or forged pointer never becomes a READY retry merely
         # because its content-addressed metadata matches.
+        active_target = _validated_active_pointer_target(
+            output_path,
+            active_pointer,
+            config_root=config_root,
+        )
         installed_contract = build_core_universe_contract(
             output_path,
             observed_at=observed_at,
@@ -751,7 +1633,6 @@ def _refresh_locked(
                 "active core generation did not reach READY: "
                 + str(installed_contract.get("reason") or installed_contract.get("blockers"))
             )
-        active_target = _active_pointer_target(output_path, active_pointer)
         active_wrapper = _read_json(output_path)
         active_ndx = next(
             (
@@ -788,8 +1669,15 @@ def _refresh_locked(
                 if isinstance(entry.get("path"), str):
                     active_artifact = Path(str(entry["path"]))
                     if not active_artifact.is_absolute():
-                        active_artifact = (active_target.parent / active_artifact).resolve()
+                        active_artifact = _absolute_without_reparse_resolution(
+                            active_target.parent / active_artifact
+                        )
                 active_sha256 = str(entry.get("sha256") or "").lower()
+        active_artifact = _assert_path_type(
+            active_artifact,
+            label="active core-universe NDX artifact",
+            expected="file",
+        )
         if not active_sha256:
             active_sha256 = str(
                 next(
@@ -810,8 +1698,15 @@ def _refresh_locked(
                 if isinstance(spy_entry.get("path"), str):
                     active_spy_artifact = Path(str(spy_entry["path"]))
                     if not active_spy_artifact.is_absolute():
-                        active_spy_artifact = (active_target.parent / active_spy_artifact).resolve()
+                        active_spy_artifact = _absolute_without_reparse_resolution(
+                            active_target.parent / active_spy_artifact
+                        )
                 active_spy_sha256 = str(spy_entry.get("sha256") or "").lower()
+        active_spy_artifact = _assert_path_type(
+            active_spy_artifact,
+            label="active core-universe SPY artifact",
+            expected="file",
+        )
         if not active_spy_sha256:
             active_spy_sha256 = str(
                 next(
@@ -840,24 +1735,54 @@ def _refresh_locked(
             "reused": True,
             "proxy_bootstrapped": False,
         }
-    generations_root = config_root / GENERATION_DIRECTORY
-    generations_root.mkdir(parents=True, exist_ok=True)
-    generation_dir = generations_root / generation_id
+    generations_root = _ensure_regular_directory(
+        config_root / GENERATION_DIRECTORY,
+        label="core-universe generation root",
+    )
+    generation_dir = _assert_path_type(
+        generations_root / generation_id,
+        label="core-universe generation directory",
+        expected="directory",
+        allow_missing=True,
+    )
     if os.path.lexists(generation_dir):
         if active_pointer is not None:
-            active_generation_target = _active_pointer_target(output_path, active_pointer)
-            if (
-                active_pointer.get("generation_id") == generation_id
-                or active_generation_target.parent.resolve() == generation_dir.resolve()
-            ):
+            active_generation_target = _validated_active_pointer_target(
+                output_path,
+                active_pointer,
+                config_root=config_root,
+            )
+            if active_pointer.get("generation_id") == generation_id or os.path.normcase(
+                os.fspath(active_generation_target.parent)
+            ) == os.path.normcase(os.fspath(generation_dir)):
                 raise RuntimeError("refusing to replace an active core-universe generation")
-        orphan = generations_root / (
-            f"{generation_id}.orphan."
-            f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}."
-            f"{uuid.uuid4().hex[:8]}"
+        orphan = _assert_path_type(
+            generations_root
+            / (
+                f"{generation_id}.orphan."
+                f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}."
+                f"{uuid.uuid4().hex[:8]}"
+            ),
+            label="core-universe orphan generation",
+            expected="directory",
+            allow_missing=True,
         )
         try:
-            os.replace(generation_dir, orphan)
+            with _hold_directory_write_boundary(
+                generations_root,
+                label="core-universe generation root",
+            ):
+                generation_dir = _assert_path_type(
+                    generation_dir,
+                    label="core-universe generation directory",
+                    expected="directory",
+                )
+                os.replace(generation_dir, orphan)
+                _assert_path_type(
+                    orphan,
+                    label="core-universe orphan generation",
+                    expected="directory",
+                )
         except OSError as exc:
             raise RuntimeError(
                 f"could not preserve inactive core-universe generation: {generation_dir}"
@@ -866,83 +1791,113 @@ def _refresh_locked(
     final_spy_artifact = generation_dir / SPY_ARTIFACT_NAME
     candidate_path = generation_dir / "luna_core_universe.json"
     pointer_swapped = False
-    generation_created = False
     try:
-        generation_dir.mkdir()
-        generation_created = True
-        # The generation is inactive until its pointer is swapped.  Both raw
-        # bytes and manifest are written under that generation, then the exact
-        # final paths are validated before activation.
-        _replace_bytes(final_artifact, payload)
-        _replace_bytes(final_spy_artifact, spy_payload)
-        spy_child = _spy_manifest(
-            artifact_path=final_spy_artifact,
-            payload=spy_payload,
-            observed_at=observed_at,
-            source_id=spy_source_id,
-            source_uri=spy_url,
-            parsed=(spy_symbols, spy_effective, spy_attestation),
-        )
-        ndx_child = _ndx_manifest(
-            artifact_path=final_artifact,
-            payload=payload,
-            observed_at=observed_at,
-            market_date=market_date,
-            parsed=(ndx_symbols, ndx_attestation),
-        )
-        candidate = {**wrapper, "manifests": [spy_child, ndx_child]}
-        candidate_bytes = (json.dumps(candidate, indent=2, sort_keys=True) + "\n").encode("utf-8")
-        _replace_bytes(candidate_path, candidate_bytes)
-        contract = build_core_universe_contract(
-            candidate_path,
-            observed_at=observed_at,
-            market_date=market_date,
-        )
-        if contract.get("status") != "READY":
-            raise RuntimeError(
-                "candidate core manifest did not reach READY: "
-                + str(contract.get("reason") or contract.get("blockers"))
+        with _hold_regular_directory(
+            generations_root,
+            label="core-universe generation root",
+        ):
+            _assert_path_type(
+                generation_dir,
+                label="core-universe generation directory",
+                expected="directory",
+                allow_missing=True,
             )
-        pointer = {
-            "schema_version": ACTIVE_POINTER_SCHEMA_VERSION,
-            "generation_id": generation_id,
-            "generation_key": generation_key,
-            "market_date": market_date,
-            "ndx_canonical_content_digest_sha256": stable_workbook_digest,
-            "ndx_canonical_symbol_set_hash_sha256": ndx_attestation["symbol_set_hash_sha256"],
-            "proxy_manifest_sha256": proxy_manifest_hash,
-            "spy_canonical_content_digest_sha256": spy_attestation["content_digest_sha256"],
-            "spy_canonical_symbol_set_hash_sha256": spy_attestation["symbol_set_hash_sha256"],
-            "spy_effective_date": spy_effective,
-            "observed_at": observed_at,
-            "manifest_path": (
-                Path(GENERATION_DIRECTORY) / generation_id / "luna_core_universe.json"
-            ).as_posix(),
-            "manifest_sha256": hashlib.sha256(candidate_bytes).hexdigest(),
-            "created_at": observed_at,
-        }
-        pointer_bytes = (json.dumps(pointer, indent=2, sort_keys=True) + "\n").encode("utf-8")
-        # This is the single active-pair swap.  The previous pointer/manifest
-        # is not touched until the complete generation is READY.
-        _replace_bytes(output_path, pointer_bytes)
-        pointer_swapped = True
-        installed_contract = build_core_universe_contract(
-            output_path,
-            observed_at=observed_at,
-            market_date=market_date,
-        )
-        if installed_contract.get("status") != "READY":
-            raise RuntimeError(
-                "installed core manifest did not reach READY: "
-                + str(installed_contract.get("reason") or installed_contract.get("blockers"))
+            generation_dir.mkdir()
+            generation_dir = _assert_path_type(
+                generation_dir,
+                label="core-universe generation directory",
+                expected="directory",
             )
+        with _hold_directory_write_boundary(
+            generation_dir,
+            label="core-universe generation directory",
+        ):
+            # The generation is inactive until its pointer is swapped.  Both raw
+            # bytes and manifest are written under that generation, then the exact
+            # final paths are validated before activation.
+            _replace_bytes(final_artifact, payload)
+            _replace_bytes(final_spy_artifact, spy_payload)
+            spy_child = _spy_manifest(
+                artifact_path=final_spy_artifact,
+                payload=spy_payload,
+                observed_at=observed_at,
+                source_id=spy_source_id,
+                source_uri=spy_url,
+                parsed=(spy_symbols, spy_effective, spy_attestation),
+            )
+            ndx_child = _ndx_manifest(
+                artifact_path=final_artifact,
+                payload=payload,
+                observed_at=observed_at,
+                market_date=market_date,
+                parsed=(ndx_symbols, ndx_attestation),
+            )
+            candidate = {**wrapper, "manifests": [spy_child, ndx_child]}
+            candidate_bytes = (json.dumps(candidate, indent=2, sort_keys=True) + "\n").encode(
+                "utf-8"
+            )
+            _replace_bytes(candidate_path, candidate_bytes)
+            contract = build_core_universe_contract(
+                candidate_path,
+                observed_at=observed_at,
+                market_date=market_date,
+            )
+            if contract.get("status") != "READY":
+                raise RuntimeError(
+                    "candidate core manifest did not reach READY: "
+                    + str(contract.get("reason") or contract.get("blockers"))
+                )
+            pointer = {
+                "schema_version": ACTIVE_POINTER_SCHEMA_VERSION,
+                "generation_id": generation_id,
+                "generation_key": generation_key,
+                "market_date": market_date,
+                "ndx_canonical_content_digest_sha256": stable_workbook_digest,
+                "ndx_canonical_symbol_set_hash_sha256": ndx_attestation["symbol_set_hash_sha256"],
+                "proxy_manifest_sha256": proxy_manifest_hash,
+                "spy_canonical_content_digest_sha256": spy_attestation["content_digest_sha256"],
+                "spy_canonical_symbol_set_hash_sha256": spy_attestation["symbol_set_hash_sha256"],
+                "spy_effective_date": spy_effective,
+                "observed_at": observed_at,
+                "manifest_path": (
+                    Path(GENERATION_DIRECTORY) / generation_id / "luna_core_universe.json"
+                ).as_posix(),
+                "manifest_sha256": hashlib.sha256(candidate_bytes).hexdigest(),
+                "created_at": observed_at,
+            }
+            pointer_bytes = (json.dumps(pointer, indent=2, sort_keys=True) + "\n").encode("utf-8")
+            # This is the single active-pair swap.  The previous pointer/manifest
+            # is not touched until the complete generation is READY.
+            _replace_bytes(output_path, pointer_bytes)
+            pointer_swapped = True
+            _validated_active_pointer_target(
+                output_path,
+                pointer,
+                config_root=config_root,
+            )
+            installed_contract = build_core_universe_contract(
+                output_path,
+                observed_at=observed_at,
+                market_date=market_date,
+            )
+            if installed_contract.get("status") != "READY":
+                raise RuntimeError(
+                    "installed core manifest did not reach READY: "
+                    + str(installed_contract.get("reason") or installed_contract.get("blockers"))
+                )
     except Exception:
         if pointer_swapped and prior_output_bytes is not None:
             _replace_bytes(output_path, prior_output_bytes)
-        elif pointer_swapped and prior_output_bytes is None and output_path.exists():
+        elif pointer_swapped and prior_output_bytes is None and os.path.lexists(output_path):
+            _assert_path_type(
+                output_path,
+                label="core-universe failed active pointer",
+                expected="file",
+            )
             output_path.unlink()
-        if generation_created and not pointer_swapped:
-            shutil.rmtree(generation_dir, ignore_errors=True)
+        # Preserve an inactive partial generation.  A later retry validates
+        # and atomically archives it; recursive cleanup here would re-open a
+        # descendant-reparse race while handling an already-failed refresh.
         raise
     return {
         "status": "READY",
@@ -973,16 +1928,30 @@ def refresh(
     bootstrap_state_street_proxy: bool = False,
 ) -> dict[str, object]:
     market_date = _normalise_market_date(market_date)
-    state_root = state_root.resolve()
-    with _refresh_lock(state_root / "config"):
-        return _refresh_locked(
-            state_root=state_root,
-            proxy_manifest=proxy_manifest,
-            ndx_artifact=ndx_artifact,
-            spy_artifact=spy_artifact,
-            market_date=market_date,
-            bootstrap_state_street_proxy=bootstrap_state_street_proxy,
+    state_root = _assert_universe_state_layout(
+        _absolute_without_reparse_resolution(state_root),
+        require_config=False,
+    )
+    # Keep both ancestors open while the protected refresh runs.  On the
+    # production Windows host, GENERIC_READ without FILE_SHARE_DELETE closes
+    # the swap window between lexical admission and each elevated write.
+    with _hold_regular_directory(state_root, label="core-universe state root"):
+        config_root = _ensure_regular_directory(
+            state_root / "config",
+            label="core-universe config root",
         )
+        with _hold_directory_write_boundary(config_root, label="core-universe config root"):
+            _assert_universe_state_layout(state_root, require_config=True)
+            with _refresh_lock(config_root):
+                _assert_universe_state_layout(state_root, require_config=True)
+                return _refresh_locked(
+                    state_root=state_root,
+                    proxy_manifest=proxy_manifest,
+                    ndx_artifact=ndx_artifact,
+                    spy_artifact=spy_artifact,
+                    market_date=market_date,
+                    bootstrap_state_street_proxy=bootstrap_state_street_proxy,
+                )
 
 
 def main() -> int:

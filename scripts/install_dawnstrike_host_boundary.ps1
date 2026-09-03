@@ -4,7 +4,8 @@ param(
     [Parameter(Mandatory = $true)][string]$CandidateRoot,
     [string]$DependencySourcePython = 'C:\Users\MattFields\AppData\Local\Programs\Python\Python313\python.exe',
     [string]$InstallRoot = 'C:\Program Files\Dawnstrike',
-    [string]$ReceiptRoot = 'C:\ProgramData\Dawnstrike'
+    [string]$ReceiptRoot = 'C:\ProgramData\Dawnstrike',
+    [string]$StateRoot = 'C:\r\dawnstrike-state'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -15,8 +16,28 @@ $principal = [Security.Principal.WindowsPrincipal]::new($identity)
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'Dawnstrike host-boundary installation requires an elevated administrator process.'
 }
-if ($InstallRoot -cne 'C:\Program Files\Dawnstrike' -or $ReceiptRoot -cne 'C:\ProgramData\Dawnstrike') {
+if (
+    $InstallRoot -cne 'C:\Program Files\Dawnstrike' -or
+    $ReceiptRoot -cne 'C:\ProgramData\Dawnstrike' -or
+    $StateRoot -cne 'C:\r\dawnstrike-state'
+) {
     throw 'Dawnstrike host-boundary installation paths are fixed host trust anchors.'
+}
+
+$installMutex = [Threading.Mutex]::new($false, 'Global\Dawnstrike.HostBoundary.Install.v1')
+$installMutexAcquired = $false
+try {
+try {
+    $installMutexAcquired = $installMutex.WaitOne(0, $false)
+}
+catch [Threading.AbandonedMutexException] {
+    # The abandoned owner is gone and this thread now owns the mutex. The
+    # protected pending manifest below performs exact crash recovery before a
+    # new ACL mutation is admitted.
+    $installMutexAcquired = $true
+}
+if (-not $installMutexAcquired) {
+    throw 'Another Dawnstrike host-boundary installation is already active.'
 }
 
 $candidate = [IO.Path]::GetFullPath($CandidateRoot).TrimEnd('\')
@@ -30,6 +51,7 @@ $expectedPythonInstallerHash = 'c54d9b9bbb8a36e6489363ddd01139707fd781d72f1f9e90
 $expectedUvHash = '268cd62b99395eb53825795518e067e4b27ec4b445175df343824689f307c807' # pragma: allowlist secret
 $installerRelative = 'scripts/install_dawnstrike_host_boundary.ps1'
 $launcherRelative = 'scripts/dawnstrike_release_launcher.ps1'
+$stateBoundaryRelative = 'scripts/state_root_boundary.ps1'
 $installerDestination = 'C:\Program Files\Dawnstrike\bin\install_dawnstrike_host_boundary.ps1'
 if ([IO.Path]::GetFullPath($PSCommandPath) -cne $installerDestination) {
     throw 'Dawnstrike host-boundary installation must run from the protected installed bootstrap path.'
@@ -38,6 +60,8 @@ $pythonSource = [IO.Path]::GetFullPath($DependencySourcePython)
 $pythonSourceRoot = Split-Path -Parent $pythonSource
 $pythonDestination = Join-Path $InstallRoot 'Python313'
 $launcherDestination = Join-Path $InstallRoot 'bin\dawnstrike_release_launcher.ps1'
+$stateBoundaryDestination = Join-Path $InstallRoot 'bin\state_root_boundary.ps1'
+$candidateTree = ''
 
 function Get-DawnstrikeInstallSha256 {
     [CmdletBinding()]
@@ -83,9 +107,9 @@ function Copy-DawnstrikePinnedFile {
     finally { $sourceHandle.Dispose() }
 }
 
-function Set-DawnstrikeProtectedDirectoryAcl {
+function New-DawnstrikeProtectedDirectorySecurity {
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][string]$Path)
+    param()
 
     $administrators = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
     $system = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
@@ -98,6 +122,38 @@ function Set-DawnstrikeProtectedDirectoryAcl {
     $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($administrators, 'FullControl', $inheritance, $none, 'Allow'))
     $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($system, 'FullControl', $inheritance, $none, 'Allow'))
     $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($users, 'ReadAndExecute', $inheritance, $none, 'Allow'))
+    return $acl
+}
+
+function Set-DawnstrikeProtectedDirectoryAcl {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $acl = New-DawnstrikeProtectedDirectorySecurity
+    Set-Acl -LiteralPath $Path -AclObject $acl
+}
+
+function Set-DawnstrikeProtectedReadableFileAcl {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $administrators = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+    $system = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+    $users = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-545')
+    $none = [Security.AccessControl.InheritanceFlags]::None
+    $propagation = [Security.AccessControl.PropagationFlags]::None
+    $acl = [Security.AccessControl.FileSecurity]::new()
+    $acl.SetAccessRuleProtection($true, $false)
+    $acl.SetOwner($administrators)
+    $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+        $administrators, 'FullControl', $none, $propagation, 'Allow'
+    ))
+    $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+        $system, 'FullControl', $none, $propagation, 'Allow'
+    ))
+    $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+        $users, 'ReadAndExecute', $none, $propagation, 'Allow'
+    ))
     Set-Acl -LiteralPath $Path -AclObject $acl
 }
 
@@ -225,6 +281,10 @@ try {
     if ($LASTEXITCODE -ne 0 -or $head -cne $ExpectedSha) { throw 'Host-boundary installer candidate SHA is invalid.' }
     $remoteMain = (& $git @safeGit rev-parse refs/remotes/origin/main).Trim().ToLowerInvariant()
     if ($LASTEXITCODE -ne 0 -or $remoteMain -cne $ExpectedSha) { throw 'Host-boundary installer requires exact origin/main identity.' }
+    $candidateTree = (& $git @safeGit rev-parse ($ExpectedSha + '^{tree}')).Trim().ToLowerInvariant()
+    if ($LASTEXITCODE -ne 0 -or $candidateTree -notmatch '^[0-9a-f]{40}$') {
+        throw 'Host-boundary installer candidate tree is invalid.'
+    }
     $status = ((& $git @safeGit status --porcelain=v1 --untracked-files=all --ignore-submodules=none) -join "`n").Trim()
     if ($LASTEXITCODE -ne 0 -or $status) { throw 'Host-boundary installer requires a clean candidate checkout.' }
     $launcherBlob = (& $git @safeGit rev-parse ($ExpectedSha + ':' + $launcherRelative)).Trim().ToLowerInvariant()
@@ -416,11 +476,16 @@ if ($LASTEXITCODE -ne 0) { throw 'Protected Python ownership hardening failed.' 
 Copy-DawnstrikeExactGitFile -RelativePath $launcherRelative -Destination $launcherDestination
 & C:\Windows\System32\icacls.exe $launcherDestination /setowner '*S-1-5-32-544' /C /Q | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Trusted release launcher ownership hardening failed.' }
+Copy-DawnstrikeExactGitFile -RelativePath $stateBoundaryRelative -Destination $stateBoundaryDestination
+Set-DawnstrikeProtectedReadableFileAcl -Path $stateBoundaryDestination
+$stateBoundarySha256 = Get-DawnstrikeInstallSha256 $stateBoundaryDestination
+. $stateBoundaryDestination
 
 $criticalPaths = @(
     $InstallRoot,
     $binRoot,
     $launcherDestination,
+    $stateBoundaryDestination,
     $pythonDestination,
     (Join-Path $pythonDestination 'python.exe'),
     (Join-Path $pythonDestination 'python3.dll'),
@@ -471,33 +536,125 @@ finally {
     }
 }
 
-if (-not (Test-Path -LiteralPath $ReceiptRoot -PathType Container)) {
-    $null = New-Item -ItemType Directory -Path $ReceiptRoot
+$receiptParent = Split-Path -Parent $ReceiptRoot
+$null = Assert-DawnstrikeInstallNoReparse `
+    -Path $receiptParent -Label 'Protected host receipt parent'
+$receiptParentLease = Open-DawnstrikeStateBoundaryPath `
+    -Path $receiptParent -Label 'Protected host receipt parent'
+$receiptRootLease = $null
+try {
+    $receiptRootExisted = Test-Path -LiteralPath $ReceiptRoot
+    if ($receiptRootExisted) {
+        # This check deliberately precedes every ACL mutation.  Set-Acl must
+        # never follow an attacker-planted ProgramData junction.
+        $null = Assert-DawnstrikeInstallNoReparse `
+            -Path $ReceiptRoot -Label 'Preexisting protected host receipt root'
+        if (-not (Test-Path -LiteralPath $ReceiptRoot -PathType Container)) {
+            throw 'Protected host receipt root exists but is not a directory.'
+        }
+    }
+    else {
+        # Directory.CreateDirectory with a protected DirectorySecurity applies
+        # the DACL as part of first creation.  A competing precreation is still
+        # opened no-follow and identity-bound below before any Set-Acl/use.
+        $receiptRootCreateAcl = New-DawnstrikeProtectedDirectorySecurity
+        $null = [IO.Directory]::CreateDirectory($ReceiptRoot, $receiptRootCreateAcl)
+        $null = Assert-DawnstrikeInstallNoReparse `
+            -Path $ReceiptRoot -Label 'New protected host receipt root'
+    }
+    $receiptRootLease = Open-DawnstrikeStateBoundaryPath `
+        -Path $ReceiptRoot -Label 'Protected host receipt root before ACL migration'
+    try {
+        Set-DawnstrikeProtectedDirectoryAcl -Path $ReceiptRoot
+        $receiptRootAfter = Open-DawnstrikeStateBoundaryPath `
+            -Path $ReceiptRoot -Label 'Protected host receipt root after ACL migration'
+        try {
+            if ([string]$receiptRootAfter.identity -cne [string]$receiptRootLease.identity) {
+                throw 'Protected host receipt root identity changed during ACL migration.'
+            }
+        }
+        finally { $receiptRootAfter.handle.Dispose() }
+        Assert-DawnstrikeInstalledBoundaryAcl -Paths @($ReceiptRoot)
+        $receiptRootSddl = [string](Get-Acl -LiteralPath $ReceiptRoot -ErrorAction Stop).Sddl
+        $receiptRootSddlSha256 = Get-DawnstrikeStateBoundarySha256Text $receiptRootSddl
+
+        $receiptPath = Join-Path $ReceiptRoot ('host-boundary-' + $ExpectedSha + '.json')
+        if (Test-Path -LiteralPath $receiptPath) {
+            $existingHostReceipt = Open-DawnstrikeStateBoundaryPath `
+                -Path $receiptPath -Label 'Preexisting protected host receipt'
+            try {
+                if ($existingHostReceipt.is_directory) {
+                    throw 'Preexisting protected host receipt is not a regular file.'
+                }
+                Assert-DawnstrikeStateBoundaryEvidenceAcl -Path $receiptPath
+            }
+            finally { $existingHostReceipt.handle.Dispose() }
+            throw 'A protected host receipt already exists; exact operator validation is required before reinstall.'
+        }
+
+        $stateBoundary = Install-DawnstrikeStateRootBoundary `
+            -StateRoot $StateRoot `
+            -EvidenceRoot $ReceiptRoot `
+            -CandidateSha $ExpectedSha `
+            -CandidateTree $candidateTree `
+            -InstalledHelperPath $stateBoundaryDestination `
+            -InstalledHelperSha256 $stateBoundarySha256
+        $receipt = [ordered]@{
+        schema_version = 'dawnstrike.host_boundary_installation.v2'
+        candidate_sha = $ExpectedSha
+        candidate_tree = $candidateTree
+        installed_at_utc = [DateTime]::UtcNow.ToString('o')
+        installer_principal = [string]$identity.Name
+        install_root = $InstallRoot
+        installer_path = $installerDestination
+        installer_sha256 = Get-DawnstrikeInstallSha256 $installerDestination
+        python_path = (Join-Path $pythonDestination 'python.exe')
+        python_sha256 = $expectedPythonHash
+        python_installer_uri = $pythonInstallerUri
+        python_installer_sha256 = $expectedPythonInstallerHash
+        uv_sha256 = $expectedUvHash
+        launcher_path = $launcherDestination
+        launcher_sha256 = Get-DawnstrikeInstallSha256 $launcherDestination
+        state_boundary_helper_path = $stateBoundaryDestination
+        state_boundary_helper_sha256 = $stateBoundarySha256
+        receipt_root = $ReceiptRoot
+        receipt_root_preexisted = [bool]$receiptRootExisted
+        receipt_root_identity = [string]$receiptRootLease.identity
+        receipt_root_sddl = $receiptRootSddl
+        receipt_root_sddl_sha256 = $receiptRootSddlSha256
+        state_root = $StateRoot
+        state_boundary_receipt_path = [string]$stateBoundary.receipt_path
+        state_boundary_receipt_sha256 = [string]$stateBoundary.receipt_sha256
+        state_boundary_rollback_manifest_path = [string]$stateBoundary.rollback_manifest_path
+        state_boundary_rollback_manifest_sha256 = [string]$stateBoundary.rollback_manifest_sha256
+        state_boundary = $stateBoundary.receipt
+        canonical_task_disposition = 'DISABLED_PENDING_GOVERNED_ACTIVATE_RESEAL'
+        auxiliary_capture_disposition = 'DISABLED_PENDING_GOVERNED_HARDEN_CAPTURE_REBIND'
+        dependency_verification = 'PASS'
+        research_only = $true
+        broker_execution_enabled = $false
+        }
+        $hostReceiptWrite = Write-DawnstrikeStateBoundaryProtectedJson `
+            -Payload $receipt -Path $receiptPath -NoReplace
+        if ((Get-DawnstrikeInstallSha256 $receiptPath) -cne [string]$hostReceiptWrite.sha256) {
+            throw 'Protected host-boundary receipt atomic replacement did not read back exactly.'
+        }
+        Assert-DawnstrikeInstalledBoundaryAcl -Paths @($receiptPath)
+        [pscustomobject][ordered]@{
+            receipt = $receipt
+            receipt_path = $receiptPath
+            receipt_sha256 = [string]$hostReceiptWrite.sha256
+        } | ConvertTo-Json -Depth 6
+    }
+    finally {
+        if ($null -ne $receiptRootLease) { $receiptRootLease.handle.Dispose() }
+    }
 }
-Set-DawnstrikeProtectedDirectoryAcl -Path $ReceiptRoot
-$receiptPath = Join-Path $ReceiptRoot ('host-boundary-' + $ExpectedSha + '.json')
-$receipt = [ordered]@{
-    schema_version = 'dawnstrike.host_boundary_installation.v1'
-    candidate_sha = $ExpectedSha
-    installed_at_utc = [DateTime]::UtcNow.ToString('o')
-    installer_principal = [string]$identity.Name
-    install_root = $InstallRoot
-    installer_path = $installerDestination
-    installer_sha256 = Get-DawnstrikeInstallSha256 $installerDestination
-    python_path = (Join-Path $pythonDestination 'python.exe')
-    python_sha256 = $expectedPythonHash
-    python_installer_uri = $pythonInstallerUri
-    python_installer_sha256 = $expectedPythonInstallerHash
-    uv_sha256 = $expectedUvHash
-    launcher_path = $launcherDestination
-    launcher_sha256 = Get-DawnstrikeInstallSha256 $launcherDestination
-    dependency_verification = 'PASS'
-    research_only = $true
-    broker_execution_enabled = $false
+finally {
+    $receiptParentLease.handle.Dispose()
 }
-$json = $receipt | ConvertTo-Json -Depth 4
-[IO.File]::WriteAllText($receiptPath, $json + "`r`n", [Text.UTF8Encoding]::new($false))
-& C:\Windows\System32\icacls.exe $receiptPath /setowner '*S-1-5-32-544' /C /Q | Out-Null
-if ($LASTEXITCODE -ne 0) { throw 'Host-boundary receipt ownership hardening failed.' }
-Assert-DawnstrikeInstalledBoundaryAcl -Paths @($receiptPath)
-$receipt | ConvertTo-Json -Depth 4
+}
+finally {
+    if ($installMutexAcquired) { $installMutex.ReleaseMutex() }
+    $installMutex.Dispose()
+}

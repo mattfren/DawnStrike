@@ -117,7 +117,7 @@ jobs:
   windows-operations:
     name: Windows schedule and secret verification
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -142,11 +142,14 @@ jobs:
             tests/test_capture_task_safety.py `
             tests/test_scheduler_doctor.py `
             tests/test_scheduled_entry_identity.py `
+            tests/test_state_root_boundary.py `
             tests/test_protected_operation_contract.py
           python -m pytest -p no:cacheprovider -q `
             tests/test_runtime_activation_contract.py
           python -m pytest -p no:cacheprovider -q `
             tests/test_vercel_publication_journal.py
+          python -m pytest -p no:cacheprovider -q `
+            tests/test_luna_core_currentness.py
       - name: Parse every scheduled PowerShell entry point
         shell: powershell
         run: |

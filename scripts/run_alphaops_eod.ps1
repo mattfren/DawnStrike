@@ -38,7 +38,8 @@ function Set-OverallFailure {
         $script:overallExit = $ExitCode
     }
 }
-$dailyLock = Enter-DawnstrikeDailyRunLock -StateRoot $state -MarketDate $MarketDate -Owner "alphaops_eod"
+$dailyLock = Enter-DawnstrikeDailyRunLock `
+    -StateRoot $state -MarketDate $MarketDate -Owner "alphaops_eod" -RetainHandle
 if (-not $dailyLock.acquired) {
     $receiptWritten = Write-DawnstrikeLockDenialReceipt -StateRoot $state -MarketDate $MarketDate -Owner "alphaops_eod" -Lock $dailyLock
     [Console]::Error.WriteLine(

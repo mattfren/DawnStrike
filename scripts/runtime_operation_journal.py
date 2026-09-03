@@ -437,13 +437,14 @@ def transition(source: Path, target: Path, previous: Path | None) -> dict[str, A
     return seal(source, target)
 
 
-COMPENSATION_KEYS = {
+COMPENSATION_KEYS_V1 = {
     "schema_version", "status", "operation", "candidate_sha", "candidate_tree",
     "prior_journal_file_sha256", "task_contract_sha256", "task_state",
     "task_xml_sha256", "task_action_contract_sha256", "task_definition_contract_sha256",
     "prior_receipt_relative_path", "prior_receipt_sha256", "failure_type",
     "research_only", "broker_execution_enabled", "receipt_self_sha256",
 }
+COMPENSATION_KEYS_V2 = COMPENSATION_KEYS_V1 | {"prior_receipt_archive_relative_path"}
 
 
 def _validate_compensation(raw: bytes) -> dict[str, Any]:
@@ -451,9 +452,23 @@ def _validate_compensation(raw: bytes) -> dict[str, Any]:
         value = json.loads(raw.decode(), object_pairs_hook=_pairs)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise ValueError(f"invalid strict compensation JSON: {exc}") from exc
-    if not isinstance(value, dict) or set(value) != COMPENSATION_KEYS:
+    value_keys = frozenset(value) if isinstance(value, dict) else frozenset()
+    if not isinstance(value, dict) or value_keys not in {
+        frozenset(COMPENSATION_KEYS_V1),
+        frozenset(COMPENSATION_KEYS_V2),
+    }:
         raise ValueError("compensation receipt keys are not exact")
-    if value["schema_version"] != "dawnstrike.runtime_compensation_receipt.v1":
+    version = value["schema_version"]
+    if (
+        version == "dawnstrike.runtime_compensation_receipt.v1"
+        and value_keys != frozenset(COMPENSATION_KEYS_V1)
+    ) or (
+        version == "dawnstrike.runtime_compensation_receipt.v2"
+        and value_keys != frozenset(COMPENSATION_KEYS_V2)
+    ) or version not in {
+        "dawnstrike.runtime_compensation_receipt.v1",
+        "dawnstrike.runtime_compensation_receipt.v2",
+    }:
         raise ValueError("compensation receipt schema is invalid")
     if value["status"] != "COMPENSATED" or value["operation"] not in {
         "capture_task_rebind", "capture_task_hardening",
@@ -470,6 +485,13 @@ def _validate_compensation(raw: bytes) -> dict[str, Any]:
             raise ValueError(f"compensation {key} is invalid")
     if value["prior_receipt_relative_path"] != "NONE":
         _safe_relative(value["prior_receipt_relative_path"])
+    if version == "dawnstrike.runtime_compensation_receipt.v2":
+        if value["prior_receipt_archive_relative_path"] != "NONE":
+            _safe_relative(value["prior_receipt_archive_relative_path"])
+        if (value["prior_receipt_relative_path"] == "NONE") != (
+            value["prior_receipt_archive_relative_path"] == "NONE"
+        ):
+            raise ValueError("compensation prior receipt archive sentinel is inconsistent")
     if (value["prior_receipt_relative_path"] == "NONE") != (
         value["prior_receipt_sha256"] == hashlib.sha256(b"").hexdigest()
     ):
@@ -494,13 +516,40 @@ def _validate_compensation(raw: bytes) -> dict[str, Any]:
     return value
 
 
-def _validate_compensation_reference(value: dict[str, Any], state_root: Path) -> None:
+def _validate_compensation_reference(
+    value: dict[str, Any],
+    state_root: Path,
+    *,
+    prior_receipt_fallback: Path | None = None,
+) -> None:
     if value["prior_receipt_relative_path"] == "NONE":
+        if prior_receipt_fallback is not None:
+            raise ValueError("compensation prior receipt fallback is inconsistent")
         return
     prior = state_root / value["prior_receipt_relative_path"].replace("/", os.sep)
     _contained(prior, state_root)
+    candidates = [prior]
+    archive_relative = value.get("prior_receipt_archive_relative_path", "NONE")
+    if archive_relative != "NONE":
+        archive = state_root / archive_relative.replace("/", os.sep)
+        _contained(archive, state_root)
+        candidates.append(archive)
+    if prior_receipt_fallback is not None:
+        _contained(prior_receipt_fallback, state_root)
+        candidates.append(prior_receipt_fallback)
+    existing: list[Path] = []
+    for candidate in candidates:
+        try:
+            if candidate.exists():
+                existing.append(candidate)
+        except OSError as exc:
+            raise ValueError("compensation prior receipt changed or is missing") from exc
+    if not existing:
+        raise ValueError("compensation prior receipt changed or is missing")
+    if len(existing) != 1:
+        raise ValueError("compensation prior receipt source/archive state is not exact")
     try:
-        raw = _read_regular(prior)
+        raw = _read_regular(existing[0])
     except (FileNotFoundError, OSError) as exc:
         raise ValueError("compensation prior receipt changed or is missing") from exc
     if hashlib.sha256(raw).hexdigest() != value["prior_receipt_sha256"]:
@@ -515,7 +564,11 @@ def seal_compensation(
     reuse_existing: bool = False,
 ) -> dict[str, Any]:
     value = json.loads(_read_regular(source).decode("utf-8"), object_pairs_hook=_pairs)
-    if set(value) != COMPENSATION_KEYS - {"receipt_self_sha256"}:
+    input_keys = frozenset(value)
+    if input_keys not in {
+        frozenset(COMPENSATION_KEYS_V1 - {"receipt_self_sha256"}),
+        frozenset(COMPENSATION_KEYS_V2 - {"receipt_self_sha256"}),
+    }:
         raise ValueError("compensation input keys are not exact")
     value["receipt_self_sha256"] = hashlib.sha256(_canonical(value)).hexdigest()
     raw = _canonical(value)
@@ -598,6 +651,7 @@ def main() -> int:
     verify_compensation = sub.add_parser("verify-compensation")
     verify_compensation.add_argument("--receipt", required=True, type=Path)
     verify_compensation.add_argument("--state-root", required=True, type=Path)
+    verify_compensation.add_argument("--prior-receipt-fallback", type=Path)
     args = parser.parse_args()
     if args.command == "verify":
         _contained(args.path, args.state_root)
@@ -607,7 +661,11 @@ def main() -> int:
         _contained(args.receipt, args.state_root)
         raw = _read_regular(args.receipt)
         payload = _validate_compensation(raw)
-        _validate_compensation_reference(payload, args.state_root)
+        _validate_compensation_reference(
+            payload,
+            args.state_root,
+            prior_receipt_fallback=args.prior_receipt_fallback,
+        )
         result = {"payload": payload, "raw_file_sha256": hashlib.sha256(raw).hexdigest()}
     elif args.command == "seal-compensation":
         _contained(args.input, args.state_root)

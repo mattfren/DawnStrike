@@ -92,8 +92,10 @@ def test_daily_session_receipt_is_write_once(tmp_path: Path) -> None:
     module = _module()
     path = tmp_path / "session.json"
     payload = module.build_expected_session(date(2026, 8, 31))
-    module._write_once_json(path, payload)
-    module._write_once_json(path, payload)
+    expected = (json.dumps(payload, sort_keys=True, indent=2) + "\n").encode("utf-8")
+    digest = module._write_once_json(path, payload)
+    assert digest == hashlib.sha256(expected).hexdigest()
+    assert module._write_once_json(path, payload) == digest
     assert json.loads(path.read_text(encoding="utf-8"))["market_date"] == "2026-08-31"
 
     with pytest.raises(RuntimeError, match="identity conflicts"):
@@ -110,18 +112,44 @@ def test_runner_child_uses_isolated_exact_interpreter(tmp_path: Path, monkeypatc
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(module, "_approved_child_python", lambda: Path(sys.executable))
     argv = [
-        "run_daily_intraday_capture.py", "--candidate-sha", "a" * 40,
-        "--repo-root", str(tmp_path), "--db-path", str(tmp_path / "capture.sqlite"),
-        "--evidence-root", str(tmp_path / "evidence"), "--run-root", str(tmp_path / "runs"),
-        "--output-root", str(tmp_path / "output"), "--session-root", str(tmp_path / "sessions"),
-        "--symbols-manifest", str(tmp_path / "symbols.json"),
-        "--symbols-manifest-sha256", "b" * 64,
-        "--entitlement-receipt", str(tmp_path / "entitlement.json"),
-        "--entitlement-receipt-sha256", "c" * 64,
-        "--source-config", str(tmp_path / "sources.yaml"),
-        "--source-config-sha256", "d" * 64, "--env-file", str(tmp_path / "runtime.env"),
-        "--market-date", "2026-08-31", "--max-pages", "100", "--retries", "3", "--execute",
+        "run_daily_intraday_capture.py",
+        "--candidate-sha",
+        "a" * 40,
+        "--repo-root",
+        str(tmp_path),
+        "--db-path",
+        str(tmp_path / "capture.sqlite"),
+        "--evidence-root",
+        str(tmp_path / "evidence"),
+        "--run-root",
+        str(tmp_path / "runs"),
+        "--output-root",
+        str(tmp_path / "output"),
+        "--session-root",
+        str(tmp_path / "sessions"),
+        "--symbols-manifest",
+        str(tmp_path / "symbols.json"),
+        "--symbols-manifest-sha256",
+        "b" * 64,
+        "--entitlement-receipt",
+        str(tmp_path / "entitlement.json"),
+        "--entitlement-receipt-sha256",
+        "c" * 64,
+        "--source-config",
+        str(tmp_path / "sources.yaml"),
+        "--source-config-sha256",
+        "d" * 64,
+        "--env-file",
+        str(tmp_path / "runtime.env"),
+        "--market-date",
+        "2026-08-31",
+        "--max-pages",
+        "100",
+        "--retries",
+        "3",
+        "--execute",
     ]
     monkeypatch.setattr(sys, "argv", argv)
 
@@ -147,4 +175,10 @@ def test_runner_child_uses_isolated_exact_interpreter(tmp_path: Path, monkeypatc
     ]
     assert Path(command[14]).resolve() == Path("scripts/capture_intraday_operations.py").resolve()
     assert command[15] == "--"
+    session_index = command.index("--expected-session")
+    assert command[session_index + 2] == "--expected-session-sha256"
+    assert (
+        command[session_index + 3]
+        == hashlib.sha256(Path(command[session_index + 1]).read_bytes()).hexdigest()
+    )
     assert captured["kwargs"]["cwd"] == tmp_path

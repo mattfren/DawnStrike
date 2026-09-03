@@ -7,7 +7,9 @@ endpoint, broker client, or mutation surface.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import re
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,8 +30,11 @@ from intraday_scanner.services.intraday_evidence_capture_service import (
 def main() -> int:
     parser = _parser()
     args = parser.parse_args()
-    symbols = _read_symbols(args.symbols_file)
-    metadata = _read_metadata(args.operator_entitlement_metadata)
+    symbols = _read_symbols(args.symbols_file, args.symbols_file_sha256)
+    metadata = _read_metadata(
+        args.operator_entitlement_metadata,
+        args.operator_entitlement_metadata_sha256,
+    )
     request_start = _utc_datetime(args.utc_start)
     request_end = _utc_datetime(args.utc_end)
     config_overrides = {
@@ -90,6 +95,7 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
     )
     parser.add_argument("--symbols-file", type=Path, required=True)
+    parser.add_argument("--symbols-file-sha256", required=True)
     parser.add_argument("--market-date", required=True)
     parser.add_argument("--exchange-session-id", required=True)
     parser.add_argument(
@@ -104,6 +110,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--code-sha", required=True)
     parser.add_argument("--source-config-hash", required=True)
     parser.add_argument("--operator-entitlement-metadata", type=Path, required=True)
+    parser.add_argument("--operator-entitlement-metadata-sha256", required=True)
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
     parser.add_argument("--include-trades", action="store_true")
     parser.add_argument("--include-quotes", action="store_true")
@@ -117,11 +124,19 @@ def _provider(name: str, config: ScannerConfig) -> HistoricalIntradayProvider:
     return MassiveMarketDataProvider(config)  # type: ignore[arg-type]
 
 
-def _read_symbols(path: Path) -> list[str]:
-    if path.is_symlink() or not path.is_file():
-        raise SystemExit(f"symbols file is not a regular file: {path}")
+def _read_symbols(path: Path, expected_sha256: str) -> list[str]:
+    raw = _read_authenticated_bytes(
+        path,
+        expected_sha256,
+        label="symbols file",
+        max_bytes=4 * 1024 * 1024,
+    )
+    try:
+        text = raw.decode("utf-8", "strict")
+    except UnicodeDecodeError as exc:
+        raise SystemExit(f"symbols file is not UTF-8: {path}") from exc
     symbols: list[str] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         symbol = line.strip().upper()
         if symbol and not symbol.startswith("#") and symbol not in symbols:
             symbols.append(symbol)
@@ -130,16 +145,42 @@ def _read_symbols(path: Path) -> list[str]:
     return symbols
 
 
-def _read_metadata(path: Path) -> dict[str, Any]:
-    if path.is_symlink() or not path.is_file():
-        raise SystemExit(f"operator entitlement metadata is not a regular file: {path}")
+def _read_metadata(path: Path, expected_sha256: str) -> dict[str, Any]:
+    raw = _read_authenticated_bytes(
+        path,
+        expected_sha256,
+        label="operator entitlement metadata",
+        max_bytes=1024 * 1024,
+    )
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
+        value = json.loads(raw.decode("utf-8", "strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise SystemExit(f"operator entitlement metadata is invalid JSON: {exc}") from exc
     if not isinstance(value, dict):
         raise SystemExit("operator entitlement metadata must be a JSON object")
     return value
+
+
+def _read_authenticated_bytes(
+    path: Path,
+    expected_sha256: str,
+    *,
+    label: str,
+    max_bytes: int,
+) -> bytes:
+    if re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None:
+        raise SystemExit(f"{label} expected SHA-256 is invalid")
+    if path.is_symlink() or not path.is_file():
+        raise SystemExit(f"{label} is not a regular file: {path}")
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise SystemExit(f"{label} is unreadable: {path}") from exc
+    if len(raw) > max_bytes:
+        raise SystemExit(f"{label} exceeds its byte ceiling")
+    if hashlib.sha256(raw).hexdigest() != expected_sha256:
+        raise SystemExit(f"{label} hash mismatch")
+    return raw
 
 
 def _utc_datetime(value: str) -> datetime:

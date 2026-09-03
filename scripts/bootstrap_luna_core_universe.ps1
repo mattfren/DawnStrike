@@ -48,8 +48,11 @@ $null = Assert-DawnstrikeProcessSourceBoundToHead `
             'scripts/invoke_dawnstrike_stage.ps1',
             'scripts/protected_operation_contract.ps1'
         ) + @(Get-DawnstrikeLunaCoreSourceFiles -ExpectedSha $ExpectedSha))
-Assert-DawnstrikeSharedLockNoReparse $state 'Core-universe bootstrap state root'
-$logRoot = Join-Path $state 'logs'
+$state = Assert-DawnstrikeUniverseStateBoundary -StateRoot $state
+$logBoundary = Open-DawnstrikeUniverseBootstrapLogBoundary `
+    -StateRoot $state -MarketDate $MarketDate
+$logRoot = [string]$logBoundary.path
+try {
 $releaseSha = Resolve-DawnstrikeReleaseSha `
     -RuntimeRoot $runtime -LogRoot $logRoot -ExpectedSha $ExpectedSha
 if ($releaseSha -cne $ExpectedSha) {
@@ -99,12 +102,15 @@ function Assert-DawnstrikeUniverseBootstrapBoundary {
 
 Assert-DawnstrikeUniverseBootstrapBoundary -RequestedMarketDate $MarketDate
 $dailyLock = Enter-DawnstrikeDailyRunLock `
-    -StateRoot $state -MarketDate $MarketDate -Owner 'luna_core_universe_bootstrap'
+    -StateRoot $state -MarketDate $MarketDate `
+    -Owner 'luna_core_universe_bootstrap' -RetainHandle
 if (-not $dailyLock.acquired) {
     throw "Core-universe bootstrap could not acquire the daily lock: $($dailyLock.reason)"
 }
+$null = Confirm-DawnstrikeRetainedDailyRunLock -Lock $dailyLock
 try {
     Assert-DawnstrikeUniverseBootstrapBoundary -RequestedMarketDate $MarketDate
+    $state = Assert-DawnstrikeUniverseStateBoundary -StateRoot $state
     Push-Location $runtime
     try {
         $refresh = Invoke-DawnstrikeNativeProcess `
@@ -151,8 +157,13 @@ try {
     )) {
         throw 'Core-universe bootstrap receipt points outside the exact durable state path.'
     }
+    $null = Confirm-DawnstrikeRetainedDailyRunLock -Lock $dailyLock
     $result | ConvertTo-Json -Depth 8 -Compress
 }
 finally {
     Exit-DawnstrikeDailyRunLock -Lock $dailyLock
+}
+}
+finally {
+    Close-DawnstrikeUniverseBootstrapLogBoundary -Boundary $logBoundary
 }

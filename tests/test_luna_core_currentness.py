@@ -3,8 +3,13 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
+import shutil
+import struct
+import subprocess
 import threading
 import zipfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,6 +17,44 @@ import pytest
 
 from intraday_scanner.services import luna_core_universe_service as core
 from scripts import refresh_luna_core_universe as refresh_script
+
+
+def _make_directory_reparse(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=True)
+        return
+    except (OSError, NotImplementedError):
+        powershell = shutil.which("powershell.exe")
+        if powershell is None:
+            pytest.skip("directory reparse creation is unavailable on this host")
+        result = subprocess.run(
+            [
+                powershell,
+                "-NoProfile",
+                "-Command",
+                (
+                    "& { param($linkPath, $targetPath) "
+                    "New-Item -ItemType Junction -Path $linkPath "
+                    "-Target $targetPath -ErrorAction Stop | Out-Null }"
+                ),
+                str(link),
+                str(target),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            pytest.skip("directory reparse creation is unavailable on this host")
+
+
+def _remove_directory_reparse(path: Path) -> None:
+    if not os.path.lexists(path):
+        return
+    try:
+        path.unlink()
+    except OSError:
+        path.rmdir()
 
 
 def _ndx_xlsx(symbols: list[str], *, company_prefix: str = "Company") -> bytes:
@@ -338,6 +381,308 @@ def _refresh_fixture(
     ndx_path = tmp_path / "ndx.xlsx"
     ndx_path.write_bytes(ndx_payload)
     return output, ndx_path.read_bytes(), spy_payload
+
+
+@pytest.mark.parametrize(
+    "relative_link",
+    [
+        Path("config"),
+        Path("config") / refresh_script.GENERATION_DIRECTORY,
+    ],
+)
+def test_refresh_rejects_preexisting_state_descendant_reparse_without_external_writes(
+    tmp_path: Path,
+    relative_link: Path,
+) -> None:
+    state = tmp_path / "state"
+    outside = tmp_path / "outside"
+    state.mkdir()
+    outside.mkdir()
+    link = state / relative_link
+    link.parent.mkdir(parents=True, exist_ok=True)
+    _make_directory_reparse(link, outside)
+
+    try:
+        with pytest.raises(RuntimeError, match="symlink|junction|reparse point"):
+            refresh_script.refresh(
+                state_root=state,
+                proxy_manifest=None,
+                ndx_artifact=None,
+                market_date="2026-08-27",
+                bootstrap_state_street_proxy=True,
+            )
+        assert list(outside.iterdir()) == []
+    finally:
+        _remove_directory_reparse(link)
+
+
+def test_refresh_rejects_reparse_active_pointer_without_touching_target(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "state"
+    config = state / "config"
+    config.mkdir(parents=True)
+    outside = tmp_path / "outside-pointer.json"
+    sentinel = b"outside pointer must remain byte-identical"
+    outside.write_bytes(sentinel)
+    pointer = config / "luna_core_universe.json"
+    try:
+        pointer.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("file reparse creation is unavailable on this host")
+
+    try:
+        with pytest.raises(RuntimeError, match="symlink|junction|reparse point"):
+            refresh_script.refresh(
+                state_root=state,
+                proxy_manifest=None,
+                ndx_artifact=None,
+                market_date="2026-08-27",
+                bootstrap_state_street_proxy=True,
+            )
+        assert outside.read_bytes() == sentinel
+    finally:
+        pointer.unlink()
+
+
+def test_refresh_safely_creates_an_absent_regular_config_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+
+    def observe_boundary(**kwargs: object) -> dict[str, object]:
+        config = Path(str(kwargs["state_root"])) / "config"
+        assert config.is_dir()
+        assert not config.is_symlink()
+        refresh_script._assert_universe_state_layout(
+            Path(str(kwargs["state_root"])),
+            require_config=True,
+        )
+        return {"status": "READY"}
+
+    monkeypatch.setattr(refresh_script, "_refresh_locked", observe_boundary)
+    result = refresh_script.refresh(
+        state_root=state,
+        proxy_manifest=None,
+        ndx_artifact=None,
+        market_date="2026-08-27",
+    )
+
+    assert result == {"status": "READY"}
+    assert (state / "config").is_dir()
+    assert not (state / "config" / refresh_script.REFRESH_LOCK_NAME).exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows sharing semantics only")
+def test_windows_write_boundary_keeps_marker_immutable_and_atomic_replace_operational(
+    tmp_path: Path,
+) -> None:
+    guarded = tmp_path / "guarded"
+    moved = tmp_path / "guarded.moved"
+    guarded.mkdir()
+    target = guarded / "active.json"
+    target.write_bytes(b"old")
+    temporary = guarded / "active.tmp"
+    temporary.write_bytes(b"new")
+
+    with refresh_script._hold_directory_write_boundary(
+        guarded,
+        label="test guarded output",
+    ):
+        marker = guarded / refresh_script.DIRECTORY_BOUNDARY_MARKER_NAME
+        assert marker.read_bytes() == refresh_script.DIRECTORY_BOUNDARY_MARKER_BYTES
+        assert not marker.is_symlink()
+        with pytest.raises(OSError):
+            marker.write_bytes(b"hostile")
+        with pytest.raises(OSError):
+            marker.unlink()
+        with pytest.raises(OSError):
+            guarded.rename(moved)
+        os.replace(temporary, target)
+        assert target.read_bytes() == b"new"
+
+    assert guarded.is_dir()
+    assert not moved.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows reparse control only")
+def test_windows_write_boundary_denies_in_place_mount_point_conversion(
+    tmp_path: Path,
+) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    guarded = tmp_path / "guarded"
+    outside = tmp_path / "outside"
+    guarded.mkdir()
+    outside.mkdir()
+    sentinel = outside / "sentinel.txt"
+    sentinel.write_bytes(b"outside bytes must remain unchanged")
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    create_file.restype = wintypes.HANDLE
+    device_io = kernel32.DeviceIoControl
+    device_io.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        wintypes.LPVOID,
+    ]
+    device_io.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+
+    with refresh_script._hold_directory_write_boundary(
+        guarded,
+        label="test guarded output",
+    ):
+        handle = create_file(
+            str(guarded),
+            0x40000000,
+            0x1 | 0x2 | 0x4,
+            None,
+            3,
+            0x02000000 | 0x00200000,
+            None,
+        )
+        assert handle != ctypes.c_void_p(-1).value
+        try:
+            substitute = ("\\??\\" + str(outside)).encode("utf-16-le")
+            display = str(outside).encode("utf-16-le")
+            path_buffer = substitute + b"\x00\x00" + display + b"\x00\x00"
+            reparse_data = (
+                struct.pack(
+                    "<IHHHHHH",
+                    0xA0000003,
+                    8 + len(path_buffer),
+                    0,
+                    0,
+                    len(substitute),
+                    len(substitute) + 2,
+                    len(display),
+                )
+                + path_buffer
+            )
+            buffer = ctypes.create_string_buffer(reparse_data)
+            returned = wintypes.DWORD()
+            converted = bool(
+                device_io(
+                    handle,
+                    0x000900A4,
+                    buffer,
+                    len(reparse_data),
+                    None,
+                    0,
+                    ctypes.byref(returned),
+                    None,
+                )
+            )
+            error = 0 if converted else ctypes.get_last_error()
+            if converted:  # pragma: no cover - cleanup before surfacing a failed invariant
+                delete_data = struct.pack("<IHH", 0xA0000003, 0, 0)
+                delete_buffer = ctypes.create_string_buffer(delete_data)
+                assert device_io(
+                    handle,
+                    0x000900AC,
+                    delete_buffer,
+                    len(delete_data),
+                    None,
+                    0,
+                    ctypes.byref(returned),
+                    None,
+                )
+            assert converted is False
+            assert error == 145  # ERROR_DIR_NOT_EMPTY: the held marker is effective.
+        finally:
+            close_handle(handle)
+
+    assert sentinel.read_bytes() == b"outside bytes must remain unchanged"
+    assert not guarded.is_symlink()
+
+
+def test_write_boundary_rejects_a_tampered_marker_before_output(
+    tmp_path: Path,
+) -> None:
+    guarded = tmp_path / "guarded"
+    guarded.mkdir()
+    marker = guarded / refresh_script.DIRECTORY_BOUNDARY_MARKER_NAME
+    marker.write_bytes(b"attacker-controlled")
+
+    with pytest.raises(RuntimeError, match="boundary marker has unexpected bytes"):
+        with refresh_script._hold_directory_write_boundary(
+            guarded,
+            label="test guarded output",
+        ):
+            pytest.fail("tampered marker was admitted")
+
+
+def test_refresh_blocks_config_swap_after_admission_without_external_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "state"
+    config = state / "config"
+    outside = tmp_path / "outside"
+    saved = state / "config.saved"
+    config.mkdir(parents=True)
+    outside.mkdir()
+    swapped = False
+
+    def attempt_swap(**_kwargs: object) -> dict[str, object]:
+        nonlocal swapped
+        try:
+            config.rename(saved)
+            _make_directory_reparse(config, outside)
+            swapped = True
+        except OSError:
+            # Windows must deny the rename while the no-delete directory
+            # handle is held.  POSIX permits it and the post-hold identity
+            # check below must still reject the operation.
+            pass
+        return {"status": "READY"}
+
+    monkeypatch.setattr(refresh_script, "_refresh_locked", attempt_swap)
+    try:
+        if os.name == "nt":
+            result = refresh_script.refresh(
+                state_root=state,
+                proxy_manifest=None,
+                ndx_artifact=None,
+                market_date="2026-08-27",
+            )
+            assert result == {"status": "READY"}
+            assert swapped is False
+        else:
+            with pytest.raises(RuntimeError, match="config root.*changed"):
+                refresh_script.refresh(
+                    state_root=state,
+                    proxy_manifest=None,
+                    ndx_artifact=None,
+                    market_date="2026-08-27",
+                )
+            assert swapped is True
+        assert list(outside.iterdir()) == []
+    finally:
+        if swapped:
+            _remove_directory_reparse(config)
+            saved.rename(config)
 
 
 def test_sod_export_parser_accepts_exact_102_row_schema(ndx_symbols: list[str]) -> None:
@@ -714,7 +1059,7 @@ def test_state_street_bootstrap_rejects_non_file_and_dangling_output_entries(
     config.mkdir()
     output = config / "luna_core_universe.json"
     output.mkdir()
-    with pytest.raises(RuntimeError, match="requires a completely absent active pointer"):
+    with pytest.raises(RuntimeError, match="active pointer is not a regular file"):
         refresh_script.refresh(
             state_root=tmp_path,
             proxy_manifest=None,
@@ -1006,6 +1351,18 @@ def test_provably_dead_refresh_owner_is_archived_and_recovered(
     )
     monkeypatch.setattr(refresh_script, "_process_is_live", lambda _pid: False)
 
+    if os.name != "nt":
+        with pytest.raises(RuntimeError, match="refresh already in progress"):
+            refresh_script.refresh(
+                state_root=tmp_path,
+                proxy_manifest=None,
+                ndx_artifact=tmp_path / "ndx.xlsx",
+                spy_artifact=tmp_path / "spy.xlsx",
+            )
+        assert json.loads(lock_path.read_text(encoding="utf-8"))["owner_token"] == "dead-owner"
+        assert not list(output.parent.glob(f"{refresh_script.REFRESH_LOCK_NAME}.dead.*"))
+        return
+
     result = refresh_script.refresh(
         state_root=tmp_path,
         proxy_manifest=None,
@@ -1018,6 +1375,190 @@ def test_provably_dead_refresh_owner_is_archived_and_recovered(
     archived = list(output.parent.glob(f"{refresh_script.REFRESH_LOCK_NAME}.dead.*"))
     assert len(archived) == 1
     assert json.loads(archived[0].read_text(encoding="utf-8"))["owner_token"] == ("dead-owner")
+
+
+def test_refresh_lock_release_never_unlinks_a_replacement_after_handle_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config"
+    config.mkdir()
+    lock_path = config / refresh_script.REFRESH_LOCK_NAME
+    displaced = config / "displaced-original.lock"
+    replacement = config / "replacement-live.lock"
+    real_open = refresh_script._open_refresh_lock_handle
+    replacement_bytes = b""
+    raced = False
+
+    @contextmanager
+    def publish_replacement_after_close(*args: object, **kwargs: object):
+        nonlocal raced, replacement_bytes
+        with real_open(*args, **kwargs) as handle:
+            yield handle
+            handle.seek(0)
+            replacement_bytes = handle.read()
+        raced = True
+        # A contender may publish immediately after the exact owner handle is
+        # closed. Cleanup must already have removed that exact identity; it may
+        # never token-match and unlink this replacement by pathname.
+        if os.path.lexists(lock_path):
+            os.replace(lock_path, displaced)
+        replacement.write_bytes(replacement_bytes)
+        os.replace(replacement, lock_path)
+
+    monkeypatch.setattr(
+        refresh_script,
+        "_open_refresh_lock_handle",
+        publish_replacement_after_close,
+    )
+
+    with refresh_script._refresh_lock(config):
+        pass
+
+    assert raced is True
+    assert not displaced.exists()
+    assert lock_path.read_bytes() == replacement_bytes
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle-bound rename only")
+def test_stale_lock_archival_blocks_replacement_after_exact_handle_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config"
+    config.mkdir()
+    lock_path = config / refresh_script.REFRESH_LOCK_NAME
+    dead_owner = refresh_script._lock_owner_metadata()
+    dead_owner.update({"owner_token": "dead-owner", "pid": 999_999})
+    lock_path.write_text(
+        json.dumps(dead_owner, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    replacement = config / "replacement-live.lock"
+    replacement.write_bytes(b"replacement-live-owner\n")
+    real_rename = refresh_script._windows_rename_from_handle_no_replace
+    attempted = False
+    blocked = False
+
+    def attack_after_admission(handle: object, destination: Path) -> None:
+        nonlocal attempted, blocked
+        attempted = True
+        try:
+            os.replace(replacement, lock_path)
+        except OSError:
+            blocked = True
+        real_rename(handle, destination)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(refresh_script, "_lock_owner_is_dead", lambda _metadata: True)
+    monkeypatch.setattr(
+        refresh_script,
+        "_windows_rename_from_handle_no_replace",
+        attack_after_admission,
+    )
+
+    assert refresh_script._archive_provably_dead_lock(lock_path) is True
+
+    assert attempted is True
+    assert blocked is True
+    assert not lock_path.exists()
+    assert replacement.read_bytes() == b"replacement-live-owner\n"
+    archived = list(config.glob(f"{refresh_script.REFRESH_LOCK_NAME}.dead.*"))
+    assert len(archived) == 1
+    assert json.loads(archived[0].read_text(encoding="utf-8"))["owner_token"] == "dead-owner"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle-bound rename only")
+def test_stale_lock_archive_destination_is_no_clobber(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config"
+    config.mkdir()
+    lock_path = config / refresh_script.REFRESH_LOCK_NAME
+    lock_path.write_bytes(b"dead-owner\n")
+    destination = config / "dead-archive"
+    destination.write_bytes(b"third-contender\n")
+
+    with refresh_script._open_refresh_lock_handle(
+        lock_path,
+        label="test stale lock",
+        exact_namespace_mutation=True,
+    ) as handle:
+        with pytest.raises(FileExistsError):
+            refresh_script._windows_rename_from_handle_no_replace(handle, destination)
+
+    assert lock_path.read_bytes() == b"dead-owner\n"
+    assert destination.read_bytes() == b"third-contender\n"
+
+
+@pytest.mark.parametrize(
+    "prior_bytes",
+    [pytest.param(b"prior-pointer\n", id="existing"), pytest.param(None, id="absent")],
+)
+def test_atomic_output_temp_swap_is_blocked_or_restores_exact_prior_truth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prior_bytes: bytes | None,
+) -> None:
+    destination = tmp_path / "luna_core_universe.json"
+    prior_identity: os.stat_result | None = None
+    if prior_bytes is not None:
+        destination.write_bytes(prior_bytes)
+        prior_identity = os.lstat(destination)
+    hostile = tmp_path / "hostile-temporary"
+    hostile.write_bytes(b"hostile-pointer\n")
+    expected = b"admitted-pointer\n"
+
+    if os.name == "nt":
+        real_replace = refresh_script._windows_replace_from_handle
+        attempted = False
+        blocked = False
+
+        def attack_after_source_admission(handle: object, target: Path) -> None:
+            nonlocal attempted, blocked
+            attempted = True
+            temporaries = list(tmp_path.glob(f".{destination.name}.*.tmp"))
+            assert len(temporaries) == 1
+            try:
+                os.replace(hostile, temporaries[0])
+            except PermissionError:
+                blocked = True
+            real_replace(handle, target)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(
+            refresh_script,
+            "_windows_replace_from_handle",
+            attack_after_source_admission,
+        )
+        refresh_script._replace_bytes(destination, expected)
+        assert attempted is True
+        assert blocked is True
+        assert destination.read_bytes() == expected
+        return
+
+    if not refresh_script.sys.platform.startswith("linux"):
+        pytest.skip("exact POSIX rollback requires Linux renameat2")
+
+    real_renameat2 = refresh_script._linux_renameat2
+    attacked = False
+
+    def swap_after_source_admission(source: Path, target: Path, flags: int) -> bool:
+        nonlocal attacked
+        if not attacked and target == destination:
+            attacked = True
+            os.replace(hostile, source)
+        return real_renameat2(source, target, flags)
+
+    monkeypatch.setattr(refresh_script, "_linux_renameat2", swap_after_source_admission)
+    with pytest.raises(RuntimeError, match="replaced during commit"):
+        refresh_script._replace_bytes(destination, expected)
+
+    assert attacked is True
+    if prior_bytes is None:
+        assert not os.path.lexists(destination)
+    else:
+        assert destination.read_bytes() == prior_bytes
+        assert prior_identity is not None
+        assert refresh_script._same_file_identity(prior_identity, os.lstat(destination))
 
 
 def test_refresh_rolls_back_active_pointer_when_post_swap_validation_fails(

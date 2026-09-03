@@ -295,7 +295,8 @@ function Write-ScenarioStage {
         -LogRoot $logRoot `
         -LogName "record_stage-scenario_intelligence-$MarketDate"
 }
-$dailyLock = Enter-DawnstrikeDailyRunLock -StateRoot $state -MarketDate $MarketDate -Owner "alphaops_monitor"
+$dailyLock = Enter-DawnstrikeDailyRunLock `
+    -StateRoot $state -MarketDate $MarketDate -Owner "alphaops_monitor" -RetainHandle
 if (-not $dailyLock.acquired) {
     $lockReceiptWritten = Write-DawnstrikeLockDenialReceipt -StateRoot $state -MarketDate $MarketDate -Owner "alphaops_monitor" -Lock $dailyLock
     $record = Write-MonitorStage `

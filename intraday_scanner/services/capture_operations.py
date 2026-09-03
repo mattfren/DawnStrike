@@ -17,7 +17,7 @@ import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PureWindowsPath
-from typing import Any
+from typing import Any, BinaryIO
 from zoneinfo import ZoneInfo
 
 from intraday_scanner.market_calendar import canonical_regular_session_id, market_session
@@ -47,6 +47,7 @@ class CapturePlan:
     symbols_manifest: Path
     symbols_manifest_sha256: str
     expected_session: Path
+    expected_session_sha256: str
     entitlement_receipt: Path
     entitlement_receipt_sha256: str
     source_config: Path
@@ -56,6 +57,37 @@ class CapturePlan:
     retries: int = 3
 
     def validate(self, *, now: datetime | None = None) -> dict[str, Any]:
+        """Validate a preview while binding every authoritative JSON read once."""
+
+        with self.admit(now=now) as admission:
+            return dict(admission.prepared)
+
+    def admit(self, *, now: datetime | None = None) -> CapturePlanAdmission:
+        """Capture and retain the exact authority inputs for one operation."""
+
+        held: list[tuple[Path, BinaryIO, tuple[int, ...]]] = []
+        try:
+            prepared, expected_session, entitlement = self._validate_admitted(
+                now=now,
+                held=held,
+            )
+            return CapturePlanAdmission(
+                plan=self,
+                prepared=prepared,
+                expected_session=expected_session,
+                entitlement=entitlement,
+                held=held,
+            )
+        except Exception:
+            _close_identity_locked_files(held)
+            raise
+
+    def _validate_admitted(
+        self,
+        *,
+        now: datetime | None,
+        held: list[tuple[Path, BinaryIO, tuple[int, ...]]],
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
         now_utc = _utc(now or datetime.now(UTC))
         if self.mode not in _MODES:
             raise CapturePlanError("mode must be forward_observed or retrospective_research")
@@ -67,6 +99,8 @@ class CapturePlan:
             raise CapturePlanError("candidate_sha must be an exact lowercase Git object id")
         if not _SHA256.fullmatch(self.symbols_manifest_sha256):
             raise CapturePlanError("symbols_manifest_sha256 must be a lowercase SHA-256")
+        if not _SHA256.fullmatch(self.expected_session_sha256):
+            raise CapturePlanError("expected_session_sha256 must be a lowercase SHA-256")
         if not _SHA256.fullmatch(self.entitlement_receipt_sha256):
             raise CapturePlanError("entitlement_receipt_sha256 must be a lowercase SHA-256")
         if not _SHA256.fullmatch(self.source_config_sha256):
@@ -144,11 +178,25 @@ class CapturePlan:
             raise CapturePlanError(
                 f"candidate SHA mismatch: expected {self.candidate_sha}, running {current_sha}"
             )
-        manifest = _read_json(regular_files["symbols_manifest"], "symbols manifest")
+        manifest_raw = _read_identity_locked_bytes(
+            regular_files["symbols_manifest"],
+            label="symbols manifest",
+            max_bytes=4 * 1024 * 1024,
+            held=held,
+        )
+        manifest = _read_json_bytes(manifest_raw, "symbols manifest")
         symbols = _validate_manifest(manifest)
-        if _sha256_file(regular_files["symbols_manifest"]) != self.symbols_manifest_sha256:
+        if hashlib.sha256(manifest_raw).hexdigest() != self.symbols_manifest_sha256:
             raise CapturePlanError("symbols manifest hash mismatch")
-        session = _read_json(regular_files["expected_session"], "expected session")
+        session_raw = _read_identity_locked_bytes(
+            regular_files["expected_session"],
+            label="expected session",
+            max_bytes=1024 * 1024,
+            held=held,
+        )
+        if hashlib.sha256(session_raw).hexdigest() != self.expected_session_sha256:
+            raise CapturePlanError("expected session hash mismatch")
+        session = _read_json_bytes(session_raw, "expected session")
         start, end, session_identity = _validate_session(session)
         if end > now_utc - timedelta(minutes=15):
             raise CapturePlanError(
@@ -156,8 +204,14 @@ class CapturePlan:
             )
         if start >= end:
             raise CapturePlanError("expected session window must have positive duration")
-        entitlement = _read_json(regular_files["entitlement_receipt"], "entitlement receipt")
-        if _sha256_file(regular_files["entitlement_receipt"]) != self.entitlement_receipt_sha256:
+        entitlement_raw = _read_identity_locked_bytes(
+            regular_files["entitlement_receipt"],
+            label="entitlement receipt",
+            max_bytes=1024 * 1024,
+            held=held,
+        )
+        entitlement = _read_json_bytes(entitlement_raw, "entitlement receipt")
+        if hashlib.sha256(entitlement_raw).hexdigest() != self.entitlement_receipt_sha256:
             raise CapturePlanError("entitlement receipt hash mismatch")
         entitlement_name = str(entitlement.get("entitlement") or "").strip()
         proof_id = str(entitlement.get("receipt") or entitlement.get("proof_id") or "").strip()
@@ -178,10 +232,16 @@ class CapturePlan:
             raise CapturePlanError("entitlement receipt is not research-only")
         if entitlement.get("broker_execution") != "disabled":
             raise CapturePlanError("entitlement receipt does not disable broker execution")
-        if source_config is not None and _sha256_file(source_config) != self.source_config_sha256:
+        source_config_raw = _read_identity_locked_bytes(
+            source_config,
+            label="source config",
+            max_bytes=4 * 1024 * 1024,
+            held=held,
+        )
+        if hashlib.sha256(source_config_raw).hexdigest() != self.source_config_sha256:
             raise CapturePlanError("source config hash mismatch")
 
-        return {
+        prepared = {
             "schema_version": "dawnstrike.capture_operation_plan.v1",
             "status": "READY",
             "mode": self.mode,
@@ -197,7 +257,7 @@ class CapturePlan:
             "exchange_session_id": session_identity["exchange_session_id"],
             "request_start": start.isoformat(),
             "request_end": end.isoformat(),
-            "expected_session_sha256": _sha256_file(regular_files["expected_session"]),
+            "expected_session_sha256": self.expected_session_sha256,
             "entitlement": entitlement_name,
             "entitlement_receipt_sha256": self.entitlement_receipt_sha256,
             "source_config_sha256": self.source_config_sha256,
@@ -213,15 +273,76 @@ class CapturePlan:
             "research_only": True,
             "broker_execution": "disabled",
         }
+        return prepared, session, entitlement
+
+
+@dataclass
+class CapturePlanAdmission:
+    """One exact, retained authority snapshot for a capture operation."""
+
+    plan: CapturePlan
+    prepared: dict[str, Any]
+    expected_session: dict[str, Any]
+    entitlement: dict[str, Any]
+    held: list[tuple[Path, BinaryIO, tuple[int, ...]]]
+    closed: bool = False
+
+    def __enter__(self) -> CapturePlanAdmission:
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        try:
+            if exc_type is None:
+                self.assert_unchanged()
+        finally:
+            self.close()
+
+    def assert_unchanged(self) -> None:
+        if self.closed:
+            raise CapturePlanError("capture plan admission is already closed")
+        _assert_identity_locked_files_unchanged(self.held)
+
+    def close(self) -> None:
+        if not self.closed:
+            _close_identity_locked_files(self.held)
+            self.closed = True
+
+    def as_dict(self) -> dict[str, Any]:
+        self.assert_unchanged()
+        result = dict(self.prepared)
+        result["plan_identity_sha256"] = hashlib.sha256(
+            json.dumps(result, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        return result
+
+    def hold_exact_bytes(
+        self,
+        path: Path,
+        *,
+        expected: bytes,
+        label: str,
+        max_bytes: int,
+    ) -> str:
+        """Add a derived child input to this admission without a reopen gap."""
+
+        self.assert_unchanged()
+        raw = _read_identity_locked_bytes(
+            _resolve_regular_file(path, label),
+            label=label,
+            max_bytes=max_bytes,
+            held=self.held,
+        )
+        if raw != expected:
+            raise CapturePlanError(f"{label} identity conflicts with admitted bytes")
+        return hashlib.sha256(raw).hexdigest()
 
     def sanitized_entitlement_metadata(self, *, receipt_hash: str) -> dict[str, str]:
-        """Return the only entitlement fields permitted into capture artifacts."""
+        """Return sanitized metadata from the exact admitted entitlement bytes."""
 
-        source = _read_json(
-            _resolve_regular_file(self.entitlement_receipt, "entitlement_receipt"),
-            "entitlement receipt",
-        )
-        entitlement = str(source.get("entitlement") or "").strip()
+        self.assert_unchanged()
+        if receipt_hash != self.plan.entitlement_receipt_sha256:
+            raise CapturePlanError("entitlement receipt hash is not the admitted identity")
+        entitlement = str(self.entitlement.get("entitlement") or "").strip()
         if not entitlement:
             raise CapturePlanError("entitlement receipt requires entitlement")
         return {
@@ -279,12 +400,8 @@ def _validate_session(value: dict[str, Any]) -> tuple[datetime, datetime, dict[s
         raise CapturePlanError("expected session is not an open NYSE market session")
     if value.get("calendar_id") and value["calendar_id"] != decision.calendar_id:
         raise CapturePlanError("expected session calendar identity mismatch")
-    session_start = _parse_utc(
-        value.get("start_utc") or value.get("request_start"), "start_utc"
-    )
-    session_end = _parse_utc(
-        value.get("end_utc") or value.get("request_end"), "end_utc"
-    )
+    session_start = _parse_utc(value.get("start_utc") or value.get("request_start"), "start_utc")
+    session_end = _parse_utc(value.get("end_utc") or value.get("request_end"), "end_utc")
     start = _parse_utc(
         value.get("capture_start_utc") or session_start.isoformat(),
         "capture_start_utc",
@@ -316,14 +433,78 @@ def _resolve_regular_file(path: Path, label: str) -> Path:
     return path.resolve()
 
 
-def _read_json(path: Path, label: str) -> dict[str, Any]:
+def _read_json_bytes(raw: bytes, label: str) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        value = json.loads(raw.decode("utf-8", "strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise CapturePlanError(f"{label} is unreadable JSON") from exc
     if not isinstance(value, dict):
         raise CapturePlanError(f"{label} must be a JSON object")
     return value
+
+
+def _read_identity_locked_bytes(
+    path: Path,
+    *,
+    label: str,
+    max_bytes: int,
+    held: list[tuple[Path, BinaryIO, tuple[int, ...]]],
+) -> bytes:
+    """Read one exact regular file and retain its deny-write/delete handle."""
+
+    from scripts.dawnstrike_python_bootstrap import _read_locked_exact_file
+
+    handles: list[BinaryIO] = []
+    try:
+        raw = _read_locked_exact_file(path, handles)
+        if len(raw) > max_bytes:
+            raise CapturePlanError(f"{label} exceeds its byte ceiling")
+        handle = handles[0]
+        details = os.fstat(handle.fileno())
+        snapshot: tuple[int, ...] = (
+            int(details.st_dev),
+            int(details.st_ino),
+            int(details.st_size),
+            int(details.st_mtime_ns),
+        )
+        if os.name != "nt":
+            snapshot += (int(details.st_ctime_ns),)
+        held.append((path, handle, snapshot))
+        handles.clear()
+        return raw
+    except CapturePlanError:
+        raise
+    except (OSError, RuntimeError) as exc:
+        raise CapturePlanError(f"{label} is unavailable") from exc
+    finally:
+        for handle in handles:
+            handle.close()
+
+
+def _assert_identity_locked_files_unchanged(
+    held: list[tuple[Path, BinaryIO, tuple[int, ...]]],
+) -> None:
+    for path, handle, admitted in held:
+        try:
+            opened = os.fstat(handle.fileno())
+            current = path.lstat()
+        except OSError as exc:
+            raise CapturePlanError("capture authority changed during execution") from exc
+        fields: tuple[str, ...] = ("st_dev", "st_ino", "st_size", "st_mtime_ns")
+        if os.name != "nt":
+            fields += ("st_ctime_ns",)
+        opened_snapshot = tuple(int(getattr(opened, field)) for field in fields)
+        current_snapshot = tuple(int(getattr(current, field)) for field in fields)
+        if opened_snapshot != admitted or current_snapshot != admitted:
+            raise CapturePlanError("capture authority changed during execution")
+
+
+def _close_identity_locked_files(
+    held: list[tuple[Path, BinaryIO, tuple[int, ...]]],
+) -> None:
+    for _path, handle, _snapshot in held:
+        handle.close()
+    held.clear()
 
 
 def _parse_utc(value: Any, label: str) -> datetime:
@@ -387,26 +568,73 @@ def _approved_git_executable() -> tuple[Path, str]:
     return path, digest
 
 
+def _governed_git_environment(repo: Path) -> dict[str, str]:
+    from intraday_scanner.approved_tools import sanitized_git_environment
+
+    return sanitized_git_environment(repo)
+
+
 def _git_identity(repo: Path) -> tuple[str, str, str]:
+    from intraday_scanner.approved_tools import admitted_git_contract
+
+    try:
+        admitted = admitted_git_contract(repo)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise CapturePlanError("admitted Git identity is unavailable") from exc
+    if admitted is not None:
+        return (
+            str(admitted["candidate_sha"]),
+            str(admitted["candidate_tree"]),
+            str(admitted["git_executable_sha256"]),
+        )
     try:
         git_path, git_sha256 = _approved_git_executable()
+        environment = _governed_git_environment(repo)
         head = subprocess.run(
-            [str(git_path), "rev-parse", "HEAD"],
+            [
+                str(git_path),
+                "-c",
+                "core.autocrlf=true",
+                "-C",
+                str(repo),
+                "rev-parse",
+                "HEAD",
+            ],
             cwd=repo,
+            env=environment,
             check=True,
             capture_output=True,
             text=True,
         ).stdout.strip()
         tree = subprocess.run(
-            [str(git_path), "rev-parse", "HEAD^{tree}"],
+            [
+                str(git_path),
+                "-c",
+                "core.autocrlf=true",
+                "-C",
+                str(repo),
+                "rev-parse",
+                "HEAD^{tree}",
+            ],
             cwd=repo,
+            env=environment,
             check=True,
             capture_output=True,
             text=True,
         ).stdout.strip()
         dirty = subprocess.run(
-            [str(git_path), "status", "--porcelain", "--untracked-files=all"],
+            [
+                str(git_path),
+                "-c",
+                "core.autocrlf=true",
+                "-C",
+                str(repo),
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+            ],
             cwd=repo,
+            env=environment,
             check=True,
             capture_output=True,
             text=True,
@@ -429,11 +657,8 @@ def _sha256_file(path: Path) -> str:
 
 
 def plan_as_dict(plan: CapturePlan, *, now: datetime | None = None) -> dict[str, Any]:
-    result = plan.validate(now=now)
-    result["plan_identity_sha256"] = hashlib.sha256(
-        json.dumps(result, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
-    return result
+    with plan.admit(now=now) as admission:
+        return admission.as_dict()
 
 
-__all__ = ["CapturePlan", "CapturePlanError", "plan_as_dict"]
+__all__ = ["CapturePlan", "CapturePlanAdmission", "CapturePlanError", "plan_as_dict"]

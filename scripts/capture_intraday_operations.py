@@ -15,12 +15,14 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from intraday_scanner.errors import StorageError
-from intraday_scanner.services.capture_operations import CapturePlan, CapturePlanError, plan_as_dict
+from intraday_scanner.services.capture_operations import (
+    CapturePlan,
+    CapturePlanAdmission,
+    CapturePlanError,
+)
 from intraday_scanner.storage.intraday_evidence_store import IntradayEvidenceStore
 
-_APPROVED_PYTHON = Path(
-    r"C:\Program Files\Dawnstrike\Python313\python.exe"
-)
+_APPROVED_PYTHON = Path(r"C:\Program Files\Dawnstrike\Python313\python.exe")
 _APPROVED_PYTHON_SHA256 = "ef8f51028ac5329641985112f8efb1c2d4c47c86b8011ddf7e6fae21e2b4e5a1"
 _BOOTSTRAP_PRELOADER = (
     "import hashlib,sys; p=sys.argv[1]; e=sys.argv[2]; b=open(p,'rb').read(); "
@@ -53,10 +55,19 @@ def main() -> int:
     args = _parser().parse_args()
     plan = _build_plan(args)
     try:
-        prepared = plan_as_dict(plan)
+        with plan.admit() as admission:
+            return _run_admitted_capture(args, plan, admission)
     except CapturePlanError as exc:
         _print_failure(str(exc))
         return 2
+
+
+def _run_admitted_capture(
+    args: argparse.Namespace,
+    plan: CapturePlan,
+    admission: CapturePlanAdmission,
+) -> int:
+    prepared = admission.as_dict()
     if not args.execute:
         print(json.dumps(prepared, sort_keys=True))
         return 0
@@ -66,7 +77,7 @@ def main() -> int:
     # expected-session denominator here; account/reporting ledgers remain
     # untouched until a separate authenticated outcome boundary exists.
     try:
-        expected = json.loads(plan.expected_session.read_text(encoding="utf-8"))
+        expected = admission.expected_session
         IntradayEvidenceStore(prepared["db_path"]).persist_expected_market_session(
             {
                 "session_id": prepared["exchange_session_id"],
@@ -90,19 +101,32 @@ def main() -> int:
     mode_output = Path(prepared["mode_output_root"])
     mode_run.mkdir(parents=True, exist_ok=True)
     mode_output.mkdir(parents=True, exist_ok=True)
-    symbols_file = mode_run / "symbols-frozen.txt"
-    symbols_file.write_text("\n".join(prepared["symbols"]) + "\n", encoding="utf-8")
-    metadata_path = mode_run / "operator-entitlement-sanitized.json"
-    metadata_path.write_text(
+    symbols_bytes = ("\n".join(prepared["symbols"]) + "\n").encode("utf-8")
+    symbols_sha256 = hashlib.sha256(symbols_bytes).hexdigest()
+    symbols_file = mode_run / f"symbols-frozen-{symbols_sha256[:16]}.txt"
+    _write_once_and_hold(
+        admission,
+        symbols_file,
+        symbols_bytes,
+        label="derived symbols input",
+    )
+    metadata_bytes = (
         json.dumps(
-            plan.sanitized_entitlement_metadata(
+            admission.sanitized_entitlement_metadata(
                 receipt_hash=prepared["entitlement_receipt_sha256"]
             ),
             sort_keys=True,
             separators=(",", ":"),
         )
-        + "\n",
-        encoding="utf-8",
+        + "\n"
+    ).encode("utf-8")
+    metadata_sha256 = hashlib.sha256(metadata_bytes).hexdigest()
+    metadata_path = mode_run / f"operator-entitlement-{metadata_sha256[:16]}.json"
+    _write_once_and_hold(
+        admission,
+        metadata_path,
+        metadata_bytes,
+        label="derived entitlement input",
     )
     child_python = _approved_child_python()
     release_root = Path(__file__).resolve().parents[1]
@@ -135,6 +159,8 @@ def main() -> int:
         prepared["mode"],
         "--symbols-file",
         str(symbols_file),
+        "--symbols-file-sha256",
+        symbols_sha256,
         "--market-date",
         prepared["market_date"],
         "--exchange-session-id",
@@ -155,6 +181,8 @@ def main() -> int:
         prepared["source_config_sha256"],
         "--operator-entitlement-metadata",
         str(metadata_path),
+        "--operator-entitlement-metadata-sha256",
+        metadata_sha256,
         "--env-file",
         str(plan.env_file),
         "--include-trades",
@@ -166,6 +194,7 @@ def main() -> int:
     env["DAWNSTRIKE_INTRADAY_MAX_PAGES"] = str(plan.max_pages)
     env["INTRADAY_REQUEST_RETRIES"] = str(plan.retries)
     result = subprocess.run(command, cwd=plan.repo_root, env=env, capture_output=True, text=True)
+    admission.assert_unchanged()
     receipt = _safe_capture_receipt(result, prepared)
     receipt["receipt_identity_sha256"] = hashlib.sha256(
         json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -180,6 +209,26 @@ def main() -> int:
         return 3
     print(json.dumps(receipt, sort_keys=True))
     return 0 if result.returncode == 0 else 1
+
+
+def _write_once_and_hold(
+    admission: CapturePlanAdmission,
+    path: Path,
+    encoded: bytes,
+    *,
+    label: str,
+) -> None:
+    try:
+        with path.open("xb") as handle:
+            handle.write(encoded)
+    except FileExistsError:
+        pass
+    admission.hold_exact_bytes(
+        path,
+        expected=encoded,
+        label=label,
+        max_bytes=4 * 1024 * 1024,
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -200,6 +249,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--symbols-manifest", type=Path, required=True)
     parser.add_argument("--symbols-manifest-sha256", required=True)
     parser.add_argument("--expected-session", type=Path, required=True)
+    parser.add_argument("--expected-session-sha256", required=True)
     parser.add_argument("--entitlement-receipt", type=Path, required=True)
     parser.add_argument("--entitlement-receipt-sha256", required=True)
     parser.add_argument("--source-config", type=Path, required=True)
@@ -227,6 +277,7 @@ def _build_plan(args: argparse.Namespace) -> CapturePlan:
         symbols_manifest=args.symbols_manifest,
         symbols_manifest_sha256=args.symbols_manifest_sha256,
         expected_session=args.expected_session,
+        expected_session_sha256=args.expected_session_sha256,
         entitlement_receipt=args.entitlement_receipt,
         entitlement_receipt_sha256=args.entitlement_receipt_sha256,
         source_config=args.source_config,

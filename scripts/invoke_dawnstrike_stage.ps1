@@ -79,6 +79,39 @@ function Get-DawnstrikeLockBytesSha256 {
     finally { $sha.Dispose() }
 }
 
+function Read-DawnstrikeLockFileBytes {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    # A retained creator requests WRITE and DELETE access, so a cooperating
+    # read must share both.  The creator itself shares READ only and therefore
+    # still denies every outside write, unlink, replace, and rename attempt.
+    $share = [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
+    $stream = [System.IO.File]::Open(
+        $Path,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        $share
+    )
+    try {
+        if ($stream.Length -gt 1048576) {
+            throw "$Label exceeds the lock byte ceiling."
+        }
+        $bytes = [byte[]]::new([int]$stream.Length)
+        $offset = 0
+        while ($offset -lt $bytes.Length) {
+            $count = $stream.Read($bytes, $offset, $bytes.Length - $offset)
+            if ($count -le 0) { throw "$Label ended before its exact bytes were read." }
+            $offset += $count
+        }
+        return $bytes
+    }
+    finally { $stream.Dispose() }
+}
+
 function Get-DawnstrikeLockSnapshot {
     [CmdletBinding()]
     param(
@@ -107,10 +140,10 @@ function Get-DawnstrikeLockSnapshot {
         $item.PSIsContainer -or
         ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
     ) { throw "$Label is not a regular non-reparse file." }
-    $first = [System.IO.File]::ReadAllBytes($full)
+    $first = Read-DawnstrikeLockFileBytes -Path $full -Label $Label
     $firstHash = Get-DawnstrikeLockBytesSha256 $first
     Assert-DawnstrikeLockNoReparseComponents $full $Label
-    $second = [System.IO.File]::ReadAllBytes($full)
+    $second = Read-DawnstrikeLockFileBytes -Path $full -Label $Label
     $secondHash = Get-DawnstrikeLockBytesSha256 $second
     if ($firstHash -ne $secondHash -or $first.Length -ne $second.Length) {
         throw "$Label changed while taking its same-byte snapshot."
@@ -140,6 +173,20 @@ function Remove-DawnstrikeOwnedLock {
     param([Parameter(Mandatory = $true)][object]$Lock, [Parameter(Mandatory = $true)][string]$Label)
 
     if (-not [bool]$Lock.acquired) { return }
+    $retainedProperty = $Lock.PSObject.Properties['retained_handle']
+    if ($null -ne $retainedProperty -and $null -ne $retainedProperty.Value) {
+        $null = Confirm-DawnstrikeRetainedDailyRunLock -Lock $Lock
+        $handle = [System.IO.FileStream]$retainedProperty.Value
+        [Dawnstrike.Locking.DailyLockNative]::MarkDelete($handle.SafeFileHandle)
+        $handle.Dispose()
+        $Lock.retained_handle = $null
+        $afterRetained = Get-DawnstrikeLockSnapshot `
+            -Path ([string]$Lock.lock_path) -Label $Label -AllowMissing
+        if ($afterRetained.present) {
+            throw "$Label path was repopulated after its exact retained handle was released."
+        }
+        return
+    }
     $current = Get-DawnstrikeLockSnapshot -Path ([string]$Lock.lock_path) -Label $Label
     if (
         -not $current.present -or
@@ -172,29 +219,36 @@ function Move-DawnstrikeDeadDailyLockToArchive {
     if (Test-Path -LiteralPath $archivePath) {
         throw "$Label deterministic stale archive already exists; refusing an ambiguous overwrite."
     }
-    $again = Get-DawnstrikeLockSnapshot -Path $sourcePath -Label $Label
-    if (
-        [string]$again.bytes_sha256 -ne $sourceHash -or
-        [string]$again.lock_token -ne [string]$Snapshot.lock_token
-    ) {
-        throw "$Label changed before its dead-owner archive could be committed."
+    $handle = Open-DawnstrikeRetainedExistingDailyRunLock -Path $sourcePath -Label $Label
+    try {
+        $heldLock = [pscustomobject]@{
+            acquired = $true
+            lock_path = $sourcePath
+            lock_token = [string]$Snapshot.lock_token
+            bytes_sha256 = $sourceHash
+            retained = $true
+            retained_handle = $handle
+        }
+        $null = Confirm-DawnstrikeRetainedDailyRunLock -Lock $heldLock
+        [Dawnstrike.Locking.DailyLockNative]::RenameNoReplace(
+            $handle.SafeFileHandle,
+            $archivePath
+        )
+        $heldLock.lock_path = $archivePath
+        $null = Confirm-DawnstrikeRetainedDailyRunLock -Lock $heldLock
+        $afterSource = Get-DawnstrikeLockSnapshot `
+            -Path $sourcePath -Label $Label -AllowMissing
+        if ($afterSource.present) {
+            throw "$Label archival did not remove the exact original lock path."
+        }
+        return [pscustomobject]@{
+            path = $archivePath
+            bytes_sha256 = $sourceHash
+            lock_token = [string]$Snapshot.lock_token
+        }
     }
-    [System.IO.File]::Move($sourcePath, $archivePath)
-    $afterSource = Get-DawnstrikeLockSnapshot -Path $sourcePath -Label $Label -AllowMissing
-    if ($afterSource.present) {
-        throw "$Label archival did not remove the original lock path."
-    }
-    $archive = Get-DawnstrikeLockSnapshot -Path $archivePath -Label "$Label archive"
-    if (
-        [string]$archive.bytes_sha256 -ne $sourceHash -or
-        [string]$archive.lock_token -ne [string]$Snapshot.lock_token
-    ) {
-        throw "$Label stale archive does not preserve the exact original bytes."
-    }
-    return [pscustomobject]@{
-        path = $archivePath
-        bytes_sha256 = $sourceHash
-        lock_token = [string]$Snapshot.lock_token
+    finally {
+        $handle.Dispose()
     }
 }
 
@@ -261,13 +315,324 @@ function Resolve-DawnstrikeForeignDailyLocksCore {
     }
 }
 
+function Initialize-DawnstrikeDailyLockNative {
+    [CmdletBinding()]
+    param()
+
+    if ('Dawnstrike.Locking.DailyLockNative' -as [type]) { return }
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+
+namespace Dawnstrike.Locking {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct FileDispositionInfo {
+        [MarshalAs(UnmanagedType.Bool)]
+        public bool DeleteFile;
+    }
+
+    public static class DailyLockNative {
+        private const UInt32 GenericRead = 0x80000000;
+        private const UInt32 GenericWrite = 0x40000000;
+        private const UInt32 DeleteAccess = 0x00010000;
+        private const UInt32 FileShareRead = 0x00000001;
+        private const UInt32 CreateNew = 1;
+        private const UInt32 OpenExisting = 3;
+        private const UInt32 FileAttributeNormal = 0x00000080;
+        private const UInt32 FileFlagOpenReparsePoint = 0x00200000;
+        private const int FileRenameInformation = 3;
+        private const int FileDispositionInformation = 4;
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern SafeFileHandle CreateFileW(
+            string path,
+            UInt32 desiredAccess,
+            UInt32 shareMode,
+            IntPtr securityAttributes,
+            UInt32 creationDisposition,
+            UInt32 flagsAndAttributes,
+            IntPtr templateFile
+        );
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool SetFileInformationByHandle(
+            SafeFileHandle file,
+            int fileInformationClass,
+            ref FileDispositionInfo fileInformation,
+            UInt32 bufferSize
+        );
+
+        [DllImport(
+            "kernel32.dll",
+            EntryPoint = "SetFileInformationByHandle",
+            SetLastError = true
+        )]
+        private static extern bool SetFileInformationByHandleRaw(
+            SafeFileHandle file,
+            int fileInformationClass,
+            IntPtr fileInformation,
+            UInt32 bufferSize
+        );
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern UInt32 GetFinalPathNameByHandleW(
+            SafeFileHandle file,
+            StringBuilder path,
+            UInt32 pathLength,
+            UInt32 flags
+        );
+
+        public static SafeFileHandle CreateNewRetained(string path) {
+            // DELETE access lets explicit Exit mark this exact open file for
+            // deletion. There is deliberately no delete-on-close flag: a hard
+            // process crash must leave durable dead-owner recovery evidence.
+            SafeFileHandle handle = CreateFileW(
+                path,
+                GenericRead | GenericWrite | DeleteAccess,
+                FileShareRead,
+                IntPtr.Zero,
+                CreateNew,
+                FileAttributeNormal,
+                IntPtr.Zero
+            );
+            if (handle == null || handle.IsInvalid) {
+                int error = Marshal.GetLastWin32Error();
+                if (handle != null) handle.Dispose();
+                throw new Win32Exception(error, "Retained daily lock creation failed");
+            }
+            return handle;
+        }
+
+        public static SafeFileHandle OpenExistingRetained(string path) {
+            SafeFileHandle handle = CreateFileW(
+                path,
+                GenericRead | GenericWrite | DeleteAccess,
+                FileShareRead,
+                IntPtr.Zero,
+                OpenExisting,
+                FileAttributeNormal | FileFlagOpenReparsePoint,
+                IntPtr.Zero
+            );
+            if (handle == null || handle.IsInvalid) {
+                int error = Marshal.GetLastWin32Error();
+                if (handle != null) handle.Dispose();
+                throw new Win32Exception(error, "Retained daily lock open failed");
+            }
+            return handle;
+        }
+
+        public static void MarkDelete(SafeFileHandle handle) {
+            FileDispositionInfo disposition = new FileDispositionInfo();
+            disposition.DeleteFile = true;
+            UInt32 size = (UInt32)Marshal.SizeOf(typeof(FileDispositionInfo));
+            if (!SetFileInformationByHandle(
+                handle,
+                FileDispositionInformation,
+                ref disposition,
+                size
+            )) {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "Retained daily lock exact deletion failed"
+                );
+            }
+        }
+
+        public static void RenameNoReplace(SafeFileHandle handle, string destination) {
+            byte[] name = Encoding.Unicode.GetBytes(destination);
+            int rootOffset = IntPtr.Size;
+            int lengthOffset = rootOffset + IntPtr.Size;
+            int nameOffset = lengthOffset + 4;
+            int size = nameOffset + name.Length + 2;
+            IntPtr buffer = Marshal.AllocHGlobal(size);
+            try {
+                for (int index = 0; index < size; index++) Marshal.WriteByte(buffer, index, 0);
+                Marshal.WriteByte(buffer, 0, 0); // ReplaceIfExists = false
+                Marshal.WriteIntPtr(buffer, rootOffset, IntPtr.Zero);
+                Marshal.WriteInt32(buffer, lengthOffset, name.Length);
+                Marshal.Copy(name, 0, IntPtr.Add(buffer, nameOffset), name.Length);
+                if (!SetFileInformationByHandleRaw(
+                    handle,
+                    FileRenameInformation,
+                    buffer,
+                    (UInt32)size
+                )) {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "Retained daily lock exact no-replace rename failed"
+                    );
+                }
+            }
+            finally { Marshal.FreeHGlobal(buffer); }
+        }
+
+        public static string GetFinalPath(SafeFileHandle handle) {
+            StringBuilder path = new StringBuilder(32768);
+            UInt32 length = GetFinalPathNameByHandleW(
+                handle,
+                path,
+                (UInt32)path.Capacity,
+                0
+            );
+            if (length == 0 || length >= path.Capacity) {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "Retained daily lock path lookup failed"
+                );
+            }
+            string value = path.ToString();
+            if (value.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase)) {
+                return @"\\" + value.Substring(8);
+            }
+            if (value.StartsWith(@"\\?\", StringComparison.OrdinalIgnoreCase)) {
+                return value.Substring(4);
+            }
+            return value;
+        }
+    }
+}
+'@
+}
+
+function Open-DawnstrikeRetainedDailyRunLock {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    $full = [System.IO.Path]::GetFullPath($Path)
+    Assert-DawnstrikeLockNoReparseComponents $full $Label
+    Initialize-DawnstrikeDailyLockNative
+    $nativeHandle = [Dawnstrike.Locking.DailyLockNative]::CreateNewRetained($full)
+    try {
+        return [System.IO.FileStream]::new(
+            $nativeHandle,
+            [System.IO.FileAccess]::ReadWrite,
+            4096,
+            $false
+        )
+    }
+    catch {
+        $nativeHandle.Dispose()
+        throw
+    }
+}
+
+function Open-DawnstrikeRetainedExistingDailyRunLock {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    $full = [System.IO.Path]::GetFullPath($Path)
+    Assert-DawnstrikeLockNoReparseComponents $full $Label
+    Initialize-DawnstrikeDailyLockNative
+    $nativeHandle = [Dawnstrike.Locking.DailyLockNative]::OpenExistingRetained($full)
+    try {
+        $stream = [System.IO.FileStream]::new(
+            $nativeHandle,
+            [System.IO.FileAccess]::ReadWrite,
+            4096,
+            $false
+        )
+        $actual = [System.IO.Path]::GetFullPath(
+            [Dawnstrike.Locking.DailyLockNative]::GetFinalPath($stream.SafeFileHandle)
+        )
+        if (-not [string]::Equals(
+            $full,
+            $actual,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) { throw "$Label retained handle is bound to a different path." }
+        return $stream
+    }
+    catch {
+        if ($null -ne $stream) { $stream.Dispose() }
+        else { $nativeHandle.Dispose() }
+        throw
+    }
+}
+
+function Get-DawnstrikeRetainedDailyRunLockSnapshot {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][object]$Lock)
+
+    $property = $Lock.PSObject.Properties['retained_handle']
+    if ($null -eq $property -or $null -eq $property.Value) {
+        throw 'Daily run lock has no retained handle.'
+    }
+    $handle = [System.IO.FileStream]$property.Value
+    if (-not $handle.CanRead -or -not $handle.CanWrite -or $handle.SafeFileHandle.IsClosed) {
+        throw 'Daily run lock retained handle is no longer valid.'
+    }
+    $expectedPath = [System.IO.Path]::GetFullPath([string]$Lock.lock_path)
+    $handlePath = [System.IO.Path]::GetFullPath(
+        [Dawnstrike.Locking.DailyLockNative]::GetFinalPath($handle.SafeFileHandle)
+    )
+    if (-not [string]::Equals(
+        $expectedPath,
+        $handlePath,
+        [System.StringComparison]::OrdinalIgnoreCase
+    )) { throw 'Daily run lock retained handle is bound to a different path.' }
+    Assert-DawnstrikeLockNoReparseComponents $expectedPath 'Daily run lock'
+    $handle.Flush($true)
+    if ($handle.Length -gt 1048576) { throw 'Daily run lock exceeds the lock byte ceiling.' }
+    $position = $handle.Position
+    try {
+        $handle.Position = 0
+        $bytes = [byte[]]::new([int]$handle.Length)
+        $offset = 0
+        while ($offset -lt $bytes.Length) {
+            $count = $handle.Read($bytes, $offset, $bytes.Length - $offset)
+            if ($count -le 0) { throw 'Daily run lock retained handle returned incomplete bytes.' }
+            $offset += $count
+        }
+    }
+    finally { $handle.Position = $position }
+    $bytesSha256 = Get-DawnstrikeLockBytesSha256 $bytes
+    try { $payload = [System.Text.Encoding]::UTF8.GetString($bytes) | ConvertFrom-Json }
+    catch { throw 'Daily run lock retained bytes are not valid JSON.' }
+    if (
+        [string]$payload.lock_token -ne [string]$Lock.lock_token -or
+        $bytesSha256 -ne [string]$Lock.bytes_sha256 -or
+        [string]$payload.research_only -ne 'True' -or
+        [string]$payload.broker_execution_enabled -ne 'False'
+    ) { throw 'Daily run lock retained bytes do not match its exact ownership identity.' }
+    return [pscustomobject]@{
+        path = $handlePath
+        bytes_sha256 = $bytesSha256
+        lock_token = [string]$payload.lock_token
+        payload = $payload
+    }
+}
+
+function Confirm-DawnstrikeRetainedDailyRunLock {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][object]$Lock)
+
+    $retained = Get-DawnstrikeRetainedDailyRunLockSnapshot -Lock $Lock
+    $pathSnapshot = Get-DawnstrikeLockSnapshot `
+        -Path ([string]$Lock.lock_path) -Label 'Daily run lock'
+    if (
+        [string]$retained.path -ne [string]$pathSnapshot.path -or
+        [string]$retained.lock_token -ne [string]$pathSnapshot.lock_token -or
+        [string]$retained.bytes_sha256 -ne [string]$pathSnapshot.bytes_sha256
+    ) { throw 'Daily run lock path is not bound to its retained handle.' }
+    return $true
+}
+
 function Enter-DawnstrikeDailyRunLockCore {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$StateRoot,
         [Parameter(Mandatory = $true)][string]$MarketDate,
         [Parameter(Mandatory = $true)][string]$Owner,
-        [int]$StaleAfterMinutes = 240
+        [int]$StaleAfterMinutes = 240,
+        [switch]$RetainHandle
     )
 
     if ($StaleAfterMinutes -le 0) {
@@ -341,21 +706,25 @@ function Enter-DawnstrikeDailyRunLockCore {
         research_only = $true
         broker_execution_enabled = $false
     } | ConvertTo-Json -Depth 3
+    $handle = $null
     try {
-        $handle = [System.IO.File]::Open(
-            $lockPath,
-            [System.IO.FileMode]::CreateNew,
-            [System.IO.FileAccess]::Write,
-            [System.IO.FileShare]::None
-        )
-        try {
-            $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
-            $handle.Write($bytes, 0, $bytes.Length)
-            $handle.Flush($true)
-        } finally {
-            $handle.Dispose()
+        if ($RetainHandle) {
+            $handle = Open-DawnstrikeRetainedDailyRunLock `
+                -Path $lockPath -Label 'Daily run lock'
         }
-    } catch [System.IO.IOException] {
+        else {
+            $handle = [System.IO.File]::Open(
+                $lockPath,
+                [System.IO.FileMode]::CreateNew,
+                [System.IO.FileAccess]::Write,
+                [System.IO.FileShare]::None
+            )
+        }
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
+        $handle.Write($bytes, 0, $bytes.Length)
+        $handle.Flush($true)
+    } catch [System.ComponentModel.Win32Exception] {
+        if ($null -ne $handle) { $handle.Dispose() }
         return [pscustomobject]@{
             acquired = $false
             lock_path = $lockPath
@@ -363,10 +732,51 @@ function Enter-DawnstrikeDailyRunLockCore {
             age_minutes = $null
         }
     }
+    catch [System.IO.IOException] {
+        if ($null -ne $handle) { $handle.Dispose() }
+        return [pscustomobject]@{
+            acquired = $false
+            lock_path = $lockPath
+            reason = "concurrent_lock_acquisition"
+            age_minutes = $null
+        }
+    }
+    catch {
+        if ($null -ne $handle) { $handle.Dispose() }
+        throw
+    }
+    finally {
+        if (-not $RetainHandle -and $null -ne $handle) {
+            $handle.Dispose()
+            $handle = $null
+        }
+    }
     Assert-DawnstrikeLockNoReparseComponents $lockPath "Daily run lock"
     $own = Get-DawnstrikeLockSnapshot -Path $lockPath -Label "Daily run lock"
     if (-not $own.present -or $own.lock_token -ne $lockToken) {
+        if ($RetainHandle -and $null -ne $handle) { $handle.Dispose() }
         throw "Daily run lock could not be read back with its own token."
+    }
+    $ownedLockFields = [ordered]@{
+        acquired = $true
+        lock_path = $lockPath
+        reason = "acquired"
+        age_minutes = 0
+        lock_token = $lockToken
+        bytes_sha256 = $own.bytes_sha256
+    }
+    if ($RetainHandle) {
+        $ownedLockFields.retained = $true
+        $ownedLockFields.retained_handle = $handle
+    }
+    $ownedLock = [pscustomobject]$ownedLockFields
+    if ($RetainHandle) {
+        try { $null = Confirm-DawnstrikeRetainedDailyRunLock -Lock $ownedLock }
+        catch {
+            $handle.Dispose()
+            $ownedLock.retained_handle = $null
+            throw
+        }
     }
     # Cooperative two-lock handshake: the pre-create check is only a
     # fast-path.  The post-create same-byte snapshot is authoritative.  If a
@@ -374,12 +784,7 @@ function Enter-DawnstrikeDailyRunLockCore {
     # only this unchanged daily lock and fail before any stage work begins.
     $activationAfter = Get-DawnstrikeLockSnapshot -Path $activationLockPath -Label "Runtime activation lock" -AllowMissing
     if ($activationAfter.present -and $Owner -notin @("runtime_activation", "runtime_rollback")) {
-        Remove-DawnstrikeOwnedLock -Lock $([pscustomobject]@{
-                acquired = $true
-                lock_path = $lockPath
-                lock_token = $lockToken
-                bytes_sha256 = $own.bytes_sha256
-            }) -Label "Daily run lock"
+        Remove-DawnstrikeOwnedLock -Lock $ownedLock -Label "Daily run lock"
         return [pscustomobject]@{
             acquired = $false
             lock_path = $lockPath
@@ -388,12 +793,7 @@ function Enter-DawnstrikeDailyRunLockCore {
         }
     }
     if ($Owner -in @("runtime_activation", "runtime_rollback") -and -not $activationAfter.present) {
-        Remove-DawnstrikeOwnedLock -Lock $([pscustomobject]@{
-                acquired = $true
-                lock_path = $lockPath
-                lock_token = $lockToken
-                bytes_sha256 = $own.bytes_sha256
-            }) -Label "Daily run lock"
+        Remove-DawnstrikeOwnedLock -Lock $ownedLock -Label "Daily run lock"
         throw "Runtime activation lock disappeared during the daily lock handshake."
     }
     try {
@@ -402,21 +802,11 @@ function Enter-DawnstrikeDailyRunLockCore {
             -CurrentLockPath $lockPath
     }
     catch {
-        Remove-DawnstrikeOwnedLock -Lock $([pscustomobject]@{
-                acquired = $true
-                lock_path = $lockPath
-                lock_token = $lockToken
-                bytes_sha256 = $own.bytes_sha256
-            }) -Label "Daily run lock"
+        Remove-DawnstrikeOwnedLock -Lock $ownedLock -Label "Daily run lock"
         throw
     }
     if ($foreignAfter.blocked) {
-        Remove-DawnstrikeOwnedLock -Lock $([pscustomobject]@{
-                acquired = $true
-                lock_path = $lockPath
-                lock_token = $lockToken
-                bytes_sha256 = $own.bytes_sha256
-            }) -Label "Daily run lock"
+        Remove-DawnstrikeOwnedLock -Lock $ownedLock -Label "Daily run lock"
         return [pscustomobject]@{
             acquired = $false
             lock_path = $lockPath
@@ -424,14 +814,7 @@ function Enter-DawnstrikeDailyRunLockCore {
             age_minutes = $null
         }
     }
-    return [pscustomobject]@{
-        acquired = $true
-        lock_path = $lockPath
-        reason = "acquired"
-        age_minutes = 0
-        lock_token = $lockToken
-        bytes_sha256 = $own.bytes_sha256
-    }
+    return $ownedLock
 }
 
 function Enter-DawnstrikeDailyRunLock {
@@ -440,7 +823,8 @@ function Enter-DawnstrikeDailyRunLock {
         [Parameter(Mandatory = $true)][string]$StateRoot,
         [Parameter(Mandatory = $true)][string]$MarketDate,
         [Parameter(Mandatory = $true)][string]$Owner,
-        [int]$StaleAfterMinutes = 240
+        [int]$StaleAfterMinutes = 240,
+        [switch]$RetainHandle
     )
 
     $mutex = Enter-DawnstrikeLockOperationMutex
@@ -462,6 +846,10 @@ function Confirm-DawnstrikeActivationDailyLockHandshakeCore {
 
     if (-not $ActivationLock.acquired -or -not $DailyLock.acquired) {
         throw "Activation/daily lock handshake requires both owned locks."
+    }
+    $retainedProperty = $DailyLock.PSObject.Properties['retained_handle']
+    if ($null -ne $retainedProperty -and $null -ne $retainedProperty.Value) {
+        $null = Confirm-DawnstrikeRetainedDailyRunLock -Lock $DailyLock
     }
     $lockRoot = Join-Path $StateRoot "locks"
     Assert-DawnstrikeLockNoReparseComponents $lockRoot "Activation lock root"

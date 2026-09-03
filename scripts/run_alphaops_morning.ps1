@@ -71,7 +71,8 @@ function Write-MorningStage {
         -LogName "record_stage-$Name-$MarketDate"
     if ($receipt.exit_code -ne 0) { $script:recordStageFailed = $true }
 }
-$dailyLock = Enter-DawnstrikeDailyRunLock -StateRoot $state -MarketDate $MarketDate -Owner "alphaops_morning"
+$dailyLock = Enter-DawnstrikeDailyRunLock `
+    -StateRoot $state -MarketDate $MarketDate -Owner "alphaops_morning" -RetainHandle
 if (-not $dailyLock.acquired) {
     $lockReceiptWritten = Write-DawnstrikeLockDenialReceipt -StateRoot $state -MarketDate $MarketDate -Owner "alphaops_morning" -Lock $dailyLock
     foreach ($stage in @("morning_collection", "ranking_delivery")) {

@@ -3,12 +3,16 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from types import MappingProxyType, SimpleNamespace
 
 import pytest
 
+import intraday_scanner.services.capture_operations as capture_operations
 from intraday_scanner.services.capture_operations import CapturePlan, CapturePlanError, plan_as_dict
 
 
@@ -67,6 +71,69 @@ def _clean_repo(tmp_path: Path) -> Path:
         capture_output=True,
     )
     return repo
+
+
+def test_capture_git_environment_binds_only_exact_repository_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = tmp_path / "repo"
+    (repository / ".git").mkdir(parents=True)
+    monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", str(tmp_path / "hostile"))
+
+    environment = capture_operations._governed_git_environment(repository)
+    git_environment = {
+        key.upper(): value for key, value in environment.items() if key.upper().startswith("GIT_")
+    }
+
+    resolved = repository.resolve(strict=True)
+    git_dir = str(resolved / ".git")
+    assert git_environment == {
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_SYSTEM": os.devnull,
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_ATTR_NOSYSTEM": "1",
+        "GIT_DIR": git_dir,
+        "GIT_COMMON_DIR": git_dir,
+        "GIT_WORK_TREE": str(resolved),
+    }
+
+
+def test_capture_identity_consumes_only_the_admitted_git_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = tmp_path / "runtime"
+    contract = MappingProxyType(
+        {
+            "schema_version": "dawnstrike.exact_git_contract.v1",
+            "root": os.path.normcase(os.path.abspath(repository)),
+            "candidate_sha": "a" * 40,
+            "candidate_tree": "b" * 40,
+            "origin_url": None,
+            "origin_main_sha": None,
+            "git_executable_sha256": "c" * 64,
+            "clean": True,
+            "tracked_inventory": (("100644", "d" * 40, "requirements.lock"),),
+            "release_authority_blobs": MappingProxyType({"requirements.lock": b"locked"}),
+            "public_web_inventory": (),
+            "public_web_blobs": MappingProxyType({}),
+        }
+    )
+    monkeypatch.setattr(sys, "_dawnstrike_exact_git_contract_v1", contract, raising=False)
+    monkeypatch.setenv("DAWNSTRIKE_EXACT_GIT_ADMISSION_REQUIRED", "1")
+    monkeypatch.setattr(
+        capture_operations.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("post-admission Git subprocess attempted"),
+    )
+
+    assert capture_operations._git_identity(repository) == (
+        "a" * 40,
+        "b" * 40,
+        "c" * 64,
+    )
 
 
 def _plan(tmp_path: Path, repo: Path) -> CapturePlan:
@@ -134,6 +201,7 @@ def _plan(tmp_path: Path, repo: Path) -> CapturePlan:
         symbols_manifest=manifest,
         symbols_manifest_sha256=_sha(manifest),
         expected_session=session,
+        expected_session_sha256=_sha(session),
         entitlement_receipt=entitlement,
         entitlement_receipt_sha256=_sha(entitlement),
         source_config=source,
@@ -203,6 +271,7 @@ def test_plan_rejects_recent_window(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
+    object.__setattr__(plan, "expected_session_sha256", _sha(session))
     with pytest.raises(CapturePlanError, match="15 minutes old"):
         plan.validate(now=datetime(2026, 8, 28, 20, 5, tzinfo=UTC))
 
@@ -243,6 +312,129 @@ def test_plan_rejects_unproven_entitlement_receipt(tmp_path: Path) -> None:
         plan.validate(now=datetime(2026, 8, 30, 12, tzinfo=UTC))
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows share-mode boundary")
+def test_capture_admission_retains_authority_handles_through_child_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _clean_repo(tmp_path)
+    plan_root = tmp_path / "plan"
+    plan_root.mkdir()
+    plan = _plan(plan_root, repo)
+    module = _operations_module()
+    blocked: dict[str, bool] = {}
+    attacked_paths: list[Path] = []
+    authority_paths = {
+        "symbols": plan.symbols_manifest.resolve(),
+        "session": plan.expected_session.resolve(),
+        "entitlement": plan.entitlement_receipt.resolve(),
+        "source_config": plan.source_config.resolve(),
+    }
+
+    class FakeStore:
+        def __init__(self, _path: str) -> None:
+            pass
+
+        def persist_expected_market_session(self, payload: dict[str, object]) -> None:
+            assert payload["exchange"] == "XNYS"
+            assert payload["session_open_utc"] == "2026-08-28T13:30:00Z"
+
+    real_read_text = Path.read_text
+
+    def deny_authority_reopen(path: Path, *args: object, **kwargs: object) -> str:
+        if path.resolve() in authority_paths.values():
+            pytest.fail(f"authoritative input was reopened by pathname: {path}")
+        return real_read_text(path, *args, **kwargs)
+
+    def hostile_child(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        all_inputs = dict(authority_paths)
+        all_inputs["derived_symbols"] = Path(command[command.index("--symbols-file") + 1])
+        all_inputs["derived_entitlement"] = Path(
+            command[command.index("--operator-entitlement-metadata") + 1]
+        )
+        for label, path in all_inputs.items():
+            attacked_paths.append(path)
+            replacement = path.with_name(f"hostile-{label}.json")
+            replacement.write_bytes(b"{}")
+            try:
+                os.replace(replacement, path)
+            except PermissionError:
+                blocked[label] = True
+            else:
+                blocked[label] = False
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"status": "COMPLETE", "run_id": "test-run"}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(module, "IntradayEvidenceStore", FakeStore)
+    monkeypatch.setattr(module, "_approved_child_python", lambda: Path(sys.executable))
+    args = SimpleNamespace(execute=True)
+
+    with plan.admit(now=datetime(2026, 8, 30, 12, tzinfo=UTC)) as admission:
+        monkeypatch.setattr(module.subprocess, "run", hostile_child)
+        monkeypatch.setattr(Path, "read_text", deny_authority_reopen)
+        assert module._run_admitted_capture(args, plan, admission) == 0
+        assert admission.expected_session["exchange"] == "XNYS"
+        assert (
+            admission.sanitized_entitlement_metadata(receipt_hash=plan.entitlement_receipt_sha256)[
+                "entitlement"
+            ]
+            == "alpaca-historical-sip-older-than-15-minutes"
+        )
+
+    assert blocked == {
+        "symbols": True,
+        "session": True,
+        "entitlement": True,
+        "source_config": True,
+        "derived_symbols": True,
+        "derived_entitlement": True,
+    }
+    for path in attacked_paths:
+        assert path.exists()
+
+
+def test_capture_execution_uses_admitted_session_and_entitlement_without_path_reopen() -> None:
+    source = Path("scripts/capture_intraday_operations.py").read_text(encoding="utf-8")
+    assert "admission.expected_session" in source
+    assert "admission.sanitized_entitlement_metadata" in source
+    assert "plan.expected_session.read_text" not in source
+    assert "plan.sanitized_entitlement_metadata" not in source
+
+
+def test_evidence_child_parses_the_same_bytes_it_hashes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _evidence_module()
+    symbols_path = tmp_path / "symbols.txt"
+    admitted = b"SPY\nIWM\n"
+    symbols_path.write_bytes(admitted)
+    expected_sha256 = hashlib.sha256(admitted).hexdigest()
+    metadata_path = tmp_path / "metadata.json"
+    admitted_metadata = b'{"entitlement":"sip","research_only":"true"}\n'
+    metadata_path.write_bytes(admitted_metadata)
+    metadata_sha256 = hashlib.sha256(admitted_metadata).hexdigest()
+    real_read_bytes = Path.read_bytes
+
+    def swap_after_read(path: Path) -> bytes:
+        raw = real_read_bytes(path)
+        if path == symbols_path:
+            path.write_bytes(b"HOSTILE\n")
+        elif path == metadata_path:
+            path.write_bytes(b'{"entitlement":"hostile"}\n')
+        return raw
+
+    monkeypatch.setattr(Path, "read_bytes", swap_after_read)
+
+    assert module._read_symbols(symbols_path, expected_sha256) == ["SPY", "IWM"]
+    assert module._read_metadata(metadata_path, metadata_sha256)["entitlement"] == "sip"
+    assert real_read_bytes(symbols_path) == b"HOSTILE\n"
+    assert real_read_bytes(metadata_path) == b'{"entitlement":"hostile"}\n'
+
+
 def test_capture_script_is_plan_only_without_execute() -> None:
     script = Path("scripts/capture_intraday_operations.py").read_text(encoding="utf-8")
     registration = Path("scripts/register_intraday_capture_task.ps1").read_text(encoding="utf-8")
@@ -261,12 +453,9 @@ def test_capture_script_is_plan_only_without_execute() -> None:
         '$pythonPrefix = @("-I", "-B", "-S", "-X", ("pycache_prefix=" + $bytecodePrefix), "-u")'
         in registration
     )
-    assert '$bootstrapArgs = @(' in registration
+    assert "$bootstrapArgs = @(" in registration
     assert '"-c", $bootstrapPreloader, $bootstrap, $bootstrapSha256' in registration
-    assert (
-        '"--release-root", $RuntimeRoot, "--expected-sha", $CandidateSha,'
-        in registration
-    )
+    assert '"--release-root", $RuntimeRoot, "--expected-sha", $CandidateSha,' in registration
     assert '"--script", $runner, "--"' in registration
     assert "Get-AuthenticodeSignature" in registration
     execute_index = registration.index("$pythonVersion = @(& $Python -I -c")
@@ -299,12 +488,14 @@ def test_nested_capture_python_is_isolated_and_scrubs_startup_environment(monkey
     monkeypatch.setenv("PYTHONPATH", r"C:\hostile")
     monkeypatch.setenv("PYTHONHOME", r"C:\hostile-home")
     monkeypatch.setenv("PYTHONSTARTUP", r"C:\hostile-startup.py")
+    monkeypatch.setenv("DAWNSTRIKE_EXACT_GIT_ADMISSION_REQUIRED", "1")
     for module in (daily, operations):
         env = module._isolated_child_environment()
         assert "PYTHONPATH" not in env
         assert "PYTHONHOME" not in env
         assert "PYTHONSTARTUP" not in env
         assert env["PYTHONDONTWRITEBYTECODE"] == "1"
+        assert env["DAWNSTRIKE_EXACT_GIT_ADMISSION_REQUIRED"] == "1"
     for path in (
         Path("scripts/run_daily_intraday_capture.py"),
         Path("scripts/capture_intraday_operations.py"),
@@ -312,6 +503,10 @@ def test_nested_capture_python_is_isolated_and_scrubs_startup_environment(monkey
         source = path.read_text(encoding="utf-8")
         assert '"-I",' in source
         assert '"-B",' in source
+        assert '"-S",' in source
+        assert "_BOOTSTRAP_PRELOADER" in source
+        assert '"--release-root",' in source
+        assert '"--expected-sha",' in source
         assert "_approved_child_python()" in source
 
 

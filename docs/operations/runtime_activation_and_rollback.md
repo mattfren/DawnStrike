@@ -28,9 +28,11 @@ artifact. A read-only clock seam exists only for guarded tests.
 
 The tool fails closed unless all of the following are true:
 
-- `CandidateRoot` is a clean, self-contained Git checkout whose `HEAD` equals
-  both the requested SHA and freshly fetched `origin/main`; it is also the
-  checkout containing the invoked tool.
+- `CandidateRoot` is a clean, self-contained clone (not a linked Git worktree)
+  whose local configuration keeps `extensions.worktreeConfig` disabled and
+  whose `HEAD` equals both the requested SHA and freshly fetched `origin/main`;
+  it is also the checkout containing the invoked tool. Git pointer/common-dir
+  and configuration bytes remain handle-locked throughout admission.
 - No ignored executable, library, script, bytecode, `.pth`, or Python startup
   hook exists in the candidate, current runtime, stage, or rollback checkout.
   Inert ignored cache metadata is permitted.
@@ -254,7 +256,8 @@ Run the same command without `-PreflightOnly`. The tool:
    state root;
 6. creates and verifies a Git rollback bundle, then seals a `PREPARED`
    receipt;
-7. renames the old runtime to its durable rollback checkout and the verified
+7. after the durable `PRE_SWAP` journal, rechecks the session clock and then
+   renames the old runtime to its durable rollback checkout and the verified
    stage to the fixed runtime path;
 8. verifies the installed commit/tree/origin while every task remains exactly
    `Disabled`, seals the pre-rebind task identity and rebind intent in the
@@ -266,8 +269,9 @@ Run the same command without `-PreflightOnly`. The tool:
 10. proves all five disabled actions are the exact candidate-SHA contract,
     seals the ready-to-enable `PREPARED` receipt, and enters
     `POST_SWAP_READY` before enabling any task; and
-11. re-enables only the originally enabled five tasks, verifies the exact new
-    Ready contract, then atomically seals a `COMPLETE` receipt. The sealed
+11. rechecks the session clock after the durable ready journal, re-enables only
+    the originally enabled five tasks, verifies the exact new Ready contract,
+    then atomically seals a `COMPLETE` receipt. The sealed
     scheduler backup retains the pre-activation action contract for
     compensation or rollback.
 
@@ -291,9 +295,9 @@ which recovery state is admissible:
 | Journal phase | Admissible scheduler boundary | Governed recovery |
 | --- | --- | --- |
 | `PRE_QUIESCE` | The sealed pre-activation XML exists; enablement may be partially quiesced. Each action must be exactly either its sealed legacy form or the pinned-executable-only normalization derived from that form, with every non-action XML invariant unchanged. | Restore every exact XML-backed action and the original Ready contract. Do not write the candidate SHA into the old runtime's tasks. Any third action form or XML drift fails closed. |
-| `PRE_SWAP` | All five tasks are `Disabled` and match the sealed pre-rebind contract; the old runtime or the exact staged/rollback rename boundary is provable. | Complete the two-directory swap or compensate to the previous runtime and XML contract. |
-| `POST_SWAP` (rebind intent) | The candidate is installed, the rollback checkout is present, and all five tasks are `Disabled`. Each action must be exactly either its sealed pre-rebind form or its independently derived candidate-SHA form, and all preserved XML sections must match. This is the only phase in which a 1-through-4 partial rebind is admissible. | Verify the installed candidate and exact per-task old-or-target action proof, then idempotently converge every action to the candidate-SHA form or compensate using the previous runtime and sealed XML. Any third form fails closed. |
-| `POST_SWAP_READY` | All five tasks are `Disabled`, all five actions are exactly candidate-SHA-bound, and the journal binds the ready-to-enable `PREPARED` receipt. | Finish a partial enablement, re-prove the exact Ready contract, and seal `COMPLETE`. |
+| `PRE_SWAP` | All five tasks are `Disabled` and match the sealed pre-rebind contract; the old runtime or the exact staged/rollback rename boundary is provable. | Recheck the current session clock immediately before any cutover rename. If the window closed, restore the previous runtime and sealed Ready XML contract and seal `COMPENSATED`; never install or enable the candidate. |
+| `POST_SWAP` (rebind intent) | The candidate is installed, the rollback checkout is present, and all five tasks are `Disabled`. Each action must be exactly either its sealed pre-rebind form or its independently derived candidate-SHA form, and all preserved XML sections must match. This is the only phase in which a 1-through-4 partial rebind is admissible. | Verify the installed candidate and exact per-task old-or-target action proof, then idempotently converge every action to the candidate-SHA form. Recheck the current clock immediately before enablement; if the window closed, restore the previous runtime and sealed Ready XML and seal `COMPENSATED`. Any third form fails closed. |
+| `POST_SWAP_READY` | The journal binds the ready-to-enable `PREPARED` receipt. A crash may have left zero through five candidate tasks enabled. | Force all five tasks back to the exact sealed Disabled candidate boundary, then recheck the current clock immediately before enablement. If the window closed, restore the previous runtime and sealed Ready XML and seal `COMPENSATED`; otherwise enable, re-prove the exact Ready contract, and seal `COMPLETE`. |
 | `COMPLETE` | All five canonical tasks are `Ready` under the exact candidate action/definition hashes. | Verify and return the existing terminal receipt; do not repeat mutation. |
 
 `POST_SWAP` rebind intent is recovery authority only when the journal, lock
@@ -304,6 +308,14 @@ the tool compares each disabled task with the two exact allowed action forms
 and proves that `Principal`, `Triggers`, `Settings`, task path, and working
 directory did not change. It does not accept an action merely because it
 contains a plausible SHA or points somewhere under `C:\r`.
+
+No nonterminal recovery phase inherits an earlier process's activation clock.
+An expired recovery is terminally compensated to the exact previous runtime and
+pre-activation Ready task contract. In every pre-swap crash shape the candidate
+is preserved at the governed failed-candidate path, while the fixed stage and
+rollback-checkout paths are proven absent before the compensation journal and
+locks become terminal. Candidate task enablement is never used as a recovery
+mechanism after the Morning boundary.
 
 Never normalize a task manually with Task Scheduler, `Set-ScheduledTask`, or
 `schtasks`. Those edits would not be journaled, would break the XML/action
@@ -391,6 +403,19 @@ C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe `
   -StateRoot C:\r\dawnstrike-state `
   -BackupRoot C:\r\dawnstrike-state-backups
 ```
+
+Rollback has no pre-Morning mutation window. Immediately before creating or
+adopting its runtime-activation lock, it takes a fresh host Task Scheduler
+snapshot and requires exactly one instance of each of the five canonical
+tasks. Every task must be `Ready` or `Disabled` (never `Running` or `Queued`),
+the EOD and Finalizer `LastRunTime` values must be from the host current date
+with EOD no later than Finalizer and Finalizer no later than the current time,
+and no canonical `NextRunTime` may remain on that date. On Monday, Weekly must
+also have a same-date completed run and an advanced next-run time. Fresh and
+crash-recovery rollback paths share this post-Finalizer-only admission.
+Compensation receipt verification and sealing use the same bounded child
+process timeout as the rollback transaction; a timeout preserves journal and
+receipt evidence and removes only the uncommitted temporary input file.
 
 For a crash before the complete receipt, pass the matching `.prepared.json`.
 The tool verifies the bundle hash, exact previous commit/tree/origin, current

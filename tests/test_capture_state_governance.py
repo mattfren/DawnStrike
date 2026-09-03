@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -1167,6 +1168,146 @@ def test_daily_lock_live_prior_date_blocks_new_date(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
+def test_retained_daily_lock_blocks_delete_write_and_reacquire(tmp_path: Path) -> None:
+    payload = _run_lock_harness(
+        tmp_path,
+        r"""
+    $first = Enter-DawnstrikeDailyRunLock `
+        -StateRoot $state -MarketDate '2026-09-01' -Owner 'retained-first' -RetainHandle
+    if (-not $first.acquired) { throw ('retained lock was not acquired: ' + $first.reason) }
+    $deleteBlocked = $false
+    try { [IO.File]::Delete([string]$first.lock_path) } catch { $deleteBlocked = $true }
+    $writeBlocked = $false
+    try { [IO.File]::WriteAllText([string]$first.lock_path, 'hostile') } catch { $writeBlocked = $true }
+    $hostile = Join-Path (Split-Path -Parent $first.lock_path) 'hostile-daily.lock'
+    [IO.File]::WriteAllText($hostile, 'hostile')
+    $replaceBlocked = $false
+    try { [IO.File]::Replace($hostile, [string]$first.lock_path, $null) } catch { $replaceBlocked = $true }
+    $lockRoot = Split-Path -Parent $first.lock_path
+    $movedRoot = "$lockRoot.hostile-move"
+    $rootRenameBlocked = $false
+    try { [IO.Directory]::Move($lockRoot, $movedRoot) } catch { $rootRenameBlocked = $true }
+    $second = Enter-DawnstrikeDailyRunLock `
+        -StateRoot $state -MarketDate '2026-09-01' -Owner 'retained-second' -RetainHandle
+    $confirmed = Confirm-DawnstrikeRetainedDailyRunLock -Lock $first
+    Exit-DawnstrikeDailyRunLock -Lock $first
+    [pscustomobject]@{
+        delete_blocked = $deleteBlocked
+        write_blocked = $writeBlocked
+        replace_blocked = $replaceBlocked
+        root_rename_blocked = $rootRenameBlocked
+        canonical_root_present = [IO.Directory]::Exists($lockRoot)
+        moved_root_absent = -not [IO.Directory]::Exists($movedRoot)
+        second_acquired = [bool]$second.acquired
+        second_reason = [string]$second.reason
+        confirmed = [bool]$confirmed
+        absent_after_exit = -not [IO.File]::Exists([string]$first.lock_path)
+    } | ConvertTo-Json -Compress
+""",
+    )
+    assert payload == {
+        "delete_blocked": True,
+        "write_blocked": True,
+        "replace_blocked": True,
+        "root_rename_blocked": True,
+        "canonical_root_present": True,
+        "moved_root_absent": True,
+        "second_acquired": False,
+        "second_reason": "active_lock",
+        "confirmed": True,
+        "absent_after_exit": True,
+    }
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
+def test_retained_daily_lock_hard_crash_preserves_recoverable_evidence(
+    tmp_path: Path,
+) -> None:
+    source = Path.cwd()
+    stage_q = str(source / "scripts" / "invoke_dawnstrike_stage.ps1").replace("'", "''")
+    state = tmp_path / "state"
+    state.mkdir()
+    state_q = str(state).replace("'", "''")
+    crash_command = rf"""
+. '{stage_q}'
+$lock = Enter-DawnstrikeDailyRunLock `
+    -StateRoot '{state_q}' -MarketDate '2026-09-01' -Owner 'crash-owner' -RetainHandle
+if (-not $lock.acquired) {{ throw ('retained lock was not acquired: ' + $lock.reason) }}
+Stop-Process -Id $PID -Force
+"""
+    crashed = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", crash_command],
+        cwd=source,
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+    assert crashed.returncode != 0
+    lock_path = state / "locks" / "dawnstrike-daily-2026-09-01.lock"
+    assert lock_path.is_file()
+
+    payload = _run_lock_harness(
+        tmp_path,
+        r"""
+    $recovered = Enter-DawnstrikeDailyRunLock `
+        -StateRoot $state -MarketDate '2026-09-01' -Owner 'recovery-owner' -RetainHandle
+    if (-not $recovered.acquired) { throw ('crash lock was not recovered: ' + $recovered.reason) }
+    $archives = @(
+        Get-ChildItem -LiteralPath (Join-Path $state 'locks') `
+            -Filter 'dawnstrike-daily-2026-09-01.lock.stale-dead-*' -File
+    )
+    Exit-DawnstrikeDailyRunLock -Lock $recovered
+    [pscustomobject]@{
+        acquired = [bool]$recovered.acquired
+        archive_count = $archives.Count
+        absent_after_exit = -not [IO.File]::Exists([string]$recovered.lock_path)
+    } | ConvertTo-Json -Compress
+""",
+    )
+    assert payload == {
+        "acquired": True,
+        "archive_count": 1,
+        "absent_after_exit": True,
+    }
+
+
+def test_every_production_daily_lock_acquisition_retains_the_exact_handle() -> None:
+    expected = {
+        "scripts/activate_dawnstrike_runtime.ps1": 7,
+        "scripts/bootstrap_luna_core_universe.ps1": 1,
+        "scripts/rollback_dawnstrike_runtime.ps1": 3,
+        "scripts/run_alphaops_eod.ps1": 1,
+        "scripts/run_alphaops_monitor.ps1": 1,
+        "scripts/run_alphaops_morning.ps1": 1,
+        "scripts/run_alphaops_weekly_training.ps1": 1,
+        "scripts/run_daily_finalize.ps1": 1,
+    }
+    observed: dict[str, int] = {}
+    marker = re.compile(r"\bEnter-DawnstrikeDailyRunLock\b")
+    for path in sorted(Path("scripts").glob("*.ps1")):
+        statement: list[str] = []
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or (not statement and line.startswith("#")):
+                continue
+            statement.append(line)
+            if line.endswith("`"):
+                continue
+            logical = " ".join(statement)
+            statement.clear()
+            if not marker.search(logical) or logical.casefold().startswith("function "):
+                continue
+            relative = path.as_posix()
+            observed[relative] = observed.get(relative, 0) + 1
+            assert "-RetainHandle" in logical, (
+                f"production daily-lock acquisition is not retained: {relative}: {logical}"
+            )
+        assert not statement, f"unterminated PowerShell continuation in {path}"
+    assert observed == expected
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
 def test_daily_lock_foreign_hash_race_fails_closed(tmp_path: Path) -> None:
     payload = _run_lock_harness(
         tmp_path,
@@ -1220,6 +1361,67 @@ def test_daily_lock_foreign_archive_collision_fails_closed(tmp_path: Path) -> No
 """,
     )
     assert payload == {"blocked": True, "source_present": True}
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
+def test_dead_daily_lock_archive_holds_exact_source_against_replacement(
+    tmp_path: Path,
+) -> None:
+    payload = _run_lock_harness(
+        tmp_path,
+        r"""
+    $locks = Join-Path $state 'locks'
+    New-Item -ItemType Directory -Path $locks -Force | Out-Null
+    $oldPath = Join-Path $locks 'dawnstrike-daily-2026-08-31.lock'
+    $dead = [ordered]@{
+        schema_version = 'dawnstrike.daily_run_lock.v3'; market_date = '2026-08-31'; owner = 'normal_stage'
+        acquired_at = '2026-08-31T12:00:00Z'; process_id = 2147483646
+        process_started_at_utc = '2026-08-31T12:00:00Z'; lock_token = 'exact-dead-owner'
+        research_only = $true; broker_execution_enabled = $false
+    } | ConvertTo-Json -Depth 3
+    [IO.File]::WriteAllText($oldPath, $dead, [Text.UTF8Encoding]::new($false))
+    $snapshot = Get-DawnstrikeLockSnapshot -Path $oldPath -Label 'old daily lock'
+    $script:replacementPath = Join-Path $locks 'replacement-live.lock'
+    $replacement = [ordered]@{
+        schema_version = 'dawnstrike.daily_run_lock.v3'; market_date = '2026-08-31'; owner = 'hostile-live'
+        acquired_at = [DateTime]::UtcNow.ToString('o'); process_id = $PID
+        process_started_at_utc = (Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('o')
+        lock_token = 'replacement-live-owner'; research_only = $true; broker_execution_enabled = $false
+    } | ConvertTo-Json -Depth 3
+    [IO.File]::WriteAllText($script:replacementPath, $replacement, [Text.UTF8Encoding]::new($false))
+    $script:displacedPath = Join-Path $locks 'displaced-dead.lock'
+    $script:archiveRaceBlocked = $false
+    $script:realOpenExisting = ${function:Open-DawnstrikeRetainedExistingDailyRunLock}
+    function Open-DawnstrikeRetainedExistingDailyRunLock {
+        [CmdletBinding()]
+        param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Label)
+        $held = & $script:realOpenExisting -Path $Path -Label $Label
+        try {
+            [IO.File]::Move($Path, $script:displacedPath)
+            [IO.File]::Move($script:replacementPath, $Path)
+        }
+        catch { $script:archiveRaceBlocked = $true }
+        return $held
+    }
+    $archive = Move-DawnstrikeDeadDailyLockToArchive -Snapshot $snapshot -Label 'old daily lock'
+    $archived = Get-DawnstrikeLockSnapshot -Path $archive.path -Label 'old daily lock archive'
+    $replacementSnapshot = Get-DawnstrikeLockSnapshot -Path $script:replacementPath -Label 'replacement lock'
+    [pscustomobject]@{
+        race_blocked = $script:archiveRaceBlocked
+        source_absent = -not (Test-Path -LiteralPath $oldPath)
+        displaced_absent = -not (Test-Path -LiteralPath $script:displacedPath)
+        archived_token = [string]$archived.lock_token
+        replacement_token = [string]$replacementSnapshot.lock_token
+    } | ConvertTo-Json -Compress
+""",
+    )
+    assert payload == {
+        "race_blocked": True,
+        "source_absent": True,
+        "displaced_absent": True,
+        "archived_token": "exact-dead-owner",
+        "replacement_token": "replacement-live-owner",
+    }
 
 
 @pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")

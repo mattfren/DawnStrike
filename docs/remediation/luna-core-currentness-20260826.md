@@ -45,7 +45,34 @@ new pointer swap. If an interrupted prior attempt left the same deterministic
 generation name inactive, the refresh preserves that entry under a unique
 `.orphan.` name before building a clean generation; unknown bytes are never
 deleted as recovery evidence. An exclusive refresh lock rejects concurrent
-writers. A successful scheduled refresh must report `status: READY` and
+writers. On Windows, a provably dead refresh lock is archived by renaming its
+exact no-delete-shared handle to a unique no-clobber destination; a competing
+replacement cannot be mistaken for the dead owner. POSIX has no equivalent
+generally available handle-bound compare-and-rename primitive, so automatic
+stale-lock archival is intentionally fail-closed there and requires explicit
+operator recovery. Before protected bootstrap admission and again while the daily lock
+is owned, every existing component of the state root, log root, daily-lock
+root, `config`, refresh lock, active pointer, and generation root must be a
+regular non-reparse entry. Bootstrap creates and holds an exact immutable
+marker in the daily-lock root, then retains a write-compatible/no-delete
+directory handle across governed daily-lock acquisition and release. This
+keeps the lock root nonempty against an in-place reparse conversion without
+changing the canonical `dawnstrike-daily-*.lock` enumeration; after release,
+it removes only its exact marker under a reacquired strict directory guard.
+Before any elevated native-process output, bootstrap creates a unique
+per-invocation directory below `$state\logs`, replaces its inherited ACL with
+an Administrators/SYSTEM-write and Users-read boundary, requires it to be
+empty, and retains no-delete handles for the state, log, and operation
+directories through receipt validation. The refresh creates an absent `config`
+directory one level at a time and holds every Windows state/config/generation
+write parent against replacement. During each atomic-write phase it also holds
+an exact, single-link boundary marker against writes and deletion; the marker
+keeps that directory nonempty, so admitting the write sharing required by
+atomic child replacement cannot admit an in-place reparse conversion. The
+refresh repeats the same fail-closed checks before elevated writes; a symlink,
+junction, other reparse point, wrong entry type, tampered boundary marker, or
+detected swap aborts without following the entry. A successful scheduled
+refresh must report `status: READY` and
 `ndx_member_count: 102`. It
 writes the raw capture and manifest under an immutable generation below
 `$state\config\luna_core_universe_generations\`, then atomically swaps
@@ -54,10 +81,10 @@ If source download/schema/attestation validation fails, the active pointer and
 prior generation remain unchanged; do not substitute a same-length download.
 
 If the active pointer is completely absent, use the explicit one-time
-State Street bootstrap mode only while the scheduler is quiescent: either
-before today's Morning task has run, or after today's EOD and finalizer have
-both run in that order. The requested market date must be the host's current
-date:
+State Street bootstrap mode only in the post-Finalizer mutation window, after
+today's EOD and finalizer have both completed in that order. A
+pre-Morning bootstrap is intentionally rejected. The requested market date
+must be the host's current date:
 
 ```powershell
 C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe `
@@ -77,10 +104,10 @@ attests both live workbooks, installs one content-addressed generation, and
 must report `status: READY`, `proxy_bootstrapped: true`,
 `ndx_member_count: 102`, and `spy_member_count: 503`. It never replaces an
 existing pointer, never substitutes for a missing caller-specified proxy path,
-and never changes broker, task, database, or notification configuration.
-Finding any existing output entry (including
-a malformed file, directory, or dangling symbolic link), rejects bootstrap
-before ordinary refresh logic runs. Direct checkout invocation is rejected.
+and never changes broker, task, database, or notification configuration. Any
+existing output entry (including a malformed file, directory, or dangling
+symbolic link) causes bootstrap to be rejected before ordinary refresh logic
+runs. Direct checkout invocation is rejected.
 
 The market date is required and is part of the source/currentness attestation.
 For a later session, omit `--ndx-artifact`: the refresh requests the exact dated

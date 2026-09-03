@@ -6,7 +6,8 @@ param(
     [string]$StateRoot = "C:\r\dawnstrike-state",
     [string]$BackupRoot = "C:\r\dawnstrike-state-backups",
     [ValidateRange(30, 1800)][int]$ProcessTimeoutSeconds = 300,
-    [pscredential]$RunAsCredential
+    [pscredential]$RunAsCredential,
+    [string]$TestNowUtc = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -21,12 +22,131 @@ $rollbackStateRoot = $StateRoot
 $rollbackBackupRoot = $BackupRoot
 $rollbackTimeout = $ProcessTimeoutSeconds
 $rollbackRunAsCredential = $RunAsCredential
+$rollbackTestNowUtc = $TestNowUtc
 . (Join-Path $PSScriptRoot "activate_dawnstrike_runtime.ps1")
 $RuntimeRoot = $rollbackRuntimeRoot
 $StateRoot = $rollbackStateRoot
 $BackupRoot = $rollbackBackupRoot
 $RunAsCredential = $rollbackRunAsCredential
 $ProcessTimeoutSeconds = $rollbackTimeout
+$TestNowUtc = $rollbackTestNowUtc
+
+function Get-DawnstrikeRollbackBoundaryNowUtc {
+    [CmdletBinding()]
+    param([string]$TestNowUtc = "")
+
+    if (-not [string]::IsNullOrWhiteSpace($TestNowUtc)) {
+        if ($env:DAWNSTRIKE_TEST_ROLLBACK_CLOCK -ne "1") {
+            throw "Rollback clock override is test-only."
+        }
+        try {
+            $parsed = [DateTimeOffset]::Parse(
+                $TestNowUtc,
+                [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::RoundtripKind
+            )
+        }
+        catch {
+            throw "Rollback clock override is invalid."
+        }
+        if ($parsed.Offset -ne [TimeSpan]::Zero) {
+            throw "Rollback clock override must be UTC."
+        }
+        return $parsed.ToUniversalTime()
+    }
+    return [DateTimeOffset]::UtcNow
+}
+
+function Assert-DawnstrikeRollbackPostFinalizerBoundarySnapshot {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][DateTimeOffset]$NowUtc,
+        [Parameter(Mandatory = $true)][object[]]$TaskSnapshots
+    )
+
+    $expected = @(
+        "Dawnstrike AlphaOps Morning",
+        "Dawnstrike AlphaOps Monitor 5m",
+        "Dawnstrike AlphaOps EOD Full Report",
+        "Dawnstrike AlphaOps V6 Weekly Training",
+        "Dawnstrike 10of10 Daily Finalize"
+    )
+    if (@($TaskSnapshots).Count -ne $expected.Count) {
+        throw "Runtime rollback requires exactly five canonical task snapshots."
+    }
+    $byName = @{}
+    foreach ($snapshot in @($TaskSnapshots)) {
+        $name = [string]$snapshot.name
+        if ($name -cnotin $expected -or $byName.ContainsKey($name)) {
+            throw "Runtime rollback post-Finalizer task snapshot is unknown or duplicated."
+        }
+        if ([string]$snapshot.state -cnotin @("Ready", "Disabled")) {
+            throw "Runtime rollback requires every canonical task to be quiescent."
+        }
+        $byName[$name] = $snapshot
+    }
+
+    $nowLocal = $NowUtc.ToLocalTime().DateTime
+    $eodLast = [DateTime]$byName["Dawnstrike AlphaOps EOD Full Report"].last_run_time
+    $finalizerLast = [DateTime]$byName["Dawnstrike 10of10 Daily Finalize"].last_run_time
+    if (
+        $eodLast.Date -ne $nowLocal.Date -or
+        $finalizerLast.Date -ne $nowLocal.Date -or
+        $eodLast -gt $finalizerLast -or
+        $finalizerLast -gt $nowLocal
+    ) {
+        throw "Runtime rollback is allowed only in the host post-Finalizer window."
+    }
+
+    # A same-day NextRunTime means at least one canonical trigger has not yet
+    # advanced beyond today's schedule. This also closes Monday's 21:00
+    # Weekly gap after the 17:30 Finalizer.
+    foreach ($name in $expected) {
+        $nextRun = [DateTime]$byName[$name].next_run_time
+        if ($nextRun -ne [DateTime]::MinValue -and $nextRun.Date -eq $nowLocal.Date) {
+            throw "Runtime rollback requires every same-day canonical trigger to finish first: $name"
+        }
+    }
+    if ($nowLocal.DayOfWeek -eq [DayOfWeek]::Monday) {
+        $weeklyLast = [DateTime]$byName["Dawnstrike AlphaOps V6 Weekly Training"].last_run_time
+        if ($weeklyLast.Date -ne $nowLocal.Date -or $weeklyLast -gt $nowLocal) {
+            throw "Runtime rollback on Monday requires the same-day Weekly task to finish first."
+        }
+    }
+    return $true
+}
+
+function Assert-DawnstrikeRollbackPostFinalizerMutationWindow {
+    [CmdletBinding()]
+    param([string]$TestNowUtc = "")
+
+    $snapshots = @()
+    foreach ($taskName in @(
+        "Dawnstrike AlphaOps Morning",
+        "Dawnstrike AlphaOps Monitor 5m",
+        "Dawnstrike AlphaOps EOD Full Report",
+        "Dawnstrike AlphaOps V6 Weekly Training",
+        "Dawnstrike 10of10 Daily Finalize"
+    )) {
+        $matches = @(Get-ScheduledTask -TaskName $taskName -ErrorAction Stop)
+        if ($matches.Count -ne 1) {
+            throw "Runtime rollback post-Finalizer task is not unique: $taskName"
+        }
+        $taskPath = [string]$matches[0].TaskPath
+        if ([string]::IsNullOrWhiteSpace($taskPath)) { $taskPath = "\" }
+        $info = Get-ScheduledTaskInfo `
+            -TaskName $taskName -TaskPath $taskPath -ErrorAction Stop
+        $snapshots += [pscustomobject]@{
+            name = $taskName
+            state = [string]$matches[0].State
+            last_run_time = [DateTime]$info.LastRunTime
+            next_run_time = [DateTime]$info.NextRunTime
+        }
+    }
+    $nowUtc = Get-DawnstrikeRollbackBoundaryNowUtc -TestNowUtc $TestNowUtc
+    return Assert-DawnstrikeRollbackPostFinalizerBoundarySnapshot `
+        -NowUtc $nowUtc -TaskSnapshots $snapshots
+}
 
 function Get-DawnstrikeActivationAuxiliaryRecoveryContract {
     [CmdletBinding()]
@@ -401,7 +521,8 @@ function Invoke-DawnstrikeRuntimeRollback {
         [Parameter(Mandatory = $true)][string]$StateRoot,
         [Parameter(Mandatory = $true)][string]$BackupRoot,
         [Parameter(Mandatory = $true)][int]$ProcessTimeoutSeconds,
-        [pscredential]$RunAsCredential
+        [pscredential]$RunAsCredential,
+        [string]$TestNowUtc = ""
     )
 
     $contract = Resolve-DawnstrikeActivationRoot $ContractRoot "ContractRoot"
@@ -666,6 +787,8 @@ function Invoke-DawnstrikeRuntimeRollback {
             if ([string]$completeLockSnapshot.payload.operation -ne "runtime_rollback") {
                 throw "Completed rollback lock belongs to a different operation."
             }
+            $null = Assert-DawnstrikeRollbackPostFinalizerMutationWindow `
+                -TestNowUtc $TestNowUtc
             $completeLock = Adopt-DawnstrikeGovernedRuntimeLockWithJournal `
                 -StateRoot $state -JournalPath $operationJournalPath `
                 -CandidateSha $candidateSha -CandidateTree ([string]$activation.candidate_tree) `
@@ -681,7 +804,8 @@ function Invoke-DawnstrikeRuntimeRollback {
             ) { throw "Completed rollback lock recovery changed the sealed journal." }
             if (Test-Path -LiteralPath $expectedCompleteDailyPath -PathType Leaf) {
                 $completeDailyLock = Enter-DawnstrikeDailyRunLock `
-                    -StateRoot $state -MarketDate $marketDate -Owner "runtime_rollback"
+                    -StateRoot $state -MarketDate $marketDate `
+                    -Owner "runtime_rollback" -RetainHandle
                 if (-not $completeDailyLock.acquired) {
                     throw "Completed rollback could not reacquire its exact daily lock."
                 }
@@ -715,10 +839,23 @@ function Invoke-DawnstrikeRuntimeRollback {
         if ([string]$compensatedJournal.payload.phase -eq "COMPENSATED") {
             $compensatedRelative = [string]$compensatedJournal.payload.compensation_receipt_relative_path
             $compensatedPath = Join-Path $state ($compensatedRelative.Replace('/', '\'))
-            $compensationCheck = & $approvedJournalInterpreter.path -I -B -S (Join-Path $PSScriptRoot "runtime_operation_journal.py") verify-compensation `
-                --receipt $compensatedPath --state-root $state 2>$null
-            if ($LASTEXITCODE -ne 0) { throw "Compensated rollback receipt failed strict validation." }
-            $compensationPayload = (($compensationCheck -join "") | ConvertFrom-Json).payload
+            $compensationCheck = Invoke-DawnstrikeActivationProcess `
+                -FilePath $approvedJournalInterpreter.path `
+                -ArgumentList @(
+                    "-I", "-B", "-S",
+                    (Join-Path $PSScriptRoot "runtime_operation_journal.py"),
+                    "verify-compensation", "--receipt", $compensatedPath,
+                    "--state-root", $state
+                ) `
+                -WorkingDirectory $PSScriptRoot `
+                -Label "Compensated rollback receipt strict validation" `
+                -TimeoutSeconds $ProcessTimeoutSeconds
+            try {
+                $compensationPayload = ([string]$compensationCheck.Stdout | ConvertFrom-Json).payload
+            }
+            catch {
+                throw "Compensated rollback receipt validation returned invalid JSON."
+            }
             $compensatedRuntime = Get-DawnstrikeGitContract $gitPath $runtime $ProcessTimeoutSeconds $candidateSha
             $compensationOrigin = Get-DawnstrikeGitValue `
                 $gitPath $runtime @("remote", "get-url", "origin") `
@@ -743,9 +880,16 @@ function Invoke-DawnstrikeRuntimeRollback {
                 $compensatedTasks.task_definition_contract_sha256 -ne [string]$compensationPayload.task_definition_contract_sha256 -or
                 $compensatedJournal.payload.compensation_receipt_sha256 -ne (Get-DawnstrikeSha256File $compensatedPath)
             ) { throw "Compensated rollback tombstone does not attest the exact restored boundary." }
+            # Terminal compensation cleanup still mutates protected rollback
+            # evidence. Keep it behind the same live host boundary even when
+            # the prior process already released both operation locks.
+            $null = Assert-DawnstrikeRollbackPostFinalizerMutationWindow `
+                -TestNowUtc $TestNowUtc
             $compensationLock = $null
             $compensationLockPath = Join-Path $state "locks\dawnstrike-runtime-activation.lock"
             if (Test-Path -LiteralPath $compensationLockPath -PathType Leaf) {
+                $null = Assert-DawnstrikeRollbackPostFinalizerMutationWindow `
+                    -TestNowUtc $TestNowUtc
                 $compensationLock = Adopt-DawnstrikeGovernedRuntimeLockWithJournal `
                     -StateRoot $state -JournalPath $operationJournalPath -CandidateSha $candidateSha `
                     -CandidateTree ([string]$activation.candidate_tree) -OriginIdentity $compensationOriginIdentity `
@@ -753,7 +897,9 @@ function Invoke-DawnstrikeRuntimeRollback {
             }
             if (@(Get-ChildItem -LiteralPath (Join-Path $state "locks") -Filter "dawnstrike-daily-*.lock" -File -Force -ErrorAction SilentlyContinue).Count -gt 0) {
                 if ($null -eq $compensationLock) { throw "Compensated rollback has a daily lock without its runtime lock." }
-                $compensationDaily = Enter-DawnstrikeDailyRunLock -StateRoot $state -MarketDate $marketDate -Owner "runtime_rollback"
+                $compensationDaily = Enter-DawnstrikeDailyRunLock `
+                    -StateRoot $state -MarketDate $marketDate `
+                    -Owner "runtime_rollback" -RetainHandle
                 if (-not $compensationDaily.acquired) { throw "Compensated rollback could not recover its daily lock." }
                 Exit-DawnstrikeDailyRunLock $compensationDaily
             }
@@ -958,6 +1104,7 @@ function Invoke-DawnstrikeRuntimeRollback {
             TaskContractSha256 = $journalTaskContractSha256
             PythonPath = $lockInterpreter.path
             PythonSha256 = $lockInterpreter.sha256
+            ProcessTimeoutSeconds = $ProcessTimeoutSeconds
         }
         if ($env:DAWNSTRIKE_TEST_ROLLBACK_CRASH_POINT -in @("after_init", "after_lock")) {
             if ($env:DAWNSTRIKE_TEST_LOCK_JOURNAL -ne "1") { throw "Rollback crash injection is test-only." }
@@ -984,6 +1131,8 @@ function Invoke-DawnstrikeRuntimeRollback {
             # lock first; Enter-DawnstrikeDailyRunLock then performs the
             # governed same-date dead-owner recovery and rejects foreign or
             # active daily locks.
+            $null = Assert-DawnstrikeRollbackPostFinalizerMutationWindow `
+                -TestNowUtc $TestNowUtc
             $activationLock = Adopt-DawnstrikeGovernedRuntimeLockWithJournal `
                 -StateRoot $state -JournalPath $operationJournalPath `
                 -CandidateSha $candidateSha -CandidateTree ([string]$activation.candidate_tree) `
@@ -995,6 +1144,8 @@ function Invoke-DawnstrikeRuntimeRollback {
                 if ([string]$orphan.payload.phase -ne "INIT") { throw "Rollback journal exists without its exact runtime lock." }
             }
             Assert-DawnstrikeNoDailyLocks $state
+            $null = Assert-DawnstrikeRollbackPostFinalizerMutationWindow `
+                -TestNowUtc $TestNowUtc
             $activationLock = Enter-DawnstrikeGovernedRuntimeLockWithJournal @enterJournalArgs
         }
         $operationJournal = Get-DawnstrikeStrictRuntimeOperationJournal $operationJournalPath $lockInterpreter.path $lockInterpreter.sha256
@@ -1006,7 +1157,9 @@ function Invoke-DawnstrikeRuntimeRollback {
         if (
             [string]$operationJournal.payload.runtime_stage_contract_sha256 -notin @($journalEmptySha256, $stageContractSha256)
         ) { throw "Rollback journal stage identity is invalid." }
-        $dailyLock = Enter-DawnstrikeDailyRunLock -StateRoot $state -MarketDate $marketDate -Owner "runtime_rollback"
+        $dailyLock = Enter-DawnstrikeDailyRunLock `
+            -StateRoot $state -MarketDate $marketDate `
+            -Owner "runtime_rollback" -RetainHandle
         if (-not $dailyLock.acquired) {
             throw "Runtime rollback could not acquire the daily run lock."
         }
@@ -1646,9 +1799,18 @@ function Invoke-DawnstrikeRuntimeRollback {
                 }
                 try {
                     Write-DawnstrikeActivationJson $compensationPayload $compensationInput
-                    & $lockInterpreter.path -I -B -S (Join-Path $PSScriptRoot "runtime_operation_journal.py") seal-compensation `
-                        --input $compensationInput --output $compensationReceipt --state-root $state --reuse-existing 2>$null | Out-Null
-                    if ($LASTEXITCODE -ne 0) { throw "Rollback compensation receipt strict sealing failed." }
+                    $null = Invoke-DawnstrikeActivationProcess `
+                        -FilePath $lockInterpreter.path `
+                        -ArgumentList @(
+                            "-I", "-B", "-S",
+                            (Join-Path $PSScriptRoot "runtime_operation_journal.py"),
+                            "seal-compensation", "--input", $compensationInput,
+                            "--output", $compensationReceipt, "--state-root", $state,
+                            "--reuse-existing"
+                        ) `
+                        -WorkingDirectory $PSScriptRoot `
+                        -Label "Rollback compensation receipt strict sealing" `
+                        -TimeoutSeconds $ProcessTimeoutSeconds
                 }
                 finally { if (Test-Path -LiteralPath $compensationInput) { Remove-Item -LiteralPath $compensationInput -Force } }
                 $compensationHash = Get-DawnstrikeSha256File $compensationReceipt
@@ -1726,6 +1888,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         -StateRoot $StateRoot `
         -BackupRoot $BackupRoot `
         -ProcessTimeoutSeconds $ProcessTimeoutSeconds `
-        -RunAsCredential $RunAsCredential
+        -RunAsCredential $RunAsCredential `
+        -TestNowUtc $TestNowUtc
     $result | ConvertTo-Json -Depth 12
 }

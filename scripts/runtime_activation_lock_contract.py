@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import re
@@ -97,9 +98,20 @@ def validate(raw: bytes) -> dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("path", type=Path)
+    parser.add_argument("path", type=Path, nargs="?")
+    parser.add_argument("--captured-base64")
     args = parser.parse_args()
-    raw = args.path.read_bytes()
+    if (args.path is None) == (args.captured_base64 is None):
+        parser.error("provide exactly one lock path or --captured-base64")
+    if args.captured_base64 is not None:
+        try:
+            raw = base64.b64decode(args.captured_base64, validate=True)
+        except ValueError as exc:
+            raise ValueError("captured lock bytes are not strict base64") from exc
+    else:
+        raw = args.path.read_bytes()
+    if len(raw) > 16384:
+        raise ValueError("lock bytes exceed the strict ceiling")
     value = validate(raw)
     print(
         json.dumps(

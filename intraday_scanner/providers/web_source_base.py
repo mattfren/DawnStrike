@@ -90,7 +90,10 @@ def load_web_sources_config(config_path: str | Path | None = None) -> WebCollect
             f"{path}. The example configuration is development-only and is never "
             "a production fallback."
         )
-    data = _load_simple_yaml(path)
+    return _web_collection_config(_load_simple_yaml(path))
+
+
+def _web_collection_config(data: dict[str, Any]) -> WebCollectionConfig:
     sources = []
     for row in list(data.get("sources") or []):
         if not isinstance(row, dict):
@@ -162,7 +165,8 @@ def production_contract_status(config: WebCollectionConfig) -> dict[str, Any]:
             source
             for source in config.sources
             if source.enabled
-            and source.type in {
+            and source.type
+            in {
                 "local_inbox",
                 "public_table_url",
                 "browser_table_url",
@@ -207,9 +211,7 @@ def production_contract_status(config: WebCollectionConfig) -> dict[str, Any]:
         or "EXAMPLE.COM" in user_agent
     ):
         violations.append("accountable_user_agent_contact_required")
-    enabled_by_name = {
-        source.name: source for source in config.sources if source.enabled
-    }
+    enabled_by_name = {source.name: source for source in config.sources if source.enabled}
     required_safety_types = {
         "nasdaq_halts": "nasdaq_trade_halts_rss",
         "sec_edgar": "sec_edgar",
@@ -224,7 +226,8 @@ def production_contract_status(config: WebCollectionConfig) -> dict[str, Any]:
         source
         for source in config.sources
         if source.enabled
-        and source.type in {
+        and source.type
+        in {
             "local_inbox",
             "public_table_url",
             "browser_table_url",
@@ -255,21 +258,37 @@ def validate_web_source_config(config_path: str | Path) -> dict[str, Any]:
 
     path = Path(config_path).resolve()
     try:
-        config = load_web_sources_config(path)
+        raw = path.read_bytes()
+    except OSError as exc:
+        return _invalid_web_source_config(path, exc)
+    return validate_web_source_config_bytes(path, raw)
+
+
+def validate_web_source_config_bytes(config_path: str | Path, raw: bytes) -> dict[str, Any]:
+    """Validate semantics and digest from one caller-captured byte string."""
+
+    path = Path(config_path).resolve()
+    try:
+        text = raw.decode("utf-8", "strict")
+        config = _web_collection_config(_load_simple_yaml_text(text))
         contract = production_contract_status(config)
     except (ConfigError, OSError, TypeError, ValueError) as exc:
-        return {
-            "status": "BLOCKED_CONFIGURATION",
-            "ready": False,
-            "config_path": str(path),
-            "config_sha256": None,
-            "violations": ["source_config_unreadable_or_invalid"],
-            "detail": str(exc),
-        }
+        return _invalid_web_source_config(path, exc)
     return {
         **contract,
         "config_path": str(path),
-        "config_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "config_sha256": hashlib.sha256(raw).hexdigest(),
+    }
+
+
+def _invalid_web_source_config(path: Path, exc: Exception) -> dict[str, Any]:
+    return {
+        "status": "BLOCKED_CONFIGURATION",
+        "ready": False,
+        "config_path": str(path),
+        "config_sha256": None,
+        "violations": ["source_config_unreadable_or_invalid"],
+        "detail": str(exc),
     }
 
 
@@ -542,11 +561,15 @@ def _default_web_config_data() -> dict[str, Any]:
 
 
 def _load_simple_yaml(path: Path) -> dict[str, Any]:
+    return _load_simple_yaml_text(path.read_text(encoding="utf-8"))
+
+
+def _load_simple_yaml_text(text: str) -> dict[str, Any]:
     data: dict[str, Any] = {}
     current_key = ""
     current_item: dict[str, Any] | None = None
     current_item_list_key = ""
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
+    for raw_line in text.splitlines():
         if not raw_line.strip() or raw_line.lstrip().startswith("#"):
             continue
         indent = len(raw_line) - len(raw_line.lstrip(" "))
