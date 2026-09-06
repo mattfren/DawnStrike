@@ -16,6 +16,13 @@ param(
 
 $ErrorActionPreference = "Stop"
 $runtime = (Resolve-Path $RuntimeRoot).Path
+# Pin the working directory to the runtime release before any py.exe call.
+# `py.exe -m intraday_scanner...` resolves the package from the current
+# directory first, so a stage launched from anywhere else silently executes a
+# different checkout - which surfaces as an unrecognised CLI argument rather
+# than as a wrong-version error. Pin it here, not at the later Push-Location,
+# or the heartbeat and stage-record calls that run first are left unpinned.
+Set-Location -LiteralPath $runtime
 New-Item -ItemType Directory -Path $StateRoot -Force | Out-Null
 $state = (Resolve-Path $StateRoot).Path
 $paperOpsRoot = if ($PaperOpsRoot) { [System.IO.Path]::GetFullPath($PaperOpsRoot) } else { Join-Path $state "v2_paper_ops_live" }
