@@ -31,6 +31,12 @@ function Import-DawnstrikeEnvironment {
         "DAWNSTRIKE_STRATEGY_EVIDENCE_ENABLED",
         "DAWNSTRIKE_STRATEGY_EVIDENCE_SHADOW_ONLY",
         "DAWNSTRIKE_STRATEGY_EVIDENCE_MAX_CANDIDATES",
+        # Bootstrap paper mode and the liquid-universe override are operator
+        # switches read by the Python layer.  A key absent from this allowlist is
+        # silently skipped below, so omitting them would leave both features
+        # permanently unreachable in the runtime no matter what runtime.env says.
+        "DAWNSTRIKE_BOOTSTRAP_PAPER_MODE",
+        "DAWNSTRIKE_ALPHAOPS_LIQUID_UNIVERSE",
         "DAWNSTRIKE_FORWARD_GAP_HMAC_KEY",
         "ALPACA_API_KEY_ID",
         "ALPACA_API_SECRET_KEY",
