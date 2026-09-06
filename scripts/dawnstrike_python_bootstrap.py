@@ -366,7 +366,6 @@ class _ExactSourceGuard:
         metadata_snapshots: dict[Path, bytes],
         forbidden_absent: tuple[Path, ...],
         tracked_handles: dict[Path, BinaryIO],
-        tracked_snapshots: dict[Path, os.stat_result],
         source_bytes: dict[str, bytes],
         git_contract: object,
     ) -> None:
@@ -375,7 +374,6 @@ class _ExactSourceGuard:
         self._metadata_snapshots = metadata_snapshots
         self._forbidden_absent = forbidden_absent
         self._tracked_handles = tracked_handles
-        self._tracked_snapshots = tracked_snapshots
         self.source_bytes = source_bytes
         self.git_contract = git_contract
 
@@ -390,10 +388,9 @@ class _ExactSourceGuard:
             if any(path.exists() for path in self._forbidden_absent):
                 _fail("release Git metadata absence changed during dispatched target lifetime")
             for path, handle in self._tracked_handles.items():
-                admitted = self._tracked_snapshots[path]
-                if not _same_file_snapshot(admitted, os.fstat(handle.fileno())) or (
-                    not _same_file_snapshot(admitted, path.lstat())
-                ):
+                opened = os.fstat(handle.fileno())
+                current = path.lstat()
+                if not _same_file_snapshot(opened, current):
                     _fail("release tracked file changed during dispatched target lifetime")
             self._metadata_guard.assert_unchanged()
         except OSError as exc:
@@ -575,15 +572,13 @@ def _assert_exact_source(root: Path, expected_sha: str) -> _ExactSourceGuard:
         _validated_git_metadata(root)
     )
     try:
-        source_bytes, git_contract, tracked_handles, tracked_snapshots = (
-            _assert_exact_source_locked(
+        source_bytes, git_contract, tracked_handles = _assert_exact_source_locked(
             root,
             expected_sha,
             metadata_snapshots,
             forbidden_absent,
-                metadata_guard,
-                metadata_handles,
-            )
+            metadata_guard,
+            metadata_handles,
         )
     except Exception:
         metadata_guard.close()
@@ -596,7 +591,6 @@ def _assert_exact_source(root: Path, expected_sha: str) -> _ExactSourceGuard:
         metadata_snapshots,
         forbidden_absent,
         tracked_handles,
-        tracked_snapshots,
         source_bytes,
         git_contract,
     )
@@ -713,7 +707,6 @@ def _assert_exact_source_locked(
 
     source_bytes: dict[str, bytes] = {}
     tracked_handles: dict[Path, BinaryIO] = {}
-    tracked_snapshots: dict[Path, os.stat_result] = {}
     tracked_inventory: list[tuple[str, str, str]] = []
     release_authority_blobs: dict[str, bytes] = {}
     public_web_inventory: list[tuple[str, str, str]] = []
@@ -757,12 +750,6 @@ def _assert_exact_source_locked(
         if resolved in tracked_handles:
             _fail("release Git tracked file inventory is ambiguous")
         tracked_handles[resolved] = source_handles[-1]
-        # Bind the identity NOW. `os.fstat` reports the live inode, so comparing
-        # it against `lstat` of the same path only ever detects replacement of
-        # the name - never modification through it. On Windows the share mode
-        # denies the write outright, but POSIX truncates in place and both stats
-        # move together, so an in-place rewrite was invisible.
-        tracked_snapshots[resolved] = os.fstat(source_handles[-1].fileno())
         tracked_inventory.append((mode, object_id, relative))
 
         key = os.path.normcase(str(resolved))
@@ -859,10 +846,7 @@ def _assert_exact_source_locked(
         if any(path.exists() for path in forbidden_absent):
             _fail("release Git metadata absence changed during final source admission")
         for path, handle in tracked_handles.items():
-            admitted = tracked_snapshots[path]
-            if not _same_file_snapshot(admitted, os.fstat(handle.fileno())) or (
-                not _same_file_snapshot(admitted, path.lstat())
-            ):
+            if not _same_file_snapshot(os.fstat(handle.fileno()), path.lstat()):
                 _fail("release tracked file changed during final source admission")
         metadata_guard.assert_unchanged()
     except OSError as exc:
@@ -883,7 +867,7 @@ def _assert_exact_source_locked(
             "public_web_blobs": MappingProxyType(public_web_blobs),
         }
     )
-    return source_bytes, git_contract, tracked_handles, tracked_snapshots
+    return source_bytes, git_contract, tracked_handles
 
 
 def _release_root(raw: str) -> Path:
