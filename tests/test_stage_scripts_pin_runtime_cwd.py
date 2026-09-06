@@ -52,6 +52,50 @@ def _index_of(lines: list[str], needle: str) -> int:
     raise AssertionError(f"{needle!r} not found")
 
 
+_MANDATORY = re.compile(r"\[Parameter\(Mandatory\s*=\s*\$true\)\]")
+# The declaration always ends with the variable, optionally followed by a comma.
+_PARAMETER_NAME = re.compile(r"\$(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*,?\s*$")
+_HEX_PATTERN = re.compile(r"ValidatePattern\('\^\[0-9a-f\]\{(?P<length>\d+)\}\$'\)")
+
+
+def _top_level_param_block(lines: list[str]) -> list[str]:
+    """The script's own `param(...)`, not a nested function's."""
+
+    start = next(
+        (index for index, line in enumerate(lines) if line.strip() == "param("), None
+    )
+    assert start is not None, "no top-level param block found"
+    end = next(
+        (index for index in range(start + 1, len(lines)) if lines[index].strip() == ")"),
+        None,
+    )
+    assert end is not None, "unterminated top-level param block"
+    return lines[start + 1 : end]
+
+
+def _mandatory_parameter_arguments(name: str) -> list[str]:
+    """Placeholder values for the script's mandatory parameters.
+
+    The governed release line makes ExpectedSha and the launch-manifest
+    parameters mandatory, and some carry a ValidatePattern. The sliced header
+    stops before anything that checks these values for real, so they only need
+    to satisfy the param block - but they must satisfy it, or PowerShell
+    refuses to run the header at all and the test would pass vacuously on a
+    parameter error.
+    """
+
+    arguments: list[str] = []
+    for line in _top_level_param_block(_lines(name)):
+        if not _MANDATORY.search(line):
+            continue
+        named = _PARAMETER_NAME.search(line)
+        assert named, f"{name}: cannot read the parameter name from {line!r}"
+        hex_match = _HEX_PATTERN.search(line)
+        value = "0" * int(hex_match.group("length")) if hex_match else "placeholder"
+        arguments.extend([f"-{named.group('name')}", value])
+    return arguments
+
+
 def _first_interpreter_line(lines: list[str]) -> int:
     for number, line in enumerate(lines, start=1):
         if re.search(r'-FilePath\s+"py\.exe"', line):
@@ -107,6 +151,7 @@ def test_header_through_pin_actually_changes_directory(tmp_path: Path, name: str
             str(runtime),
             "-StateRoot",
             str(tmp_path / "state"),
+            *_mandatory_parameter_arguments(name),
         ],
         cwd=foreign,
         text=True,
