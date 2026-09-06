@@ -132,12 +132,21 @@ def _same_file_identity(left: os.stat_result, right: os.stat_result) -> bool:
     return (int(left.st_dev), int(left.st_ino)) == (int(right.st_dev), int(right.st_ino))
 
 
-def _same_file_snapshot(left: os.stat_result, right: os.stat_result) -> bool:
+def _same_file_snapshot(
+    left: os.stat_result, right: os.stat_result, *, across_rename: bool = False
+) -> bool:
     # Windows' CRT fstat reports creation time in st_ctime_ns while lstat can
     # expose a slightly different conversion for the same handle identity.
     # The opened handle denies writes; POSIX additionally compares change time.
+    #
+    # `across_rename` drops that change-time comparison, and only that one.
+    # POSIX rename(2) - including renameat2 with RENAME_EXCHANGE - updates the
+    # inode's ctime as part of the operation, so comparing a pre-rename stat to
+    # a post-rename stat of the SAME inode always disagreed. Every field that
+    # actually identifies the inode is still compared, so a genuinely different
+    # file is still caught.
     fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns")
-    if os.name != "nt":
+    if os.name != "nt" and not across_rename:
         fields += ("st_ctime_ns",)
     return all(int(getattr(left, field)) == int(getattr(right, field)) for field in fields)
 
@@ -1244,13 +1253,13 @@ def _replace_from_exact_handle(
         elif not _linux_renameat2(source, destination, 1):  # RENAME_NOREPLACE
             raise RuntimeError("identity-bound POSIX replacement is unavailable")
         installed = os.lstat(destination)
-        if not _same_file_snapshot(admitted, installed):
+        if not _same_file_snapshot(admitted, installed, across_rename=True):
             if destination_existed:
                 if not _linux_renameat2(source, destination, 2):
                     raise RuntimeError("atomic output rollback primitive is unavailable")
                 restored = os.lstat(destination)
                 if prior_destination is None or not _same_file_snapshot(
-                    prior_destination, restored
+                    prior_destination, restored, across_rename=True
                 ):
                     raise RuntimeError("atomic output rollback did not restore prior truth")
             else:
@@ -1260,7 +1269,7 @@ def _replace_from_exact_handle(
                     raise RuntimeError("atomic output rollback did not restore absence")
             raise RuntimeError("core-universe atomic temporary was replaced during commit")
     installed = os.lstat(destination)
-    if not _same_file_snapshot(admitted, installed):
+    if not _same_file_snapshot(admitted, installed, across_rename=True):
         raise RuntimeError("core-universe atomic output has the wrong installed identity")
     handle.seek(0)
     if handle.read() != expected_bytes:
