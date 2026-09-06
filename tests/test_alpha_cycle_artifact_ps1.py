@@ -437,3 +437,78 @@ def test_optional_scenario_failure_keeps_core_complete_but_task_nonzero() -> Non
     assert result["core_status"] == "COMPLETE"
     assert result["core_exit_code"] == 0
     assert result["final_exit_code"] == 1
+
+
+MONITOR_STAGE = ROOT / "scripts" / "run_alphaops_monitor.ps1"
+MORNING_STAGE = ROOT / "scripts" / "run_alphaops_morning.ps1"
+
+
+def _artifact_validation_invocations(script: Path) -> list[str]:
+    """Return each Test-DawnstrikeAlphaCycleArtifact invocation as one flat string.
+
+    PowerShell continues a call across lines with a trailing backtick, so the
+    invocation is reassembled until a line does not continue.
+    """
+
+    lines = script.read_text(encoding="utf-8").splitlines()
+    invocations: list[str] = []
+    index = 0
+    while index < len(lines):
+        if "Test-DawnstrikeAlphaCycleArtifact" in lines[index]:
+            parts = [lines[index].strip()]
+            while parts[-1].endswith("`") and index + 1 < len(lines):
+                index += 1
+                parts.append(lines[index].strip())
+            invocations.append(" ".join(part.rstrip("`").strip() for part in parts))
+        index += 1
+    return invocations
+
+
+def test_monitor_stage_accepts_lane_local_core_shortfall() -> None:
+    """The monitor must not reject the artifact the morning stage publishes.
+
+    A governed core-universe outage records ``core_universe_status`` as
+    ``DATA_UNAVAILABLE``.  The morning stage deliberately accepts that as
+    lane-local and publishes the mover lane anyway.  The monitor consumes only
+    ``research_candidate_count`` and ``research_symbols`` and never reads core
+    membership, so if it validates strictly it fails every cycle of every day on
+    a signal it does not use.
+    """
+
+    invocations = _artifact_validation_invocations(MONITOR_STAGE)
+
+    assert invocations, "monitor stage no longer validates the AlphaOps cycle artifact"
+    for invocation in invocations:
+        assert "-AllowCoreShortfall" in invocation, (
+            "run_alphaops_monitor.ps1 must pass -AllowCoreShortfall; without it the "
+            "monitor rejects every artifact a governed core outage produces and the "
+            "entire intraday lane fails closed."
+        )
+        assert "-RequireCoreCoverage" not in invocation
+
+
+def test_morning_stage_retains_a_lane_local_core_shortfall_path() -> None:
+    """The shared contract is only coherent if morning still allows the shortfall."""
+
+    invocations = _artifact_validation_invocations(MORNING_STAGE)
+
+    assert invocations, "morning stage no longer validates the AlphaOps cycle artifact"
+    assert any("-AllowCoreShortfall" in invocation for invocation in invocations)
+
+
+def test_core_data_unavailable_artifact_survives_the_monitor_switch_set(
+    tmp_path: Path,
+) -> None:
+    """End-to-end: the exact switches the monitor uses accept a real outage artifact."""
+
+    payload = _valid_payload()
+    payload["run_contract"]["core_universe_status"] = "DATA_UNAVAILABLE"
+
+    monitor_uses_shortfall = all(
+        "-AllowCoreShortfall" in invocation
+        for invocation in _artifact_validation_invocations(MONITOR_STAGE)
+    )
+    result = _validate(tmp_path, payload, allow_core_shortfall=monitor_uses_shortfall)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["research_candidate_count"] is not None

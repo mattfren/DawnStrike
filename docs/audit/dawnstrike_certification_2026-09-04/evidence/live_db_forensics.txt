@@ -1,0 +1,95 @@
+DB: C:/r/dawnstrike-state/shadow_real.sqlite (read-only, immutable)
+schema_version: 30
+quick_check: ok
+tables: 145
+non-empty: 40 empty: 105
+
+== OUTCOME / TRADE / LEARNING TABLES (all zero = no closed loop) ==
+     0  alpha_learning_runs
+     0  alpha_outcome_labels
+     0  alpha_v6_outcomes
+     0  committed_fill_truth_receipts
+     0  intelligence_outcome_summary
+     0  intelligence_outcomes
+     0  learning_backfeed_events
+     0  manual_audit_trades
+     0  manual_outcomes
+     0  no_trade_session_receipts
+     0  opportunity_outcome_receipts
+     0  opportunity_outcome_records
+     0  outcome_capture_attempts
+     0  paper_audit_trades
+     0  paper_position_excursion_reconciliations
+     0  paper_positions
+     0  paper_trade_fills
+     0  research_episode_outcome_bridges
+     0  scenario_replay_trades
+     0  signal_outcomes
+     0  strategy_learning_labels
+     0  strategy_paper_trades
+     0  trade_attribution_cases
+     0  trade_attribution_factors
+     0  trade_intents
+
+== DAILY PERFORMANCE STATUS BY DATE ==
+{'market_date': '2026-07-31', 'cohort': 'official_forward_paper', 'status': 'PARTIAL', 'evidence_state': 'pending', 'realized_trade_count': 0, 'net_pnl_cents': None, 'return_pct': None}
+{'market_date': '2026-08-03', 'cohort': 'official_forward_paper', 'status': 'PARTIAL', 'evidence_state': 'pending', 'realized_trade_count': 0, 'net_pnl_cents': None, 'return_pct': None}
+{'market_date': '2026-08-04', 'cohort': 'official_forward_paper', 'status': 'PARTIAL', 'evidence_state': 'pending', 'realized_trade_count': 0, 'net_pnl_cents': None, 'return_pct': None}
+{'market_date': '2026-08-05', 'cohort': 'official_forward_paper', 'status': 'PARTIAL', 'evidence_state': 'pending', 'realized_trade_count': 0, 'net_pnl_cents': None, 'return_pct': None}
+{'market_date': '2026-08-06', 'cohort': 'official_forward_paper', 'status': 'PARTIAL', 'evidence_state': 'pending', 'realized_trade_count': 0, 'net_pnl_cents': None, 'return_pct': None}
+{'market_date': '2026-08-07', 'cohort': 'official_forward_paper', 'status': 'PARTIAL', 'evidence_state': 'pending', 'realized_trade_count': 0, 'net_pnl_cents': None, 'return_pct': None}
+{'market_date': '2026-08-10', 'cohort': 'official_forward_paper', 'status': 'PARTIAL', 'evidence_state': 'pending', 'realized_trade_count': 0, 'net_pnl_cents': None, 'return_pct': None}
+{'market_date': '2026-08-11', 'cohort': 'official_forward_paper', 'status': 'PARTIAL', 'evidence_state': 'pending', 'realized_trade_count': 0, 'net_pnl_cents': None, 'return_pct': None}
+{'market_date': '2026-08-12', 'cohort': 'official_forward_paper', 'status': 'PARTIAL', 'evidence_state': 'pending', 'realized_trade_count': 0, 'net_pnl_cents': None, 'return_pct': None}
+{'market_date': '2026-08-13', 'cohort': 'official_forward_paper', 'status': 'PARTIAL', 'evidence_state': 'pending', 'realized_trade_count': 0, 'net_pnl_cents': None, 'return_pct': None}
+{'market_date': '2026-08-14', 'cohort': 'official_forward_paper', 'status': 'PARTIAL', 'evidence_state': 'pending', 'realized_trade_count': 0, 'net_pnl_cents': None, 'return_pct': None}
+{'market_date': '2026-08-17', 'cohort': 'official_forward_paper', 'status': 'PARTIAL', 'evidence_state': 'pending', 'realized_trade_count': 0, 'net_pnl_cents': None, 'return_pct': None}
+{'market_date': '2026-08-18', 'cohort': 'official_forward_paper', 'status': 'PARTIAL', 'evidence_state': 'pending', 'realized_trade_count': 0, 'net_pnl_cents': None, 'return_pct': None}
+{'market_date': '2026-08-19', 'cohort': 'official_forward_paper', 'status': 'PARTIAL', 'evidence_state': 'pending', 'realized_trade_count': 0, 'net_pnl_cents': None, 'return_pct': None}
+{'market_date': '2026-08-20', 'cohort': 'official_forward_paper', 'status': 'PARTIAL', 'evidence_state': 'pending', 'realized_trade_count': 0, 'net_pnl_cents': None, 'return_pct': None}
+{'market_date': '2026-08-21', 'cohort': 'official_forward_paper', 'status': 'PARTIAL', 'evidence_state': 'pending', 'realized_trade_count': 0, 'net_pnl_cents': None, 'return_pct': None}
+{'market_date': '2026-08-24', 'cohort': 'official_forward_paper', 'status': 'PARTIAL', 'evidence_state': 'pending', 'realized_trade_count': 0, 'net_pnl_cents': None, 'return_pct': None}
+{'market_date': '2026-08-25', 'cohort': 'official_forward_paper', 'status': 'PARTIAL', 'evidence_state': 'pending', 'realized_trade_count': 0, 'net_pnl_cents': None, 'return_pct': None}
+{'market_date': '2026-08-26', 'cohort': 'official_forward_paper', 'status': 'PARTIAL', 'evidence_state': 'pending', 'realized_trade_count': 0, 'net_pnl_cents': None, 'return_pct': None}
+{'market_date': '2026-08-27', 'cohort': 'official_forward_paper', 'status': 'PARTIAL', 'evidence_state': 'pending', 'realized_trade_count': 0, 'net_pnl_cents': None, 'return_pct': None}
+{'market_date': '2026-08-28', 'cohort': 'official_forward_paper', 'status': 'PARTIAL', 'evidence_state': 'pending', 'realized_trade_count': 0, 'net_pnl_cents': None, 'return_pct': None}
+{'market_date': '2026-08-31', 'cohort': 'alphaops_signal_research', 'status': 'NO_TRADE', 'evidence_state': 'no_trade', 'realized_trade_count': 0, 'net_pnl_cents': 0, 'return_pct': None}
+{'market_date': '2026-08-31', 'cohort': 'official_forward_paper', 'status': 'NO_TRADE', 'evidence_state': 'no_trade', 'realized_trade_count': 0, 'net_pnl_cents': 0, 'return_pct': 0.0}
+{'market_date': '2026-09-01', 'cohort': 'alphaops_signal_research', 'status': 'NO_TRADE', 'evidence_state': 'no_trade', 'realized_trade_count': 0, 'net_pnl_cents': 0, 'return_pct': None}
+{'market_date': '2026-09-01', 'cohort': 'official_forward_paper', 'status': 'NO_TRADE', 'evidence_state': 'no_trade', 'realized_trade_count': 0, 'net_pnl_cents': 0, 'return_pct': 0.0}
+{'market_date': '2026-09-02', 'cohort': 'alphaops_signal_research', 'status': 'NO_TRADE', 'evidence_state': 'no_trade', 'realized_trade_count': 0, 'net_pnl_cents': 0, 'return_pct': None}
+{'market_date': '2026-09-02', 'cohort': 'official_forward_paper', 'status': 'NO_TRADE', 'evidence_state': 'no_trade', 'realized_trade_count': 0, 'net_pnl_cents': 0, 'return_pct': 0.0}
+{'market_date': '2026-09-03', 'cohort': 'alphaops_signal_research', 'status': 'NO_TRADE', 'evidence_state': 'no_trade', 'realized_trade_count': 0, 'net_pnl_cents': 0, 'return_pct': None}
+{'market_date': '2026-09-03', 'cohort': 'official_forward_paper', 'status': 'NO_TRADE', 'evidence_state': 'no_trade', 'realized_trade_count': 0, 'net_pnl_cents': 0, 'return_pct': 0.0}
+
+== PAPER ACCOUNT LEDGER ==
+{'market_date': '2026-07-31', 'status': 'MISSING', 'evidence_state': 'missing', 'trade_count': 0, 'net_return_pct': None, 'target_return_pct': 1.0, 'target_status': 'PENDING', 'beginning_equity_cents': 10000000, 'ending_equity_cents': None}
+{'market_date': '2026-08-03', 'status': 'MISSING', 'evidence_state': 'missing', 'trade_count': 0, 'net_return_pct': None, 'target_return_pct': 1.0, 'target_status': 'PENDING', 'beginning_equity_cents': None, 'ending_equity_cents': None}
+{'market_date': '2026-08-04', 'status': 'MISSING', 'evidence_state': 'missing', 'trade_count': 0, 'net_return_pct': None, 'target_return_pct': 1.0, 'target_status': 'PENDING', 'beginning_equity_cents': None, 'ending_equity_cents': None}
+{'market_date': '2026-08-05', 'status': 'MISSING', 'evidence_state': 'missing', 'trade_count': 0, 'net_return_pct': None, 'target_return_pct': 1.0, 'target_status': 'PENDING', 'beginning_equity_cents': None, 'ending_equity_cents': None}
+{'market_date': '2026-08-06', 'status': 'MISSING', 'evidence_state': 'missing', 'trade_count': 0, 'net_return_pct': None, 'target_return_pct': 1.0, 'target_status': 'PENDING', 'beginning_equity_cents': None, 'ending_equity_cents': None}
+{'market_date': '2026-08-07', 'status': 'MISSING', 'evidence_state': 'missing', 'trade_count': 0, 'net_return_pct': None, 'target_return_pct': 1.0, 'target_status': 'PENDING', 'beginning_equity_cents': None, 'ending_equity_cents': None}
+{'market_date': '2026-08-10', 'status': 'MISSING', 'evidence_state': 'missing', 'trade_count': 0, 'net_return_pct': None, 'target_return_pct': 1.0, 'target_status': 'PENDING', 'beginning_equity_cents': None, 'ending_equity_cents': None}
+{'market_date': '2026-08-11', 'status': 'MISSING', 'evidence_state': 'missing', 'trade_count': 0, 'net_return_pct': None, 'target_return_pct': 1.0, 'target_status': 'PENDING', 'beginning_equity_cents': None, 'ending_equity_cents': None}
+{'market_date': '2026-08-12', 'status': 'MISSING', 'evidence_state': 'missing', 'trade_count': 0, 'net_return_pct': None, 'target_return_pct': 1.0, 'target_status': 'PENDING', 'beginning_equity_cents': None, 'ending_equity_cents': None}
+{'market_date': '2026-08-13', 'status': 'MISSING', 'evidence_state': 'missing', 'trade_count': 0, 'net_return_pct': None, 'target_return_pct': 1.0, 'target_status': 'PENDING', 'beginning_equity_cents': None, 'ending_equity_cents': None}
+{'market_date': '2026-08-14', 'status': 'MISSING', 'evidence_state': 'missing', 'trade_count': 0, 'net_return_pct': None, 'target_return_pct': 1.0, 'target_status': 'PENDING', 'beginning_equity_cents': None, 'ending_equity_cents': None}
+{'market_date': '2026-08-17', 'status': 'MISSING', 'evidence_state': 'missing', 'trade_count': 0, 'net_return_pct': None, 'target_return_pct': 1.0, 'target_status': 'PENDING', 'beginning_equity_cents': None, 'ending_equity_cents': None}
+{'market_date': '2026-08-18', 'status': 'MISSING', 'evidence_state': 'missing', 'trade_count': 0, 'net_return_pct': None, 'target_return_pct': 1.0, 'target_status': 'PENDING', 'beginning_equity_cents': None, 'ending_equity_cents': None}
+{'market_date': '2026-08-19', 'status': 'MISSING', 'evidence_state': 'missing', 'trade_count': 0, 'net_return_pct': None, 'target_return_pct': 1.0, 'target_status': 'PENDING', 'beginning_equity_cents': None, 'ending_equity_cents': None}
+{'market_date': '2026-08-20', 'status': 'MISSING', 'evidence_state': 'missing', 'trade_count': 0, 'net_return_pct': None, 'target_return_pct': 1.0, 'target_status': 'PENDING', 'beginning_equity_cents': None, 'ending_equity_cents': None}
+{'market_date': '2026-08-21', 'status': 'MISSING', 'evidence_state': 'missing', 'trade_count': 0, 'net_return_pct': None, 'target_return_pct': 1.0, 'target_status': 'PENDING', 'beginning_equity_cents': None, 'ending_equity_cents': None}
+{'market_date': '2026-08-24', 'status': 'MISSING', 'evidence_state': 'missing', 'trade_count': 0, 'net_return_pct': None, 'target_return_pct': 1.0, 'target_status': 'PENDING', 'beginning_equity_cents': None, 'ending_equity_cents': None}
+{'market_date': '2026-08-25', 'status': 'MISSING', 'evidence_state': 'missing', 'trade_count': 0, 'net_return_pct': None, 'target_return_pct': 1.0, 'target_status': 'PENDING', 'beginning_equity_cents': None, 'ending_equity_cents': None}
+{'market_date': '2026-08-26', 'status': 'MISSING', 'evidence_state': 'missing', 'trade_count': 0, 'net_return_pct': None, 'target_return_pct': 1.0, 'target_status': 'PENDING', 'beginning_equity_cents': None, 'ending_equity_cents': None}
+{'market_date': '2026-08-27', 'status': 'MISSING', 'evidence_state': 'missing', 'trade_count': 0, 'net_return_pct': None, 'target_return_pct': 1.0, 'target_status': 'PENDING', 'beginning_equity_cents': None, 'ending_equity_cents': None}
+{'market_date': '2026-08-28', 'status': 'MISSING', 'evidence_state': 'missing', 'trade_count': 0, 'net_return_pct': None, 'target_return_pct': 1.0, 'target_status': 'PENDING', 'beginning_equity_cents': None, 'ending_equity_cents': None}
+{'market_date': '2026-08-31', 'status': 'NO_TRADE', 'evidence_state': 'no_trade', 'trade_count': 0, 'net_return_pct': 0.0, 'target_return_pct': 1.0, 'target_status': 'PENDING', 'beginning_equity_cents': None, 'ending_equity_cents': None}
+{'market_date': '2026-09-01', 'status': 'NO_TRADE', 'evidence_state': 'no_trade', 'trade_count': 0, 'net_return_pct': 0.0, 'target_return_pct': 1.0, 'target_status': 'PENDING', 'beginning_equity_cents': None, 'ending_equity_cents': None}
+{'market_date': '2026-09-02', 'status': 'NO_TRADE', 'evidence_state': 'no_trade', 'trade_count': 0, 'net_return_pct': 0.0, 'target_return_pct': 1.0, 'target_status': 'PENDING', 'beginning_equity_cents': None, 'ending_equity_cents': None}
+{'market_date': '2026-09-03', 'status': 'NO_TRADE', 'evidence_state': 'no_trade', 'trade_count': 0, 'net_return_pct': 0.0, 'target_return_pct': 1.0, 'target_status': 'PENDING', 'beginning_equity_cents': None, 'ending_equity_cents': None}
+
+== MONITOR INTERVAL GAPS BY DATE ==
+Traceback (most recent call last):
+  File "<stdin>", line 21, in <module>
+sqlite3.OperationalError: no such column: market_data_available

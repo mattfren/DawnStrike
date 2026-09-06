@@ -1,0 +1,138 @@
+{
+  "schema": "dawnstrike.certification.gate_results.v1",
+  "audit_date": "2026-09-04",
+  "audit_commit": "14ca714f6df37a5769119547d01d77527baeb5c5",
+  "remediation_branch": "codex/dawnstrike-cert-remediation-20260904",
+  "verdicts": {
+    "A_software_functionality": "PARTIAL",
+    "B_research_validity": "PARTIAL",
+    "C_demonstrated_edge": "FAIL"
+  },
+  "scores": {
+    "product_readiness": 50,
+    "innovation_potential": 59,
+    "proven_innovation": 16
+  },
+  "hard_gates": [
+    {
+      "gate": "No critical user journey fails",
+      "result": "FAIL",
+      "evidence": "daily_run_stages: intraday_monitor FAILED x344, eod_outcome_capture FAILED x4, paper_reconciliation FAILED x4, alpha_learning FAILED x4 across 2026-08-31..2026-09-04. No alpha_monitor-* or trade_watch-* log has ever been written.",
+      "post_remediation": "Root cause fixed and regression-tested (WP-1). Production proof requires one live session; see operator packet OP-1."
+    },
+    {
+      "gate": "No known material error in signal or outcome calculations",
+      "result": "FAIL",
+      "evidence": "target_1 was assigned the prior-day high unconditionally, publishing a first target 35-45% below entry on three live gap-up signals (LIDR, GPRO, PPBT).",
+      "post_remediation": "Fixed and regression-tested (WP-3). Realized user impact was nil: all three carried was_alerted=0, blocked by the unrelated gate 'SEC risk not checked'."
+    },
+    {
+      "gate": "No lookahead bias or data leakage remains possible",
+      "result": "UNKNOWN",
+      "evidence": "Verified absent on the paths audited: position_management.py raises ValueError on a pre-open bar; audit_service._eligible_bars is causal; premarket reconciliation enforces completed bars in the 04:00-09:29 ET window. The adversarial V6 dataset/label leakage probe did not complete.",
+      "post_remediation": "Still UNKNOWN. All V6 tables are empty so nothing is at risk today, but this must close before any V6 promotion."
+    },
+    {
+      "gate": "Entry and fill semantics match the documented strategy",
+      "result": "FAIL",
+      "evidence": "Paper audit defaults to entry_mode='open' (config.py:70,302; paper_audit.py:19), entering at the first eligible bar's open regardless of the breakout trigger, while the product's stored rule is 'Watch only if price confirms above X.' Production trade_watcher_service.py decides on a polled 5-minute spot price and cannot see intrabar excursion; the correct path-accurate engine v2/paper_ops/position_management.py has no production caller.",
+      "post_remediation": "Not remediated. WP-8 open: changes what the product measures, which is a strategy-definition decision requiring escalation."
+    },
+    {
+      "gate": "Live and fixture data cannot be confused",
+      "result": "PASS",
+      "evidence": "alert_gate blocks fixture_only/synthetic_or_test_data; every receipt stamps research_only:true and broker_execution_enabled:false; cohort/evidence_mode/evidence_state separate forward_observed from research; sample scans label source 'sample' with stale_data_flag true."
+    },
+    {
+      "gate": "Results can be reproduced",
+      "result": "FAIL",
+      "evidence": "A clean venv following the documented 'pip install -e .[dev]' resolves anyio 4.15.0 against requirements.lock's 4.14.2 and fails the repository's own dependency contract test with the identical error seen in the full run. The documented install never consults the lock.",
+      "post_remediation": "BLOCKED_EXTERNAL. WP-4 requires a dependency-baseline decision by the owner."
+    },
+    {
+      "gate": "Database cannot silently corrupt or duplicate core records",
+      "result": "PARTIAL",
+      "evidence": "PRAGMA quick_check = ok on the live DB; schema_version 30; scans are idempotent in the observed runs. A full concurrency/migration-from-old-schema audit did not complete."
+    },
+    {
+      "gate": "UI does not display misleading confidence or return claims",
+      "result": "PARTIAL",
+      "evidence": "win_probability_pct returns 100.0 on zero evidence but is NEVER rendered (absent from EXPECTANCY_COLUMNS app.py:113-121 and from both per-ticker render sites). The expectancy table carries an honest explanation ('Basis: score prior only; tier: exploratory'), but the setup card app.py:4460-4485 shows a bare 'Expected +4.99%' with no basis, tier or confidence qualifier.",
+      "post_remediation": "Not remediated. Latent, not user-facing for win probability; the bare card figure remains a product-truth gap."
+    },
+    {
+      "gate": "No P0 or P1 defect remains unresolved",
+      "result": "FAIL",
+      "evidence": "WP-1, WP-2, WP-3 fixed and regression-tested. WP-4 and WP-5 BLOCKED_EXTERNAL pending owner decisions. WP-8 open."
+    },
+    {
+      "gate": "No critical path remains UNKNOWN",
+      "result": "FAIL",
+      "evidence": "V6 leakage probe UNKNOWN; 12 statistical findings and 8 scan findings raised but not adversarially verified; dead-code/duplicate sweep and full capability matrix incomplete."
+    },
+    {
+      "gate": "Required external live verification is complete",
+      "result": "BLOCKED_EXTERNAL",
+      "evidence": "Proving WP-1 in production requires a live market session after deployment. Audit performed 2026-09-04 during a session whose pipeline had already failed. See operator packet OP-1."
+    },
+    {
+      "gate": "Documentation does not materially contradict runtime behavior",
+      "result": "FAIL",
+      "evidence": "README.md and docs/AUTOMATION.md describe a 5-minute monitoring cadence that has never executed. docs/quant-refactor/32-final-independent-certification.md claims CERTIFICATION: READY with 3,166 passing tests; the suite is now 5,150 with 61 failures.",
+      "post_remediation": "The cadence claim becomes true once WP-1 is deployed. The stale certification needs a superseded banner."
+    },
+    {
+      "gate": "Final test run comes from the remediated state and passes",
+      "result": "FAIL",
+      "evidence": "Baseline at origin/main: 5,150 collected / 5,083 passed / 61 failed / 6 skipped / exit 1. Final run from the hash-frozen remediated state: 5,156 collected / 5,090 passed / 60 failed / 6 skipped / exit 1. Zero regressions introduced: the failing-file distribution is identical to baseline except tests/test_streamlit_app.py, which moved from failing to passing, and all 6 added tests pass. The 60 remaining failures are the same environment-identity families (anyio lock drift ~35, stale approved interpreter hash ~16, date-dependent 3, residual streamlit projection/publication), which remain BLOCKED_EXTERNAL pending owner decisions on DS-005 and DS-006."
+    }
+  ],
+  "mode_readiness": {
+    "offline_research": "PASS",
+    "historical_backtest": "PARTIAL",
+    "forward_paper_research": "FAIL",
+    "live_data_decision_support": "FAIL",
+    "invite_only_beta": "FAIL",
+    "production_research_product": "FAIL",
+    "real_money_execution": "OUT_OF_SCOPE"
+  },
+  "final_verdict": "NOT CERTIFIED",
+  "preservation": {
+    "primary_checkout_modified": false,
+    "production_runtime_modified": false,
+    "live_database_modified": false,
+    "live_database_access_mode": "mode=ro&immutable=1 with PRAGMA query_only=ON",
+    "scheduled_tasks_modified": false,
+    "commits_made": 0,
+    "pushes_made": 0,
+    "worktrees_removed": 0,
+    "stashes_dropped": 0,
+    "developer_python_environment_modified": false,
+    "new_artifacts": [
+      "C:\\r\\dawnstrike-cert-20260904 (audit worktree, branch codex/dawnstrike-cert-remediation-20260904, uncommitted)",
+      "C:\\r\\dawnstrike-cleanenv-20260904 (throwaway venv for the reproducibility test)"
+    ]
+  },
+  "final_test_evidence": {
+    "baseline": {
+      "collected": 5150,
+      "passed": 5083,
+      "failed": 61,
+      "skipped": 6,
+      "exit_code": 1
+    },
+    "final_remediated": {
+      "collected": 5156,
+      "passed": 5090,
+      "failed": 60,
+      "skipped": 6,
+      "xfailed": 0,
+      "xpassed": 0,
+      "exit_code": 1
+    },
+    "regressions_introduced": 0,
+    "tests_added": 6,
+    "tests_fixed": 1,
+    "log": "evidence/final_pytest_remediated.txt"
+  }
+}

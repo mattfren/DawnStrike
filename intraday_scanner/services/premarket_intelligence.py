@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from csv import DictWriter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -210,6 +211,38 @@ def build_premarket_intelligence(
     )
 
 
+_ROUNDUP_PHRASES = (
+    "stocks moving",
+    "stocks to watch",
+    "movers",
+    "moving premarket",
+    "moving in wednesday",
+    "moving in monday",
+    "moving in tuesday",
+    "moving in thursday",
+    "moving in friday",
+    "after-market session",
+    "premarket session",
+    "here are",
+    "top gainers",
+    "biggest movers",
+    "market wrap",
+)
+
+
+def _is_market_roundup(lowered: str) -> bool:
+    """True for multi-ticker list articles that explain no single symbol.
+
+    These name a dozen companies and attribute a cause to none of them, so they
+    cannot support a per-candidate catalyst claim.
+    """
+
+    if any(phrase in lowered for phrase in _ROUNDUP_PHRASES):
+        return True
+    # "12 Health Care Stocks ..." - a leading count followed by a plural noun.
+    return bool(re.match(r"^\s*\d{1,3}\s+\w+", lowered) and "stocks" in lowered)
+
+
 def classify_catalyst(headline: str, *, has_news: bool = True) -> CatalystAssessment:
     text = str(headline or "").strip()
     lowered = text.lower()
@@ -224,6 +257,15 @@ def classify_catalyst(headline: str, *, has_news: bool = True) -> CatalystAssess
         flags.append("social_media_hype")
     if any(term in lowered for term in ("reiterates", "reminds", "update on prior", "previously")):
         flags.append("recycled_news")
+    if _is_market_roundup(lowered):
+        # A "20 Stocks Moving Premarket" roundup names many tickers and explains
+        # none of them.  Attributing it to a candidate manufactures a catalyst
+        # that does not exist, and in live data one candidate was assigned an
+        # article about an entirely different company.
+        flags.append("non_specific_market_roundup")
+        return CatalystAssessment(
+            "C", "no_clear_catalyst", _summary(text), 0.2, flags
+        )
     if any(
         term in lowered
         for term in (
@@ -271,6 +313,20 @@ def classify_catalyst(headline: str, *, has_news: bool = True) -> CatalystAssess
         "major earnings beat",
         "major contract",
         "strategic investment",
+        # Earnings are the single most common premarket gap catalyst, but only
+        # the exact phrase "earnings beat" was recognised.  A real 36% earnings
+        # gap headline matched nothing and scored as neutral.
+        "beats estimates",
+        "beats on earnings",
+        "tops estimates",
+        "raises guidance",
+        "raises full-year",
+        "record revenue",
+        "record quarter",
+        "merger agreement",
+        "to be acquired",
+        "takeover",
+        "tender offer",
     ]
     tier_b = [
         "partnership",
@@ -281,6 +337,20 @@ def classify_catalyst(headline: str, *, has_news: bool = True) -> CatalystAssess
         "analyst upgrade",
         "expansion",
         "collaboration",
+        "quarterly results",
+        "q1 results",
+        "q2 results",
+        "q3 results",
+        "q4 results",
+        "first quarter",
+        "second quarter",
+        "third quarter",
+        "fourth quarter",
+        "reports earnings",
+        "earnings report",
+        "price target raised",
+        "uplisting",
+        "short squeeze",
     ]
     theme_terms = (
         "ai",

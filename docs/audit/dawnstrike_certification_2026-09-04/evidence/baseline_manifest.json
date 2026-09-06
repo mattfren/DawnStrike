@@ -1,0 +1,158 @@
+{
+  "schema": "dawnstrike.certification.baseline_manifest.v1",
+  "audit_date_utc": "2026-09-04",
+  "auditor_role": "baseline_auditor",
+  "audit_target": {
+    "reason_for_target": "The primary checkout is 440 commits and 547,081 insertions behind origin/main; auditing it would produce entirely stale findings.",
+    "worktree": "C:/r/dawnstrike-cert-20260904",
+    "commit": "14ca714f6df37a5769119547d01d77527baeb5c5",
+    "commit_date": "2026-09-02",
+    "ref": "origin/main",
+    "working_tree_at_start": "clean",
+    "remediation_branch": "codex/dawnstrike-cert-remediation-20260904"
+  },
+  "three_way_divergence": {
+    "primary_checkout": {
+      "path": "C:/Users/MattFields/Dawnstrike",
+      "commit": "ba39a5353045b7d417936ed1aed0ee4802169759",
+      "commit_date": "2026-08-07",
+      "behind_origin_main_commits": 440,
+      "ahead_of_origin_main_commits": 0,
+      "diff_vs_origin_main": "1486 files changed, 547081 insertions, 5960 deletions",
+      "dirty_tracked_files": 8,
+      "untracked_paths": 2,
+      "status": "STALE_AND_DIRTY",
+      "modified_by_this_audit": false
+    },
+    "authoritative_remote": {
+      "ref": "origin/main",
+      "commit": "14ca714f6df37a5769119547d01d77527baeb5c5",
+      "commit_date": "2026-09-02",
+      "last_fetch": "2026-09-02T11:32:45"
+    },
+    "production_runtime": {
+      "path": "C:/r/dawnstrike-runtime",
+      "commit": "b7220890672049446147cb2ae81cd267b6dfbb3b",
+      "commit_date": "2026-08-30",
+      "is_ancestor_of_origin_main": true,
+      "is_ancestor_of_primary_checkout": false,
+      "working_tree": "clean",
+      "note": "Live scheduled tasks execute THIS checkout, not the primary checkout.",
+      "modified_by_this_audit": false
+    }
+  },
+  "environment": {
+    "os": "Windows 11 Pro 10.0.26200",
+    "python": "3.13.15 (built 2026-08-05)",
+    "python_exe_sha256": "85B71D8C6EC1905935F74BE0C9869AAE198D00E98F39DF699EC66F9C5A84CECD",
+    "python_version_file": "3.13",
+    "requires_python": ">=3.13,<3.14",
+    "pwsh": "7.6.5",
+    "windows_powershell": "5.1.26100.9278",
+    "pytest": "9.1.1",
+    "mypy": "2.3.1",
+    "ruff": "0.16.5",
+    "streamlit": "1.63.0",
+    "pandas": "3.0.5",
+    "numpy": "2.5.2",
+    "scikit_learn": "1.9.0",
+    "openai": "3.7.0",
+    "anyio_installed": "4.15.0",
+    "anyio_locked": "4.14.2",
+    "package_installed": "dawnstrike-intraday-scanner 0.1.0 (editable)",
+    "package_manager": "pip (no uv present)"
+  },
+  "code_inventory_at_audit_commit": {
+    "python_files_in_intraday_scanner": 362,
+    "python_loc_in_intraday_scanner": 207698,
+    "app_py_loc": 4828,
+    "test_files": 258,
+    "tests_collected": 5150,
+    "cli_subcommands": 101,
+    "docs_markdown_files": 195,
+    "scripts": 97
+  },
+  "baseline_test_result": {
+    "command": "py -m pytest -q -p no:cacheprovider --durations=40 -rsxX",
+    "collected": 5150,
+    "passed": 5083,
+    "failed": 61,
+    "skipped": 6,
+    "xfailed": 0,
+    "xpassed": 0,
+    "exit_code": 1,
+    "log": "evidence/full_pytest_origin_main.txt"
+  },
+  "prior_certification_claim": {
+    "document": "docs/quant-refactor/32-final-independent-certification.md",
+    "date": "2026-08-17",
+    "claimed_verdict": "CERTIFICATION: READY",
+    "claimed_tests": 3166,
+    "actual_tests_at_audit_commit": 5150,
+    "staleness_note": "Predates the audit commit by 16 days; its test evidence is superseded and the suite no longer passes."
+  },
+  "live_operational_state": {
+    "state_root": "C:/r/dawnstrike-state",
+    "active_db": "C:/r/dawnstrike-state/shadow_real.sqlite",
+    "active_db_sha256_at_read": "D218324FFB220CA6D1BC28823B37E8677B2D7FD0EF24EF23ED06C7D6FFF759B2",
+    "active_db_bytes_at_read": 14602240,
+    "active_db_schema_version": 30,
+    "active_db_quick_check": "ok",
+    "tables_total": 145,
+    "tables_empty": 105,
+    "mutating_live_during_audit": true,
+    "scheduled_tasks_ready": [
+      "Dawnstrike 10of10 Daily Finalize",
+      "Dawnstrike AlphaOps EOD Full Report",
+      "Dawnstrike AlphaOps Monitor 5m",
+      "Dawnstrike AlphaOps Morning",
+      "Dawnstrike AlphaOps V6 Weekly Training",
+      "Dawnstrike Delayed SIP Capture"
+    ],
+    "scheduled_task_last_results": {
+      "Dawnstrike AlphaOps Morning": 2,
+      "Dawnstrike 10of10 Daily Finalize": 2,
+      "Dawnstrike Delayed SIP Capture": 2147942402,
+      "Dawnstrike AlphaOps Monitor 5m": 267009
+    },
+    "daily_run_stage_status_2026_08_31_to_09_04": {
+      "intraday_monitor": {"FAILED": 344},
+      "morning_collection": {"FAILED": 5},
+      "ranking_delivery": {"FAILED": 5},
+      "eod_outcome_capture": {"FAILED": 4},
+      "paper_reconciliation": {"FAILED": 4},
+      "paperops_forward": {"FAILED": 4},
+      "alpha_learning": {"FAILED": 4},
+      "canonical_performance": {"DEGRADED": 4},
+      "readiness": {"DEGRADED": 4},
+      "publication": {"COMPLETE": 4},
+      "calendar_build": {"NO_TRADE": 4}
+    },
+    "forward_paper_record": {
+      "cohort": "official_forward_paper",
+      "window": "2026-07-31 to 2026-09-03",
+      "trading_days": 25,
+      "days_missing": 21,
+      "days_no_trade": 4,
+      "total_trades": 0,
+      "target_return_pct": 1.0,
+      "target_status": "PENDING"
+    }
+  },
+  "preservation": {
+    "primary_checkout_modified": false,
+    "production_runtime_modified": false,
+    "live_db_modified": false,
+    "live_db_access_mode": "mode=ro&immutable=1 with PRAGMA query_only=ON, or file-hash only",
+    "scheduled_tasks_modified": false,
+    "commits_made": 0,
+    "pushes_made": 0,
+    "worktrees_removed": 0,
+    "stashes_dropped": 0,
+    "developer_python_environment_modified": false,
+    "artifacts_created": [
+      "C:/r/dawnstrike-cert-20260904 (audit worktree; remediation uncommitted)",
+      "C:/r/dawnstrike-cleanenv-20260904 (throwaway venv for the clean-build test)"
+    ]
+  }
+}

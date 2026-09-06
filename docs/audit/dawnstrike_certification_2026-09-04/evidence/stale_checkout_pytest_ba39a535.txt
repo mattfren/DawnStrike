@@ -1,0 +1,29 @@
+........................................................................ [  9%]
+........................................................................ [ 18%]
+........................................................................ [ 27%]
+........................................................................ [ 36%]
+........................................................................ [ 45%]
+........................................................................ [ 54%]
+...................................................................F.... [ 63%]
+........................................................................ [ 72%]
+.........................................F.............................. [ 81%]
+........................................................................ [ 90%]
+........................................................................ [ 99%]
+.....                                                                    [100%]
+================================== FAILURES ===================================
+___________ test_public_dashboard_has_semantic_tables_and_headings ____________
+tests\test_public_dashboard_semantics.py:10: in test_public_dashboard_has_semantic_tables_and_headings
+    assert html.count('aria-pressed="false"') == 5
+E   assert 6 == 5
+E    +  where 6 = <built-in method count of str object at 0x000001C0698DA010>('aria-pressed="false"')
+E    +    where <built-in method count of str object at 0x000001C0698DA010> = '<!doctype html>\n<html lang="en">\n  <head>\n    <meta charset="utf-8" />\n    <meta name="viewport" content="width=d... pending</span></span></footer>\n    <script type="module" src="/assets/dawnstrike.js"></script>\n  </body>\n</html>\n'.count
+_____________ test_streamlit_dashboard_renders_without_exceptions _____________
+tests\test_streamlit_app.py:5: in test_streamlit_dashboard_renders_without_exceptions
+    app = AppTest.from_file("app.py", default_timeout=30)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+..\AppData\Local\Programs\Python\Python313\Lib\site-packages\streamlit\testing\v1\app_test.py:348: in from_file
+    raise FileNotFoundError(
+E   FileNotFoundError: AppTest script not found at C:\Users\MattFields\Dawnstrike\tests\app.py. Relative paths are resolved against the file that calls AppTest.from_file().
+=========================== short test summary info ===========================
+FAILED tests/test_public_dashboard_semantics.py::test_public_dashboard_has_semantic_tables_and_headings
+FAILED tests/test_streamlit_app.py::test_streamlit_dashboard_renders_without_exceptions

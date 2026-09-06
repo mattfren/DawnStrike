@@ -1,0 +1,160 @@
+{
+  "schema": "dawnstrike.certification.finding_register.v1",
+  "source": "primary auditor (direct verification, not subagent)",
+  "audit_commit": "14ca714f6df37a5769119547d01d77527baeb5c5",
+  "date": "2026-09-04",
+  "findings": [
+    {
+      "id": "DS-P0-001",
+      "title": "Intraday monitor rejects the artifact the morning stage deliberately publishes, killing the monitoring loop on every cycle",
+      "category": "correctness",
+      "severity": "CRITICAL",
+      "confidence": "HIGH",
+      "status": "CONFIRMED",
+      "claim_tested": "The 5-minute intraday monitoring loop runs and observes saved picks during the trading session.",
+      "evidence": [
+        "Live DB daily_run_stages: intraday_monitor FAILED x344, morning_collection FAILED x5, ranking_delivery FAILED x5, eod_outcome_capture FAILED x4, paper_reconciliation FAILED x4, paperops_forward FAILED x4, alpha_learning FAILED x4.",
+        "monitor_interval_gaps: 79 MISSED_INTERVAL per day for 2026-08-31..2026-09-03 and 35 on 2026-09-04; zero observed intervals.",
+        "No alpha_monitor-*.stdout.log or trade_watch-*.stdout.log exists in C:/r/dawnstrike-state/logs; only calendar/heartbeat wrappers. The monitoring CLI has never executed.",
+        "Reproduced directly: dot-sourcing C:/r/dawnstrike-runtime/scripts/alpha_cycle_artifact.ps1 and calling Test-DawnstrikeAlphaCycleArtifact on the real 2026-09-03 artifact throws: AlphaOps cycle artifact core universe is not READY; full core coverage is unavailable.",
+        "Artifact run_contract.core_universe_status = DATA_UNAVAILABLE; S&P 500 and Nasdaq-100 verdicts both observed_unique_count 0 with blockers expected_count_missing/membership_absent."
+      ],
+      "observed": "run_alphaops_monitor.ps1:355-358 calls Test-DawnstrikeAlphaCycleArtifact with neither -AllowCoreShortfall nor -RequireCoreCoverage. In alpha_cycle_artifact.ps1 the coreCoverageRequired expression evaluates true when core_universe_status is DATA_UNAVAILABLE and -AllowCoreShortfall is absent, so the validator throws and the monitor sets error_code alpha_cycle_artifact_invalid and exits 2 on every cycle.",
+      "expected": "The monitor should tolerate a governed lane-local core-universe shortfall exactly as the morning stage does, because the monitor consumes only research_candidate_count and research_symbols from the artifact and does not use core-universe membership at all.",
+      "impact": "The entire post-morning product loop is dead: no intraday monitoring, no trade-watch, no entries, no outcome capture, no paper reconciliation, no learning. This is the difference between a working decision-support product and a daily premarket email.",
+      "root_cause": "Inconsistent core-coverage strictness between two callers of one shared validator. run_alphaops_morning.ps1:229-236 passes -AllowCoreShortfall with an explicit comment that a core refresh outage is lane-local and the mover lane remains publishable; the monitor omits it.",
+      "remediation": "Pass -AllowCoreShortfall at the monitor call site so the two stages share one contract, and add a regression test asserting the monitor invocation tolerates a lane-local core shortfall.",
+      "acceptance_test": "A test proving the monitor accepts an artifact whose run_contract.core_universe_status is DATA_UNAVAILABLE, plus a live cycle producing an alpha_monitor-<date>.stdout.log and an observed (not MISSED) monitor interval.",
+      "files": ["scripts/run_alphaops_monitor.ps1:355-358", "scripts/run_alphaops_morning.ps1:219-236", "scripts/alpha_cycle_artifact.ps1:176-181"]
+    },
+    {
+      "id": "DS-P0-002",
+      "title": "Existing test proves the validator shortfall behavior but nothing asserts the monitor passes the flag",
+      "category": "test-coverage",
+      "severity": "HIGH",
+      "confidence": "HIGH",
+      "status": "CONFIRMED",
+      "claim_tested": "The 5,150-test suite would catch a break in the core daily loop.",
+      "evidence": [
+        "tests/test_alpha_cycle_artifact_ps1.py:261-273 test_artifact_accepts_lane_local_core_data_unavailable_shortfall asserts strict mode REJECTS core_universe_status=DATA_UNAVAILABLE (core universe is not READY in stderr) and that -AllowCoreShortfall accepts it.",
+        "grep of tests/ for AllowCoreShortfall matches only that one file; no test exercises the run_alphaops_monitor.ps1 invocation."
+      ],
+      "observed": "The unit contract is tested in both directions while the production caller that violates it is untested, so a 100%-failure production defect coexists with a passing targeted suite.",
+      "expected": "A caller-level or source-contract test should assert the monitor tolerates a lane-local core shortfall.",
+      "impact": "Test count is not evidence of working user journeys. This is the concrete instance proving that.",
+      "root_cause": "Coverage stops at the shared helper; PowerShell stage scripts are only partially contract-tested.",
+      "remediation": "Add a monitor-invocation contract test alongside the existing validator test.",
+      "acceptance_test": "New test fails before the DS-P0-001 fix and passes after.",
+      "files": ["tests/test_alpha_cycle_artifact_ps1.py:261-273"]
+    },
+    {
+      "id": "DS-P1-003",
+      "title": "Registered scheduled task is incompatible with the monitor script at origin/main",
+      "category": "reliability",
+      "severity": "HIGH",
+      "confidence": "HIGH",
+      "status": "CONFIRMED",
+      "claim_tested": "The current head can be deployed to the existing runtime without changing task registration.",
+      "evidence": [
+        "Live task Dawnstrike AlphaOps Monitor 5m arguments: -File C:/r/dawnstrike-runtime/scripts/run_alphaops_monitor.ps1 -RuntimeRoot ... -StateRoot ... only.",
+        "C:/r/dawnstrike-runtime (b7220890) monitor param block: RuntimeRoot, StateRoot, MarketDate, Notify - all optional.",
+        "origin/main (14ca714f) monitor param block adds three Mandatory params: ExpectedSha, LaunchManifestPath, LaunchManifestSha256."
+      ],
+      "observed": "Upgrading the runtime to origin/main without re-registering the task would leave three mandatory parameters unsupplied in a non-interactive scheduled context.",
+      "expected": "Deployment procedure and task registration move together, or the parameters degrade safely.",
+      "impact": "A routine runtime upgrade would silently break the scheduled pipeline.",
+      "root_cause": "Task registration scripts and stage-script signatures evolved on separate cadences; the runtime is pinned three days behind origin/main.",
+      "remediation": "Re-register tasks as part of the documented runtime upgrade, and add a preflight that validates every registered task argument set against the target commit parameter signatures.",
+      "acceptance_test": "A preflight check that fails when a registered task omits a mandatory parameter of the target commit stage script.",
+      "files": ["scripts/run_alphaops_monitor.ps1:1-10", "scripts/register_alphaops_tasks.ps1"]
+    },
+    {
+      "id": "DS-P1-004",
+      "title": "The only Streamlit dashboard render test is broken by a Streamlit API change; the dashboard itself is fine",
+      "category": "test-coverage",
+      "severity": "MEDIUM",
+      "confidence": "HIGH",
+      "status": "CONFIRMED",
+      "claim_tested": "The primary Streamlit dashboard has working automated verification.",
+      "evidence": [
+        "py -m pytest tests/test_streamlit_app.py at origin/main fails: FileNotFoundError: AppTest script not found at C:/r/dawnstrike-cert-20260904/tests/app.py. Relative paths are resolved against the file that calls AppTest.from_file().",
+        "Same failure reproduced independently in the primary checkout.",
+        "Driving AppTest with an absolute path succeeds: exception=ElementList(), error=ElementList(), tabs=[Today, Picks, Calendar, Performance, System], DB not created, warnings include SQLite database not found ... empty, read-only state and Evidence is insufficient until at least 20 real market days are audited."
+      ],
+      "observed": "The app renders correctly; only the test relative-path assumption is stale under streamlit 1.63.0.",
+      "expected": "The UI smoke test should pass and guard the dashboard.",
+      "impact": "The primary user interface currently has no passing automated regression guard, so UI breakage would go undetected. Severity is limited because the product itself is verified working.",
+      "root_cause": "AppTest.from_file resolves relative paths against the calling file; pyproject pins only streamlit>=1.32 so the behavior change was admitted silently.",
+      "remediation": "Resolve app.py from the repository root in the test (absolute path), and pin a tested streamlit upper bound or add a compatibility note.",
+      "acceptance_test": "tests/test_streamlit_app.py passes on streamlit 1.63.0.",
+      "files": ["tests/test_streamlit_app.py:7", "pyproject.toml"]
+    },
+    {
+      "id": "DS-P2-005",
+      "title": "config_hash attached to every ranked candidate incorporates local filesystem paths",
+      "category": "research-validity",
+      "severity": "LOW",
+      "confidence": "HIGH",
+      "status": "CONFIRMED",
+      "claim_tested": "config_hash is a stable fingerprint of scoring configuration usable to compare runs.",
+      "evidence": [
+        "Two scans of sample_data/premarket_snapshot_sample.csv differing only in --out-dir and --db-path produced identical values in every ranked_candidates.csv column except config_hash (e464382b3509 vs b35f68c75312).",
+        "Changing only --out-dir also changed it (e464382b3509 vs 2e59adc5acdf).",
+        "Two runs with identical --out-dir and --db-path produced the identical hash twice (1885ac5b81d9).",
+        "scoring.py:407-409 hashes config.public_dict(), which includes database_path and output_dir."
+      ],
+      "observed": "config_hash is deterministic given identical paths but changes when only output/database paths change, so it cannot be compared across machines or output directories.",
+      "expected": "A configuration fingerprint should cover scoring/strategy parameters, not local I/O locations.",
+      "impact": "Weakens cross-run and cross-machine reproducibility comparison and provenance auditing. It does not affect any score, rank, or level.",
+      "root_cause": "public_dict() conflates runtime I/O settings with strategy configuration.",
+      "remediation": "Hash only the strategy/scoring-relevant subset, or emit a separate strategy_config_hash alongside the existing value.",
+      "acceptance_test": "Two scans differing only in --out-dir/--db-path produce an identical strategy configuration hash.",
+      "files": ["intraday_scanner/scoring.py:407-409", "intraday_scanner/config.py"]
+    },
+    {
+      "id": "DS-VERDICT-C-006",
+      "title": "Zero trades in 25 forward paper-trading days: no demonstrated edge exists",
+      "category": "research-validity",
+      "severity": "CRITICAL",
+      "confidence": "HIGH",
+      "status": "CONFIRMED",
+      "claim_tested": "Dawnstrike has produced credible evidence that its insights outperform alternatives after realistic costs.",
+      "evidence": [
+        "paper_account_daily_ledger, official_forward_paper cohort, 2026-07-31..2026-09-03 = 25 trading days: 21 rows status MISSING/evidence_state missing, 4 rows status NO_TRADE. trade_count 0 on every row. target_return_pct 1.0 with target_status PENDING on every row.",
+        "All of signal_outcomes, paper_positions, paper_trade_fills, paper_audit_trades, manual_outcomes, alpha_outcome_labels, alpha_v6_outcomes, strategy_learning_labels, alpha_learning_runs, trade_intents, committed_fill_truth_receipts, outcome_capture_attempts contain 0 rows.",
+        "105 of 145 tables in the live database are empty; schema_version 30 initialized 2026-08-30."
+      ],
+      "observed": "The forward paper record contains no completed trade of any kind. The learning loop has never closed once in this database.",
+      "expected": "For any edge claim, a statistically meaningful sample of completed, cost-adjusted outcomes.",
+      "impact": "Verdict C (Demonstrated Product Edge) is determinable without statistical analysis: there is nothing to analyze. No performance claim of any kind is currently supportable.",
+      "root_cause": "Downstream starvation from DS-P0-001 plus a strategy that has selected no qualifying entry on any observed day.",
+      "remediation": "Fix DS-P0-001 first; edge evaluation cannot begin until the loop closes and completed outcomes accumulate.",
+      "acceptance_test": "A non-zero count of completed, cost-adjusted paper outcomes across a pre-registered sample of trading days.",
+      "files": ["live database C:/r/dawnstrike-state/shadow_real.sqlite"]
+    },
+    {
+      "id": "DS-STRENGTH-007",
+      "title": "Truth discipline is real and verified in production, not aspirational",
+      "category": "product-truth",
+      "severity": "INFORMATIONAL",
+      "confidence": "HIGH",
+      "status": "CONFIRMED_STRENGTH",
+      "claim_tested": "Dawnstrike refuses to fabricate or overstate evidence.",
+      "evidence": [
+        "Unobserved monitor slots are persisted as explicit MISSED_INTERVAL receipts carrying missing_is_not_zero: true rather than being dropped or zero-filled.",
+        "No-trade days record return_basis explicit_no_trade_observed_zero and observed_zero true, distinct from MISSING/pending days which keep net_return_pct NULL.",
+        "Daily finalize for 2026-09-03 returned status DEGRADED, upstream_status failed, deployment_url null, next_action missing_or_degraded_upstream_truth_or_safety - it refused to publish to the public dashboard while upstream was degraded.",
+        "Stage failures were delivered to Telegram on 2026-08-31, 09-01, 09-02 and 09-03 (stage_failure_notification receipts, sent: true).",
+        "Streamlit dashboard on an empty database warns Evidence is insufficient until at least 20 real market days are audited and does not create the database.",
+        "Every receipt carries research_only: true and broker_execution_enabled: false."
+      ],
+      "observed": "The system consistently distinguishes missing from zero, refuses to publish degraded truth, and labels insufficient evidence as insufficient.",
+      "expected": "n/a - this is a verified strength to protect.",
+      "impact": "This is the most defensible property of the product and a principal reason the codebase is salvageable. It must not be weakened by any remediation.",
+      "root_cause": "n/a",
+      "remediation": "Protect it. Any fix to DS-P0-001 must preserve the fail-visible contract rather than loosening validation generally.",
+      "acceptance_test": "Regression tests asserting missing != zero and refuse-to-publish-degraded remain green after remediation.",
+      "files": ["multiple"]
+    }
+  ]
+}
