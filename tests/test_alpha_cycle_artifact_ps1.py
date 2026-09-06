@@ -425,3 +425,47 @@ def test_optional_scenario_failure_keeps_core_complete_but_task_nonzero() -> Non
     assert result["core_status"] == "COMPLETE"
     assert result["core_exit_code"] == 0
     assert result["final_exit_code"] == 1
+
+
+MONITOR_STAGE = ROOT / "scripts" / "run_alphaops_monitor.ps1"
+MORNING_STAGE = ROOT / "scripts" / "run_alphaops_morning.ps1"
+
+
+def _artifact_validation_invocations(script: Path) -> list[str]:
+    """Return each Test-DawnstrikeAlphaCycleArtifact invocation as one flat string."""
+
+    lines = script.read_text(encoding="utf-8").splitlines()
+    invocations: list[str] = []
+    index = 0
+    while index < len(lines):
+        if "Test-DawnstrikeAlphaCycleArtifact" in lines[index]:
+            parts = [lines[index].strip()]
+            while parts[-1].endswith("`") and index + 1 < len(lines):
+                index += 1
+                parts.append(lines[index].strip())
+            invocations.append(" ".join(part.rstrip("`").strip() for part in parts))
+        index += 1
+    return invocations
+
+
+def test_monitor_stage_accepts_lane_local_core_shortfall() -> None:
+    """The monitor must not reject the artifact the morning stage publishes.
+
+    A governed core-universe outage records ``core_universe_status`` as
+    ``DATA_UNAVAILABLE``.  The morning stage accepts that as lane-local and
+    publishes the mover lane anyway.  The monitor consumes only
+    ``research_candidate_count`` and ``research_symbols`` and never reads core
+    membership, so validating strictly failed every cycle of every day on a
+    signal it does not use - 344 recorded intraday_monitor failures across five
+    trading days, with no alpha_monitor log ever written.
+    """
+
+    invocations = _artifact_validation_invocations(MONITOR_STAGE)
+
+    assert invocations, "monitor stage no longer validates the AlphaOps cycle artifact"
+    for invocation in invocations:
+        assert "-AllowCoreShortfall" in invocation, (
+            "run_alphaops_monitor.ps1 must pass -AllowCoreShortfall; without it the "
+            "monitor rejects every artifact a governed core outage produces."
+        )
+        assert "-RequireCoreCoverage" not in invocation
