@@ -803,3 +803,131 @@ def test_eod_cross_release_handoff_failure_is_terminal_and_observable_before_wri
     assert '"--status", "FAILED"' in failure_path
     assert '"stage_failure_notification-$MarketDate"' in failure_path
     assert "exit $handoffFailureExit" in failure_path
+
+
+def _data_unavailable_core(root: Path, *, observed_at: object) -> None:
+    """Rewrite the core contract into the shape an absent manifest produces.
+
+    This is what production emits when no core-universe manifest is configured:
+    `status=DATA_UNAVAILABLE`, no members, and - the part that mattered -
+    `observed_at: null`, because there was nothing to observe.
+    """
+
+    core_path = root / "core_universe_contract.json"
+    core = json.loads(core_path.read_text(encoding="utf-8"))
+    core["status"] = "DATA_UNAVAILABLE"
+    core["observed_at"] = observed_at
+    core["effective_date"] = None
+    core["members"] = []
+    core["membership_count"] = 0
+    core["completeness_verdict"] = "INCOMPLETE"
+    core["freshness_verdict"] = "UNKNOWN"
+    core["canonical_member_set_hash_sha256"] = _canonical_member_hash([])
+    for verdict in core["index_verdicts"].values():
+        verdict.update(
+            {
+                "status": "DATA_UNAVAILABLE",
+                "observed_unique_count": 0,
+                "count_verdict": "FAIL",
+                "effective_date_verdict": "UNKNOWN",
+                "freshness_verdict": "UNKNOWN",
+                "completeness_verdict": "INCOMPLETE",
+            }
+        )
+    unhashed = dict(core)
+    for key in ("content_hash_sha256", "content_hash", "contract_id", "universe_id"):
+        unhashed.pop(key, None)
+    digest = hashlib.sha256(
+        json.dumps(unhashed, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    ).hexdigest()
+    core["content_hash_sha256"] = digest
+    core["content_hash"] = digest
+    core_path.write_text(json.dumps(core, sort_keys=True), encoding="utf-8")
+
+
+def test_unobserved_core_universe_does_not_fail_the_whole_trading_day(tmp_path: Path) -> None:
+    """An absent core-universe manifest must not cost the mover lane its day.
+
+    `DATA_UNAVAILABLE` is a status this validator explicitly accepts, and every
+    later check - empty members, the freshness window, member validity - already
+    steps aside for it. But the observation check ran unconditionally and ahead
+    of all of them, so a contract that honestly reported "nothing observed"
+    could never be validated and the branch was unreachable.
+
+    In production that single line failed `morning_collection` and
+    `ranking_delivery`, then cascaded into
+    `eod_precondition_universe_handoff_invalid`, which blocked
+    `eod_outcome_capture`, `paper_reconciliation`, `paperops_forward` and
+    `alpha_learning`. Proven against the real 2026-09-03 morning artifacts:
+    `core universe contract observation is invalid` before, `valid` with 104
+    symbols after.
+    """
+
+    root = _morning_root(tmp_path)
+    _data_unavailable_core(root, observed_at=None)
+
+    payload = build_universe_handoff(root, MARKET_DATE)
+
+    assert payload["universe_symbols"] == ["AAA", "BBB"], (
+        "the mover lane is fully observed and must survive an unobserved core lane"
+    )
+    assert "core_membership_unavailable" in payload["coverage"]["shortfall_reasons"]
+    assert payload["coverage"]["status"] == "PARTIAL", (
+        "an unobserved core lane is a declared shortfall, never silent completeness"
+    )
+
+
+def test_missing_observed_at_key_is_treated_the_same_as_null(tmp_path: Path) -> None:
+    root = _morning_root(tmp_path)
+    core_path = root / "core_universe_contract.json"
+    _data_unavailable_core(root, observed_at=None)
+    core = json.loads(core_path.read_text(encoding="utf-8"))
+    core.pop("observed_at")
+    unhashed = dict(core)
+    for key in ("content_hash_sha256", "content_hash", "contract_id", "universe_id"):
+        unhashed.pop(key, None)
+    digest = hashlib.sha256(
+        json.dumps(unhashed, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    ).hexdigest()
+    core["content_hash_sha256"] = digest
+    core["content_hash"] = digest
+    core_path.write_text(json.dumps(core, sort_keys=True), encoding="utf-8")
+
+    payload = build_universe_handoff(root, MARKET_DATE)
+
+    assert payload["universe_symbols"] == ["AAA", "BBB"]
+
+
+@pytest.mark.parametrize("stamp", ["not-a-timestamp", "2026-13-45", "", 12345])
+def test_a_present_but_unusable_observation_is_still_refused(
+    tmp_path: Path, stamp: object
+) -> None:
+    """Relaxing the check must not accept a stamp the contract actually claims."""
+
+    root = _morning_root(tmp_path)
+    _data_unavailable_core(root, observed_at=stamp)
+
+    with pytest.raises(UniverseHandoffError, match="observation is invalid"):
+        build_universe_handoff(root, MARKET_DATE)
+
+
+def test_a_ready_core_universe_still_requires_a_real_observation(tmp_path: Path) -> None:
+    """The relaxation is scoped to DATA_UNAVAILABLE and nothing else."""
+
+    root = _morning_root(tmp_path)
+    core_path = root / "core_universe_contract.json"
+    core = json.loads(core_path.read_text(encoding="utf-8"))
+    assert str(core["status"]).upper() == "READY"
+    core["observed_at"] = None
+    unhashed = dict(core)
+    for key in ("content_hash_sha256", "content_hash", "contract_id", "universe_id"):
+        unhashed.pop(key, None)
+    digest = hashlib.sha256(
+        json.dumps(unhashed, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    ).hexdigest()
+    core["content_hash_sha256"] = digest
+    core["content_hash"] = digest
+    core_path.write_text(json.dumps(core, sort_keys=True), encoding="utf-8")
+
+    with pytest.raises(UniverseHandoffError, match="observation is invalid"):
+        build_universe_handoff(root, MARKET_DATE)
