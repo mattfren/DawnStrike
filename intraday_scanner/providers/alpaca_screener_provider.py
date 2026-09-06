@@ -14,11 +14,18 @@ import re
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from intraday_scanner.config import ScannerConfig
-from intraday_scanner.errors import DataProviderError
+from intraday_scanner.errors import DataProviderError, MarketCalendarCoverageError
+from intraday_scanner.market_calendar import (
+    EARLY_CLOSE_ET,
+    MARKET_TIMEZONE,
+    REGULAR_CLOSE_ET,
+    MarketSessionStatus,
+    market_session,
+)
 from intraday_scanner.models import EVIDENCE_CONFIDENCE_VERSION, utc_now_iso
 from intraday_scanner.network_safety import open_allowlisted_url
 from intraday_scanner.providers.alpaca_provider import AlpacaProvider
@@ -46,6 +53,42 @@ NON_COMMON_NAME_TERMS = (
     " ultra short",
 )
 _TICKER = re.compile(r"^[A-Z][A-Z0-9.-]{0,9}$")
+
+# A vendor stamp a little ahead of our clock is ordinary clock skew; a stamp
+# meaningfully in the future is not, and is refused.
+FUTURE_SOURCE_TOLERANCE_SECONDS = 30.0
+# Longest run of consecutive non-session days the published calendar contains
+# is four (Thursday close through the Tuesday after a Monday holiday), so a
+# fortnight of lookback cannot miss a completed session.
+_SESSION_LOOKBACK_DAYS = 14
+
+
+def _previous_session_close_utc(reference: datetime) -> datetime | None:
+    """Close of the most recent regular session that ended before ``reference``.
+
+    Returns ``None`` when the published calendar does not cover the window, so
+    the caller can fall back rather than crash on an uncovered date.
+    """
+
+    local = reference.astimezone(MARKET_TIMEZONE)
+    day = local.date()
+    for _ in range(_SESSION_LOOKBACK_DAYS):
+        try:
+            decision = market_session(day)
+        except MarketCalendarCoverageError:
+            return None
+        if decision.is_trading_day:
+            close_time = (
+                EARLY_CLOSE_ET
+                if decision.status == MarketSessionStatus.EARLY_CLOSE
+                else REGULAR_CLOSE_ET
+            )
+            close_local = datetime.combine(day, close_time, tzinfo=MARKET_TIMEZONE)
+            if close_local < local:
+                return close_local.astimezone(timezone.utc)
+        day -= timedelta(days=1)
+    return None
+
 
 
 def _aware_utc(value: datetime | str) -> datetime:
@@ -134,14 +177,45 @@ class AlpacaScreenerProvider:
             lane: (source_reference - source_time).total_seconds()
             for lane, source_time in source_times.items()
         }
-        maximum_source_age = max(int(maximum_observation_skew_seconds), 0)
-        if any(
-            age < -30.0 or age > maximum_source_age
-            for age in source_ages.values()
-        ):
+        # The screener lanes are *discovery*: they decide which symbols to look
+        # at.  Every price on the row below comes from `get_premarket_snapshot`,
+        # fetched seconds ago.  Alpaca republishes the lanes once per session,
+        # stamped after the close, so holding them to the intraday observation
+        # window made the source unusable at exactly the hour this product runs:
+        # a premarket cycle always reads the prior session's stamp, the guard
+        # rejected every collection, and the pipeline fell back to
+        # unauthenticated web tables that can never clear the alert gate.
+        #
+        # Bind the lanes to the session they must come from instead. A stamp at
+        # or after the last completed close is the current published snapshot; an
+        # older one means the vendor is genuinely behind and is still refused.
+        session_floor = _previous_session_close_utc(source_reference)
+        if session_floor is None:
+            # Outside published calendar coverage, fall back to the caller's
+            # observation window rather than trusting an unbounded age.
+            session_floor = source_reference - timedelta(
+                seconds=max(int(maximum_observation_skew_seconds), 0)
+            )
+        ahead = sorted(
+            lane
+            for lane, age in source_ages.items()
+            if age < -FUTURE_SOURCE_TOLERANCE_SECONDS
+        )
+        if ahead:
             raise DataProviderError(
-                "STALE_MOVER_DISCOVERY_SOURCE: Alpaca screener source timestamps "
-                "do not match the requested current snapshot"
+                "STALE_MOVER_DISCOVERY_SOURCE: Alpaca screener lanes "
+                f"({', '.join(ahead)}) are stamped ahead of the requested snapshot"
+            )
+        behind = sorted(
+            lane
+            for lane, source_time in source_times.items()
+            if source_time < session_floor
+        )
+        if behind:
+            raise DataProviderError(
+                "STALE_MOVER_DISCOVERY_SOURCE: Alpaca screener discovery lanes "
+                f"({', '.join(behind)}) predate the last completed session close "
+                f"at {session_floor.isoformat()}"
             )
         assets = self._active_assets()
         asset_by_symbol = {
@@ -198,10 +272,15 @@ class AlpacaScreenerProvider:
                     "source_url": SCREENER_BASE_URL,
                     "extraction_mode": "authenticated_api",
                     "data_source_kind": "alpaca_api",
+                    # `source_timestamp` is what every downstream freshness
+                    # check reads.  It must describe this row's observation -
+                    # the snapshot fetched moments ago - not the once-a-session
+                    # discovery stamp, which made a current quote look hours old.
+                    # The discovery stamps stay on the receipt below.
                     "source_timestamp": str(
-                        movers.get("last_updated")
-                        or most_active.get("last_updated")
+                        row.get("source_timestamp")
                         or snapshot.as_of_timestamp
+                        or utc_now_iso()
                     ),
                     "extracted_at": utc_now_iso(),
                     "source_confidence": 92.0,
@@ -268,7 +347,8 @@ class AlpacaScreenerProvider:
             "point_in_time_status": (
                 "CURRENT_SNAPSHOT_BOUND" if requested_at is not None else "CURRENT_SNAPSHOT"
             ),
-            "source_timestamp_status": "FRESH_BOUND",
+            "source_timestamp_status": "SESSION_BOUND",
+            "discovery_session_floor_utc": session_floor.isoformat(),
             "source_timestamp_age_seconds": {
                 lane: round(age, 6) for lane, age in source_ages.items()
             },
