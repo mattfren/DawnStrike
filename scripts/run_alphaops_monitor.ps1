@@ -352,10 +352,18 @@ try {
 
     if ($exitCode -eq 0) {
         try {
+            # A governed core refresh outage is lane-local, exactly as the morning
+            # stage records it.  The monitor consumes only the research candidate
+            # count and symbols from this artifact and never reads core-universe
+            # membership, so it must accept the same DATA_UNAVAILABLE/shortfall
+            # truth the morning stage deliberately publishes.  Without this the
+            # monitor rejects every artifact the morning stage accepted and the
+            # whole intraday lane fails closed on a signal it does not consume.
             $alphaArtifact = Test-DawnstrikeAlphaCycleArtifact `
                 -ArtifactPath $alphaCyclePath `
                 -MarketDate $MarketDate `
-                -ReleaseSha $releaseSha
+                -ReleaseSha $releaseSha `
+                -AllowCoreShortfall
             $scenarioCandidateCount = [int64]$alphaArtifact.research_candidate_count
             $scenarioSymbols = [string]::Join(",", @($alphaArtifact.research_symbols))
         }

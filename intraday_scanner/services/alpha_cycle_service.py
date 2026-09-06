@@ -85,6 +85,7 @@ from intraday_scanner.services.alpha_v6_universe_service import (
     register_alpha_v6_universe,
 )
 from intraday_scanner.services.candidate_news_service import enrich_candidate_news
+from intraday_scanner.services.float_enrichment_service import enrich_rows_with_sec_float
 from intraday_scanner.services.learning_service import (
     load_production_alpha_learning_labels,
     run_alpha_learning,
@@ -916,8 +917,28 @@ def alpha_cycle(
         out_dir=output_dir / "candidate_news",
     )
     source_summary["candidate_news"] = dict(news_enrichment["summary"])
+    # Float rotation is worth up to 14 of 100 score points but scores a hard
+    # zero without ``float_shares``, so an unenriched candidate can never reach
+    # an A/B setup grade.  Resolve a current share count from SEC XBRL before
+    # the scan reads the snapshot, otherwise the enrichment cannot influence the
+    # grade it exists to inform.
+    float_enrichment = enrich_rows_with_sec_float(
+        list(news_enrichment.get("rows") or []),
+        source_config=source_config,
+        store=store,
+        out_dir=output_dir / "float_enrichment",
+        as_of=cycle_decision_at,
+        rehearsal_mode=fixture_mode,
+        snapshot_fallback=str(
+            news_enrichment.get("snapshot_path")
+            or dict(enrichment.get("paths") or {}).get("snapshot")
+            or collection["snapshot_path"]
+        ),
+    )
+    source_summary["float_enrichment"] = dict(float_enrichment["summary"])
     enriched_snapshot_path = str(
-        news_enrichment.get("snapshot_path")
+        float_enrichment.get("snapshot_path")
+        or news_enrichment.get("snapshot_path")
         or dict(enrichment.get("paths") or {}).get("snapshot")
         or collection["snapshot_path"]
     )
@@ -2693,9 +2714,45 @@ def _has_avoid_reason(row: dict[str, Any]) -> bool:
     return str(value or "").strip().lower() not in {"", "none", "false"}
 
 
-def _alphaops_scanner_config(config: Any) -> Any:
-    """Use a liquid day-trading universe instead of the legacy penny-gap profile."""
+ALPHAOPS_LIQUID_UNIVERSE_ENV = "DAWNSTRIKE_ALPHAOPS_LIQUID_UNIVERSE"
 
+
+def _alphaops_scanner_config(config: Any) -> Any:
+    """Apply the liquid large-cap universe only when explicitly requested.
+
+    This previously overrode the operator's configured universe unconditionally,
+    widening the price band from $0.50-$25 to $1-$500 and dropping the gap floor
+    from 15% to 1%.  That silently replaced the strategy profile with one the
+    scoring model cannot express:
+
+    * ``formula._float_rotation_score`` awards up to 14 of 100 points for
+      premarket float rotation, which is only meaningful for a small float.  In
+      live data the admitted large caps rotated 0.01%-0.10% of their float and
+      earned effectively nothing, while the one genuine small cap rotated 63.8%.
+    * The hardcoded ``max_credible_gap_pct=50`` penalised a real 93% gap that
+      the operator's own ``max_credible_gap_pct=300`` treats as credible, and
+      ``ideal_gap_high_pct=25`` placed every true gapper outside the ideal band.
+
+    The result was a universe of mega caps scored by a small-cap formula, so no
+    candidate could reach the A/B setup grade the alert gate requires.  The
+    operator's configured profile is now authoritative; the liquid profile
+    remains available behind an explicit opt-in.
+    """
+
+    liquid = str(os.environ.get(ALPHAOPS_LIQUID_UNIVERSE_ENV, "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+    if not liquid:
+        # Honour the configured universe; only the operational caps that are not
+        # part of the strategy definition are set here.
+        return config.with_overrides(
+            top_n=20,
+            premarket_enrichment_max_candidates=60,
+        )
     return config.with_overrides(
         min_gap_pct=1.0,
         ideal_gap_low_pct=3.0,
@@ -3720,6 +3777,14 @@ def _attach_authenticated_alpaca_structure(
         or high <= 0
         or low <= 0
         or not premarket_receipt_matches
+        # The prior-day high is only *resistance* while it sits above the entry.
+        # On a gap up - the entire premise of this product - the premarket high
+        # has already cleared yesterday's high, so using it as target_1 would
+        # publish a first target below the entry and below the stop.  Refuse the
+        # structure instead, exactly as an absent observation does, so the
+        # constructor emits NO_VALID_PLAN rather than an inverted plan.
+        or prior_high is None
+        or prior_high <= high
     ):
         return output
     output["market_structure_observations"] = {

@@ -177,14 +177,21 @@ returns require an explicit saved exit signal. See
 
 ## Install
 
+Install the exact locked dependency set, the same way CI does. `pyproject.toml`
+declares only lower bounds, so a plain editable install resolves newer versions
+than `requirements.lock` pins and then fails the repository's own
+dependency-identity tests:
+
 ```powershell
-py -m pip install -e .
+py -m pip install --require-hashes -r requirements.lock
+py -m pip install --no-deps -e .
+py -m pip check
 ```
 
-For development tools:
+Regenerate the lock only when a pin is intentionally advanced:
 
 ```powershell
-py -m pip install -e ".[dev]"
+py -m piptools compile --generate-hashes --output-file requirements.lock requirements.in
 ```
 
 ## Run the Sample Scanner
