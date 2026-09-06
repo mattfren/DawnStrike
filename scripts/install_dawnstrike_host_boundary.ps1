@@ -181,14 +181,23 @@ function Assert-DawnstrikeInstalledBoundaryAcl {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string[]]$Paths)
 
+    # Only genuinely mutating rights belong in this mask.  ``Modify`` and
+    # ``FullControl`` are composites that also carry every read bit
+    # (FullControl is 0x1F01FF), so OR-ing them here produced a mask matching
+    # *any* access right at all: a plain ``ReadAndExecute`` ACE scored
+    # 0x200A9 against it and tripped the check.  That made the assertion
+    # impossible to satisfy, including against the read-only Users ACE this
+    # installer itself grants in New-DawnstrikeProtectedDirectorySecurity, so
+    # the host boundary could never be installed.
+    #
+    # The write-only bits below still catch Modify and FullControl grants,
+    # because both include the Write group.
     $writeLikeRights = (
         [Security.AccessControl.FileSystemRights]::Write -bor
-        [Security.AccessControl.FileSystemRights]::Modify -bor
         [Security.AccessControl.FileSystemRights]::Delete -bor
         [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
         [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
-        [Security.AccessControl.FileSystemRights]::TakeOwnership -bor
-        [Security.AccessControl.FileSystemRights]::FullControl
+        [Security.AccessControl.FileSystemRights]::TakeOwnership
     )
     foreach ($path in $Paths) {
         $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
