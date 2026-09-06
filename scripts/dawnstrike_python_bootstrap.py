@@ -229,7 +229,7 @@ def _open_locked_exact_file(path: Path) -> BinaryIO:
     import msvcrt
     from ctypes import wintypes
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
     create_file = kernel32.CreateFileW
     create_file.argtypes = (
         wintypes.LPCWSTR,
@@ -255,10 +255,10 @@ def _open_locked_exact_file(path: Path) -> BinaryIO:
     )
     invalid_handle = ctypes.c_void_p(-1).value
     if raw_handle is None or int(raw_handle) == invalid_handle:
-        error = ctypes.get_last_error()
+        error = ctypes.get_last_error()  # type: ignore[attr-defined]
         raise OSError(error, f"cannot lock Git metadata: {path}")
     try:
-        descriptor = msvcrt.open_osfhandle(
+        descriptor = msvcrt.open_osfhandle(  # type: ignore[attr-defined]
             int(raw_handle), os.O_RDONLY | getattr(os, "O_BINARY", 0)
         )
     except Exception:
@@ -303,7 +303,7 @@ class _GitMetadataChangeGuard:
         import ctypes
         from ctypes import wintypes
 
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
         find_first = kernel32.FindFirstChangeNotificationW
         find_first.argtypes = (wintypes.LPCWSTR, wintypes.BOOL, wintypes.DWORD)
         find_first.restype = wintypes.HANDLE
@@ -320,7 +320,7 @@ class _GitMetadataChangeGuard:
         )
         invalid_handle = ctypes.c_void_p(-1).value
         if handle is None or int(handle) == invalid_handle:
-            error = ctypes.get_last_error()
+            error = ctypes.get_last_error()  # type: ignore[attr-defined]
             raise OSError(error, f"cannot guard Git metadata directory: {git_dir}")
         self._handle = int(handle)
 
@@ -331,7 +331,7 @@ class _GitMetadataChangeGuard:
         import ctypes
         from ctypes import wintypes
 
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
         wait = kernel32.WaitForSingleObject
         wait.argtypes = (wintypes.HANDLE, wintypes.DWORD)
         wait.restype = wintypes.DWORD
@@ -348,7 +348,7 @@ class _GitMetadataChangeGuard:
         import ctypes
         from ctypes import wintypes
 
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
         close = kernel32.FindCloseChangeNotification
         close.argtypes = (wintypes.HANDLE,)
         close.restype = wintypes.BOOL

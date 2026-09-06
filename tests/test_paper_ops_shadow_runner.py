@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from intraday_scanner.market_calendar import is_market_holiday
 from intraday_scanner.v2.data import MarketBar, MarketDataset, write_ohlcv_csv
 from intraday_scanner.v2.data_truth import build_data_truth_snapshot
 from intraday_scanner.v2.data_truth.models import DataTruthManifest
@@ -33,16 +34,22 @@ STRATEGY_ID = "fixture_shadow_parent"
 CHALLENGER_ID = "fixture_shadow_parent_candidate_v2"
 
 
+def _is_session_day(value: date) -> bool:
+    """A regular US equities session: a weekday that is not a market holiday."""
+
+    return value.weekday() < 5 and not is_market_holiday(value)
+
+
 def _future_session_date(days: int) -> date:
     value = date.today() + timedelta(days=days)
-    while value.weekday() >= 5:
+    while not _is_session_day(value):
         value += timedelta(days=1)
     return value
 
 
 def _next_session(value: date) -> date:
     value += timedelta(days=1)
-    while value.weekday() >= 5:
+    while not _is_session_day(value):
         value += timedelta(days=1)
     return value
 
@@ -1398,8 +1405,13 @@ def _build_retained_data_truth_snapshot(
     # The governed DataTruth explicit-universe contract requires the active
     # fleet warm-up history and the last completed exchange session. Keep this
     # retained fixture realistic while preserving the requested terminal close.
+    # The product resolves the last completed *exchange session*, so this
+    # fixture must skip holidays as well as weekends.  Skipping only weekends
+    # left the fixture sitting on a holiday whenever run_date landed on one -
+    # e.g. Labor Day 2026-09-07, a Monday, where weekday() is 0 - and the
+    # generated bars then disagreed with the session the product required.
     completed_date = run_date
-    while completed_date.weekday() >= 5:
+    while not _is_session_day(completed_date):
         completed_date -= timedelta(days=1)
     original_bars = list(source_dataset.bars_by_symbol.get("TST", ()))
     terminal = next(
@@ -1409,7 +1421,7 @@ def _build_retained_data_truth_snapshot(
     history: list[MarketBar] = []
     cursor = completed_date - timedelta(days=1)
     while len(history) < 100:
-        if cursor.weekday() < 5:
+        if _is_session_day(cursor):
             history.append(
                 replace(
                     terminal,

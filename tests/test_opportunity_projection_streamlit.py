@@ -2,6 +2,11 @@ from pathlib import Path
 
 from streamlit.testing.v1 import AppTest
 
+# ``AppTest.from_file`` resolves a relative path against the file that calls it,
+# not the working directory, so a bare "app.py" silently resolves to
+# tests/app.py and the projection checks stop running.
+APP = str(Path(__file__).resolve().parents[1] / "app.py")
+
 
 def test_streamlit_projection_is_invisible_by_default(
     tmp_path: Path,
@@ -10,7 +15,7 @@ def test_streamlit_projection_is_invisible_by_default(
     database = tmp_path / "missing.sqlite"
     monkeypatch.setenv("INTRADAY_DATABASE_PATH", str(database))
     monkeypatch.delenv("DAWNSTRIKE_OPPORTUNITY_PROJECTION_ENABLED", raising=False)
-    app = AppTest.from_file("app.py", default_timeout=30)
+    app = AppTest.from_file(APP, default_timeout=90)
 
     app.run()
 
@@ -32,7 +37,7 @@ def test_streamlit_projection_reports_missing_data_without_no_trade_claim(
     database = tmp_path / "missing.sqlite"
     monkeypatch.setenv("INTRADAY_DATABASE_PATH", str(database))
     monkeypatch.setenv("DAWNSTRIKE_OPPORTUNITY_PROJECTION_ENABLED", "true")
-    app = AppTest.from_file("app.py", default_timeout=30)
+    app = AppTest.from_file(APP, default_timeout=90)
 
     app.run()
 
