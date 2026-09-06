@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 from typing import Any
 
@@ -42,11 +43,114 @@ MIN_CATALYST_CONFIDENCE = 0.60
 ALERT_GATE_VERSION = "dawnstrike-alert-gate-v2.0.0"
 PASSING_EVIDENCE_STATUSES = frozenset({"CLEAR", "VERIFIED", "OK", "PASS"})
 ALERTABLE_EDGE_BUCKETS = frozenset({"MEDIUM", "HIGH"})
-ALERTABLE_SETUP_GRADES = frozenset({"A", "B"})
+# ``_setup_grade`` emits "A+" for scores >= 90, so omitting it here would reject
+# the single best grade the scorer can produce as "setup grade below alert
+# threshold".  A+ must rank at least as high as A.
+ALERTABLE_SETUP_GRADES = frozenset({"A+", "A", "B"})
 ALERTABLE_CONFIDENCE_BUCKETS = frozenset({"MEDIUM", "HIGH"})
 RECEIPT_ALERTABLE_TIERS = frozenset(
     {"QUALIFIED_PICK", "PICK_WITH_DISCLOSED_GAPS", "CONDITIONAL_PICK"}
 )
+
+# --- Bootstrap paper mode -------------------------------------------------
+#
+# Several gates below are unsatisfiable until the system has already traded.
+# ``confidence_bucket`` is INSUFFICIENT_SAMPLE until 20 real outcome days exist
+# (``edge_calibrator.MIN_REAL_DAYS_FOR_EXPECTANCY``), but outcome days only
+# accrue from entries, and entries require passing this gate.  That is a closed
+# loop: without an explicit bootstrap the product can never take its first paper
+# trade, which is exactly the state the live database was found in - 25 forward
+# sessions, zero trades.
+#
+# Bootstrap mode waives ONLY that class of gate: evidence that is missing
+# because it has not been collected yet, or calibration that cannot exist
+# before the first trade.  It NEVER waives a safety gate.  Halt status, SEC
+# risk, spread, price/level validity, volume, data quality, gap regime, stop
+# distance and every edge judgement (setup grade, edge bucket, reward/risk,
+# catalyst) remain fully enforced.
+#
+# Waived items are not discarded.  They are recorded on the row as
+# ``bootstrap_waived_reasons`` and the row is stamped ``bootstrap_mode`` so any
+# downstream evidence, performance or promotion consumer can exclude bootstrap
+# entries from a calibrated-edge claim.
+#
+# Off unless DAWNSTRIKE_BOOTSTRAP_PAPER_MODE is truthy.
+BOOTSTRAP_MODE_ENV = "DAWNSTRIKE_BOOTSTRAP_PAPER_MODE"
+
+BOOTSTRAP_WAIVABLE_REASONS = frozenset(
+    {
+        # No producer sets corporate_action_status anywhere in the pipeline, so
+        # it is permanently UNKNOWN and can never clear.
+        "corporate action status is not verified clear",
+        # Free public tables are inherently LIMITED; this can never be CLEAR
+        # without a paid verified feed.
+        "source quality status is not verified clear",
+        "source confidence below alert threshold",
+        "public table identity not verified",
+    }
+)
+
+BOOTSTRAP_WAIVABLE_WARNINGS = frozenset(
+    {
+        "not enough history yet",
+        "probability uncalibrated",
+        "free web data - verify manually",
+        "only one source confirmed it",
+        "low source confidence",
+        "secondary Yahoo range used - research only",
+    }
+)
+
+BOOTSTRAP_WAIVABLE_MISSING = frozenset({"float unknown", "previous close missing"})
+
+# Edge buckets are produced by the calibrator, which returns INSUFFICIENT_SAMPLE
+# below MIN_REAL_DAYS_FOR_EXPECTANCY and drags the alpha score toward its
+# insufficient-sample baseline.  They are therefore part of the same closed loop
+# and must be waivable, or bootstrap mode still cannot place a first trade.
+#
+# Setup grade and reward/risk are deliberately EXCLUDED: those are genuine
+# judgements about the setup itself, not artefacts of missing history.
+BOOTSTRAP_WAIVABLE_EDGE_REASONS = frozenset(
+    {
+        "edge bucket below alert threshold",
+        "confidence evidence below alert threshold",
+    }
+)
+
+# Deliberately NOT waivable, at any setting.  These are the checks that prevent
+# the worst single outcomes or that indicate the row is simply not evaluable.
+BOOTSTRAP_NEVER_WAIVED = frozenset(
+    {
+        "halt status not checked",
+        "halt status is not verified clear",
+        "SEC risk not checked",
+        "SEC risk status is not verified clear",
+        "extreme spread",
+        "missing price",
+        "invalid price",
+        "invalid entry trigger",
+        "invalid target",
+        "invalid invalidation",
+        "invalid reward/risk",
+        "missing volume",
+        "data quality unavailable",
+        "data quality below alert threshold",
+        "gap regime outside alert policy",
+        "stop distance exceeds alert policy",
+    }
+)
+
+
+def _bootstrap_paper_mode_enabled() -> bool:
+    """True when the operator has explicitly opted into bootstrap paper mode."""
+
+    return str(os.environ.get(BOOTSTRAP_MODE_ENV, "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
 
 
 def apply_alert_gates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -227,7 +331,17 @@ def evaluate_alert_gate(row: dict[str, Any]) -> dict[str, Any]:
         reasons.append("data quality below alert threshold")
 
     gap_pct = _optional_float(row.get("gap_pct"))
-    if gap_pct is not None and (gap_pct < 0 or gap_pct > MAX_ALERT_GAP_PCT):
+    # The scanner declares how large a gap it considers credible.  A hardcoded
+    # ceiling here contradicted configurations whose ideal band already reached
+    # 140%, rejecting exactly the explosive gappers the strategy exists to find.
+    # A negative gap is always rejected; the upper bound follows the scan.
+    configured_gap_ceiling = _optional_float(row.get("max_credible_gap_pct"))
+    gap_ceiling = (
+        configured_gap_ceiling
+        if configured_gap_ceiling is not None and configured_gap_ceiling > 0
+        else MAX_ALERT_GAP_PCT
+    )
+    if gap_pct is not None and (gap_pct < 0 or gap_pct > gap_ceiling):
         reasons.append("gap regime outside alert policy")
     stop_distance = _stop_distance_pct(row)
     if stop_distance is not None and stop_distance > MAX_ALERT_STOP_DISTANCE_PCT:
@@ -285,6 +399,33 @@ def evaluate_alert_gate(row: dict[str, Any]) -> dict[str, Any]:
 
     reasons.extend(receipt_state["blocking_reasons"])
 
+    bootstrap_mode = _bootstrap_paper_mode_enabled()
+    bootstrap_waived: list[str] = []
+    if bootstrap_mode:
+        # Partition, never discard.  A safety reason is never waivable even if a
+        # future edit adds it to a waivable set by mistake.
+        def _partition(
+            items: list[str], waivable: frozenset[str]
+        ) -> tuple[list[str], list[str]]:
+            kept: list[str] = []
+            waived: list[str] = []
+            for item in items:
+                if item in waivable and item not in BOOTSTRAP_NEVER_WAIVED:
+                    waived.append(item)
+                else:
+                    kept.append(item)
+            return kept, waived
+
+        reasons, waived_reasons = _partition(reasons, BOOTSTRAP_WAIVABLE_REASONS)
+        warnings, waived_warnings = _partition(warnings, BOOTSTRAP_WAIVABLE_WARNINGS)
+        missing, waived_missing = _partition(missing, BOOTSTRAP_WAIVABLE_MISSING)
+        edge_reasons, waived_edge = _partition(
+            edge_reasons, BOOTSTRAP_WAIVABLE_EDGE_REASONS
+        )
+        bootstrap_waived = _unique(
+            [*waived_reasons, *waived_edge, *waived_warnings, *waived_missing]
+        )
+
     public_warnings = _unique([*missing, *warnings])
     if reasons:
         status = BLOCKED
@@ -311,6 +452,10 @@ def evaluate_alert_gate(row: dict[str, Any]) -> dict[str, Any]:
         "alert_gate_version": ALERT_GATE_VERSION,
         "alert_gate_status": status,
         "alert_gate_reasons": _unique(reasons + edge_reasons + public_warnings),
+        # Truth preservation: what bootstrap mode set aside stays on the record,
+        # so a bootstrap entry can never be mistaken for a fully evidenced one.
+        "bootstrap_mode": bootstrap_mode,
+        "bootstrap_waived_reasons": bootstrap_waived,
         "public_data_reliability_grade": grade,
         "missing_critical_fields": _unique(missing),
         "manual_confirmation_required": manual_required,

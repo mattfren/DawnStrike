@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -17,6 +18,7 @@ from intraday_scanner.services.premarket_intelligence import (
 )
 
 TARGET_POLICY_VERSION = "alphaops-v5-premarket-range-extension-v1"
+STOP_POLICY_VERSION = "alphaops-v5-volatility-aware-stop-v1"
 FIRST_TARGET_RANGE_EXTENSION = 1.618
 STRETCH_TARGET_RANGE_EXTENSION = 2.618
 FUTURE_TIMESTAMP_TOLERANCE_SECONDS = 60
@@ -66,6 +68,69 @@ def score_universe(
     )
 
 
+def _volatility_aware_stop(
+    *,
+    entry: float,
+    premarket_low: float,
+    observed_range: float,
+    config: ScannerConfig,
+) -> tuple[float, dict[str, Any]]:
+    """Place the stop from observed volatility instead of the full range low.
+
+    Pinning the stop to ``premarket_low * 0.985`` meant the stop spanned the
+    entire premarket range.  For the explosive gappers this product targets that
+    is catastrophic: a 93% gapper produced a 35.4% stop, which both fails the
+    alert gate's 15% policy and is the mechanism behind the worst recorded
+    single loss.
+
+    The stop is now a fraction of the observed range - wide where the session is
+    genuinely volatile, tight where it is not - then floored so ordinary noise
+    and spread cannot trip it, and capped so one trade's loss stays bounded.
+
+    Targets are deliberately left anchored to observed structure.  Widening
+    reward:risk by tightening the stop is legitimate; manufacturing a target
+    from the risk distance is not, and the alert gate rejects it as gaming.
+    """
+
+    floor_distance = entry * (config.min_stop_distance_pct / 100.0)
+    cap_distance = entry * (config.max_stop_distance_pct / 100.0)
+    range_distance = observed_range * config.stop_range_fraction
+    # An absent or degenerate range must not produce a zero-width stop.
+    proposed = range_distance if range_distance > 0 else floor_distance
+    distance = min(max(proposed, floor_distance), cap_distance)
+
+    structural_low = premarket_low * 0.985
+    stop = entry - distance
+    if structural_low > stop:
+        # The premarket low is tighter than the volatility band, so respect the
+        # observed structure rather than inventing a looser stop.
+        stop = structural_low
+        distance = entry - stop
+        basis = "premarket_low_tighter_than_volatility_band"
+    elif range_distance <= 0:
+        basis = "min_distance_floor_no_range"
+    elif distance >= cap_distance:
+        basis = "max_distance_cap"
+    elif distance <= floor_distance:
+        basis = "min_distance_floor"
+    else:
+        basis = "premarket_range_fraction"
+
+    # Round the stop UP (toward entry) so tick rounding can only tighten the
+    # distance.  Rounding down would let a capped stop drift past the cap and
+    # quietly exceed the configured maximum loss.
+    stop = max(math.ceil(stop * 10_000) / 10_000, 0.0001)
+    return stop, {
+        "stop_basis_kind": basis,
+        "stop_range_fraction": config.stop_range_fraction,
+        "stop_distance_pct": round((entry - stop) / entry * 100, 4) if entry > 0 else None,
+        "stop_min_distance_pct": config.min_stop_distance_pct,
+        "stop_max_distance_pct": config.max_stop_distance_pct,
+        "stop_structural_low": round(structural_low, 4),
+        "stop_policy_version": STOP_POLICY_VERSION,
+    }
+
+
 def score_snapshot(
     row: SnapshotRow,
     config: ScannerConfig,
@@ -77,10 +142,15 @@ def score_snapshot(
     breakout_trigger = round(row.premarket_high * 1.005, 4)
     pullback_low = row.premarket_price * 0.94
     pullback_high = row.premarket_price * 0.98
-    invalidation = row.premarket_low * 0.985
     observed_premarket_range = max(
         row.premarket_high - row.premarket_low,
         0,
+    )
+    invalidation, stop_basis = _volatility_aware_stop(
+        entry=breakout_trigger,
+        premarket_low=row.premarket_low,
+        observed_range=observed_premarket_range,
+        config=config,
     )
     # Targets are anchored to observed market structure, not manufactured from
     # entry-to-stop risk.  V5 calculates after-cost R only after these levels
@@ -123,6 +193,11 @@ def score_snapshot(
             "target_basis_extension": FIRST_TARGET_RANGE_EXTENSION,
             "target_policy_version": TARGET_POLICY_VERSION,
             "target_derived_from_risk": False,
+            # Carry the configured gap ceiling so the alert gate judges the gap
+            # against the operator's declared strategy rather than a hardcoded
+            # 50% that contradicts an ideal band reaching 140%.
+            "max_credible_gap_pct": config.max_credible_gap_pct,
+            **stop_basis,
         }
     )
     intelligence_payload.update(

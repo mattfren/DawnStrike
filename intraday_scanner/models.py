@@ -191,6 +191,17 @@ CANDIDATE_COLUMNS = [
     "target_basis_extension",
     "target_policy_version",
     "target_derived_from_risk",
+    # Stop provenance: which rule placed the stop, and the bounds it honoured.
+    # Recorded so a reviewer can see whether a stop came from observed
+    # volatility, the structural low, or a policy floor/cap.
+    "stop_basis_kind",
+    "stop_distance_pct",
+    "stop_range_fraction",
+    "stop_min_distance_pct",
+    "stop_max_distance_pct",
+    "stop_structural_low",
+    "stop_policy_version",
+    "max_credible_gap_pct",
     "legacy_plan_status",
     "legacy_plan_reason",
     "risk_flags",
