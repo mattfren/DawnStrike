@@ -72,14 +72,18 @@ function Assert-DawnstrikeLauncherProtectedPath {
         }
         $cursor = $cursor.Parent
     }
+    # Modify (0x301BF) and FullControl (0x1F01FF) are composites that carry every
+    # read bit, so OR-ing them here made the mask match ANY access right at all -
+    # including the plain ReadAndExecute ACE Windows puts on the Program Files
+    # tree, and the one the host-boundary installer itself grants BUILTIN\Users.
+    # The assertion was therefore unsatisfiable on every machine. A Modify or
+    # FullControl grant is still caught, because each includes the Write group.
     $writeLikeRights = (
         [Security.AccessControl.FileSystemRights]::Write -bor
-        [Security.AccessControl.FileSystemRights]::Modify -bor
         [Security.AccessControl.FileSystemRights]::Delete -bor
         [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
         [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
-        [Security.AccessControl.FileSystemRights]::TakeOwnership -bor
-        [Security.AccessControl.FileSystemRights]::FullControl
+        [Security.AccessControl.FileSystemRights]::TakeOwnership
     )
     foreach ($boundary in @(
         'C:\Program Files',
