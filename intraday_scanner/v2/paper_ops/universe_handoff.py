@@ -611,10 +611,21 @@ def _validate_core_contract(
         raise UniverseHandoffError("core universe contract schema is invalid")
     if str(core.get("requested_market_date") or "") != market_date:
         raise UniverseHandoffError("core universe contract market date conflicts")
-    observed_date = _iso_date(core.get("observed_at"))
-    if observed_date is None:
+    status = str(core.get("status") or "").upper()
+    observed_at = core.get("observed_at")
+    observed_date = _iso_date(observed_at)
+    # A DATA_UNAVAILABLE contract has nothing to observe - expressing that is
+    # the point of the status - and every later check here already steps aside
+    # for it: empty members, the freshness window and member validity are all
+    # gated on READY.  Demanding a parseable observation from *every* contract
+    # made the DATA_UNAVAILABLE branch unreachable, so an absent core-universe
+    # manifest failed the handoff, failed `morning_collection` and
+    # `ranking_delivery`, and cascaded into
+    # `eod_precondition_universe_handoff_invalid` for the rest of the day.
+    # A present-but-unparseable stamp is still refused, whatever the status.
+    if observed_date is None and (status == "READY" or observed_at is not None):
         raise UniverseHandoffError("core universe contract observation is invalid")
-    if str(core.get("status") or "").upper() not in {"READY", "DATA_UNAVAILABLE"}:
+    if status not in {"READY", "DATA_UNAVAILABLE"}:
         raise UniverseHandoffError("core universe contract status is invalid")
     if str(core.get("completeness_verdict") or "").upper() not in {
         "COMPLETE",
@@ -628,7 +639,10 @@ def _validate_core_contract(
     }:
         raise UniverseHandoffError("core universe contract freshness is invalid")
     if (
-        str(core.get("status") or "").upper() == "READY"
+        status == "READY"
+        # Non-None by the gate above; stated so the type narrows rather than
+        # being assumed.
+        and observed_date is not None
         and str(core.get("freshness_verdict") or "").upper() == "FRESH"
     ):
         observed_day = date.fromisoformat(observed_date)
