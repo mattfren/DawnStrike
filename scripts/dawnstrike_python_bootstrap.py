@@ -636,7 +636,7 @@ def _assert_exact_source_locked(
     forbidden_absent: tuple[Path, ...],
     metadata_guard: _GitMetadataChangeGuard,
     source_handles: list[BinaryIO],
-) -> tuple[dict[str, bytes], object, dict[Path, BinaryIO], dict[Path, os.stat_result]]:
+) -> tuple[dict[str, bytes], object, dict[Path, BinaryIO]]:
     attributes_path = root / ".gitattributes"
     if not attributes_path.is_file() or _is_reparse(attributes_path):
         _fail("release checkout has no regular governed .gitattributes")
