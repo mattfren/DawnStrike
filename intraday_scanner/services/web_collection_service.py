@@ -266,7 +266,7 @@ def web_auto_collect(
         config,
         output_dir,
         store if persist else None,
-        deduped[:20],
+        deduped,
         persist,
     )
     sec_events = list(sec_summary.get("events") or [])
@@ -1027,6 +1027,31 @@ def _maybe_collect_halts(
     )
 
 
+# SEC risk is checked one HTTP request per ticker, so the list is capped.  The
+# cap is a time budget, not a judgement about which issuers matter, and the
+# previous `rows[:20]` slice spent it on whichever rows the source merge
+# happened to emit first.  Every ticker past the cut keeps
+# `sec_risk_status='UNKNOWN'`, which the alert gate hard-blocks, so an
+# arbitrary slice silently decided which candidates could ever be alertable.
+DEFAULT_SEC_RISK_MAX_TICKERS = 60
+
+
+def _sec_risk_priority(row: dict[str, Any]) -> tuple[float, float, str]:
+    """Order rows by how likely they are to become a candidate.
+
+    Gap magnitude is the strategy's primary selector and dollar volume its
+    liquidity screen, so spend the request budget there rather than on merge
+    order.  Sorting is descending on both, with the ticker as a deterministic
+    tie-break.
+    """
+
+    return (
+        -abs(_float(row.get("gap_pct"))),
+        -_float(row.get("dollar_volume")),
+        str(row.get("ticker") or ""),
+    )
+
+
 def _maybe_collect_sec(
     config: Any,
     output_dir: Path,
@@ -1037,7 +1062,14 @@ def _maybe_collect_sec(
     source = get_source(config, "sec_edgar")
     if source is None:
         return {"status": "disabled", "events": []}
-    tickers = [str(row.get("ticker") or "") for row in rows]
+    params = dict(getattr(source, "params", None) or {})
+    try:
+        limit = int(params.get("max_tickers") or DEFAULT_SEC_RISK_MAX_TICKERS)
+    except (TypeError, ValueError):
+        limit = DEFAULT_SEC_RISK_MAX_TICKERS
+    limit = max(1, limit)
+    prioritized = sorted(rows, key=_sec_risk_priority)[:limit]
+    tickers = [str(row.get("ticker") or "") for row in prioritized]
     return collect_sec_risk(
         source=source,
         config=config,
