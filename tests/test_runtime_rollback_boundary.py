@@ -5,6 +5,8 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 ROLLBACK = ROOT / "scripts" / "rollback_dawnstrike_runtime.ps1"
 ACTIVATION = ROOT / "scripts" / "activate_dawnstrike_runtime.ps1"
@@ -18,6 +20,14 @@ def _ps_quote(value: Path) -> str:
 
 
 def _run_powershell(script: str) -> subprocess.CompletedProcess[str]:
+    # These cases drive the real activation and rollback scripts through Windows
+    # PowerShell at its pinned absolute path - the same path the release
+    # launcher pins - so there is deliberately no cross-platform fallback. On a
+    # host without it the call raised FileNotFoundError and read as a product
+    # failure; skipping states the true reason. The assertions in this module
+    # that only parse script text keep running everywhere.
+    if not POWERSHELL.is_file():
+        pytest.skip(f"pinned Windows PowerShell is unavailable: {POWERSHELL}")
     return subprocess.run(
         [
             str(POWERSHELL),
