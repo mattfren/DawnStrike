@@ -75,6 +75,14 @@ class ScannerConfig:
     max_price: float = 25.0
     top_n: int = 10
     wide_spread_pct: float = 5.0
+    # Volatility-aware stop placement.  The stop was previously pinned to the
+    # full premarket low, so a 93% gapper produced a 35% stop - far outside any
+    # sane risk policy and the mechanism behind the worst historical single
+    # loss.  The stop is now a fraction of the observed premarket range, floored
+    # so noise cannot trip it and capped so a single trade's loss is bounded.
+    stop_range_fraction: float = 0.5
+    min_stop_distance_pct: float = 3.0
+    max_stop_distance_pct: float = 12.0
     monitor_drop_from_watch_pct: float = 8.0
     monitor_volume_collapse_ratio: float = 0.45
     monitor_rejection_range_pct: float = 65.0
@@ -153,6 +161,12 @@ class ScannerConfig:
             raise ConfigError("max_price must be greater than min_price")
         if self.top_n <= 0:
             raise ConfigError("top_n must be positive")
+        if not 0 < self.stop_range_fraction <= 1:
+            raise ConfigError("stop_range_fraction must be greater than 0 and at most 1")
+        if self.min_stop_distance_pct <= 0:
+            raise ConfigError("min_stop_distance_pct must be positive")
+        if self.max_stop_distance_pct <= self.min_stop_distance_pct:
+            raise ConfigError("max_stop_distance_pct must exceed min_stop_distance_pct")
         if self.explosive_top_n <= 0:
             raise ConfigError("explosive_top_n must be positive")
         if self.slippage_bps < 0:
@@ -316,6 +330,18 @@ def load_config(env_file: str | Path = ".env", **overrides: Any) -> ScannerConfi
         top_n=_to_int("INTRADAY_TOP_N", _env("INTRADAY_TOP_N", "10", env_values)),
         wide_spread_pct=_to_float(
             "INTRADAY_WIDE_SPREAD_PCT", _env("INTRADAY_WIDE_SPREAD_PCT", "5", env_values)
+        ),
+        stop_range_fraction=_to_float(
+            "INTRADAY_STOP_RANGE_FRACTION",
+            _env("INTRADAY_STOP_RANGE_FRACTION", "0.5", env_values),
+        ),
+        min_stop_distance_pct=_to_float(
+            "INTRADAY_MIN_STOP_DISTANCE_PCT",
+            _env("INTRADAY_MIN_STOP_DISTANCE_PCT", "3", env_values),
+        ),
+        max_stop_distance_pct=_to_float(
+            "INTRADAY_MAX_STOP_DISTANCE_PCT",
+            _env("INTRADAY_MAX_STOP_DISTANCE_PCT", "12", env_values),
         ),
         monitor_drop_from_watch_pct=_to_float(
             "INTRADAY_MONITOR_DROP_FROM_WATCH_PCT",
