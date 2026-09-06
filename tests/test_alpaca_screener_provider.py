@@ -100,7 +100,7 @@ def test_alpaca_screener_discovers_read_only_common_stock_universe(monkeypatch):
     assert result["status"] == "success"
     assert [row["ticker"] for row in result["rows"]] == ["NOVA"]
     assert result["rejection_reason_counts"] == {"non_common_security_name": 1}
-    assert result["source_timestamp_status"] == "FRESH_BOUND"
+    assert result["source_timestamp_status"] == "SESSION_BOUND"
     assert result["source_timestamp_age_seconds"] == {
         "most_actives": 300.0,
         "movers": 300.0,
