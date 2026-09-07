@@ -7,6 +7,7 @@ import os
 import shutil
 import struct
 import subprocess
+import tempfile
 import threading
 import zipfile
 from contextlib import contextmanager
@@ -17,6 +18,43 @@ import pytest
 
 from intraday_scanner.services import luna_core_universe_service as core
 from scripts import refresh_luna_core_universe as refresh_script
+
+
+def _atomic_commit_primitive_available() -> bool:
+    """Whether this platform and filesystem offer compare-and-rename.
+
+    `refresh_luna_core_universe` installs a generation with a primitive that
+    binds the destination name to an already-open inode: a Windows handle-bound
+    rename, or Linux `renameat2` with RENAME_NOREPLACE / RENAME_EXCHANGE. Where
+    neither exists the module fails closed on purpose - see the comment above
+    `_archive_provably_dead_lock`, which calls automatic recovery "deliberately
+    unavailable there".
+
+    GitHub's hosted Linux runners build on overlayfs, which answers renameat2
+    with EINVAL, so these tests were asserting behaviour the platform cannot
+    provide and failed for a reason unrelated to the code under test. Probe the
+    real primitive on the real temp filesystem rather than guessing from
+    `os.name`, so the coverage still runs anywhere it genuinely can.
+    """
+
+    if os.name == "nt":
+        return True
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        source = root / "probe-source"
+        destination = root / "probe-destination"
+        source.write_bytes(b"probe")
+        destination.write_bytes(b"probe")
+        try:
+            return bool(refresh_script._linux_renameat2(source, destination, 2))
+        except OSError:
+            return False
+
+
+requires_atomic_commit = pytest.mark.skipif(
+    not _atomic_commit_primitive_available(),
+    reason="commit path needs Windows handle-bound rename or Linux renameat2",
+)
 
 
 def _make_directory_reparse(link: Path, target: Path) -> None:
@@ -633,6 +671,7 @@ def test_write_boundary_rejects_a_tampered_marker_before_output(
             pytest.fail("tampered marker was admitted")
 
 
+@requires_atomic_commit
 def test_refresh_blocks_config_swap_after_admission_without_external_writes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -957,6 +996,7 @@ def test_direct_source_download_failure_is_explicitly_blocked(
         refresh_script._fetch(core.NASDAQ_NDX_SOD_2026_08_27_URL)
 
 
+@requires_atomic_commit
 def test_explicit_state_street_bootstrap_installs_a_missing_active_pointer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1107,6 +1147,7 @@ def test_refresh_preserves_prior_manifest_when_raw_capture_is_not_governed(
     assert not json.loads(output.read_text(encoding="utf-8")).get("generation_id")
 
 
+@requires_atomic_commit
 def test_refresh_accepts_later_market_date_only_from_the_exact_dated_download(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1186,6 +1227,7 @@ def test_refresh_rejects_stale_spy_capture_and_preserves_pointer(
     assert output.read_bytes() == prior
 
 
+@requires_atomic_commit
 def test_refresh_installs_and_revalidates_one_atomic_active_generation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1216,6 +1258,7 @@ def test_refresh_installs_and_revalidates_one_atomic_active_generation(
     assert result["ndx_artifact"] == str(installed_artifact)
 
 
+@requires_atomic_commit
 def test_refresh_reuses_same_content_addressed_generation_byte_identically(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1248,6 +1291,7 @@ def test_refresh_reuses_same_content_addressed_generation_byte_identically(
     assert not (output.parent / refresh_script.REFRESH_LOCK_NAME).exists()
 
 
+@requires_atomic_commit
 def test_refresh_preserves_a_partial_inactive_generation_before_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1282,6 +1326,7 @@ def test_refresh_preserves_a_partial_inactive_generation_before_retry(
     assert (generation / "luna_core_universe.json").is_file()
 
 
+@requires_atomic_commit
 def test_concurrent_refresh_writer_is_rejected_without_pointer_corruption(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1494,6 +1539,7 @@ def test_stale_lock_archive_destination_is_no_clobber(
     "prior_bytes",
     [pytest.param(b"prior-pointer\n", id="existing"), pytest.param(None, id="absent")],
 )
+@requires_atomic_commit
 def test_atomic_output_temp_swap_is_blocked_or_restores_exact_prior_truth(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1561,6 +1607,7 @@ def test_atomic_output_temp_swap_is_blocked_or_restores_exact_prior_truth(
         assert refresh_script._same_file_identity(prior_identity, os.lstat(destination))
 
 
+@requires_atomic_commit
 def test_refresh_rolls_back_active_pointer_when_post_swap_validation_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1636,6 +1683,7 @@ def test_refresh_changed_member_attestation_leaves_prior_generation_intact(
     assert not json.loads(output.read_text(encoding="utf-8")).get("generation_id")
 
 
+@requires_atomic_commit
 def test_refresh_source_download_failure_leaves_active_generation_unchanged(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

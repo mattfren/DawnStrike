@@ -112,7 +112,15 @@ def test_runner_child_uses_isolated_exact_interpreter(tmp_path: Path, monkeypatc
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(module.subprocess, "run", fake_run)
-    monkeypatch.setattr(module, "_approved_child_python", lambda: Path(sys.executable))
+    # Mirror what the real `_approved_child_python` returns. It resolves, and the
+    # assertion below expects a resolved path; stubbing an unresolved one made
+    # the two agree only where `sys.executable` is not a symlink. On Linux
+    # `.../bin/python` links to `.../bin/python3.13`, so the stub and the
+    # expectation disagreed and the case failed for its own reason rather than
+    # the product's.
+    monkeypatch.setattr(
+        module, "_approved_child_python", lambda: Path(sys.executable).resolve(strict=True)
+    )
     argv = [
         "run_daily_intraday_capture.py",
         "--candidate-sha",
