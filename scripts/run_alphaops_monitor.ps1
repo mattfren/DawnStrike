@@ -405,6 +405,22 @@ try {
             $errorCode = "trade_watcher_failed"
         }
     }
+    if ($env:DAWNSTRIKE_PAPER_EXECUTION_ENABLED -match '^(?i:true|1|yes|y)$') {
+        # Alpaca PAPER broker execution. Deliberately non-fatal: a broker
+        # outage must never fail the research chain, and the receipt records
+        # what happened either way. Entries additionally require
+        # DAWNSTRIKE_PAPER_ENTRIES_ENABLED, which this script never sets.
+        $paperReceipt = Join-Path $state "receipts\paper-execution-$MarketDate.json"
+        $paperStore = Join-Path $state "paper_execution.sqlite"
+        $paper = Invoke-DawnstrikeNativeProcess `
+            -FilePath "py.exe" `
+            -ArgumentList @("-m", "intraday_scanner.cli", "paper-session", "--db-path", $dbPath, "--market-date", $MarketDate, "--store-path", $paperStore, "--receipt", $paperReceipt) `
+            -LogRoot $logRoot `
+            -LogName "paper_session-$MarketDate"
+        if ($paper.exit_code -ne 0) {
+            Write-Warning "Paper execution session exited $($paper.exit_code); research chain continues."
+        }
+    }
     $coreExitCode = $exitCode
     $coreErrorCode = $errorCode
     if ($monitorInitialCoverageUnknown -and -not $coreErrorCode) {

@@ -200,7 +200,18 @@ CANDIDATE_COLUMNS = [
     "stop_min_distance_pct",
     "stop_max_distance_pct",
     "stop_structural_low",
+    # How much of the volatility the band asked for the stop actually covers.
+    # Below 1.0 the loss cap has pulled the stop inside the observed premarket
+    # range, so ordinary noise is expected to trip it.
+    "stop_volatility_coverage",
+    "stop_inside_observed_volatility",
     "stop_policy_version",
+    # Whether the reward:risk number is evidence about this setup or an
+    # artifact of the stop policy's own constants.  See _reward_risk_evidence.
+    "reward_risk_ratio_computed",
+    "reward_risk_basis",
+    "reward_risk_is_evidence",
+    "reward_risk_policy_version",
     "max_credible_gap_pct",
     "legacy_plan_status",
     "legacy_plan_reason",

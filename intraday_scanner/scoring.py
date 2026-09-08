@@ -19,6 +19,9 @@ from intraday_scanner.services.premarket_intelligence import (
 
 TARGET_POLICY_VERSION = "alphaops-v5-premarket-range-extension-v1"
 STOP_POLICY_VERSION = "alphaops-v5-volatility-aware-stop-v1"
+REWARD_RISK_EVIDENCE_VERSION = "alphaops-v5-reward-risk-evidence-v1"
+# One price tick; the stop is rounded to this grid.
+STOP_TICK = 1e-4
 FIRST_TARGET_RANGE_EXTENSION = 1.618
 STRETCH_TARGET_RANGE_EXTENSION = 2.618
 FUTURE_TIMESTAMP_TOLERANCE_SECONDS = 60
@@ -120,14 +123,76 @@ def _volatility_aware_stop(
     # distance.  Rounding down would let a capped stop drift past the cap and
     # quietly exceed the configured maximum loss.
     stop = max(math.ceil(stop * 10_000) / 10_000, 0.0001)
+    final_distance = entry - stop
+    # How much of the volatility the band asked for the stop actually covers.
+    # Below 1.0 the loss cap has pulled the stop INSIDE the observed premarket
+    # range, so ordinary noise is expected to trip it.  Measured across 5,605
+    # real premarket geometries the cap binds on 54% of candidates, which is
+    # why this is reported rather than left implicit.
+    coverage = (final_distance / range_distance) if range_distance > 0 else None
+    # The tick rounding above always tightens the stop by up to one tick.  That
+    # sub-tick shortfall is not the loss cap biting, so it must not be reported
+    # as one.
+    inside = coverage is not None and (range_distance - final_distance) > STOP_TICK
     return stop, {
         "stop_basis_kind": basis,
         "stop_range_fraction": config.stop_range_fraction,
-        "stop_distance_pct": round((entry - stop) / entry * 100, 4) if entry > 0 else None,
+        "stop_distance_pct": round(final_distance / entry * 100, 4) if entry > 0 else None,
         "stop_min_distance_pct": config.min_stop_distance_pct,
         "stop_max_distance_pct": config.max_stop_distance_pct,
         "stop_structural_low": round(structural_low, 4),
+        "stop_volatility_coverage": round(coverage, 4) if coverage is not None else None,
+        "stop_inside_observed_volatility": bool(inside),
         "stop_policy_version": STOP_POLICY_VERSION,
+    }
+
+
+# How the reward:risk number was arrived at, which decides whether it is
+# evidence about THIS setup or an artifact of the stop policy's constants.
+REWARD_RISK_BASIS_STRUCTURE = "structure_anchored"
+REWARD_RISK_BASIS_PINNED = "range_ratio_pinned"
+REWARD_RISK_BASIS_VOLATILITY = "volatility_scaled"
+
+
+def _reward_risk_evidence(
+    *,
+    entry: float,
+    stop: float,
+    target: float,
+    stop_basis_kind: str,
+) -> dict[str, Any]:
+    """Say what the reward:risk ratio actually measures for this plan.
+
+    The target extends the observed premarket range and, for every stop basis
+    except the structural low, so does the stop.  When both legs come from the
+    same range the ratio is implied by ``FIRST_TARGET_RANGE_EXTENSION`` and
+    ``stop_range_fraction`` - it is arithmetic, not evidence.
+
+    Measured over 5,605 real premarket geometries (537 sessions of SIP minute
+    bars): where the volatility band sets the stop the ratio lands in
+    [3.070, 3.197] with a standard deviation of 0.0296, and the 1.50R floor
+    rejects 13 of 5,605 candidates (0.23%).  Under the previous structural stop
+    the same floor rejected 47.53%.  The floor was not lowered; it stopped
+    binding.  Consumers must therefore read ``reward_risk_is_evidence`` before
+    treating the ratio as a quality signal.
+    """
+
+    risk = entry - stop
+    reward = target - entry
+    ratio = round(reward / risk, 4) if risk > 0 else None
+    if stop_basis_kind == "premarket_low_tighter_than_volatility_band":
+        basis = REWARD_RISK_BASIS_STRUCTURE
+    elif stop_basis_kind == "premarket_range_fraction":
+        basis = REWARD_RISK_BASIS_PINNED
+    else:
+        # Cap or floor: the stop is a fixed fraction of entry, so the ratio
+        # tracks range-relative-to-price - a volatility proxy, not an edge.
+        basis = REWARD_RISK_BASIS_VOLATILITY
+    return {
+        "reward_risk_ratio_computed": ratio,
+        "reward_risk_basis": basis,
+        "reward_risk_is_evidence": basis == REWARD_RISK_BASIS_STRUCTURE,
+        "reward_risk_policy_version": REWARD_RISK_EVIDENCE_VERSION,
     }
 
 
@@ -193,6 +258,12 @@ def score_snapshot(
             "target_basis_extension": FIRST_TARGET_RANGE_EXTENSION,
             "target_policy_version": TARGET_POLICY_VERSION,
             "target_derived_from_risk": False,
+            **_reward_risk_evidence(
+                entry=breakout_trigger,
+                stop=invalidation,
+                target=first_target,
+                stop_basis_kind=str(stop_basis["stop_basis_kind"]),
+            ),
             # Carry the configured gap ceiling so the alert gate judges the gap
             # against the operator's declared strategy rather than a hardcoded
             # 50% that contradicts an ideal band reaching 140%.

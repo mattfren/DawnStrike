@@ -37,6 +37,20 @@ function Import-DawnstrikeEnvironment {
         # permanently unreachable in the runtime no matter what runtime.env says.
         "DAWNSTRIKE_BOOTSTRAP_PAPER_MODE",
         "DAWNSTRIKE_ALPHAOPS_LIQUID_UNIVERSE",
+        # Alpaca PAPER execution switches and risk limits, read by
+        # intraday_scanner/execution.  PAPER only: there is no live-trading key
+        # here and the adapter cannot construct a live URL.  Omitting any of
+        # these would leave the corresponding control unreachable.
+        "DAWNSTRIKE_PAPER_EXECUTION_ENABLED",
+        "DAWNSTRIKE_PAPER_ENTRIES_ENABLED",
+        "DAWNSTRIKE_PAPER_KILL_SWITCH",
+        "DAWNSTRIKE_PAPER_KILL_SWITCH_ENGAGED",
+        "DAWNSTRIKE_PAPER_RISK_PCT",
+        "DAWNSTRIKE_PAPER_MAX_POSITION_PCT",
+        "DAWNSTRIKE_PAPER_MAX_CONCURRENT",
+        "DAWNSTRIKE_PAPER_MAX_ENTRIES_PER_DAY",
+        "DAWNSTRIKE_PAPER_DAILY_LOSS_LIMIT_PCT",
+        "DAWNSTRIKE_PAPER_MAX_STALENESS_SECONDS",
         "DAWNSTRIKE_FORWARD_GAP_HMAC_KEY",
         "ALPACA_API_KEY_ID",
         "ALPACA_API_SECRET_KEY",
