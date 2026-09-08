@@ -204,6 +204,9 @@ class FakeBroker:
     def get_orders_since(self, _after):
         return list(self._existing or [])
 
+    def get_open_orders(self):
+        return []
+
     def find_by_client_order_id(self, coid):
         for o in self._existing or []:
             if o.client_order_id == coid:
@@ -354,6 +357,69 @@ def test_positions_are_still_managed_while_entries_are_disabled(monkeypatch, tmp
     out = engine.manage_positions(market_date="2026-09-08", force_exit=True)
     assert broker.closed == ["TEST"]
     assert out["actions"][0]["action"] == "time_exit_submitted"
+
+
+class BracketBroker(FakeBroker):
+    """A broker whose close fails while the bracket's legs are still resting."""
+
+    def __init__(self, *, legs_cancel=True):
+        super().__init__()
+        self.legs_cancel = legs_cancel
+        self.cancelled: list[str] = []
+        self.positions = [{"symbol": "TEST", "qty": "500"}]
+        self._legs_live = True
+
+    def get_open_orders(self):
+        if not self._legs_live:
+            return []
+        return [
+            _order(
+                {
+                    "id": "brk-1", "client_order_id": "ds-x", "symbol": "TEST",
+                    "side": "buy", "qty": 500, "filled_qty": 500, "status": "filled",
+                    "order_class": "bracket",
+                    "legs": [
+                        {"id": "leg-tp", "symbol": "TEST", "status": "new"},
+                        {"id": "leg-sl", "symbol": "TEST", "status": "new"},
+                    ],
+                }
+            )
+        ]
+
+    def cancel_order(self, order_id):
+        if not self.legs_cancel:
+            raise PaperBrokerError(f"DELETE /v2/orders/{order_id} -> 422: already terminal")
+        self.cancelled.append(order_id)
+        self._legs_live = False
+
+    def close_position(self, symbol):
+        if self._legs_live:
+            raise PaperBrokerError("403: insufficient qty available for order (requested: 500)")
+        return super().close_position(symbol)
+
+
+def test_flatten_cancels_resting_bracket_legs_before_closing(monkeypatch, tmp_path):
+    """Otherwise the close is rejected and the position is stranded overnight."""
+
+    broker = BracketBroker()
+    engine, _ = _engine(tmp_path, broker)
+    out = engine.manage_positions(market_date="2026-09-08", force_exit=True)
+
+    assert "leg-tp" in broker.cancelled and "leg-sl" in broker.cancelled
+    assert broker.closed == ["TEST"]
+    assert out["actions"][0]["action"] == "time_exit_submitted"
+
+
+def test_a_leg_that_cannot_be_cancelled_is_reported_not_swallowed(monkeypatch, tmp_path):
+    """A racing fill makes cancel fail; the close attempt must still be recorded."""
+
+    broker = BracketBroker(legs_cancel=False)
+    engine, _ = _engine(tmp_path, broker)
+    out = engine.manage_positions(market_date="2026-09-08", force_exit=True)
+
+    assert broker.closed == []
+    assert out["actions"][0]["action"] == "time_exit_failed"
+    assert "insufficient qty" in out["actions"][0]["error"]
 
 
 def test_bracket_rejects_incoherent_prices(monkeypatch):

@@ -28,6 +28,9 @@ from intraday_scanner.execution.risk_gate import RiskDecision, RiskSettings, eva
 
 SCHEMA_VERSION = "dawnstrike.paper_execution.v1"
 
+# Statuses the broker will not act on again.
+_TERMINAL = frozenset({"filled", "canceled", "expired", "rejected", "done_for_day"})
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -306,6 +309,24 @@ class PaperExecutionEngine:
             **marks,
         }
 
+    def _open_orders_by_symbol(self) -> dict[str, list[str]]:
+        """Open order ids grouped by symbol, including bracket legs."""
+
+        grouped: dict[str, list[str]] = {}
+        try:
+            open_orders = self.client.get_open_orders()
+        except PaperBrokerError as exc:
+            self.store.log("open_order_lookup_failed", error=str(exc))
+            return grouped
+        for order in open_orders:
+            grouped.setdefault(order.symbol, []).append(order.id)
+            for leg in order.legs:
+                leg_id = str(leg.get("id") or "")
+                leg_symbol = str(leg.get("symbol") or order.symbol)
+                if leg_id and str(leg.get("status") or "") not in _TERMINAL:
+                    grouped.setdefault(leg_symbol, []).append(leg_id)
+        return grouped
+
     def manage_positions(self, *, market_date: str, force_exit: bool) -> dict[str, Any]:
         """Manage open positions. Deliberately independent of entry gating.
 
@@ -315,10 +336,26 @@ class PaperExecutionEngine:
 
         positions = self.client.get_positions()
         actions: list[dict[str, Any]] = []
+        resting = self._open_orders_by_symbol() if force_exit and positions else {}
         for pos in positions:
             symbol = str(pos.get("symbol"))
             if force_exit:
                 try:
+                    # The bracket's take-profit and stop legs still reserve the
+                    # shares. Closing on top of them can be rejected for
+                    # insufficient quantity, which would strand the position
+                    # overnight - the exact failure this exit exists to prevent.
+                    for order_id in resting.get(symbol, ()):
+                        try:
+                            self.client.cancel_order(order_id)
+                        except PaperBrokerError as exc:
+                            # Already terminal, or cancelled by a racing fill.
+                            self.store.log(
+                                "exit_leg_cancel_skipped",
+                                symbol=symbol,
+                                order_id=order_id,
+                                error=str(exc),
+                            )
                     order = self.client.close_position(symbol)
                     self.store.upsert_order(order, market_date)
                     actions.append({"symbol": symbol, "action": "time_exit_submitted"})

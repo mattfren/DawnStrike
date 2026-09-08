@@ -99,6 +99,9 @@ class StubBroker:
     def get_orders_since(self, _after):
         return []
 
+    def get_open_orders(self):
+        return []
+
     def find_by_client_order_id(self, _coid):
         return None
 
