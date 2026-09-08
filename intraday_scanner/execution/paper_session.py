@@ -40,6 +40,12 @@ ENTRY_ELIGIBLE_STATUSES = frozenset({"PASS", "ALERT_OK"})
 # missing field fails closed instead of silently disabling the staleness gate.
 UNKNOWN_AGE_SECONDS = float("inf")
 
+# This is an intraday strategy: nothing is carried overnight. Positions are
+# flattened once the session is inside this window, so the operator never has to
+# remember to do it. The broker's bracket handles stop and target; this handles
+# the position that reached neither.
+FLATTEN_MINUTES_BEFORE_CLOSE = 10.0
+
 
 def _num(value: Any) -> float | None:
     """Parse a level that may arrive as 6.72, '6.72' or '$6.72'."""
@@ -128,6 +134,17 @@ def _plan_from(candidate: dict[str, Any], market_date: str, now: datetime) -> En
     )
 
 
+def minutes_to_close(preflight: dict[str, Any], now: datetime) -> float | None:
+    """Minutes until the regular session closes, or None if it is not open."""
+
+    if not preflight.get("market_open"):
+        return None
+    closes = _parse_stamp(preflight.get("next_close"))
+    if closes is None:
+        return None
+    return (closes - now).total_seconds() / 60.0
+
+
 def _screen(candidate: dict[str, Any]) -> str | None:
     """Return the reason this candidate may not reach the broker, or None."""
 
@@ -194,6 +211,8 @@ def run_paper_session(
     funnel["candidates_in_database"] = len(candidates)
 
     market_open = bool(receipt["preflight"].get("market_open"))
+    _remaining = minutes_to_close(receipt["preflight"], now)
+    closing_soon = _remaining is not None and _remaining <= FLATTEN_MINUTES_BEFORE_CLOSE
     for candidate in candidates:
         refusal = _screen(candidate)
         if refusal:
@@ -206,6 +225,10 @@ def run_paper_session(
             continue
         if not market_open:
             funnel["market_closed"] += 1
+            continue
+        if closing_soon:
+            # Opening here would be flattened minutes later for nothing.
+            funnel["too_close_to_the_bell"] += 1
             continue
         result = engine.submit_entry(plan)
         funnel[f"entry_{result['reason']}"] += 1
@@ -227,7 +250,13 @@ def run_paper_session(
 
     # Management runs regardless of the entry outcome, and regardless of whether
     # entries were enabled at all.
-    receipt["management"] = engine.manage_positions(market_date=market_date, force_exit=force_exit)
+    remaining = minutes_to_close(receipt["preflight"], datetime.now(timezone.utc))
+    at_the_close = remaining is not None and remaining <= FLATTEN_MINUTES_BEFORE_CLOSE
+    receipt["minutes_to_close"] = None if remaining is None else round(remaining, 1)
+    receipt["flatten_triggered"] = bool(at_the_close)
+    receipt["management"] = engine.manage_positions(
+        market_date=market_date, force_exit=force_exit or at_the_close
+    )
     receipt["reconcile_after"] = engine.reconcile(market_date)
     receipt["funnel"] = dict(funnel)
     receipt["status"] = "completed"
