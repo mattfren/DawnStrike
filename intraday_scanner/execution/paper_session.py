@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,6 +46,17 @@ UNKNOWN_AGE_SECONDS = float("inf")
 # remember to do it. The broker's bracket handles stop and target; this handles
 # the position that reached neither.
 FLATTEN_MINUTES_BEFORE_CLOSE = 10.0
+
+# The five-minute monitor is hard-bounded, and this step is a guest inside it.
+# A slow broker must cost the research chain time, not correctness, so the
+# session stops starting new work past this budget and says so in the receipt.
+# Entry submission that is already in flight is never abandoned mid-order.
+SESSION_BUDGET_SECONDS = 75.0
+
+# Tighter than the adapter default: inside a bounded stage, failing fast and
+# reconciling on the next pass beats blocking.
+BROKER_TIMEOUT_SECONDS = 8.0
+BROKER_RETRIES = 2
 
 
 def _num(value: Any) -> float | None:
@@ -175,6 +187,11 @@ def run_paper_session(
     happened either way.
     """
 
+    started = time.monotonic()
+
+    def over_budget() -> bool:
+        return (time.monotonic() - started) > SESSION_BUDGET_SECONDS
+
     now = datetime.now(timezone.utc)
     funnel: Counter[str] = Counter()
     receipt: dict[str, Any] = {
@@ -190,7 +207,9 @@ def run_paper_session(
     }
 
     try:
-        broker = client or PaperBrokerClient()
+        broker = client or PaperBrokerClient(
+            timeout=BROKER_TIMEOUT_SECONDS, retries=BROKER_RETRIES
+        )
         engine = PaperExecutionEngine(
             client=broker,
             store=PaperExecutionStore(store_path),
@@ -214,6 +233,9 @@ def run_paper_session(
     _remaining = minutes_to_close(receipt["preflight"], now)
     closing_soon = _remaining is not None and _remaining <= FLATTEN_MINUTES_BEFORE_CLOSE
     for candidate in candidates:
+        if over_budget():
+            funnel["session_budget_exhausted"] += 1
+            continue
         refusal = _screen(candidate)
         if refusal:
             funnel[refusal] += 1
@@ -257,7 +279,14 @@ def run_paper_session(
     receipt["management"] = engine.manage_positions(
         market_date=market_date, force_exit=force_exit or at_the_close
     )
-    receipt["reconcile_after"] = engine.reconcile(market_date)
+    # The closing reconcile is a refresh, not a safety property: reconcile()
+    # runs first on every pass, so skipping it here only delays the picture by
+    # five minutes. It is the right thing to drop when time has run out.
+    if over_budget():
+        receipt["reconcile_after"] = {"skipped": "session_budget_exhausted"}
+    else:
+        receipt["reconcile_after"] = engine.reconcile(market_date)
+    receipt["elapsed_seconds"] = round(time.monotonic() - started, 2)
     receipt["funnel"] = dict(funnel)
     receipt["status"] = "completed"
     _write(receipt_path, receipt)

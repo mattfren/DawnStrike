@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from intraday_scanner.execution import paper_session as session
 from intraday_scanner.execution.paper_broker import _order
 from intraday_scanner.execution.paper_session import (
     FLATTEN_MINUTES_BEFORE_CLOSE,
@@ -341,6 +342,30 @@ def test_the_receipt_records_that_entries_were_disabled(monkeypatch, tmp_path):
     assert receipt["entries_enabled"] is False
     assert broker.submitted == []
     assert receipt["funnel"]["entry_entries_disabled"] == 1
+
+
+def test_a_slow_broker_cannot_overrun_the_monitor(monkeypatch, tmp_path):
+    """The five-minute monitor is bounded; this step is a guest inside it."""
+
+    _enable(monkeypatch)
+    monkeypatch.setattr(session, "SESSION_BUDGET_SECONDS", -1.0)
+    db = _db(tmp_path, [("AAA", True, _signal()), ("BBB", True, _signal())])
+    broker = StubBroker()
+    receipt = _run(tmp_path, db, broker)
+
+    assert broker.submitted == []
+    assert receipt["funnel"]["session_budget_exhausted"] == 2
+    assert receipt["reconcile_after"] == {"skipped": "session_budget_exhausted"}
+    # Management still ran: an open position is never abandoned to a timer.
+    assert "management" in receipt
+    assert receipt["status"] == "completed"
+
+
+def test_the_receipt_records_how_long_the_session_took(monkeypatch, tmp_path):
+    _enable(monkeypatch)
+    receipt = _run(tmp_path, _db(tmp_path, []), StubBroker())
+    assert isinstance(receipt["elapsed_seconds"], float)
+    assert receipt["elapsed_seconds"] >= 0
 
 
 def test_preflight_failure_is_reported_not_raised(tmp_path):
