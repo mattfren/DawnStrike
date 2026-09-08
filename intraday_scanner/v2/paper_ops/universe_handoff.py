@@ -1289,7 +1289,7 @@ def _read_mover_snapshot(path: Path, market_date: str) -> list[dict[str, Any]]:
         if not _SYMBOL_PATTERN.fullmatch(ticker):
             raise UniverseHandoffError("governed mover snapshot ticker is invalid")
         declared = str(row.get("market_date") or row.get("as_of_date") or "").strip()
-        timestamp = _first_text(row.get("as_of_timestamp"), row.get("extracted_at"))
+        timestamp = _first_text(row.get("extracted_at"), row.get("as_of_timestamp"))
         if declared and declared != market_date:
             raise UniverseHandoffError("governed mover snapshot is cross-date")
         if not declared and (not timestamp or _iso_date(timestamp) != market_date):
