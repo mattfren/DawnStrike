@@ -1,10 +1,16 @@
+import pathlib
+
 from streamlit.testing.v1 import AppTest
+
+# Streamlit 1.63 resolves a relative AppTest path against the file that
+# calls it, not the working directory, and app.py lives at the repo root.
+APP = str(pathlib.Path(__file__).resolve().parents[1] / "app.py")
 
 
 def test_streamlit_dashboard_renders_without_exceptions(tmp_path, monkeypatch):
     default_db = tmp_path / "missing.sqlite"
     monkeypatch.setenv("INTRADAY_DATABASE_PATH", str(default_db))
-    app = AppTest.from_file("app.py", default_timeout=30)
+    app = AppTest.from_file(APP, default_timeout=30)
 
     app.run()
 
