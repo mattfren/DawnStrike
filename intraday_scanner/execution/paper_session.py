@@ -54,9 +54,12 @@ FLATTEN_MINUTES_BEFORE_CLOSE = 10.0
 SESSION_BUDGET_SECONDS = 75.0
 
 # Tighter than the adapter default: inside a bounded stage, failing fast and
-# reconciling on the next pass beats blocking.
+# reconciling on the next pass beats blocking. No retries either - the budget
+# check cannot bound work that happens before it (preflight and the opening
+# reconcile), so the per-call ceiling has to do that job. This step runs 78
+# times a session, so losing one pass to a transient blip is the cheap outcome.
 BROKER_TIMEOUT_SECONDS = 8.0
-BROKER_RETRIES = 2
+BROKER_RETRIES = 1
 
 
 def _num(value: Any) -> float | None:
