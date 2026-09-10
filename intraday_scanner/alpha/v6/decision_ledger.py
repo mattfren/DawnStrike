@@ -134,6 +134,8 @@ def build_candidate_decisions(
                 "all_inputs_observed_at_or_before_decision": True,
                 "decision_timestamp": decision_at,
                 "feature_timestamp": feature.get("timestamp"),
+                "feature_available_at": feature.get("feature_available_at"),
+                "feature_ingested_at": feature.get("feature_ingested_at"),
             },
             "prediction": {
                 "status": "NOT_SCORED_POLICY_REJECTED",
@@ -253,6 +255,7 @@ def _no_trade_decision(
             "all_inputs_observed_at_or_before_decision": True,
             "decision_timestamp": decision_at,
             "feature_timestamp": decision_at,
+            "no_feature_inputs": True,
         },
         "prediction": {
             "status": "NO_TRADE_SAFETY_FALLBACK",

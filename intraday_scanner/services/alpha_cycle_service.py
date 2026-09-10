@@ -1645,6 +1645,10 @@ def alpha_cycle(
         "v6_shadow": {
             "strategy_version": "dawnstrike-alphaops-v6-shadow",
             "decision_count": len(v6_decisions),
+            "decision_artifact": str(output_dir / "alpha_v6_decisions.json"),
+            "decision_artifact_sha256": hashlib.sha256(
+                json.dumps(v6_decisions, indent=2, sort_keys=True).encode("utf-8")
+            ).hexdigest(),
             "tracked_count": sum(1 for row in v6_decisions if row.get("action") == "SHADOW_TRACK"),
             "persistence": v6_decision_stats,
             "versioned_universe_membership_count": len(universe_memberships),
@@ -1669,12 +1673,14 @@ def alpha_cycle(
         "run_contract": run_contract.to_dict(),
         "scan_paths": {key: str(value) for key, value in scan_paths.items()},
         "out_dir": str(output_dir),
+        "v6_decision_records": v6_decisions,
     }
     if session_gate is not None:
         result["session_gate"] = session_gate.to_dict()
     _write_json(output_dir / "alpha_cycle.json", result)
     _write_json(output_dir / "alpha_signals.json", signals)
     _write_json(output_dir / "alpha_features.json", feature_vectors)
+    _write_json(output_dir / "alpha_v6_decisions.json", v6_decisions)
     return result
 
 

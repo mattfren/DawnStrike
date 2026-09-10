@@ -185,6 +185,8 @@ def _observational_training_row_valid(
         and label.get("evidence_class") == OBSERVATIONAL_EVIDENCE_CLASS
         and label.get("fill_truth_bound") is False
         and label.get("fill_truth_status") == "not_applicable_observation"
+        and label.get("horizon_unit") == "minutes"
+        and isinstance(label.get("close_identity"), dict)
         and label.get("learning_eligible") is True
         and label.get("return_label_eligible") is True
         and label.get("research_only") is True
