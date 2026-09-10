@@ -23,6 +23,7 @@ from intraday_scanner.alpha.execution_cost import DEFAULT_EXECUTION_COST_MODEL, 
 from intraday_scanner.alpha.outcome_semantics import account_equity_drawdown
 from intraday_scanner.alpha.v5_policy import DEFAULT_V5_POLICY, evaluate_v5_official_paper
 from intraday_scanner.performance.account_contract import account_session_return_pct
+from intraday_scanner.market_calendar import CALENDAR_ID, MARKET_TIMEZONE, REGULAR_CLOSE_ET, EARLY_CLOSE_ET, market_session
 
 getcontext().prec = 28
 
@@ -190,6 +191,8 @@ def evaluate_gap_orb15_signal(
     scope: str = "gap_orb15_continuation_research_v1",
     ticker: str = "",
     expected_opening_bars: int = 15,
+    instrument_id: str | None = None,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     """Evaluate one fixed ORB rule without same-bar or hindsight fills."""
 
@@ -197,14 +200,35 @@ def evaluate_gap_orb15_signal(
         return _rejected("unknown_scope")
     if not bars or prior_close is None or not math.isfinite(float(prior_close)) or prior_close <= 0:
         return _rejected("missing_prior_close")
-    if scope == "panel_orb15_continuation_research_v1" and ticker.upper() not in FIXED_PANEL:
+    if not instrument_id or not session_id:
+        return _rejected("instrument_session_identity_missing")
+    if scope == "panel_orb15_continuation_research_v1" and (ticker.upper() not in FIXED_PANEL or instrument_id.upper() not in FIXED_PANEL):
         return _rejected("panel_membership_invalid")
     ordered = sorted((dict(row) for row in bars), key=lambda row: str(row.get("event_at") or row.get("bar_start_at") or ""))
+    if any(str(row.get("instrument_id") or instrument_id) != str(instrument_id) or str(row.get("session_id") or session_id) != str(session_id) for row in ordered):
+        return _rejected("instrument_session_identity_mismatch")
+    if not str(session_id).startswith("XNYS:") or not str(session_id).endswith(":regular"):
+        return _rejected("session_identity_invalid")
+    try:
+        session_date = datetime.fromisoformat(str(session_id).split(":", 2)[1]).date()
+        scheduled = market_session(session_date)
+    except (ValueError, IndexError):
+        return _rejected("session_calendar_invalid")
+    if not scheduled.is_trading_day:
+        return _rejected("session_closed")
     if any(not _chronology_valid(row) for row in ordered):
         return _rejected("source_availability_or_ingestion_invalid")
     opening = [row for row in ordered if "09:30" <= _clock(row) < "09:45"]
     later = [row for row in ordered if "09:45" <= _clock(row) < "11:30"]
-    if len(opening) < expected_opening_bars:
+    opening_minutes = []
+    for row in opening:
+        try:
+            local = _parse_time(row.get("event_at") or row.get("bar_start_at")).astimezone(MARKET_TIMEZONE)
+            opening_minutes.append((local.date(), local.hour * 60 + local.minute))
+        except ValueError:
+            return _rejected("opening_timestamp_invalid")
+    expected_minutes = [(session_date, 570 + index) for index in range(expected_opening_bars)]
+    if len(opening) != expected_opening_bars or sorted(opening_minutes) != expected_minutes or len(set(opening_minutes)) != len(opening_minutes):
         return _rejected("opening_range_missing")
     first_open = _number(opening[0].get("open"))
     last_close = _number(opening[-1].get("close"))
@@ -220,7 +244,7 @@ def evaluate_gap_orb15_signal(
         return _rejected("opening_return_not_positive")
     if scope == "gap_orb15_continuation_research_v1" and gap_pct < 0.0075:
         return _rejected("gap_below_0_75_pct")
-    if scope == "gap_orb15_continuation_research_v1" and not corporate_action_valid:
+    if not corporate_action_valid:
         return _rejected("corporate_action_prior_close_unverified")
     # Break detection uses a later quote only.  A later bar high is not a
     # decision-time executable observation and therefore cannot trigger entry.
@@ -244,7 +268,10 @@ def evaluate_gap_orb15_signal(
     if risk <= 0:
         return _rejected("nonpositive_range_risk")
     break_at = _parse_time(break_row.get("event_at") or break_row.get("bar_start_at"))
-    close_dt = _parse_time(close_at)
+    close_dt = _parse_time(close_at).astimezone(MARKET_TIMEZONE)
+    expected_close = EARLY_CLOSE_ET if scheduled.status.value == "early_close" else REGULAR_CLOSE_ET
+    if close_dt.date() != session_date or close_dt.timetz().replace(tzinfo=None) != expected_close:
+        return _rejected("close_calendar_mismatch")
     decision_at = _parse_time(break_row.get("ingested_at") or break_row.get("available_at") or break_row.get("event_at"))
     # Every input used by the decision must have arrived by that decision.
     if any(_parse_time(row.get("ingested_at")) > decision_at for row in opening + [break_row]):
@@ -267,6 +294,9 @@ def evaluate_gap_orb15_signal(
         "break_event_at": break_at.isoformat(),
         "decision_at": decision_at.isoformat(),
         "ticker": ticker.upper(),
+        "instrument_id": instrument_id,
+        "session_id": session_id,
+        "calendar_id": CALENDAR_ID,
         "maximum_exit_at": exit_deadline.isoformat(),
         "close_deadline_at": deadline.isoformat(),
         "same_bar_fill": False,
@@ -289,7 +319,7 @@ def replay_account_twr(*, sessions: Sequence[Mapping[str, Any]]) -> dict[str, An
     valid_no_trade = 0
     for row in sessions:
         sid = str(row.get("session_id") or "")
-        if not sid or row.get("starting_equity_cents") is None or row.get("ending_equity_cents") is None or "external_flow_cents" not in row:
+        if not sid or row.get("starting_equity_cents") is None or row.get("ending_equity_cents") is None or "external_flow_cents" not in row or not row.get("cash_flow_timing") or not row.get("valuation_currency") or not row.get("cash_flow_source_id"):
             missing.append(sid or "unknown")
             continue
         try:
@@ -302,7 +332,7 @@ def replay_account_twr(*, sessions: Sequence[Mapping[str, Any]]) -> dict[str, An
         except (KeyError, TypeError, ValueError):
             missing.append(sid or "unknown")
             continue
-        if not all(math.isfinite(value) for value in (fees, turnover, exposure)):
+        if not all(math.isfinite(value) for value in (fees, turnover, exposure)) or not math.isfinite(float(flow_cents)):
             missing.append(sid or "unknown")
             continue
         if beginning_cents <= 0 or ending_cents <= 0:
@@ -330,7 +360,7 @@ def replay_account_twr(*, sessions: Sequence[Mapping[str, Any]]) -> dict[str, An
         return {"status": "NO_VALID_SESSIONS", "returns": [], "missing_sessions": missing}
     accounting_rows = []
     for row in sessions:
-        if row.get("starting_equity_cents") is None or row.get("ending_equity_cents") is None or "external_flow_cents" not in row:
+        if row.get("starting_equity_cents") is None or row.get("ending_equity_cents") is None or "external_flow_cents" not in row or not row.get("cash_flow_timing") or not row.get("valuation_currency") or not row.get("cash_flow_source_id"):
             continue
         accounting_rows.append({
             "account_equity": row["ending_equity_cents"],
@@ -365,11 +395,15 @@ def replay_account_twr(*, sessions: Sequence[Mapping[str, Any]]) -> dict[str, An
 
 def bootstrap_paired_session_returns(
     *,
-    challenger_returns: Sequence[float],
-    baseline_returns: Sequence[float],
+    sessions: Sequence[Mapping[str, Any]] | None = None,
+    challenger_returns: Sequence[float] | None = None,
+    baseline_returns: Sequence[float] | None = None,
     block_length: int = 5,
     resamples: int = 10_000,
     seed: int = 27_029,
+    protocol_hash: str | None = None,
+    journal_hash: str | None = None,
+    trial_hash: str | None = None,
 ) -> dict[str, Any]:
     """Compute the preregistered fixed-block paired log-return interval.
 
@@ -378,9 +412,30 @@ def bootstrap_paired_session_returns(
     blocks are excluded rather than padded with zero performance.
     """
 
-    if block_length < 1 or resamples < 1 or len(challenger_returns) != len(baseline_returns):
-        return {"status": "INVALID_INPUT", "reason": "paired_series_shape_invalid"}
-    if len(challenger_returns) < block_length:
+    if block_length != 5 or resamples != 10_000 or seed != 27_029:
+        return {"status": "REJECTED", "reason": "frozen_bootstrap_parameters"}
+    if sessions is None or challenger_returns is not None or baseline_returns is not None:
+        return {"status": "REJECTED", "reason": "bound_session_journal_required"}
+    if not all(isinstance(value, str) and len(value) == 64 for value in (protocol_hash, journal_hash, trial_hash)):
+        return {"status": "REJECTED", "reason": "protocol_journal_trial_identity_missing"}
+    ordered = sorted((dict(row) for row in sessions), key=lambda row: str(row.get("market_date") or ""))
+    required = ("session_id", "market_date", "challenger_return", "baseline_return", "eligible", "decision_at", "label_available_at", "journal_hash", "trial_hash")
+    if any(any(row.get(key) in {None, ""} for key in required) for row in ordered):
+        return {"status": "INVALID_INPUT", "reason": "session_denominator_or_lineage_missing"}
+    if any(row.get("eligible") is not True or row.get("journal_hash") != journal_hash or row.get("trial_hash") != trial_hash for row in ordered):
+        return {"status": "REJECTED", "reason": "session_lineage_or_eligibility_mismatch"}
+    try:
+        dates = [str(row["market_date"]) for row in ordered]
+        if dates != sorted(set(dates)):
+            return {"status": "REJECTED", "reason": "session_order_or_duplicate_invalid"}
+        chronology = [_parse_time(row["decision_at"]) < _parse_time(row["label_available_at"]) for row in ordered]
+    except (TypeError, ValueError):
+        return {"status": "REJECTED", "reason": "session_chronology_invalid"}
+    if not all(chronology):
+        return {"status": "REJECTED", "reason": "label_before_decision"}
+    challenger_returns = [row["challenger_return"] for row in ordered]
+    baseline_returns = [row["baseline_return"] for row in ordered]
+    if len(ordered) < 5:
         return {"status": "WAITING", "reason": "insufficient_complete_block_sessions"}
     diffs: list[float] = []
     for challenger, baseline in zip(challenger_returns, baseline_returns):
@@ -410,6 +465,9 @@ def bootstrap_paired_session_returns(
         "seed": seed,
         "observed_mean_daily_log_return": observed,
         "one_sided_lower_bound_95": samples[lower_index],
+        "protocol_hash": protocol_hash,
+        "journal_hash": journal_hash,
+        "trial_hash": trial_hash,
         "caller_interval_ignored": True,
     }
 
@@ -555,9 +613,20 @@ def run_r7_weekly_controller(
         diagnostic_dimensions[name] = {"observations": observed, "status": "EVALUABLE" if observed >= 20 else "UNKNOWN_INSUFFICIENT_OBSERVATIONS", "minimum_observations": 20}
     breaches = [row for row in ordered if _number(row.get("diagnostic_value")) is not None and float(row["diagnostic_value"]) < 0.5]
     consecutive = len(breaches) >= 2 and str(breaches[-1].get("market_date")) > str(breaches[-2].get("market_date"))
+    confirmation = {"status": "WAITING_MARKET_EVIDENCE", "common_complete_sessions": 0, "challenger_trade_count": 0, "baseline_trade_count": 0}
+    confirmation_rows = [row for row in ordered if row.get("paired_challenger_return") is not None and row.get("paired_baseline_return") is not None and row.get("journal_hash") and row.get("trial_hash") and row.get("protocol_hash_sha256") == protocol.get("protocol_hash_sha256")]
+    if confirmation_rows:
+        journal_hash = str(confirmation_rows[0]["journal_hash"])
+        trial_hash = str(confirmation_rows[0]["trial_hash"])
+        if all(row.get("journal_hash") == journal_hash and row.get("trial_hash") == trial_hash for row in confirmation_rows):
+            bound_sessions = [{"session_id": row.get("session_id", row.get("decision_id")), "market_date": row.get("market_date"), "challenger_return": row.get("paired_challenger_return"), "baseline_return": row.get("paired_baseline_return"), "eligible": True, "decision_at": row.get("decision_at"), "label_available_at": row.get("label_available_at"), "journal_hash": journal_hash, "trial_hash": trial_hash} for row in confirmation_rows]
+            bootstrap = bootstrap_paired_session_returns(sessions=bound_sessions, protocol_hash=str(protocol.get("protocol_hash_sha256")), journal_hash=journal_hash, trial_hash=trial_hash)
+            confirmation = {"status": "COMPLETE" if len(bound_sessions) >= 60 and bootstrap.get("status") == "COMPLETE" else "WAITING_MARKET_EVIDENCE", "common_complete_sessions": len(bound_sessions), "challenger_trade_count": sum(1 for row in confirmation_rows if row.get("challenger_trade") is True), "baseline_trade_count": sum(1 for row in confirmation_rows if row.get("baseline_trade") is True), "bootstrap": bootstrap}
     prior = str((prior_state or {}).get("status") or "RETAIN_FROZEN_CHAMPION")
     if diagnostic.get("status", "").startswith("QUARANTINE") or consecutive:
         status = "ROLLBACK_FROZEN_CHAMPION" if prior == "OBSERVER_ONLY" else "RETAIN_FROZEN_CHAMPION"
+    elif receipt.get("status", "").startswith("TRAINED") and diagnostic.get("status") == "STABLE" and confirmation.get("status") == "COMPLETE" and confirmation["challenger_trade_count"] >= 30 and confirmation["baseline_trade_count"] >= 30:
+        status = "OBSERVER_PROMOTED_ENGINEERING_ONLY"
     elif receipt.get("status", "").startswith("TRAINED") and diagnostic.get("status") == "STABLE":
         status = "OBSERVER_ONLY"
     else:
@@ -566,13 +635,54 @@ def run_r7_weekly_controller(
         "status": status, "schedule": {"training_dates": training_dates, "validation_dates": validation_dates, "shadow_dates": shadow_dates},
         "model_run_id": model_id, "training_cutoff": training_cutoff, "training_receipt": receipt,
         "predictions": predictions, "calibration": calibration, "diagnostics": diagnostic,
-        "diagnostic_dimensions": diagnostic_dimensions,
+        "diagnostic_dimensions": diagnostic_dimensions, "confirmation": confirmation,
         "phases": {"collect": len(ordered), "validate": len(ordered), "mature": sum(1 for row in ordered if row.get("label_available_at") and str(row.get("label_available_at"))[:10] <= training_cutoff), "diagnose": True, "propose": True, "train": receipt.get("status"), "validate_predictions": sum(1 for row in predictions if str(row.get("market_date") or "") in validation_dates), "shadow_predictions": sum(1 for row in predictions if str(row.get("market_date") or "") in shadow_dates), "paired_comparison": "DERIVED_FROM_BOUND_ROWS"},
         "breach_count": len(breaches), "consecutive_breaches": consecutive, "rollback_target": "frozen_v5",
-        "activation_time": None if status != "OBSERVER_ONLY" else datetime.now().astimezone().isoformat(),
+        "activation_time": datetime.now().astimezone().isoformat() if status in {"OBSERVER_ONLY", "OBSERVER_PROMOTED_ENGINEERING_ONLY"} else None,
         "trial_history": [{"trial_id": "fixed-d029-1", "dataset_hash": dataset.get("dataset_hash_sha256"), "status": status}],
         "research_only": True, "broker_execution_enabled": False, "economic_pass": False,
     }
+
+
+def dispatch_r7_weekly(
+    *, dataset: Mapping[str, Any], protocol: Mapping[str, Any], code_sha: str,
+    state_path: str | Path, dispatch_id: str,
+) -> dict[str, Any]:
+    """Persist one idempotent offline weekly dispatch receipt."""
+    path = Path(state_path)
+    if not str(dispatch_id).strip():
+        return {"status": "REJECTED", "reason": "dispatch_id_missing"}
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {"status": "QUARANTINED", "reason": "state_corrupt"}
+        if existing.get("dispatch_id") == dispatch_id:
+            return {**existing, "idempotent_replay": True}
+        return {"status": "REJECTED", "reason": "duplicate_or_conflicting_dispatch", "existing_dispatch_id": existing.get("dispatch_id")}
+    result = run_r7_weekly_controller(dataset=dataset, protocol=protocol, code_sha=code_sha)
+    receipt = {"schema_version": "dawnstrike.r7.weekly_dispatch.v1", "dispatch_id": dispatch_id, "dataset_hash_sha256": dataset.get("dataset_hash_sha256"), "protocol_hash_sha256": protocol.get("protocol_hash_sha256"), "result": result, "state_hash_sha256": _hash(result), "research_only": True, "broker_execution_enabled": False}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(_canonical(receipt), encoding="utf-8")
+    temporary.replace(path)
+    return receipt
+
+
+def export_income_artifacts(*, illustration: Mapping[str, Any], output_dir: str | Path, as_of_date: str) -> dict[str, Any]:
+    """Write immutable dated illustrative scenario and sequence comparison receipts."""
+    if not as_of_date or not illustration.get("forward_replay") or not illustration.get("reverse_replay"):
+        return {"status": "REJECTED", "reason": "illustration_or_date_missing"}
+    root = Path(output_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    body = {"schema_version": "dawnstrike.income.illustrative.v1", "as_of_date": as_of_date, "illustration": dict(illustration), "evidence_status": "ENGINEERING_ONLY", "capacity_status": "UNKNOWN_NO_CAPACITY_EVIDENCE", "forecast": False}
+    body["artifact_hash_sha256"] = _hash(body)
+    scenario_path = root / f"illustrative_income_{as_of_date}.json"
+    comparison_path = root / f"illustrative_sequence_comparison_{as_of_date}.json"
+    scenario_path.write_text(_canonical(body), encoding="utf-8")
+    comparison = {"schema_version": "dawnstrike.income.sequence_comparison.v1", "as_of_date": as_of_date, "forward_ending_capital": illustration["forward_replay"]["ending_capital"], "reverse_ending_capital": illustration["reverse_replay"]["ending_capital"], "sequence_difference": illustration["sequence_difference"], "capacity_status": "UNKNOWN_NO_CAPACITY_EVIDENCE", "artifact_hash_sha256": _hash(body)}
+    comparison_path.write_text(_canonical(comparison), encoding="utf-8")
+    return {"status": "WRITTEN", "scenario_path": str(scenario_path), "comparison_path": str(comparison_path), "artifact_hash_sha256": body["artifact_hash_sha256"]}
 
 
 def simulate_causal_fill_lifecycle(
@@ -758,6 +868,11 @@ def evaluate_controller_update(
     reasons: list[str] = []
     if candidate.get("protocol_hash_sha256") != controller.get("protocol_hash_sha256"):
         reasons.append("protocol_hash_mismatch")
+    for field in ("model_version", "dataset_hash_sha256", "source_hash_sha256", "code_sha", "configuration_hash_sha256", "activation_time"):
+        if candidate.get(field) in {None, ""}:
+            reasons.append(f"{field}_missing")
+    if candidate.get("cost_model_version") in {None, ""}:
+        reasons.append("cost_model_version_missing")
     if candidate.get("cost_status") in {None, "UNKNOWN", "COST_UNKNOWN"}:
         reasons.append("unknown_cost")
     if int(candidate.get("eligible_session_count", 0) or 0) < 60:
@@ -811,20 +926,29 @@ def build_income_illustration(
     reserve_floor = illustrative_capital * max(0, int(reserve_months)) / 12 * annual_withdrawal_rate
     def replay(sequence: Sequence[float]) -> dict[str, Any]:
         balance = illustrative_capital
+        reserve = reserve_floor
         periods: list[dict[str, Any]] = []
         losing_periods = 0
         for index, rate in enumerate(sequence, start=1):
             start = balance
-            gross = start * float(rate)
-            costs = start * annual_cost_rate
+            effective_rate = float(rate) * max(0.0, (1.0 - decay_rate) ** (index - 1))
+            operating_start = max(0.0, start - reserve)
+            gross = operating_start * effective_rate
+            costs = operating_start * annual_cost_rate
             taxable = gross - costs
             taxes = max(0.0, taxable * tax_rate)
-            ending = max(0.0, start + gross - costs - taxes - withdrawal)
+            available = operating_start + gross - costs - taxes
+            requested = withdrawal
+            operating_withdrawal = min(max(0.0, available), requested)
+            reserve_used = max(0.0, requested - operating_withdrawal)
+            reserve_used = min(reserve, reserve_used)
+            reserve -= reserve_used
+            ending = max(0.0, available - operating_withdrawal) + reserve
             if gross < 0:
                 losing_periods += 1
-            periods.append({"period": index, "starting_capital": start, "return_rate": float(rate), "gross_result": gross, "costs": costs, "taxes": taxes, "withdrawal": withdrawal, "ending_capital": ending})
+            periods.append({"period": index, "starting_capital": start, "return_rate": float(rate), "effective_return_rate": effective_rate, "gross_result": gross, "costs": costs, "taxes": taxes, "withdrawal": requested, "operating_withdrawal": operating_withdrawal, "reserve_used": reserve_used, "reserve_remaining": reserve, "ending_capital": ending})
             balance = ending
-        return {"ending_capital": balance, "periods": periods, "losing_period_count": losing_periods}
+        return {"ending_capital": balance, "periods": periods, "losing_period_count": losing_periods, "reserve_remaining": reserve}
     forward = replay(returns)
     reverse = replay(list(reversed(returns)))
     gross_income = illustrative_capital * annual_return_assumption
@@ -958,6 +1082,7 @@ __all__ = [
     "admit_d022_trade",
     "bootstrap_paired_session_returns",
     "compare_v5_baseline_challenger",
+    "dispatch_r7_weekly",
     "build_observer_controller",
     "build_research_protocol",
     "evaluate_confirmation_summary",
@@ -965,6 +1090,7 @@ __all__ = [
     "evaluate_gap_orb15_signal",
     "run_v5_admission",
     "run_r7_weekly_controller",
+    "export_income_artifacts",
     "simulate_causal_fill_lifecycle",
     "replay_account_twr",
 ]
