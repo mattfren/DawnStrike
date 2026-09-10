@@ -24,6 +24,12 @@ def main() -> int:
     parser.add_argument("--repository-root", type=Path)
     parser.add_argument("--max-events", type=int, default=100_000)
     parser.add_argument("--max-bytes", type=int, default=64 * 1024 * 1024)
+    parser.add_argument(
+        "--reduction-mode",
+        choices=("none", "bounded_derivative"),
+        default="none",
+        help="Keep hard event/byte caps; bounded_derivative records source counts and emits an explicit subset.",
+    )
     args = parser.parse_args()
     try:
         result = build_observation_inputs(
@@ -34,6 +40,7 @@ def main() -> int:
             repository_root=args.repository_root,
             max_events=args.max_events,
             max_bytes=args.max_bytes,
+            reduction_mode=args.reduction_mode,
         )
     except ObservationProducerError as exc:
         print(json.dumps({"status": "BLOCKED", "reason": str(exc)}, sort_keys=True))

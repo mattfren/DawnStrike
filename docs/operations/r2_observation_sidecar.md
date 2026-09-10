@@ -19,20 +19,60 @@ timestamp relative to the immutable `decision_deadline`. A delayed-only run is
 `PARTIAL`, and an unavailable source is `MISSED_SESSION`; an explicit empty
 JSONL file is the only healthy `EMPTY` result.
 
-## Attempt-2 preparation and authority boundary
+## Provider boundary and bounded derivation contract
 
-The integrated repair-2 source is the isolated worktree
+The Alpaca historical bars contract is versioned as
+`alpaca.stock.historical.v1`. Alpaca documents both `start` and `end` as
+inclusive query bounds ([official reference](https://docs.alpaca.markets/us/reference/stockbars)).
+The R2 derived window therefore uses the explicit `half_open_v1` rule: events
+strictly before `request_end` are written to `raw-events.jsonl`; an event at
+`request_end` is retained losslessly in `boundary-events.jsonl` with
+`inclusive_provider_end_excluded_from_current_half_open` and a next-window
+identity. Events after `request_end` or before `request_start` fail closed.
+
+The adapter streams retained page artifacts and enforces both event and byte
+limits. When a retained source exceeds those limits, use
+`--reduction-mode bounded_derivative`; the manifest records source counts,
+derived counts, and `coverage_class=BOUNDED_DERIVATIVE`, and does not claim
+full source coverage. The retained provider pages remain the authoritative raw
+source and are never rewritten by this adapter.
+
+For the current R2-OPS evidence, the source receipt is bound offline with:
+
+```powershell
+py -3.13 scripts/build_observation_inputs.py `
+  --capture-receipt C:\r\dawnstrike-forward-runs\forward_observed\6a4fd8458e017b746776399edcbbf6c4\capture_run_receipt.json `
+  --scope-declaration C:\r\dawnstrike-remediation-20260909\verification\R2\R2_OPS_SCOPE_DECLARATION_20260910.json `
+  --output-root C:\r\dawnstrike-remediation-20260909\verification\R2\R2_OPS_FULL_DERIVED_20260910 `
+  --decision-deadline 2026-09-09T14:00:00+00:00 `
+  --repository-root C:\r\dawnstrike-r2-ops-compat-20260910 `
+  --max-events 10000 --max-bytes 67108864 --reduction-mode bounded_derivative
+```
+
+The resulting source count is 1,812,144 and the bounded derivative contains
+10,000 events plus five boundary events. Its coverage is explicitly
+`BOUNDED_DERIVATIVE`; this old-day artifact is development evidence only.
+The offline observer is resumable with the same manifest, source, output root,
+and caps. A cooperative stop marker is created beside the output root; remove
+it only after the process exits, then rerun the exact command. The observer
+receipt records the cursor source hash and remains `PARTIAL` when retained
+events arrive after the decision deadline.
+
+## Historical repair-2 preparation (retained as rejected)
+
+The earlier repair-2 source was the isolated worktree
 `C:\r\dawnstrike-r2-repair2-20260910`. Resolve and freeze its exact commit before
 the capture command; the `--code-sha` value below is the resolved commit and is
 joined into the provider receipt.
 
 The prospective declaration at
 `C:\r\dawnstrike-remediation-20260909\verification\R2\repair2_scope_declaration_20260910.json`
-was generated from the authenticated-on-disk universe generation
+was generated from the then available universe generation
 `C:\r\dawnstrike-config-vault\20260909\luna_core_universe_generations\ndx-sod-2026-09-09-674d870edc806c01f079533d17af24a214046712c8ce2e8a\luna_core_universe.json`
 (source hash `63186471234a8b5728588fa0b4821e3ed50ffd540454e053afb7da23c90fb828`).
-It retains the full 518-symbol as-of census as `missing_input` until a real
-capture receipt exists, predeclares the five-symbol liquid reference panel
+It incorrectly used the 518-symbol core declaration for this R2 mover scope.
+That declaration remains a rejected historical artifact. The corrected current
+scope is the actual 181-row mover census plus the five-symbol liquid reference panel
 `DIA/IWM/QQQ/SPY/TLT`, and freezes a deterministic 12-candidate stratified
 sample with explicit inclusion probabilities. This declaration is a diagnostic
 observation scope and does not certify the small-cap thesis or become a trading
@@ -40,11 +80,11 @@ universe. The symbols file is
 `C:\r\dawnstrike-remediation-20260909\verification\R2\repair2_symbols_prospective_20260910.txt`
 (SHA-256 `3C13FEA936F71BFDF66D4F601E449E49A9EA03CF720AD9322C69D642FDBFF4CA`).
 
-The authorized entitlement receipt, `runtime.env`, and retained provider
-capture receipt were absent during repair-2 preparation. Therefore the real
-capture remains `BLOCKED_AUTHORITY`; the commands below are a source-pinned
-prepared invocation and must not be launched until those inputs are supplied by
-the authorized owner. No provider request was made by this repair.
+The earlier repair-2 packet recorded those inputs as absent. The targeted OPS
+recovery located the existing authorized entitlement receipt, source template,
+runtime path, and retained forward capture; their values remain external and
+are referenced by the append-only R2 OPS receipts. No provider request was made
+by this repair, and a new prospective session is still required before launch.
 
 ## Bounded noninteractive operation
 
