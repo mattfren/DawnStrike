@@ -9,6 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from intraday_scanner.observation.cohort import PRODUCER_REDUCTION_MODES
 from intraday_scanner.observation.producer import (
     ObservationProducerError,
     build_observation_inputs,
@@ -26,9 +27,12 @@ def main() -> int:
     parser.add_argument("--max-bytes", type=int, default=64 * 1024 * 1024)
     parser.add_argument(
         "--reduction-mode",
-        choices=("none", "bounded_derivative"),
+        choices=PRODUCER_REDUCTION_MODES,
         default="none",
-        help="Keep hard event/byte caps; bounded_derivative records source counts and emits an explicit subset.",
+        help=(
+            "Keep hard event/byte caps; bounded_derivative records source counts "
+            "and emits an explicit subset; stratified_panel selects the fixed panel."
+        ),
     )
     args = parser.parse_args()
     try:
