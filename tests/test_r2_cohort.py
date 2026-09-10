@@ -140,6 +140,23 @@ def test_prepare_and_resume_missing_source_are_durable_and_do_not_renew(tmp_path
     assert after_close["safety"]["no_auto_renewal"] is True
 
 
+def test_prepare_persists_explicit_producer_reduction_mode(tmp_path: Path) -> None:
+    plan = prepare_cohort(
+        output_root=tmp_path / "cohort",
+        input_root=tmp_path / "inputs",
+        scope_root=tmp_path / "scopes",
+        repo_root=Path(r"C:\r\dawnstrike-remediation-candidate-20260909"),
+        reduction_mode="stratified_panel",
+    )
+    assert plan["producer_reduction_mode"] == "stratified_panel"
+    with pytest.raises(CohortError, match="unsupported producer reduction mode"):
+        prepare_cohort(
+            output_root=tmp_path / "invalid",
+            input_root=tmp_path / "inputs",
+            scope_root=tmp_path / "scopes",
+            repo_root=Path(r"C:\r\dawnstrike-remediation-candidate-20260909"),
+            reduction_mode="silent_panel_narrowing",
+        )
 def test_scope_rejects_historical_core_substitution(tmp_path: Path) -> None:
     path = _scope(tmp_path)
     value = json.loads(path.read_text(encoding="utf-8"))

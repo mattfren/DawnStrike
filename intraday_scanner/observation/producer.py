@@ -245,7 +245,7 @@ def _stratified_selection(
     }
     boundary_counts = {symbol: 0 for symbol in _STRATIFIED_REFERENCE_PANEL}
 
-    def classify(row: dict[str, Any]) -> tuple[str, int | None, str]:
+    def classify(row: dict[str, Any], *, count: bool) -> tuple[str, int | None, str]:
         symbol = str(row["symbol"]).upper()
         if symbol not in _STRATIFIED_REFERENCE_PANEL:
             raise ObservationProducerError("stratified source contains a non-panel symbol")
@@ -258,13 +258,15 @@ def _stratified_selection(
             raise ObservationProducerError("provider event is outside the capture request window")
         event_time = event_at.isoformat()
         if event_at == request_end:
-            boundary_counts[symbol] += 1
+            if count:
+                boundary_counts[symbol] += 1
             return symbol, None, event_time
         bin_index = min(
             _STRATIFIED_BIN_COUNT - 1,
             int((event_at - request_start).total_seconds() // bin_seconds),
         )
-        counts[(symbol, bin_index)] += 1
+        if count:
+            counts[(symbol, bin_index)] += 1
         return symbol, bin_index, event_time
 
     first_artifacts: list[dict[str, Any]] = []
@@ -275,7 +277,9 @@ def _stratified_selection(
         feed=feed,
         artifacts=first_artifacts,
     ):
-        classify(row)
+        if str(row.get("symbol") or "").upper() not in _STRATIFIED_REFERENCE_PANEL:
+            continue
+        classify(row, count=True)
 
     target_counts: dict[tuple[str, int], int] = {}
     for symbol in _STRATIFIED_REFERENCE_PANEL:
@@ -307,7 +311,9 @@ def _stratified_selection(
         feed=feed,
         artifacts=[],
     ):
-        symbol, bin_index, event_time = classify(row)
+        if str(row.get("symbol") or "").upper() not in _STRATIFIED_REFERENCE_PANEL:
+            continue
+        symbol, bin_index, event_time = classify(row, count=False)
         key = _selection_key(row=row, event_time=event_time)
         target = (
             boundary_targets[symbol]
@@ -565,8 +571,20 @@ def build_observation_inputs(
                     item=item,
                 )
                 selection_key = _selection_key(row=row, event_time=event_at.isoformat())
-                if selected_events is not None and selection_key not in selected_events:
+                if (
+                    selected_events is not None
+                    and row["symbol"] in _STRATIFIED_REFERENCE_PANEL
+                    and selection_key not in selected_events
+                ):
                     continue
+                selected_identity = (
+                    selected_events.get(selection_key)
+                    if selected_events is not None
+                    else None
+                )
+                if selected_identity is not None:
+                    event["selection_rank"] = selected_identity["selection_rank"]
+                    event["inclusion_probability"] = selected_identity["inclusion_probability"]
                 if event_key in seen_keys:
                     source_duplicate_count += 1
                     continue

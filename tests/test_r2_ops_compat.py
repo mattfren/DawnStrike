@@ -252,6 +252,11 @@ def test_stratified_panel_derivative_covers_each_symbol_and_bin(tmp_path: Path) 
     assert result["derived_boundary_event_count"] == 5
     assert result["source_full_coverage_claim"] is False
     assert result["sampling_plan"]["present_selected_count"] == 35
+    assert all(
+        sum(result["sampling_plan"]["counts"][symbol]["bins"]) == 6
+        and result["sampling_plan"]["counts"][symbol]["boundary_available"] == 1
+        for symbol in symbols
+    )
     raw = [
         json.loads(line)
         for line in (tmp_path / "producer" / "raw-events.jsonl").read_text().splitlines()
@@ -263,6 +268,13 @@ def test_stratified_panel_derivative_covers_each_symbol_and_bin(tmp_path: Path) 
     assert {row["symbol"] for row in raw} == set(symbols)
     assert {row["symbol"] for row in boundary} == set(symbols)
     assert all("source_page_path" in row and "source_item_index" in row for row in raw + boundary)
+    assert all(
+        isinstance(row["selection_rank"], str)
+        and len(row["selection_rank"]) == 64
+        and all(character in "0123456789abcdef" for character in row["selection_rank"])
+        and 0 < row["inclusion_probability"] <= 1
+        for row in raw + boundary
+    )
     assert {symbol: sum(row["symbol"] == symbol for row in raw) for symbol in symbols} == {
         symbol: 6 for symbol in symbols
     }

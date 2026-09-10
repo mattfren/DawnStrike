@@ -38,6 +38,7 @@ REFERENCE_PANEL = ("DIA", "IWM", "QQQ", "SPY", "TLT")
 MOVER_MEMBERSHIPS = ("selected", "rejected", "unselected")
 APPROVED_PYTHON = Path(r"C:\Program Files\Dawnstrike\Python313\python.exe")
 APPROVED_PYTHON_SHA256 = "ef8f51028ac5329641985112f8efb1c2d4c47c86b8011ddf7e6fae21e2b4e5a1"
+PRODUCER_REDUCTION_MODES = ("none", "bounded_derivative", "stratified_panel")
 
 
 class CohortError(ValueError):
@@ -338,6 +339,7 @@ def prepare_cohort(
     max_bytes: int = 64 * 1024 * 1024,
     max_rss_bytes: int = 256 * 1024 * 1024,
     max_wall_seconds: int = 1800,
+    reduction_mode: str = "bounded_derivative",
 ) -> dict[str, Any]:
     if max_pages < 1 or max_pages > MAX_OFFLINE_PAGES or max_events < 1 or max_events > 10000:
         raise CohortError("cohort request caps exceed the existing offline observer bounds")
@@ -345,6 +347,8 @@ def prepare_cohort(
         raise CohortError("cohort byte cap exceeds the existing local bound")
     if max_rss_bytes < 1 or max_wall_seconds < 1:
         raise CohortError("cohort resource caps must be positive")
+    if reduction_mode not in PRODUCER_REDUCTION_MODES:
+        raise CohortError("unsupported producer reduction mode")
     code_sha, tree_sha = _git_identity(repo_root.resolve())
     toolchain = _toolchain_identity(python_path)
     if not toolchain["approved"]:
@@ -395,6 +399,7 @@ def prepare_cohort(
             "max_retries": MAX_RETRIES,
             "max_sessions": MAX_EXPECTED_SESSIONS,
         },
+        "producer_reduction_mode": reduction_mode,
         "safety": {
             "research_only": True,
             "broker_execution_enabled": False,
@@ -801,7 +806,7 @@ def resume_cohort(
                         "--max-bytes",
                         str(state["caps"]["max_bytes"]),
                         "--reduction-mode",
-                        "bounded_derivative",
+                        str(state.get("producer_reduction_mode") or "bounded_derivative"),
                     ]
                     producer_run = runner(
                         producer_command,
