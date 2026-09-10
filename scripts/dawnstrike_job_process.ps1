@@ -319,10 +319,64 @@ namespace Dawnstrike.Native
             string label,
             int timeoutMilliseconds,
             int outputDrainMilliseconds,
+            string[] environmentOverrides
+        )
+        {
+            return RunInternal(
+                filePath,
+                arguments,
+                workingDirectory,
+                label,
+                timeoutMilliseconds,
+                outputDrainMilliseconds,
+                environmentOverrides,
+                0,
+                0,
+                0,
+                false
+            );
+        }
+
+        public static JobProcessResult Run(
+            string filePath,
+            string[] arguments,
+            string workingDirectory,
+            string label,
+            int timeoutMilliseconds,
+            int outputDrainMilliseconds,
             string[] environmentOverrides,
             ulong jobMemoryLimitBytes,
             ulong processTreeRssLimitBytes,
             int rssSampleMilliseconds
+        )
+        {
+            return RunInternal(
+                filePath,
+                arguments,
+                workingDirectory,
+                label,
+                timeoutMilliseconds,
+                outputDrainMilliseconds,
+                environmentOverrides,
+                jobMemoryLimitBytes,
+                processTreeRssLimitBytes,
+                rssSampleMilliseconds,
+                true
+            );
+        }
+
+        private static JobProcessResult RunInternal(
+            string filePath,
+            string[] arguments,
+            string workingDirectory,
+            string label,
+            int timeoutMilliseconds,
+            int outputDrainMilliseconds,
+            string[] environmentOverrides,
+            ulong jobMemoryLimitBytes,
+            ulong processTreeRssLimitBytes,
+            int rssSampleMilliseconds,
+            bool enableResourceGuard
         )
         {
             if (String.IsNullOrWhiteSpace(filePath))
@@ -337,9 +391,13 @@ namespace Dawnstrike.Native
             {
                 throw new ArgumentOutOfRangeException("timeouts must be positive.");
             }
-            if (jobMemoryLimitBytes < 1 || processTreeRssLimitBytes < 1 || rssSampleMilliseconds < 1)
+            if (enableResourceGuard && (jobMemoryLimitBytes < 1 || processTreeRssLimitBytes < 1 || rssSampleMilliseconds < 1))
             {
                 throw new ArgumentOutOfRangeException("guard limits must be positive.");
+            }
+            if (!enableResourceGuard && (jobMemoryLimitBytes != 0 || processTreeRssLimitBytes != 0 || rssSampleMilliseconds != 0))
+            {
+                throw new ArgumentException("resource guard values require the observer overload.");
             }
 
             IntPtr job = IntPtr.Zero;
@@ -367,7 +425,7 @@ namespace Dawnstrike.Native
             {
                 job = CreateJobObject(IntPtr.Zero, null);
                 RequireHandle(job, "CreateJobObject");
-                configuredLimits = ConfigureJobLimits(job, jobMemoryLimitBytes);
+                configuredLimits = ConfigureJobLimits(job, jobMemoryLimitBytes, enableResourceGuard);
 
                 SECURITY_ATTRIBUTES security = new SECURITY_ATTRIBUTES();
                 security.nLength = Marshal.SizeOf(typeof(SECURITY_ATTRIBUTES));
@@ -422,8 +480,11 @@ namespace Dawnstrike.Native
                 }
                 CloseOwnedHandle(ref processInfo.hThread);
 
-                guardStop = new CancellationTokenSource();
-                guardTask = Task.Run(() => MonitorJob(job, guardStop.Token, guard, processTreeRssLimitBytes, rssSampleMilliseconds));
+                if (enableResourceGuard)
+                {
+                    guardStop = new CancellationTokenSource();
+                    guardTask = Task.Run(() => MonitorJob(job, guardStop.Token, guard, processTreeRssLimitBytes, rssSampleMilliseconds));
+                }
                 DateTime deadline = DateTime.UtcNow.AddMilliseconds(timeoutMilliseconds);
                 while (true)
                 {
@@ -497,10 +558,10 @@ namespace Dawnstrike.Native
                     Stderr = stderr,
                     ExitCode = unchecked((int)rawExitCode),
                     ActiveJobMembersAfterCleanup = activeAfterCleanup,
-                    JobMemoryLimitBytes = jobMemoryLimitBytes,
+                    JobMemoryLimitBytes = enableResourceGuard ? jobMemoryLimitBytes : 0,
                     JobMemoryLimitReadbackBytes = configuredLimits.JobMemoryLimit.ToUInt64(),
                     JobLimitFlags = configuredLimits.BasicLimitInformation.LimitFlags,
-                    ProcessTreeRssLimitBytes = processTreeRssLimitBytes,
+                    ProcessTreeRssLimitBytes = enableResourceGuard ? processTreeRssLimitBytes : 0,
                     PeakJobMemoryUsedBytes = guard.PeakJobMemoryUsedBytes,
                     LastJobMemoryUsedBytes = guard.LastJobMemoryUsedBytes,
                     PeakProcessTreeRssBytes = guard.PeakProcessTreeRssBytes,
@@ -634,13 +695,20 @@ namespace Dawnstrike.Native
             return new StreamReader(stream, Encoding.UTF8, true, 4096, false);
         }
 
-        private static JOBOBJECT_EXTENDED_LIMIT_INFORMATION ConfigureJobLimits(IntPtr job, ulong jobMemoryLimitBytes)
+        private static JOBOBJECT_EXTENDED_LIMIT_INFORMATION ConfigureJobLimits(
+            IntPtr job,
+            ulong jobMemoryLimitBytes,
+            bool enableResourceGuard
+        )
         {
             JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits =
                 new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
-            limits.BasicLimitInformation.LimitFlags =
-                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_JOB_MEMORY;
-            limits.JobMemoryLimit = (UIntPtr)jobMemoryLimitBytes;
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if (enableResourceGuard)
+            {
+                limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_JOB_MEMORY;
+                limits.JobMemoryLimit = (UIntPtr)jobMemoryLimitBytes;
+            }
             int size = Marshal.SizeOf(typeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION));
             IntPtr pointer = Marshal.AllocHGlobal(size);
             try
@@ -663,8 +731,8 @@ namespace Dawnstrike.Native
             JOBOBJECT_EXTENDED_LIMIT_INFORMATION readback = QueryExtendedLimits(job);
             uint flags = readback.BasicLimitInformation.LimitFlags;
             if ((flags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE) == 0
-                || (flags & JOB_OBJECT_LIMIT_JOB_MEMORY) == 0
-                || readback.JobMemoryLimit.ToUInt64() != jobMemoryLimitBytes)
+                || (enableResourceGuard && ((flags & JOB_OBJECT_LIMIT_JOB_MEMORY) == 0
+                    || readback.JobMemoryLimit.ToUInt64() != jobMemoryLimitBytes)))
             {
                 throw new InvalidOperationException(
                     String.Format(
@@ -1130,9 +1198,9 @@ function Invoke-DawnstrikeJobProcess {
         [Parameter(Mandatory = $true)][ValidateRange(1, 86400)][int]$TimeoutSeconds,
         [Parameter()][ValidateRange(1, 60)][int]$OutputDrainTimeoutSeconds = 5,
         [Parameter()][hashtable]$EnvironmentOverrides = @{},
-        [Parameter()][ValidateRange(1, 268435456)][UInt64]$JobMemoryLimitBytes = 268435456,
-        [Parameter()][ValidateRange(1, 268435456)][UInt64]$ProcessTreeRssLimitBytes = 268435456,
-        [Parameter()][ValidateRange(1, 10000)][int]$RssSampleMilliseconds = 100
+        [Parameter()][ValidateRange(0, 268435456)][UInt64]$JobMemoryLimitBytes = 0,
+        [Parameter()][ValidateRange(0, 268435456)][UInt64]$ProcessTreeRssLimitBytes = 0,
+        [Parameter()][ValidateRange(0, 10000)][int]$RssSampleMilliseconds = 0
     )
 
     $environmentPairs = @(
@@ -1140,6 +1208,25 @@ function Invoke-DawnstrikeJobProcess {
             Sort-Object -Property Key |
             ForEach-Object { "{0}={1}" -f $_.Key, $_.Value }
     )
+    $guardValues = @($JobMemoryLimitBytes, $ProcessTreeRssLimitBytes, $RssSampleMilliseconds)
+    $guardEnabled = ($JobMemoryLimitBytes -gt 0 -or $ProcessTreeRssLimitBytes -gt 0 -or $RssSampleMilliseconds -gt 0)
+    if ($guardEnabled -and ($JobMemoryLimitBytes -lt 1 -or $ProcessTreeRssLimitBytes -lt 1 -or $RssSampleMilliseconds -lt 1)) {
+        throw 'Observer resource guard requires positive memory, RSS, and sampling values together.'
+    }
+    if ($guardEnabled -and ($JobMemoryLimitBytes -gt 268435456 -or $ProcessTreeRssLimitBytes -gt 268435456)) {
+        throw 'Observer resource guard limits cannot exceed 256 MiB.'
+    }
+    if (-not $guardEnabled) {
+        return [Dawnstrike.Native.JobProcessRunner]::Run(
+            $FilePath,
+            @($ArgumentList),
+            $WorkingDirectory,
+            $Label,
+            $TimeoutSeconds * 1000,
+            $OutputDrainTimeoutSeconds * 1000,
+            $environmentPairs
+        )
+    }
     return [Dawnstrike.Native.JobProcessRunner]::Run(
         $FilePath,
         @($ArgumentList),
@@ -1148,8 +1235,6 @@ function Invoke-DawnstrikeJobProcess {
         $TimeoutSeconds * 1000,
         $OutputDrainTimeoutSeconds * 1000,
         $environmentPairs,
-        $JobMemoryLimitBytes,
-        $ProcessTreeRssLimitBytes,
-        $RssSampleMilliseconds
+        $JobMemoryLimitBytes, $ProcessTreeRssLimitBytes, $RssSampleMilliseconds
     )
 }

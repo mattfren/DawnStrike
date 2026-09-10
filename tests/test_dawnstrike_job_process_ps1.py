@@ -152,6 +152,12 @@ def test_job_runner_succeeds_and_round_trips_windows_arguments(tmp_path: Path) -
     assert payload["ActiveJobMembersAfterCleanup"] == 0
     assert json.loads(payload["Stdout"]) == expected
     assert payload["Stderr"] == ""
+    assert payload["JobMemoryLimitBytes"] == 0
+    assert payload["JobMemoryLimitReadbackBytes"] == 0
+    assert payload["JobLimitFlags"] == 0x2000
+    assert payload["ProcessTreeRssLimitBytes"] == 0
+    assert payload["ProcessTreeRssMeasurementAvailable"] is False
+    assert payload["ProcessTreeRssSamples"] == 0
 
 
 def test_job_runner_reports_native_memory_and_rss_guard_readback(tmp_path: Path) -> None:
@@ -163,7 +169,14 @@ def test_job_runner_reports_native_memory_and_rss_guard_readback(tmp_path: Path)
     )
 
     completed = _run_powershell(
-        _invoke_command([fixture], label="guard telemetry probe", timeout_seconds=5)
+        _invoke_command(
+            [fixture],
+            label="guard telemetry probe",
+            timeout_seconds=5,
+            job_memory_limit_bytes=268435456,
+            rss_limit_bytes=268435456,
+            rss_sample_milliseconds=100,
+        )
     )
 
     assert completed.returncode == 0, completed.stderr
@@ -202,6 +215,24 @@ def test_job_runner_rss_supervisor_terminates_noncooperative_process(tmp_path: P
     message = json.loads(completed.stdout)["Message"]
     assert "process-tree RSS cap exceeded" in message
     assert "active_job_members_after_cleanup=0" in message
+
+
+def test_job_runner_rejects_partial_observer_guard_without_fallback(tmp_path: Path) -> None:
+    fixture = tmp_path / "partial guard.js"
+    fixture.write_text("process.exit(0);\n", encoding="utf-8")
+
+    completed = _run_powershell(
+        _failure_command(
+            [fixture],
+            label="partial guard probe",
+            timeout_seconds=5,
+            job_memory_limit_bytes=65536,
+        )
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    message = json.loads(completed.stdout)["Message"]
+    assert "requires positive memory, RSS, and sampling values together" in message
 
 
 def test_job_runner_preserves_real_nonzero_exit_and_stderr(tmp_path: Path) -> None:

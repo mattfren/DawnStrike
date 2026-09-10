@@ -803,9 +803,9 @@ function Invoke-DawnstrikeNativeProcess {
         [Parameter()][hashtable]$EnvironmentOverrides = @{},
         [Parameter()][string]$DependencyStageRoot = '',
         [Parameter()][string]$DependencyStageReceiptPath = '',
-        [Parameter()][ValidateRange(1, 268435456)][UInt64]$JobMemoryLimitBytes = 268435456,
-        [Parameter()][ValidateRange(1, 268435456)][UInt64]$ProcessTreeRssLimitBytes = 268435456,
-        [Parameter()][ValidateRange(1, 10000)][int]$RssSampleMilliseconds = 100,
+        [Parameter()][ValidateRange(0, 268435456)][UInt64]$JobMemoryLimitBytes = 0,
+        [Parameter()][ValidateRange(0, 268435456)][UInt64]$ProcessTreeRssLimitBytes = 0,
+        [Parameter()][ValidateRange(0, 10000)][int]$RssSampleMilliseconds = 0,
         [Parameter()][switch]$NoSite,
         [Parameter()][switch]$SuppressConsoleReplay
     )
