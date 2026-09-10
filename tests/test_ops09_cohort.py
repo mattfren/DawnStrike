@@ -359,6 +359,54 @@ def test_shared_writer_accounts_multiple_roots_and_replacement_once(tmp_path: Pa
     assert not (adapter / "overflow.json").exists()
 
 
+def test_shared_writer_accounts_retained_target_during_shrink(tmp_path: Path) -> None:
+    root = tmp_path / "session"
+    root.mkdir()
+    writer = SharedBoundedWriter(roots=(root,), max_bytes=100)
+    target = root / "target.json"
+    target.write_bytes(b"o" * 95)
+    old = target.read_bytes()
+
+    # The old target (95) and new temporary (10) coexist before replace.
+    with pytest.raises(Ops09Error, match=r"projected_peak=105, cap=100"):
+        writer(target, b"n" * 10)
+    assert target.read_bytes() == old
+    assert not list(root.glob(".target.json.*.tmp"))
+
+    safe_root = root / "safe"
+    safe_root.mkdir()
+    safe = safe_root / "safe.json"
+    safe.write_bytes(b"o" * 80)
+    SharedBoundedWriter(roots=(safe_root,), max_bytes=100)(safe, b"n" * 10)
+    assert safe.read_bytes() == b"n" * 10
+
+    equal_root = root / "equal"
+    equal_root.mkdir()
+    equal = equal_root / "equal.json"
+    equal.write_bytes(b"o" * 50)
+    SharedBoundedWriter(roots=(equal_root,), max_bytes=100)(equal, b"n" * 50)
+    assert equal.read_bytes() == b"n" * 50
+
+    growth_root = root / "growth"
+    growth_root.mkdir()
+    growth = growth_root / "growth.json"
+    growth.write_bytes(b"o" * 10)
+    growth_writer = SharedBoundedWriter(roots=(growth_root,), max_bytes=160)
+    growth_writer(growth, b"n" * 80)
+    assert growth.read_bytes() == b"n" * 80
+
+    multi_root = root / "multi"
+    multi_root.mkdir()
+    other = multi_root / "other.json"
+    other.write_bytes(b"x" * 20)
+    multi = multi_root / "multi.json"
+    multi.write_bytes(b"o" * 10)
+    multi_writer = SharedBoundedWriter(roots=(multi_root,), max_bytes=65)
+    multi_writer(multi, b"n" * 15)
+    assert multi.read_bytes() == b"n" * 15
+    assert other.read_bytes() == b"x" * 20
+
+
 def test_elapsed_and_attempt_identity_are_authoritative_before_marker(tmp_path: Path) -> None:
     state_path = tmp_path / "cohort-state.json"
     attempt_path = tmp_path / ".ops09-attempt.json"

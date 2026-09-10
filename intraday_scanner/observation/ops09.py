@@ -215,7 +215,11 @@ class SharedBoundedWriter:
         path.parent.mkdir(parents=True, exist_ok=True)
         existing = path.stat().st_size if path.is_file() else 0
         current = self._tree_bytes() - existing
-        projected_peak = current + len(data) * 2
+        # During replacement the old target remains live while the temporary
+        # file is written.  Keep the historical conservative new-final/temp
+        # bound for growth, while also charging the retained old target when a
+        # replacement shrinks (or otherwise changes) an existing file.
+        projected_peak = current + max(existing + len(data), len(data) * 2)
         if projected_peak > self.max_bytes:
             raise Ops09Error(
                 f"OPS09 shared byte budget rejects {path.name}: "
