@@ -44,13 +44,81 @@ MAX_ATTEMPTS = 3
 MAX_EVENTS = 10_000
 MAX_BYTES = 64 * 1024 * 1024
 CAPTURE_BYTES = 48 * 1024 * 1024
-DOWNSTREAM_BYTES = 16 * 1024 * 1024
+NATIVE_CAPTURE_BYTES = 8 * 1024 * 1024
+NATIVE_METADATA_BYTES = 1 * 1024 * 1024
+NATIVE_RESERVED_BYTES = NATIVE_CAPTURE_BYTES + NATIVE_METADATA_BYTES
+DOWNSTREAM_BYTES = 7 * 1024 * 1024
 MAX_RSS_BYTES = 256 * 1024 * 1024
 MAX_WALL_SECONDS = 1_800
 
 
 class Ops09Error(ValueError):
     """The OPS09 contract cannot safely continue."""
+
+
+class _ByteLedger:
+    """Durable, source-owned reservation ledger for one logical session."""
+
+    def __init__(self, *, output_root: Path, database_root: Path, identity: dict[str, Any]) -> None:
+        self.output_root = output_root.resolve()
+        self.database_root = database_root.resolve()
+        self.path = self.output_root / ".ops09-byte-ledger.json"
+        self.identity = identity
+        self.output_root.mkdir(parents=True, exist_ok=True)
+        if self.path.is_file():
+            payload = _read_object(self.path, "OPS09 byte ledger")
+            if payload.get("schema_version") != "dawnstrike.ops09.byte_ledger.v1":
+                raise Ops09Error("OPS09 byte ledger schema is unsupported")
+            if payload.get("identity") != identity:
+                raise Ops09Error("OPS09 byte ledger identity changed")
+            if int(payload.get("max_bytes") or 0) != MAX_BYTES:
+                raise Ops09Error("OPS09 byte ledger limit changed")
+            reservations = payload.get("reservations")
+            self.reservations = reservations if isinstance(reservations, dict) else {}
+        else:
+            self.reservations: dict[str, int] = {}
+            self._write()
+
+    def _actual_bytes(self) -> int:
+        return _tree_bytes(self.output_root) + _tree_bytes(self.database_root)
+
+    def _write(self) -> None:
+        payload = {
+            "schema_version": "dawnstrike.ops09.byte_ledger.v1",
+            "max_bytes": MAX_BYTES,
+            "identity": self.identity,
+            "reservations": self.reservations,
+            "actual_bytes": self._actual_bytes(),
+        }
+        temporary = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
+        temporary.write_bytes(_canonical(payload) + b"\n")
+        temporary.replace(self.path)
+
+    def admit(self, phase: str, reserve: int) -> None:
+        if phase in self.reservations:
+            raise Ops09Error(f"OPS09 byte ledger phase is already admitted: {phase}")
+        if reserve < 0 or reserve > MAX_BYTES:
+            raise Ops09Error(f"OPS09 byte ledger reservation is invalid: {phase}")
+        actual = self._actual_bytes()
+        active = sum(int(value) for value in self.reservations.values())
+        if actual + active + reserve > MAX_BYTES:
+            raise Ops09Error(
+                f"OPS09 cumulative byte budget rejects {phase}: used={actual}, "
+                f"reserved={active}, reserve={reserve}, cap={MAX_BYTES}"
+            )
+        self.reservations[phase] = reserve
+        self._write()
+
+    def release(self, phase: str) -> dict[str, int]:
+        reserved = int(self.reservations.pop(phase, 0))
+        actual = self._actual_bytes()
+        if actual > MAX_BYTES:
+            raise Ops09Error(
+                f"OPS09 cumulative byte budget exceeded after {phase}: "
+                f"used={actual}, cap={MAX_BYTES}"
+            )
+        self._write()
+        return {"reserved_bytes": reserved, "actual_bytes": actual}
 
 
 def _canonical(value: Any) -> bytes:
@@ -307,6 +375,7 @@ def prepare_ops09_cohort(
         },
         "caps": {"max_pages": MAX_PAGES, "max_attempts_total": MAX_ATTEMPTS, "max_events": MAX_EVENTS,
                  "max_bytes": MAX_BYTES, "capture_bytes": CAPTURE_BYTES, "downstream_bytes": DOWNSTREAM_BYTES,
+                 "native_capture_bytes": NATIVE_CAPTURE_BYTES, "native_metadata_bytes": NATIVE_METADATA_BYTES,
                  "max_rss_bytes": MAX_RSS_BYTES, "max_wall_seconds": MAX_WALL_SECONDS},
         "safety": {"research_only": True, "broker_execution_enabled": False, "orders_enabled": False,
                    "no_auto_renewal": True, "no_second_ops03_stream": True},
@@ -399,7 +468,7 @@ def _validate_request_contract(
         raise Ops09Error("OPS09 capture hash alias is not typed and authenticated")
 
 
-def _run_capture(*, plan: dict[str, Any], session: dict[str, Any], contract: dict[str, Any],
+def _run_capture_unbudgeted(*, plan: dict[str, Any], session: dict[str, Any], contract: dict[str, Any],
                  scope: dict[str, Any], scope_path: Path, session_root: Path, fixture: Path | None,
                  execute: bool, timeout_seconds: int, decision_artifact: Path | None,
                  database_path: Path, as_of: str) -> dict[str, Any]:
@@ -412,12 +481,13 @@ def _run_capture(*, plan: dict[str, Any], session: dict[str, Any], contract: dic
     argument_list = [str(Path(plan["repository"]["root"]) / "scripts" / "ops09_pipeline.py"),
                      "--market-date", session["market_date"], "--census", str(census_path), "--output-root", str(capture_root),
                      "--source-config-hash", str(contract["source_config_sha256"]),
-                     "--capture-receipt-hash", contract["request_contract_sha256"],
-                     "--repo-sha", str(plan["repository"]["code_sha"]), "--as-of", as_of,
-                     "--database-path", str(database_path),
-                     "--adapter-output-root", str(session_root / "ops06")]
+                      "--capture-receipt-hash", contract["request_contract_sha256"],
+                      "--max-bytes", str(CAPTURE_BYTES),
+                      "--repo-sha", str(plan["repository"]["code_sha"]), "--as-of", as_of,
+                      "--database-path", str(database_path),
+                      "--adapter-output-root", str(session_root / "ops06")]
     if decision_artifact is not None:
-        argument_list += ["--decision-artifact", str(decision_artifact)]
+        argument_list += ["--decision-artifact", str(decision_artifact), "--defer-consumers"]
     if fixture is not None:
         argument_list += ["--fixture", str(fixture)]
     elif execute:
@@ -445,6 +515,12 @@ def _run_capture(*, plan: dict[str, Any], session: dict[str, Any], contract: dic
         wrapper_environment["OPENBLAS_NUM_THREADS"] = "1"
         wrapper_environment["OMP_NUM_THREADS"] = "1"
         wrapper_environment["MKL_NUM_THREADS"] = "1"
+        # Keep interpreter and atomic temporary files inside the admitted
+        # session roots so the ledger accounts for them before dispatch.
+        temporary_root = session_root / "temp"
+        temporary_root.mkdir(parents=True, exist_ok=True)
+        wrapper_environment["TEMP"] = str(temporary_root)
+        wrapper_environment["TMP"] = str(temporary_root)
         completed = subprocess.run(
             args,
             cwd=plan["repository"]["root"],
@@ -494,6 +570,24 @@ def _run_capture(*, plan: dict[str, Any], session: dict[str, Any], contract: dic
             "capture_budget": {"page_count": page_count, "event_count": event_count,
                                "persisted_bytes": capture_bytes, "max_pages": MAX_PAGES,
                                "max_events": MAX_EVENTS, "max_bytes": CAPTURE_BYTES}}
+
+
+def _run_capture(*, ledger: _ByteLedger, plan: dict[str, Any], session: dict[str, Any],
+                 contract: dict[str, Any], scope: dict[str, Any], scope_path: Path,
+                 session_root: Path, fixture: Path | None, execute: bool, timeout_seconds: int,
+                 decision_artifact: Path | None, database_path: Path, as_of: str) -> dict[str, Any]:
+    """Reserve capture plus all native output before starting the child."""
+    phase = f"capture:{session['market_date']}"
+    ledger.admit(phase, CAPTURE_BYTES + NATIVE_RESERVED_BYTES)
+    try:
+        return _run_capture_unbudgeted(
+            plan=plan, session=session, contract=contract, scope=scope, scope_path=scope_path,
+            session_root=session_root, fixture=fixture, execute=execute,
+            timeout_seconds=timeout_seconds, decision_artifact=decision_artifact,
+            database_path=database_path, as_of=as_of,
+        )
+    finally:
+        ledger.release(phase)
 
 
 def _run_consumers(*, adapted: dict[str, Any], database_path: Path, session: dict[str, Any], repo_sha: str) -> dict[str, Any]:
@@ -555,6 +649,16 @@ def _resume_ops09_unlocked(*, output_root: Path, input_root: Path, scope_root: P
     identity = _admitted_repository_identity(state, repo_root)
     if state.get("database_root") != str(database_root.resolve()) or database_root.resolve() == Path(r"C:\r\dawnstrike-state\shadow_real.sqlite").resolve():
         raise Ops09Error("OPS09 database root is not isolated")
+    ledger = _ByteLedger(
+        output_root=output_root,
+        database_root=database_root,
+        identity={
+            "cohort_id": state.get("cohort_id"),
+            "output_root": str(output_root),
+            "database_root": str(database_root.resolve()),
+            "repository": identity,
+        },
+    )
     now_utc = now or datetime.now(UTC)
     invocation_started_mono = time.monotonic()
     stop_path = output_root / ".cohort.stop"
@@ -615,7 +719,7 @@ def _resume_ops09_unlocked(*, output_root: Path, input_root: Path, scope_root: P
         if fixture is not None and not fixture.is_file(): fixture = None
         decision_path = (decision_root.resolve() / session["market_date"] / "decisions.json") if decision_root else None
         capture = _run_capture(
-            plan=state, session=session, contract=contract, scope=scope, scope_path=scope_path,
+            ledger=ledger, plan=state, session=session, contract=contract, scope=scope, scope_path=scope_path,
             session_root=session_root, fixture=fixture, execute=execute, timeout_seconds=remaining,
             decision_artifact=decision_path if decision_path is not None and decision_path.is_file() else None,
             database_path=database_root / f"{session['market_date']}.sqlite",
@@ -648,11 +752,16 @@ def _resume_ops09_unlocked(*, output_root: Path, input_root: Path, scope_root: P
             if remaining < 1:
                 session.update({"status": "DEGRADED", "decision_eligibility": "ZERO", "reason": "session wall-time budget exhausted before downstream"})
                 continue
-            _assert_budget(output_root, DOWNSTREAM_BYTES, "adapter and consumer phase")
-            adapted = adapt_ops05_to_r3(observation_root=Path(capture["capture_root"]), decision_artifact=decision_path,
-                                        output_root=session_root / "ops06", as_of=state["expected_sessions"][index]["end_utc"])
-            consumers = _run_consumers(adapted=adapted, database_path=database_root / f"{session['market_date']}.sqlite",
-                                       session=session, repo_sha=identity["code_sha"])
+            downstream_phase = f"downstream:{session['market_date']}"
+            ledger.admit(downstream_phase, DOWNSTREAM_BYTES)
+            try:
+                _assert_budget(output_root, DOWNSTREAM_BYTES, "adapter and consumer phase")
+                adapted = adapt_ops05_to_r3(observation_root=Path(capture["capture_root"]), decision_artifact=decision_path,
+                                            output_root=session_root / "ops06", as_of=state["expected_sessions"][index]["end_utc"])
+                consumers = _run_consumers(adapted=adapted, database_path=database_root / f"{session['market_date']}.sqlite",
+                                           session=session, repo_sha=identity["code_sha"])
+            finally:
+                ledger.release(downstream_phase)
         except (Ops06AdapterError, ValueError, OSError) as exc:
             session.update({"status": "DEGRADED", "decision_status": "INVALID_OR_LATE", "decision_eligibility": "ZERO", "reason": str(exc)}); continue
         session.update({"status": "COMPLETE", "decision_status": "BOUND", "decision_eligibility": "DELAYED_LABEL_ONLY",

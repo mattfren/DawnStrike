@@ -40,6 +40,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--database-path", type=Path)
     parser.add_argument("--repo-sha", required=True)
     parser.add_argument("--as-of", required=True)
+    parser.add_argument("--max-bytes", type=int, default=64 * 1024 * 1024)
+    parser.add_argument("--defer-consumers", action="store_true")
     return parser
 
 
@@ -50,6 +52,7 @@ def main() -> int:
         "--census", str(args.census), "--output-root", str(args.output_root),
         "--source-config-hash", args.source_config_hash,
         "--capture-receipt-hash", args.capture_receipt_hash,
+        "--max-bytes", str(args.max_bytes),
     ]
     if args.fixture is not None:
         ops05_args += ["--fixture", str(args.fixture)]
@@ -70,6 +73,11 @@ def main() -> int:
     payload = {"status": "CAPTURED", "capture_root": str(args.output_root.resolve())}
     if args.decision_artifact is None or not args.decision_artifact.is_file():
         payload["decision_status"] = "MISSING_INPUT"
+        print(json.dumps(payload, sort_keys=True))
+        return 0
+    if args.defer_consumers:
+        payload["decision_status"] = "DEFERRED"
+        payload["decision_artifact"] = str(args.decision_artifact.resolve())
         print(json.dumps(payload, sort_keys=True))
         return 0
     adapter_root = (args.adapter_output_root or (args.output_root.resolve().parent / "ops06")).resolve()
