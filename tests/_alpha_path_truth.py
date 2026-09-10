@@ -855,6 +855,8 @@ def canonical_v6_decision(
         "market_date": market_date,
         "decision_at": f"{market_date}T12:10:00+00:00",
         "feature_timestamp": f"{market_date}T12:09:00+00:00",
+        "feature_available_at": f"{market_date}T12:09:30+00:00",
+        "feature_ingested_at": f"{market_date}T12:09:45+00:00",
         "ticker": "NOVA",
         "strategy_version": "dawnstrike-alphaops-v6-shadow",
         "model_version": "dawnstrike-alphaops-v6-research-suite-v2",

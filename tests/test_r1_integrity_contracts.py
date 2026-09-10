@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import hashlib
 from intraday_scanner.alpha.edge_calibrator import calibrate_edge
-from intraday_scanner.alpha.outcome_semantics import account_equity_drawdown, realized_return
+from intraday_scanner.alpha.outcome_semantics import (
+    account_equity_drawdown,
+    chronology_valid,
+    realized_return,
+)
 from intraday_scanner.alpha.commit_bridge import _mint_authenticated_fill_truth
 from intraday_scanner.decisioning.contracts import canonical_json
 from intraday_scanner.alpha.performance_truth import build_truth_report
@@ -58,6 +62,28 @@ def test_point_in_time_rejects_future_feature_timestamp() -> None:
     assert point_in_time_valid(decision) is False
 
 
+def test_feature_event_availability_ingestion_and_decision_order_is_required() -> None:
+    decision = canonical_v6_decision("timing-contract")
+    label = canonical_v6_label(decision, value=1.0)
+    assert chronology_valid(decision=decision, label=label)
+    assert not chronology_valid(
+        decision={**decision, "feature_available_at": "2026-08-03T12:11:00+00:00"},
+        label=label,
+    )
+    assert not chronology_valid(
+        decision={**decision, "feature_ingested_at": "2026-08-03T12:10:30+00:00"},
+        label=label,
+    )
+    assert not chronology_valid(
+        decision={**decision, "feature_available_at": None},
+        label=label,
+    )
+    assert not chronology_valid(
+        decision={**decision, "feature_ingested_at": None},
+        label=label,
+    )
+
+
 def test_cash_flows_are_unitized_with_explicit_timing_and_currency() -> None:
     deposit = [
         {"account_equity": 100, "cash_flow": 0, "valuation_currency": "USD"},
@@ -88,6 +114,12 @@ def test_cash_flows_are_unitized_with_explicit_timing_and_currency() -> None:
     assert account_equity_drawdown(
         [{"account_equity": 100}, {"account_equity": 200, "cash_flow": 100}]
     ) is None
+    assert account_equity_drawdown(
+        [
+            {"account_equity": 100, "valuation_currency": "USD"},
+            {"account_equity": 200, "cash_flow": float("nan"), "valuation_currency": "USD"},
+        ]
+    ) is None
 
 
 def test_authenticated_typed_rows_reach_real_training_boundary() -> None:
@@ -97,7 +129,7 @@ def test_authenticated_typed_rows_reach_real_training_boundary() -> None:
         decision = canonical_v6_decision(
             f"auth-{index}", market_date=f"2026-01-{(index % 28) + 1:02d}"
         )
-        decision["feature_timestamp"] = decision["decision_at"]
+        # Keep event, availability, and ingest clocks distinct and ordered.
         label = canonical_v6_label(decision, value=1.0 if index % 2 else -1.0)
         label = {
             **label,

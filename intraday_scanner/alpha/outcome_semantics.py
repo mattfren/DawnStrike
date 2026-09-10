@@ -77,8 +77,15 @@ def account_equity_drawdown(rows: list[dict[str, Any]]) -> float | None:
         if equity is None or equity <= 0:
             return None
         currency = str(row.get("valuation_currency") or row.get("currency") or "").strip()
-        flow = finite_number(row.get("cash_flow"))
-        if flow is None:
+        # An omitted flow means no flow was recorded for this valuation.  A
+        # present non-finite value is invalid measurement data and must stay
+        # unavailable; coercing NaN/inf to zero would manufacture performance.
+        raw_flow = row.get("cash_flow")
+        if "cash_flow" in row and raw_flow not in {None, ""}:
+            flow = finite_number(raw_flow)
+            if flow is None:
+                return None
+        else:
             flow = 0.0
         if flow != 0.0:
             timing = str(row.get("cash_flow_timing") or "").lower()
@@ -122,7 +129,25 @@ def chronology_valid(
         or point.get("latest_feature_timestamp")
     )
     feature_at = _timestamp(feature_value)
-    if decision_at is None or feature_at is None or feature_at > decision_at:
+    available_value = (
+        decision.get("feature_available_at")
+        or point.get("feature_available_at")
+        or point.get("features_available_at")
+    )
+    ingested_value = (
+        decision.get("feature_ingested_at")
+        or point.get("feature_ingested_at")
+        or point.get("features_ingested_at")
+    )
+    available_at = _timestamp(available_value)
+    ingested_at = _timestamp(ingested_value)
+    if (
+        decision_at is None
+        or feature_at is None
+        or available_at is None
+        or ingested_at is None
+        or not (feature_at <= available_at <= ingested_at <= decision_at)
+    ):
         return False
     if label is None:
         return True

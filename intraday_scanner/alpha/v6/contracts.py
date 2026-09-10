@@ -45,7 +45,7 @@ def utc_now() -> str:
 
 
 def point_in_time_valid(decision: dict[str, Any]) -> bool:
-    """Require explicit decision-time provenance without inferring missing truth."""
+    """Require recorded event, availability, ingest, and decision chronology."""
 
     point_in_time = decision.get("point_in_time")
     if not isinstance(point_in_time, dict):
@@ -59,30 +59,44 @@ def point_in_time_valid(decision: dict[str, Any]) -> bool:
         or point_in_time.get("features_observed_at")
         or point_in_time.get("latest_feature_timestamp")
     )
-    if not feature_timestamp or not _aware_timestamp_not_after(
-        feature_timestamp, decision.get("decision_at")
+    feature_available_at = (
+        decision.get("feature_available_at")
+        or point_in_time.get("feature_available_at")
+        or point_in_time.get("features_available_at")
+    )
+    feature_ingested_at = (
+        decision.get("feature_ingested_at")
+        or point_in_time.get("feature_ingested_at")
+        or point_in_time.get("features_ingested_at")
+    )
+    event_at = _parse_aware_timestamp(feature_timestamp)
+    available_at = _parse_aware_timestamp(feature_available_at)
+    ingested_at = _parse_aware_timestamp(feature_ingested_at)
+    decision_at = _parse_aware_timestamp(decision.get("decision_at"))
+    if (
+        event_at is None
+        or available_at is None
+        or ingested_at is None
+        or decision_at is None
+        or not (event_at <= available_at <= ingested_at <= decision_at)
     ):
         return False
     return bool(
-        decision.get("decision_at")
-        and decision.get("input_hash_sha256")
+        decision.get("input_hash_sha256")
         and decision.get("source_lineage_hash_sha256")
     )
 
 
-def _aware_timestamp_not_after(value: object, decision_at: object) -> bool:
-    """Validate optional feature chronology without accepting naive timestamps."""
-
+def _parse_aware_timestamp(value: object) -> datetime | None:
     if value in {None, ""}:
-        return True
+        return None
     try:
-        observed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        decision = datetime.fromisoformat(str(decision_at).replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except (TypeError, ValueError):
-        return False
-    if observed.tzinfo is None or decision.tzinfo is None:
-        return False
-    return observed.astimezone(timezone.utc) <= decision.astimezone(timezone.utc)
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
 
 
 def decision_contract_violations(decision: dict[str, Any]) -> list[str]:
