@@ -11,6 +11,7 @@ from intraday_scanner.observation.ops05_historical_bars import (
     produce_historical_bars,
 )
 from intraday_scanner.observation.ops06_bars_adapter import adapt_ops05_to_r3
+import intraday_scanner.observation.ops06_bars_adapter as ops06_adapter
 from intraday_scanner.providers.base import IntradayPage
 
 
@@ -129,6 +130,32 @@ def test_ops05_archive_adapts_to_matured_label_only_horizons(tmp_path) -> None:
         "CENSORED_BY_SESSION_CLOSE",
     ]
     assert packet["ops06_adapter"]["page_hashes_verified"] == 3
+
+
+def test_horizons_bind_to_each_decision_identity(tmp_path, monkeypatch) -> None:
+    root, decisions_path = _archive(tmp_path)
+    payload = json.loads(decisions_path.read_text(encoding="utf-8"))
+    second = dict(payload["v6_decision_records"][0])
+    second["decision_id"] = "ops06-second"
+    payload["v6_decision_records"].append(second)
+    decisions_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    monkeypatch.setattr(
+        ops06_adapter,
+        "_horizon_summary",
+        lambda decision, events, close_at: [{
+            "horizon_minutes": 60,
+            "status": "MATURED_DELAYED_LABEL",
+            "marker": decision["decision_id"],
+        }],
+    )
+    packet = adapt_ops05_to_r3(
+        observation_root=root, decision_artifact=decisions_path, as_of="2026-09-10T00:00:00+00:00"
+    )["adapter_packet"]
+    assert [label["horizon_definitions"][0]["marker"] for label in packet["labels"]] == [
+        "ops06-positive", "ops06-second"
+    ]
+    assert all(label["horizon_binding"]["binding"] == "exact_decision_identity" for label in packet["labels"])
 
 
 def test_ops05_archive_routes_through_public_daily_cli(tmp_path, capsys) -> None:

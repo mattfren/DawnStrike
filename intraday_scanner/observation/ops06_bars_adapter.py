@@ -458,13 +458,45 @@ def adapt_ops05_to_r3(
         target_contract=target_contract,
     )
     close_at = _utc(manifest["session_close_identity"]["close_at"])
-    horizons = [_horizon_summary(decision, events, close_at) for decision in decisions]
+    horizons_by_identity: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for decision in decisions:
+        decision_id = str(decision.get("decision_id") or "").strip()
+        symbol = str(decision.get("ticker") or "").strip().upper()
+        decision_at_value = str(decision.get("decision_at") or "").strip()
+        if not decision_id or not symbol or not decision_at_value:
+            raise Ops06AdapterError("decision identity is missing for horizon binding")
+        identity = (decision_id, symbol, decision_at_value)
+        if identity in horizons_by_identity:
+            raise Ops06AdapterError("decision identity is duplicated for horizon binding")
+        summary = _horizon_summary(decision, events, close_at)
+        horizons_by_identity[identity] = [
+            {
+                **row,
+                "decision_id": decision_id,
+                "symbol": symbol,
+                "decision_at": decision_at_value,
+            }
+            for row in summary
+        ]
     for label in packet.get("labels", []):
         label["eligibility_state"] = "OBSERVATIONAL_TARGET_ELIGIBLE"
         label["target_contract"] = dict(target_contract)
-        label["horizon_definitions"] = next(
-            (row for row in horizons if row and row[0].get("horizon_minutes") is not None), []
+        label_identity = (
+            str(label.get("decision_id") or "").strip(),
+            str(label.get("ticker") or "").strip().upper(),
+            str(label.get("decision_at") or "").strip(),
         )
+        horizon_definitions = horizons_by_identity.get(label_identity)
+        if not horizon_definitions:
+            raise Ops06AdapterError("label decision identity is not bound to horizon definitions")
+        label["horizon_definitions"] = [dict(row) for row in horizon_definitions]
+        label["horizon_binding"] = {
+            "decision_id": label_identity[0],
+            "symbol": label_identity[1],
+            "decision_at": label_identity[2],
+            "binding": "exact_decision_identity",
+        }
+    horizons = list(horizons_by_identity.values())
     packet["ops06_adapter"] = {
         "status": "ADAPTED",
         "raw_source_sha256": raw_hash,
@@ -472,6 +504,7 @@ def adapt_ops05_to_r3(
         "full_census_count": len(census),
         "decision_count": len(decisions),
         "horizon_minutes": list(_HORIZONS),
+        "horizon_binding": "exact_decision_identity_per_label",
         "target_contract": target_contract,
         "timing_class": "delayed_historical_label_only",
         "feature_decision_eligible": False,

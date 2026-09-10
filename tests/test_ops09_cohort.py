@@ -82,6 +82,19 @@ def test_d042_sampling_keeps_four_strata_and_missing_input() -> None:
     assert result["population_counts"] == {"selected": 2, "rejected": 10, "unselected": 167, "missing_input": 2}
 
 
+def test_d081_sampling_redistributes_when_strata_are_unavailable() -> None:
+    rows = (
+        [{"symbol": "S0", "membership": "selected"}]
+        + [{"symbol": "R0", "membership": "rejected"}]
+        + [{"symbol": f"U{i}", "membership": "unselected"} for i in range(5)]
+    )
+    result = _sample_movers(rows)
+    assert result["population_counts"] == {"selected": 1, "rejected": 1, "unselected": 5, "missing_input": 0}
+    assert result["sampled_count"] == 7
+    assert {row["membership"] for row in result["rows"]} == {"selected", "rejected", "unselected"}
+    assert next(row for row in result["rows"] if row["membership"] == "selected")["inclusion_probability"] == 1.0
+
+
 def test_scope_requires_date_bound_complete_producer(tmp_path: Path) -> None:
     path = _scope(tmp_path)
     value = validate_ops09_scope(path, expected_date="2026-09-10")
