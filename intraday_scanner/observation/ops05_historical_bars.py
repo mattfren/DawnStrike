@@ -39,6 +39,350 @@ WINDOW_SCHEMA = "dawnstrike.ops05.historical_window.v1"
 RECEIPT_SCHEMA = "dawnstrike.ops05.historical_bars_receipt.v1"
 
 
+def _atomic_write(path: Path, data: bytes) -> None:
+    """Publish one complete artifact without exposing a torn JSON/page file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_bytes(data)
+    os.replace(temporary, path)
+
+
+def _atomic_json(path: Path, value: Any) -> None:
+    _atomic_write(path, json.dumps(value, sort_keys=True, indent=2).encode("utf-8") + b"\n")
+
+
+class _DurableCapture:
+    """Small append/checkpoint journal for one authenticated OPS05 capture.
+
+    The ledger lives beside the requested output root and is keyed by the
+    source/window identity, so moving output files cannot reset capture caps.
+    """
+
+    schema = "dawnstrike.ops05.durable_capture.v1"
+
+    def __init__(
+        self, *, root: Path, identity: dict[str, Any], resume_across_roots: bool = False
+    ) -> None:
+        self.root = root
+        self.identity = identity
+        self.fingerprint = _sha256(identity)
+        ledger_parent = root.parent / ".ops05-capture-ledger"
+        root_key = (
+            "shared"
+            if resume_across_roots
+            else hashlib.sha256(str(root).encode()).hexdigest()
+        )
+        self.ledger = ledger_parent / self.fingerprint / root_key
+        self.state_path = self.ledger / "state.json"
+        self.index_path = ledger_parent / "index.json"
+        self.lock_path = self.ledger / "capture.lock"
+        self.page_dir = self.ledger / "pages"
+        self.state: dict[str, Any] = {}
+        self._held = False
+
+    def _identity_matches(self, state: Mapping[str, Any]) -> bool:
+        return (
+            state.get("identity") == self.identity
+            and state.get("fingerprint") == self.fingerprint
+        )
+
+    def existing_receipt(self) -> dict[str, Any] | None:
+        path = self.root / "receipt.json"
+        if not path.is_file():
+            return None
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise Ops05Error("existing OPS05 receipt is unreadable") from exc
+        if not isinstance(value, dict):
+            raise Ops05Error("existing OPS05 receipt is not an object")
+        lineage = value.get("source_lineage") or {}
+        if (
+            value.get("market_date") != self.identity["market_date"]
+            or lineage.get("source_config_sha256") != self.identity["source_config_sha256"]
+            or lineage.get("capture_receipt_sha256") != self.identity["capture_receipt_sha256"]
+        ):
+            raise Ops05Error("immutable OPS05 output conflicts with capture identity")
+        raw_path = self.root / "raw-bars.jsonl"
+        if raw_path.is_file():
+            rows = [
+                json.loads(line)
+                for line in raw_path.read_text(encoding="utf-8").splitlines()
+                if line
+            ]
+            if _sha256(rows) != value.get("raw_event_stream_sha256"):
+                raise Ops05Error("immutable OPS05 raw artifact changed")
+        binding_path = self.root / "capture-binding.json"
+        if binding_path.is_file():
+            binding = json.loads(binding_path.read_text(encoding="utf-8"))
+            declared = binding.pop("binding_sha256", None)
+            if declared != _sha256(binding):
+                raise Ops05Error("immutable OPS05 binding changed")
+        return value
+
+    def __enter__(self) -> _DurableCapture:
+        self.ledger.mkdir(parents=True, exist_ok=True)
+        self.index_path.parent.mkdir(parents=True, exist_ok=True)
+        index: dict[str, Any] = {}
+        if self.index_path.is_file():
+            try:
+                index = json.loads(self.index_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise Ops05Error("OPS05 capture identity index is unreadable") from exc
+        index_key = _sha256({
+            "market_date": self.identity["market_date"],
+            "capture_receipt_sha256": self.identity["capture_receipt_sha256"],
+            "census_sha256": self.identity["census_sha256"],
+            "provider": self.identity["provider"],
+            "feed": self.identity["feed"],
+        })
+        prior_fingerprint = index.get(index_key)
+        if prior_fingerprint and prior_fingerprint != self.fingerprint:
+            raise Ops05Error("OPS05 source/config/window identity conflicts with prior capture")
+        index[index_key] = self.fingerprint
+        _atomic_json(self.index_path, index)
+        if self.lock_path.exists():
+            try:
+                owner = json.loads(self.lock_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise Ops05Error("OPS05 capture lock is unreadable; refusing takeover") from exc
+            pid = owner.get("pid") if isinstance(owner, dict) else None
+            if pid == os.getpid() or _pid_exists(pid):
+                raise Ops05Error("OPS05 capture already has a live owner")
+            raise Ops05Error("OPS05 stale capture owner requires explicit reconciliation")
+        try:
+            fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError as exc:
+            raise Ops05Error("OPS05 capture lock acquisition raced") from exc
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump({"pid": os.getpid(), "started_at": _now()}, handle, sort_keys=True)
+        self._held = True
+        if self.state_path.is_file():
+            try:
+                self.state = json.loads(self.state_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise Ops05Error("OPS05 durable capture state is unreadable") from exc
+            if not isinstance(self.state, dict) or not self._identity_matches(self.state):
+                raise Ops05Error("OPS05 durable capture identity changed")
+            changed = False
+            for key, record in (self.state.get("pages") or {}).items():
+                if not isinstance(record, dict):
+                    raise Ops05Error(f"OPS05 durable page record is invalid: {key}")
+                page_path = self.ledger / str(record.get("page_path") or "")
+                try:
+                    page_value = json.loads(page_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError) as exc:
+                    raise Ops05Error("OPS05 durable page body is unreadable") from exc
+                for field in ("item_count", "observed_item_bytes"):
+                    if field not in record:
+                        record[field] = page_value.get(field, 0)
+                        changed = True
+            if changed:
+                self.state["event_count"] = sum(
+                    int(item.get("item_count", 0)) for item in self.state["pages"].values()
+                )
+                self.state["raw_payload_bytes"] = sum(
+                    int(item.get("observed_item_bytes", 0))
+                    for item in self.state["pages"].values()
+                )
+                self._save()
+        else:
+            self.state = {
+                "schema_version": self.schema,
+                "fingerprint": self.fingerprint,
+                "identity": self.identity,
+                "status": "RUNNING",
+                "started_at": _now(),
+                "original_timestamps": {},
+                "pages": {},
+                "journal": [],
+                "page_count": 0,
+                "attempt_count": 0,
+                "event_count": 0,
+                "raw_payload_bytes": 0,
+                "wall_seconds_observed": 0.0,
+            }
+            self._save()
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        if self._held:
+            self.lock_path.unlink(missing_ok=True)
+            self._held = False
+
+    def _save(self) -> None:
+        _atomic_json(self.state_path, self.state)
+        _atomic_json(self.root / "capture-state.json", self.state)
+        ledger_bytes = self.ledger_bytes()
+        if ledger_bytes > MAX_BYTES:
+            raise Ops05Error("OPS05 durable journal exceeds the 64 MiB bound")
+
+    def ledger_bytes(self) -> int:
+        if not self.state_path.is_file():
+            return 0
+        return self.state_path.stat().st_size + sum(
+            path.stat().st_size for path in self.page_dir.glob("*.json") if path.is_file()
+        )
+
+    def check_budget(self, *, events: int = 0, payload_bytes: int = 0) -> None:
+        if int(self.state.get("page_count", 0)) >= MAX_PAGES:
+            raise Ops05Error("provider page cap exceeded")
+        if int(self.state.get("event_count", 0)) + events > MAX_EVENTS:
+            raise Ops05Error("derived event cap exceeded")
+        if int(self.state.get("raw_payload_bytes", 0)) + payload_bytes > MAX_BYTES:
+            raise Ops05Error("raw provider payload exceeds the 64 MiB bound")
+        if float(self.state.get("wall_seconds_observed", 0.0)) > MAX_WALL_SECONDS:
+            raise Ops05Error("OPS05 wall-time cap exceeded")
+
+    def check_runtime(self, started_at: float) -> None:
+        elapsed = wall_clock.monotonic() - started_at
+        if float(self.state.get("wall_seconds_observed", 0.0)) + elapsed > MAX_WALL_SECONDS:
+            raise Ops05Error("OPS05 cumulative wall-time cap exceeded")
+        _check_runtime(started_at)
+
+    def note_runtime(self, started_at: float) -> None:
+        self.state["wall_seconds_observed"] = round(
+            float(self.state.get("wall_seconds_observed", 0.0))
+            + max(0.0, wall_clock.monotonic() - started_at),
+            6,
+        )
+
+    def attempt_started(self, key: str, attempt: int, request: dict[str, Any]) -> None:
+        self.state["journal"].append({
+            "kind": "request_attempt_started",
+            "key": key,
+            "attempt": attempt,
+            "request": request,
+            "at": _now(),
+        })
+        self.state["attempt_count"] = int(self.state.get("attempt_count", 0)) + 1
+        self._save()
+
+    def attempt_failed(self, key: str, attempt: int, error: str) -> None:
+        self.state["journal"].append({
+            "kind": "request_attempt_uncertain",
+            "key": key,
+            "attempt": attempt,
+            "error": error,
+            "at": _now(),
+        })
+        self._save()
+
+    def page(self, key: str) -> dict[str, Any] | None:
+        record = (self.state.get("pages") or {}).get(key)
+        if not isinstance(record, dict):
+            return None
+        path = self.ledger / str(record.get("page_path") or "")
+        if not path.is_file():
+            raise Ops05Error("OPS05 durable page body is missing")
+        try:
+            page = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise Ops05Error("OPS05 durable page body is unreadable") from exc
+        if not isinstance(page, dict) or page.get("raw_payload_hash_sha256") != record.get(
+            "raw_payload_hash_sha256"
+        ):
+            raise Ops05Error("OPS05 durable page binding changed")
+        if _sha256(page.get("raw_payload_items", [])) != record.get("raw_payload_hash_sha256"):
+            raise Ops05Error("OPS05 durable page payload hash changed")
+        return page
+
+    def commit_page(self, key: str, page: dict[str, Any], *, page_bytes: int) -> None:
+        self.check_budget(events=int(page.get("item_count", 0)), payload_bytes=page_bytes)
+        filename = hashlib.sha256(key.encode("utf-8")).hexdigest() + ".json"
+        page_path = self.page_dir / filename
+        _atomic_json(page_path, page)
+        record = {
+            "page_path": f"pages/{filename}",
+            "page_number": page["page_number"],
+            "endpoint": page["endpoint"],
+            "cursor_in": page.get("cursor_in"),
+            "cursor_out": page.get("cursor_out"),
+            "raw_payload_hash_sha256": page["raw_payload_hash_sha256"],
+            "request_id": page.get("request_id"),
+            "item_count": page.get("item_count", 0),
+            "observed_item_bytes": page.get("observed_item_bytes", 0),
+        }
+        self.state.setdefault("pages", {})[key] = record
+        self.state["page_count"] = len(self.state["pages"])
+        self.state["event_count"] = sum(
+            int(item.get("item_count", 0)) for item in self.state["pages"].values()
+        )
+        self.state["raw_payload_bytes"] = sum(
+            int(item.get("observed_item_bytes", 0))
+            for item in self.state["pages"].values()
+        )
+        self.state["journal"].append({"kind": "page_committed", "key": key, "at": _now()})
+        self._save()
+
+    def fail(self, phase: str, error: BaseException) -> None:
+        self.state["status"] = "PARTIAL"
+        self.state["failure"] = {
+            "phase": phase,
+            "type": type(error).__name__,
+            "message": str(error),
+            "at": _now(),
+        }
+        self._save()
+        _atomic_json(self.root / "partial-receipt.json", {
+            "schema_version": "dawnstrike.ops05.partial_capture_receipt.v1",
+            "status": "PARTIAL",
+            "identity": self.identity,
+            "durable_page_count": len(self.state.get("pages", {})),
+            "derived_bar_count": self.state.get("derived_bar_count", 0),
+            "derived_boundary_count": self.state.get("derived_boundary_count", 0),
+            "derived_raw_stream_sha256": self.state.get("derived_raw_stream_sha256"),
+            "failure": self.state["failure"],
+            "prior_pages_retained": True,
+        })
+
+    def checkpoint_derived(
+        self, bars: Sequence[Mapping[str, Any]], boundary_events: Sequence[Mapping[str, Any]]
+    ) -> None:
+        raw = "\n".join(json.dumps(row, sort_keys=True) for row in bars) + ("\n" if bars else "")
+        boundary = "\n".join(
+            json.dumps(row, sort_keys=True) for row in boundary_events
+        ) + ("\n" if boundary_events else "")
+        _atomic_write(self.root / "partial" / "raw-bars.jsonl", raw.encode("utf-8"))
+        _atomic_write(self.root / "partial" / "boundary-events.jsonl", boundary.encode("utf-8"))
+        self.state["derived_bar_count"] = len(bars)
+        self.state["derived_boundary_count"] = len(boundary_events)
+        self.state["derived_raw_stream_sha256"] = _sha256(list(bars))
+        self.state["status"] = "RUNNING"
+        self._save()
+
+    def complete(self) -> None:
+        self.state["status"] = "CAPTURED"
+        self._save()
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _pid_exists(pid: Any) -> bool:
+    try:
+        value = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if value <= 0:
+        return False
+    if os.name == "nt":
+        if value == os.getpid():
+            return True
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel.OpenProcess(0x1000, False, value)
+        if not handle:
+            return False
+        kernel.CloseHandle(handle)
+        return True
+    try:
+        os.kill(value, 0)
+    except OSError:
+        return False
+    return True
+
+
 class Ops05Error(ValueError):
     """The bounded historical source contract is invalid."""
 
@@ -303,6 +647,8 @@ def _fetch_pages(
     byte_counter: list[int],
     started_at: float,
     expected_endpoint: str,
+    logical_key_prefix: str = "capture",
+    durable: _DurableCapture | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     items: list[dict[str, Any]] = []
     page_receipts: list[dict[str, Any]] = []
@@ -311,21 +657,67 @@ def _fetch_pages(
     if hasattr(config, "request_retries"):
         call_config.request_retries = 1
     for page_number in range(MAX_PAGES):
-        _check_runtime(started_at)
+        if durable is not None:
+            durable.check_runtime(started_at)
+        else:
+            _check_runtime(started_at)
         if page_counter[0] >= MAX_PAGES:
             raise Ops05Error("provider page cap exceeded")
+        page_key = f"{logical_key_prefix}:{expected_endpoint}:{page_number}"
+        resumed = durable.page(page_key) if durable is not None else None
+        if resumed is not None:
+            page_items = [dict(item) for item in resumed.get("raw_payload_items", [])]
+            page_receipts.append(dict(resumed))
+            page_counter[0] += 1
+            event_counter[0] += len(page_items)
+            byte_counter[0] += int(resumed.get("observed_item_bytes", 0))
+            items.extend(
+                {
+                    **item,
+                    "__ops05_page_number": page_number,
+                    "__ops05_page_row_index": row_index,
+                    "__ops05_page_hash_sha256": resumed["raw_payload_hash_sha256"],
+                }
+                for row_index, item in enumerate(page_items)
+            )
+            if not resumed.get("cursor_out"):
+                return items, page_receipts
+            token = resumed.get("cursor_out")
+            continue
         page: IntradayPage | None = None
         last_error: Exception | None = None
         attempts = 0
         for _attempt in range(MAX_RETRIES):
             attempts += 1
+            request_started_at = _now()
+            if durable is not None:
+                durable.attempt_started(
+                    page_key,
+                    attempts,
+                    {
+                        "provider": provider.provider_name,
+                        "feed": provider.feed,
+                        "endpoint": expected_endpoint,
+                        "symbols_sha256": _sha256(list(symbols)),
+                        "request_start": start,
+                        "request_end": end,
+                        "cursor_in": token,
+                    },
+                )
             try:
                 page = getattr(provider, method)(
                     symbols, start, end, call_config, page_token=token
                 )
+                response_received_at = _now()
                 break
+            except KeyboardInterrupt as exc:
+                if durable is not None:
+                    durable.attempt_failed(page_key, attempts, str(exc) or "interrupted in flight")
+                raise
             except Exception as exc:  # provider errors become a receipt failure
                 last_error = exc
+                if durable is not None:
+                    durable.attempt_failed(page_key, attempts, str(exc))
         if page is None:
             raise Ops05Error(f"{method} failed after {MAX_RETRIES} retries: {last_error}")
         if (
@@ -359,9 +751,15 @@ def _fetch_pages(
                 "observed_item_bytes": page_bytes,
                 "request_start": start,
                 "request_end": end,
+                "request_started_at": request_started_at,
+                "response_received_at": response_received_at,
+                "ingested_at": _now(),
                 "raw_payload_items": page_items,
             }
         )
+        if durable is not None:
+            durable.note_runtime(started_at)
+            durable.commit_page(page_key, page_receipts[-1], page_bytes=page_bytes)
         page_counter[0] += 1
         items.extend(
             {
@@ -466,7 +864,7 @@ def _check_runtime(started_at: float) -> None:
         raise Ops05Error("OPS05 process-tree RSS cap exceeded")
 
 
-def produce_historical_bars(
+def _produce_historical_bars(
     *,
     market_date: str,
     census: Sequence[Mapping[str, Any]],
@@ -475,6 +873,7 @@ def produce_historical_bars(
     output_root: str | Path,
     source_config_hash: str,
     capture_receipt_hash: str,
+    durable: _DurableCapture | None = None,
 ) -> dict[str, Any]:
     """Produce a bounded delayed archive using a supplied provider adapter."""
 
@@ -492,6 +891,17 @@ def produce_historical_bars(
         raise Ops05Error("bounded symbol count exceeded")
     root = Path(output_root).resolve()
     root.mkdir(parents=True, exist_ok=True)
+    if durable is None:
+        identity = {
+            "market_date": market_date,
+            "provider": provider.provider_name,
+            "feed": provider.feed,
+            "source_config_sha256": source_config_hash,
+            "capture_receipt_sha256": capture_receipt_hash,
+            "census_sha256": _sha256(census_rows),
+            "windows": {key: value.as_dict() for key, value in windows.items()},
+        }
+        durable = _DurableCapture(root=root, identity=identity)
     started_at = wall_clock.monotonic()
     page_counter = [0]
     event_counter = [0]
@@ -504,19 +914,25 @@ def produce_historical_bars(
         window = windows[window_name]
         start = window.start.isoformat().replace("+00:00", "Z")
         end = window.end.isoformat().replace("+00:00", "Z")
-        items, pages = _fetch_pages(
-            provider,
-            "get_bars_page",
-            symbols,
-            start,
-            end,
-            config,
-            page_counter=page_counter,
-            event_counter=event_counter,
-            byte_counter=byte_counter,
-            started_at=started_at,
-            expected_endpoint="bars",
-        )
+        try:
+            items, pages = _fetch_pages(
+                provider,
+                "get_bars_page",
+                symbols,
+                start,
+                end,
+                config,
+                page_counter=page_counter,
+                event_counter=event_counter,
+                byte_counter=byte_counter,
+                started_at=started_at,
+                expected_endpoint="bars",
+                logical_key_prefix=window_name,
+                durable=durable,
+            )
+        except BaseException as exc:
+            durable.fail(window_name, exc)
+            raise
         page_receipts.extend([{**page, "window": window_name} for page in pages])
         for item in items:
             symbol = str(item.get("symbol") or item.get("S") or "").upper()
@@ -550,21 +966,28 @@ def produce_historical_bars(
             bars.append(event)
             if len(bars) + len(boundary_events) > MAX_EVENTS:
                 raise Ops05Error("derived event cap exceeded")
+        durable.checkpoint_derived(bars, boundary_events)
     ca_start = windows["corporate_actions"].start.isoformat().replace("+00:00", "Z")
     ca_end = windows["corporate_actions"].end.isoformat().replace("+00:00", "Z")
-    ca_items, ca_pages = _fetch_pages(
-        provider,
-        "get_corporate_actions_page",
-        symbols,
-        ca_start,
-        ca_end,
-        config,
-        page_counter=page_counter,
-        event_counter=event_counter,
-        byte_counter=byte_counter,
-        started_at=started_at,
-        expected_endpoint="corporate_actions",
-    )
+    try:
+        ca_items, ca_pages = _fetch_pages(
+            provider,
+            "get_corporate_actions_page",
+            symbols,
+            ca_start,
+            ca_end,
+            config,
+            page_counter=page_counter,
+            event_counter=event_counter,
+            byte_counter=byte_counter,
+            started_at=started_at,
+            expected_endpoint="corporate_actions",
+            logical_key_prefix="corporate_actions",
+            durable=durable,
+        )
+    except BaseException as exc:
+        durable.fail("corporate_actions", exc)
+        raise
     page_receipts.extend([{**page, "window": "corporate_actions"} for page in ca_pages])
     if len(bars) + len(boundary_events) + len(ca_items) > MAX_EVENTS:
         raise Ops05Error("derived event cap exceeded")
@@ -696,6 +1119,8 @@ def produce_historical_bars(
     binding["binding_sha256"] = _sha256(binding)
     binding_text = json.dumps(binding, sort_keys=True, indent=2) + "\n"
     binding_bytes = len(binding_text.encode("utf-8"))
+    durable_bytes = durable.ledger_bytes()
+    receipt["coverage"]["durable_journal_bytes"] = durable_bytes
     for _ in range(3):
         receipt_text = json.dumps(receipt, sort_keys=True, indent=2) + "\n"
         persisted_bytes = sum(
@@ -704,13 +1129,71 @@ def produce_historical_bars(
         ) + binding_bytes
         receipt["coverage"]["persisted_output_bytes"] = persisted_bytes
     receipt_text = json.dumps(receipt, sort_keys=True, indent=2) + "\n"
-    if persisted_bytes > MAX_BYTES:
+    if persisted_bytes + durable_bytes > MAX_BYTES:
         raise Ops05Error("persisted capture binding exceeds the 64 MiB bound")
-    (root / "raw-bars.jsonl").write_text(raw_bars_text, encoding="utf-8")
-    (root / "boundary-events.jsonl").write_text(boundary_text, encoding="utf-8")
-    (root / "universe-census.json").write_text(census_text, encoding="utf-8")
-    (root / "receipt.json").write_text(
-        receipt_text, encoding="utf-8"
-    )
-    (root / "capture-binding.json").write_text(binding_text, encoding="utf-8")
+    for path, text in (
+        (root / "raw-bars.jsonl", raw_bars_text),
+        (root / "boundary-events.jsonl", boundary_text),
+        (root / "universe-census.json", census_text),
+        (root / "receipt.json", receipt_text),
+        (root / "capture-binding.json", binding_text),
+    ):
+        if path.is_file() and path.read_text(encoding="utf-8") != text:
+            raise Ops05Error(f"immutable OPS05 artifact conflict: {path.name}")
+        if not path.is_file():
+            _atomic_write(path, text.encode("utf-8"))
+    durable.complete()
     return receipt
+
+
+def produce_historical_bars(
+    *,
+    market_date: str,
+    census: Sequence[Mapping[str, Any]],
+    provider: HistoricalBarsProvider,
+    config: Any,
+    output_root: str | Path,
+    source_config_hash: str,
+    capture_receipt_hash: str,
+    resume_across_roots: bool = False,
+) -> dict[str, Any]:
+    """Run or resume one durable, bounded OPS05 capture."""
+    if provider.provider_name != "alpaca" or provider.feed != "sip":
+        raise Ops05Error("OPS05 requires the existing Alpaca SIP provider; no feed fallback")
+    if len(source_config_hash) != 64 or len(capture_receipt_hash) != 64:
+        raise Ops05Error("source and capture identities must be SHA-256 values")
+    root = Path(output_root).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    windows = build_windows(market_date)
+    census_rows, _sampling = select_movers(census)
+    identity = {
+        "market_date": market_date,
+        "provider": provider.provider_name,
+        "feed": provider.feed,
+        "source_config_sha256": source_config_hash,
+        "capture_receipt_sha256": capture_receipt_hash,
+        "census_sha256": _sha256(census_rows),
+        "windows": {key: value.as_dict() for key, value in windows.items()},
+    }
+    durable = _DurableCapture(
+        root=root, identity=identity, resume_across_roots=resume_across_roots
+    )
+    existing = durable.existing_receipt()
+    if existing is not None:
+        return existing
+    try:
+        with durable:
+            return _produce_historical_bars(
+                market_date=market_date,
+                census=census,
+                provider=provider,
+                config=config,
+                output_root=root,
+                source_config_hash=source_config_hash,
+                capture_receipt_hash=capture_receipt_hash,
+                durable=durable,
+            )
+    except BaseException as exc:
+        if durable._held:
+            durable.fail("capture", exc)
+        raise
