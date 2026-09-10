@@ -265,7 +265,18 @@ def test_cli_routes_actual_decision_producer_artifact_to_observation_consumer(
     )
     assert decisions and decisions[0]["action"] == "SHADOW_TRACK"
     decision_artifact = tmp_path / "alpha_v6_decisions.json"
-    decision_artifact.write_text(json.dumps(decisions, sort_keys=True), encoding="utf-8")
+    decision_artifact.write_text(
+        json.dumps(
+            {
+                "code_sha": "fixture-producer-sha",
+                "producer_run_id": "fixture-producer-run",
+                "market_date": "2026-01-02",
+                "v6_decision_records": decisions,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
     observation_root = tmp_path / "observation"
     observation_root.mkdir()
     (observation_root / "universe-manifest.json").write_text(
