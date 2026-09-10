@@ -6,6 +6,11 @@ from statistics import median
 from typing import Any
 
 from intraday_scanner.alpha.edge_calibrator import outlier_warning, score_decile
+from intraday_scanner.alpha.outcome_semantics import (
+    account_drawdown,
+    account_equity_drawdown,
+    realized_return,
+)
 
 
 def build_truth_report(rows: list[dict[str, Any]], *, real_days_collected: int) -> dict[str, Any]:
@@ -30,6 +35,7 @@ def build_truth_report(rows: list[dict[str, Any]], *, real_days_collected: int) 
     missing_high = sum(1 for row in rows if row.get("missing_outcome_high") is True)
     drawdowns = [_drawdown(row) for row in rows]
     clean_drawdowns = [value for value in drawdowns if value is not None]
+    equity_drawdown = account_equity_drawdown(rows)
     evidence_warnings = _evidence_warnings(
         rows,
         real_days_collected=real_days_collected,
@@ -56,7 +62,9 @@ def build_truth_report(rows: list[dict[str, Any]], *, real_days_collected: int) 
         "worst_day_return_pct": min(returns) if returns else None,
         "best_day_return_pct": max(returns) if returns else None,
         "max_drawdown_pct": (
-            min(clean_drawdowns) if clean_drawdowns else None
+            min([*clean_drawdowns, *([equity_drawdown] if equity_drawdown is not None else [])])
+            if clean_drawdowns or equity_drawdown is not None
+            else None
         ),
         "outlier": outlier_warning(rows),
         "missing_outcome_rate_pct": (
@@ -126,27 +134,11 @@ def _risk_flag_impact(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 
 
 def _return(row: dict[str, Any]) -> float | None:
-    for key in ("high_after_entry_return", "return_pct", "close_return_pct"):
-        value = row.get(key)
-        if value is None or value == "":
-            continue
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return None
-    return None
+    return realized_return(row)
 
 
 def _drawdown(row: dict[str, Any]) -> float | None:
-    for key in ("low_after_entry_drawdown", "max_adverse_excursion", "drawdown_pct"):
-        value = row.get(key)
-        if value is None or value == "":
-            continue
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return None
-    return None
+    return account_drawdown(row)
 
 
 def _best_worst(buckets: dict[str, dict[str, Any]]) -> dict[str, Any]:

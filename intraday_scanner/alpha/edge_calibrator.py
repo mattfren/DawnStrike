@@ -5,6 +5,12 @@ from __future__ import annotations
 from statistics import median
 from typing import Any
 
+from intraday_scanner.alpha.outcome_semantics import (
+    account_drawdown,
+    finite_number,
+    realized_return,
+)
+
 MIN_REAL_DAYS_FOR_EXPECTANCY = 20
 MIN_ROWS_FOR_MODEL = 80
 
@@ -108,32 +114,11 @@ def score_decile(value: Any) -> int:
 
 
 def _return(row: dict[str, Any]) -> float | None:
-    for key in (
-        "high_after_entry_return",
-        "high_after_entry_return_pct",
-        "return_pct",
-        "close_return_pct",
-    ):
-        value = row.get(key)
-        if value is None or value == "":
-            continue
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return None
-    return None
+    return realized_return(row)
 
 
 def _drawdown(row: dict[str, Any]) -> float | None:
-    for key in ("low_after_entry_drawdown", "max_adverse_excursion", "drawdown_pct"):
-        value = row.get(key)
-        if value is None or value == "":
-            continue
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return None
-    return None
+    return account_drawdown(row)
 
 
 def _hit_rate(values: list[float]) -> float:

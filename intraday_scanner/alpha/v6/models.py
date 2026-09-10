@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from intraday_scanner.alpha.canonical_return_truth import (
@@ -142,10 +143,57 @@ def current_training_rows(dataset_rows: list[dict[str, Any]]) -> list[dict[str, 
                 label.get("label_value"),
             )
             and has_authenticated_committed_fill_truth({**row, **label, **decision})
+            and _chronology_valid(row=row, label=label, decision=decision)
         ):
             continue
         accepted.append(row)
     return accepted
+
+
+def _chronology_valid(
+    *, row: dict[str, Any], label: dict[str, Any], decision: dict[str, Any]
+) -> bool:
+    """Require aware decision, feature, and label availability timestamps."""
+
+    decision_at = _timestamp(decision.get("decision_at"))
+    if decision_at is None:
+        return False
+    point_in_time = decision.get("point_in_time")
+    point_in_time = point_in_time if isinstance(point_in_time, dict) else {}
+    feature_value = (
+        decision.get("feature_timestamp")
+        or decision.get("features_observed_at")
+        or point_in_time.get("feature_timestamp")
+        or point_in_time.get("features_observed_at")
+        or point_in_time.get("latest_feature_timestamp")
+    )
+    feature_at = _timestamp(feature_value)
+    if feature_at is None or feature_at > decision_at:
+        return False
+    available_value = next(
+        (
+            label.get(field)
+            for field in ("label_available_at", "available_at", "matured_at", "observed_at")
+            if label.get(field) not in {None, ""}
+        ),
+        None,
+    )
+    available_at = _timestamp(available_value)
+    if available_at is None or available_at <= decision_at:
+        return False
+    return True
+
+
+def _timestamp(value: object) -> datetime | None:
+    if value in {None, ""}:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
 
 
 def _same_number(left: object, right: object) -> bool:

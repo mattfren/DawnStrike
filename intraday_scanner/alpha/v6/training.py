@@ -190,14 +190,21 @@ def walk_forward_challenger_predictions(
         return []
     predictions: list[dict[str, Any]] = []
     for fold in expanding_purged_splits(rows):
+        training_ids = set(fold.get("training_decision_ids") or [])
         training_dates = set(fold["training_dates"])
         test_dates = set(fold["test_dates"])
-        training_rows = [row for row in rows if row.get("market_date") in training_dates]
+        training_rows = [
+            row
+            for row in rows
+            if str(row.get("decision_id") or row.get("label_id") or "") in training_ids
+        ]
         eligibility = model_eligibility(training_rows)
         if eligibility.status == "NOT_TRAINED_INSUFFICIENT_LABELS":
             continue
         training_activation = [
-            row for row in activation_rows if row.get("market_date") in training_dates
+            row
+            for row in activation_rows
+            if str(row.get("decision_id") or row.get("label_id") or "") in training_ids
         ]
         suite = _fit_model_suite(
             training_rows,

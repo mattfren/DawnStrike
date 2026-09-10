@@ -52,11 +52,35 @@ def point_in_time_valid(decision: dict[str, Any]) -> bool:
         return False
     if point_in_time.get("all_inputs_observed_at_or_before_decision") is not True:
         return False
+    if not _aware_timestamp_not_after(
+        decision.get("feature_timestamp")
+        or decision.get("features_observed_at")
+        or point_in_time.get("feature_timestamp")
+        or point_in_time.get("features_observed_at")
+        or point_in_time.get("latest_feature_timestamp"),
+        decision.get("decision_at"),
+    ):
+        return False
     return bool(
         decision.get("decision_at")
         and decision.get("input_hash_sha256")
         and decision.get("source_lineage_hash_sha256")
     )
+
+
+def _aware_timestamp_not_after(value: object, decision_at: object) -> bool:
+    """Validate optional feature chronology without accepting naive timestamps."""
+
+    if value in {None, ""}:
+        return True
+    try:
+        observed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        decision = datetime.fromisoformat(str(decision_at).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return False
+    if observed.tzinfo is None or decision.tzinfo is None:
+        return False
+    return observed.astimezone(timezone.utc) <= decision.astimezone(timezone.utc)
 
 
 def decision_contract_violations(decision: dict[str, Any]) -> list[str]:

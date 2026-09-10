@@ -178,6 +178,11 @@ def expanding_purged_splits(
             {
                 "fold_id": f"v6-fold-{test_date}",
                 "training_dates": actual_training_dates,
+                "training_decision_ids": sorted(
+                    str(row.get("decision_id") or row.get("label_id") or "")
+                    for row in training_rows
+                    if str(row.get("decision_id") or row.get("label_id") or "")
+                ),
                 "test_dates": [test_date],
                 "embargoed_dates": dates[test_index - embargo_dates : test_index],
                 "no_lookahead": max(training_dates) < test_date,

@@ -382,17 +382,17 @@ def test_offline_ml_only_activates_when_it_beats_rule_baseline():
 def test_empirical_prior_shrinkage_and_outlier_warning():
     assert shrink_empirical_mean(bucket_mean=20, bucket_count=2, global_mean=2) < 5
     report = calibrate_edge(
-        bucket_rows=[{"high_after_entry_return": 12}, {"high_after_entry_return": -2}],
-        global_rows=[{"high_after_entry_return": 2}] * 40,
+        bucket_rows=[{"close_return_pct": 12}, {"close_return_pct": -2}],
+        global_rows=[{"close_return_pct": 2}] * 40,
         real_shadow_days=22,
     )
 
     assert report["mode"] == "empirical_shrinkage"
     assert report["sample_size"] == 2
     assert outlier_warning([
-        {"high_after_entry_return": 50},
-        {"high_after_entry_return": 1},
-        {"high_after_entry_return": 1},
+        {"close_return_pct": 50},
+        {"close_return_pct": 1},
+        {"close_return_pct": 1},
     ])["outlier_dependent"] is True
 
 
@@ -419,8 +419,8 @@ def test_source_reliability_and_setup_memory_update():
         ],
     )
     memory = build_setup_memory([
-        {"setup_key": "grade:A", "high_after_entry_return": 10, "low_after_entry_drawdown": -2},
-        {"setup_key": "grade:A", "high_after_entry_return": -1, "low_after_entry_drawdown": -4},
+        {"setup_key": "grade:A", "high_after_entry_return": 10, "close_return_pct": 10, "low_after_entry_drawdown": -2},
+        {"setup_key": "grade:A", "high_after_entry_return": -1, "close_return_pct": -1, "low_after_entry_drawdown": -4},
     ])
 
     assert reliability[0]["reliability_score"] > 50
@@ -440,6 +440,8 @@ def test_performance_truth_reports_alpha_buckets_and_warnings():
             "catalyst_category": "biotech",
             "risk_flags": "none",
             "high_after_entry_return": 10,
+            "close_return_pct": 10,
+            "account_drawdown_pct": -2,
             "low_after_entry_drawdown": -2,
             "data_source_kind": "manual",
         },
@@ -453,6 +455,8 @@ def test_performance_truth_reports_alpha_buckets_and_warnings():
             "catalyst_category": "none",
             "risk_flags": "wide_spread",
             "high_after_entry_return": -3,
+            "close_return_pct": -3,
+            "account_drawdown_pct": -8,
             "low_after_entry_drawdown": -8,
             "data_source_kind": "manual",
         },
