@@ -318,6 +318,8 @@ def run_alpha_v6_daily_monitor(
                 == producer_registration.get("versioned_universe_id")
                 and observation_source["manifest"].get("universe_generation_id")
                 == registration.get("versioned_universe_id")
+                and producer_registration.get("external_approval") is False
+                and producer_registration.get("production_registration_performed") is False
                 and registration.get("production_registration_performed") is not True
             ):
                 observational_universe_id = str(registration["versioned_universe_id"])
