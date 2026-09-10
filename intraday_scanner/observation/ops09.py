@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import subprocess
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -400,17 +401,23 @@ def _validate_request_contract(
 
 def _run_capture(*, plan: dict[str, Any], session: dict[str, Any], contract: dict[str, Any],
                  scope: dict[str, Any], scope_path: Path, session_root: Path, fixture: Path | None,
-                 execute: bool, timeout_seconds: int) -> dict[str, Any]:
+                 execute: bool, timeout_seconds: int, decision_artifact: Path | None,
+                 database_path: Path, as_of: str) -> dict[str, Any]:
     capture_root = session_root / "capture"
     census_path = session_root / "capture-census.json"
     _assert_budget(session_root.parent, CAPTURE_BYTES, "capture phase")
     movers = scope["scope"].get("scopes", {}).get("original_small_cap_gap", [])
     census_path.parent.mkdir(parents=True, exist_ok=True)
     census_path.write_text(json.dumps(movers, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-    argument_list = [str(Path(plan["repository"]["root"]) / "scripts" / "ops05_historical_bars.py"),
+    argument_list = [str(Path(plan["repository"]["root"]) / "scripts" / "ops09_pipeline.py"),
                      "--market-date", session["market_date"], "--census", str(census_path), "--output-root", str(capture_root),
                      "--source-config-hash", str(contract["source_config_sha256"]),
-                     "--capture-receipt-hash", contract["request_contract_sha256"]]
+                     "--capture-receipt-hash", contract["request_contract_sha256"],
+                     "--repo-sha", str(plan["repository"]["code_sha"]), "--as-of", as_of,
+                     "--database-path", str(database_path),
+                     "--adapter-output-root", str(session_root / "ops06")]
+    if decision_artifact is not None:
+        argument_list += ["--decision-artifact", str(decision_artifact)]
     if fixture is not None:
         argument_list += ["--fixture", str(fixture)]
     elif execute:
@@ -462,7 +469,8 @@ def _run_capture(*, plan: dict[str, Any], session: dict[str, Any], contract: dic
                 "capture_budget": {"page_count": page_count, "event_count": event_count,
                                    "persisted_bytes": capture_bytes}, "capture_root": str(capture_root)}
     status = "CAPTURED" if receipt.get("status") == "CAPTURED" else "PARTIAL"
-    return {"status": status, "command": args, "cli": payload, "receipt": receipt,
+    return {"status": status, "command": args, "cli": payload, "pipeline": payload,
+            "receipt": receipt,
             "capture_root": str(capture_root), "capture_receipt_sha256": _sha_file(capture_root / "receipt.json"),
             "capture_budget": {"page_count": page_count, "event_count": event_count,
                                "persisted_bytes": capture_bytes, "max_pages": MAX_PAGES,
@@ -478,6 +486,46 @@ def _run_consumers(*, adapted: dict[str, Any], database_path: Path, session: dic
     return {"daily": daily, "weekly": weekly, "database_path": str(database_path.resolve()), "isolated": True}
 
 
+def _admitted_repository_identity(state: dict[str, Any], repo_root: Path) -> dict[str, str]:
+    """Use the identity admitted at prepare time; never spawn Git after admission."""
+    identity = state.get("repository")
+    if not isinstance(identity, dict):
+        raise Ops09Error("OPS09 admitted repository identity is missing")
+    root = Path(str(identity.get("root") or "")).resolve()
+    if root != repo_root.resolve():
+        raise Ops09Error("OPS09 repository root changed after admission")
+    code_sha = str(identity.get("code_sha") or "").lower()
+    tree_sha = str(identity.get("tree_sha") or "").lower()
+    if len(code_sha) != 40 or any(char not in "0123456789abcdef" for char in code_sha):
+        raise Ops09Error("OPS09 admitted repository commit identity is invalid")
+    if len(tree_sha) != 40 or any(char not in "0123456789abcdef" for char in tree_sha):
+        raise Ops09Error("OPS09 admitted repository tree identity is invalid")
+    return {"root": str(root), "code_sha": code_sha, "tree_sha": tree_sha}
+
+
+def _refresh_session_elapsed(
+    *, state: dict[str, Any], session: dict[str, Any], now_utc: datetime,
+    state_path: Path, invocation_started_mono: float, phase: str,
+) -> int:
+    """Persist session elapsed time before every phase and return remaining seconds."""
+    started = session.get("session_started_at")
+    if not started:
+        session["session_started_at"] = now_utc.isoformat()
+        started = session["session_started_at"]
+    try:
+        started_wall = datetime.fromisoformat(str(started).replace("Z", "+00:00")).timestamp()
+    except ValueError as exc:
+        raise Ops09Error("OPS09 session elapsed clock is invalid") from exc
+    persisted = float(session.get("elapsed_seconds") or 0.0)
+    wall_elapsed = max(0.0, now_utc.timestamp() - started_wall)
+    monotonic_elapsed = max(0.0, time.monotonic() - invocation_started_mono)
+    elapsed = max(persisted, wall_elapsed, monotonic_elapsed)
+    session["elapsed_seconds"] = round(elapsed, 6)
+    session["last_phase"] = phase
+    _atomic_json(state_path, state)
+    return max(0, int(MAX_WALL_SECONDS - elapsed))
+
+
 def _resume_ops09_unlocked(*, output_root: Path, input_root: Path, scope_root: Path, database_root: Path,
                            repo_root: Path, execute: bool = False, now: datetime | None = None,
                            fixture_root: Path | None = None, decision_root: Path | None = None) -> dict[str, Any]:
@@ -485,18 +533,22 @@ def _resume_ops09_unlocked(*, output_root: Path, input_root: Path, scope_root: P
     state = _read_object(state_path, "OPS09 cohort state")
     if state.get("schema_version") != OPS09_STATE_SCHEMA or state.get("mode") != "ops09":
         raise Ops09Error("OPS09 state identity is invalid")
-    identity = _repo_identity(repo_root.resolve())
-    if state.get("repository", {}).get("code_sha") != identity["code_sha"] or state.get("repository", {}).get("tree_sha") != identity["tree_sha"]:
-        raise Ops09Error("OPS09 repository SHA/tree changed")
+    identity = _admitted_repository_identity(state, repo_root)
     if state.get("database_root") != str(database_root.resolve()) or database_root.resolve() == Path(r"C:\r\dawnstrike-state\shadow_real.sqlite").resolve():
         raise Ops09Error("OPS09 database root is not isolated")
     now_utc = now or datetime.now(UTC)
-    if not state.get("cohort_started_at"):
-        state["cohort_started_at"] = now_utc.isoformat()
-        state["cohort_deadline_at"] = (now_utc.timestamp() + MAX_WALL_SECONDS)
-        _atomic_json(state_path, state)
-    deadline = float(state.get("cohort_deadline_at") or now_utc.timestamp())
+    invocation_started_mono = time.monotonic()
     stop_path = output_root / ".cohort.stop"
+    due_indices = [
+        index for index, candidate in enumerate(state["sessions"])
+        if candidate.get("status") not in {"COMPLETE", "MISSED_SESSION"} and _eligible(candidate, now_utc)
+    ]
+    if len(due_indices) > 1:
+        for missed_index in due_indices[:-1]:
+            missed = state["sessions"][missed_index]
+            missed.update({"status": "MISSED_SESSION", "reason": "prior due date was not collected; no automatic backfill"})
+        due_indices = due_indices[-1:]
+    due_index = due_indices[0] if due_indices else None
     for index, session in enumerate(state["sessions"]):
         if stop_path.exists():
             state["status"] = "STOPPED"
@@ -506,7 +558,7 @@ def _resume_ops09_unlocked(*, output_root: Path, input_root: Path, scope_root: P
                     pending.update({"status": "STOPPED", "operator_intervention": "stop marker observed"})
             _atomic_json(state_path, state)
             return state
-        if session.get("status") in {"COMPLETE", "MISSED_SESSION"}: continue
+        if session.get("status") in {"COMPLETE", "MISSED_SESSION"} or index != due_index: continue
         if not _eligible(session, now_utc):
             session.update({"status": "EXPECTED", "reason": "awaiting session close and delayed-source grace"}); continue
         scope_path = Path(session["scope_path"])
@@ -516,7 +568,10 @@ def _resume_ops09_unlocked(*, output_root: Path, input_root: Path, scope_root: P
             scope = validate_ops09_scope(scope_path, expected_date=session["market_date"])
         except Ops09Error as exc:
             session.update({"status": "DEGRADED", "reason": str(exc), "operator_intervention": "repair exact date-bound scope"}); continue
-        remaining = int(deadline - now_utc.timestamp())
+        remaining = _refresh_session_elapsed(
+            state=state, session=session, now_utc=now_utc,
+            state_path=state_path, invocation_started_mono=invocation_started_mono, phase="before_capture",
+        )
         if remaining < 1:
             state["status"] = "DEGRADED"; state["reason"] = "cohort wall-time budget exhausted"
             _atomic_json(state_path, state)
@@ -539,16 +594,40 @@ def _resume_ops09_unlocked(*, output_root: Path, input_root: Path, scope_root: P
             session.update({"status": "READY", "request_contract_sha256": contract["request_contract_sha256"], "scope": scope}); continue
         fixture = (fixture_root.resolve() / session["market_date"] / "fixture.json") if fixture_root else None
         if fixture is not None and not fixture.is_file(): fixture = None
-        capture = _run_capture(plan=state, session=session, contract=contract, scope=scope, scope_path=scope_path,
-                               session_root=session_root, fixture=fixture, execute=execute, timeout_seconds=remaining)
+        decision_path = (decision_root.resolve() / session["market_date"] / "decisions.json") if decision_root else None
+        capture = _run_capture(
+            plan=state, session=session, contract=contract, scope=scope, scope_path=scope_path,
+            session_root=session_root, fixture=fixture, execute=execute, timeout_seconds=remaining,
+            decision_artifact=decision_path if decision_path is not None and decision_path.is_file() else None,
+            database_path=database_root / f"{session['market_date']}.sqlite",
+            as_of=state["expected_sessions"][index]["end_utc"],
+        )
         session.update({"capture": {k: v for k, v in capture.items() if k not in {"receipt"}},
                         "request_contract_sha256": contract["request_contract_sha256"]})
         if capture.get("status") != "CAPTURED":
             session.update({"status": "PARTIAL" if capture.get("status") == "PARTIAL" else "DEGRADED", "decision_eligibility": "ZERO"}); continue
-        decision_path = (decision_root.resolve() / session["market_date"] / "decisions.json") if decision_root else None
+        if capture.get("pipeline", {}).get("decision_status") == "BOUND":
+            pipeline = capture["pipeline"]
+            session.update({
+                "status": "COMPLETE", "decision_status": "BOUND",
+                "decision_eligibility": "DELAYED_LABEL_ONLY",
+                "ops06": {"adapter_output_root": pipeline.get("adapter_output_root"), "label_count": pipeline.get("label_count")},
+                "consumers": pipeline.get("consumers", {}),
+                "coverage_class": "delayed_historical_label_only",
+                "consumer_cadence": "existing_public_daily_monitor_and_existing_weekly_due_or_not_due",
+            })
+            _atomic_json(state_path, state)
+            continue
         if decision_path is None or not decision_path.is_file():
             session.update({"status": "PARTIAL", "decision_status": "MISSING_INPUT", "decision_eligibility": "ZERO", "reason": "raw capture retained; decision artifact missing"}); continue
         try:
+            remaining = _refresh_session_elapsed(
+                state=state, session=session, now_utc=now_utc,
+                state_path=state_path, invocation_started_mono=invocation_started_mono, phase="before_downstream",
+            )
+            if remaining < 1:
+                session.update({"status": "DEGRADED", "decision_eligibility": "ZERO", "reason": "session wall-time budget exhausted before downstream"})
+                continue
             _assert_budget(output_root, DOWNSTREAM_BYTES, "adapter and consumer phase")
             adapted = adapt_ops05_to_r3(observation_root=Path(capture["capture_root"]), decision_artifact=decision_path,
                                         output_root=session_root / "ops06", as_of=state["expected_sessions"][index]["end_utc"])
