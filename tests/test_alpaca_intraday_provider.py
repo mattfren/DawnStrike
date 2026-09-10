@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import json
+
+import pytest
+
 from intraday_scanner.config import ScannerConfig
+from intraday_scanner.errors import DataProviderError
 from intraday_scanner.providers.alpaca_provider import AlpacaProvider
 
 
@@ -137,3 +142,65 @@ def test_alpaca_corporate_actions_cap_provider_page_limit(monkeypatch) -> None:
     )
 
     assert calls[0]["limit"] == "1000"
+
+
+class _Response:
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+        self.read_calls: list[int | None] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def read(self, amount=None):
+        self.read_calls.append(amount)
+        return self.body if amount is None else self.body[:amount]
+
+
+def test_ops05_response_cap_reads_a_sentinel_before_decode(monkeypatch) -> None:
+    config = type(
+        "BoundedConfig",
+        (),
+        {
+            "request_retries": 1,
+            "request_timeout_seconds": 1,
+            "_ops05_response_max_bytes": 8,
+        },
+    )()
+    provider = AlpacaProvider(
+        ScannerConfig(alpaca_api_key_id="id", alpaca_api_secret_key="secret")
+    )
+    response = _Response(json.dumps({"too": "large"}).encode())
+    monkeypatch.setattr(
+        "intraday_scanner.providers.alpaca_provider.open_allowlisted_url",
+        lambda *_args, **_kwargs: response,
+    )
+    with pytest.raises(DataProviderError, match="bounded read size"):
+        provider._request_json("/v2/stocks/bars", {}, config)
+    assert response.read_calls == [9]
+
+
+def test_ops05_response_cap_allows_exactly_bounded_json(monkeypatch) -> None:
+    body = b'{"ok":1}'
+    config = type(
+        "BoundedConfig",
+        (),
+        {
+            "request_retries": 1,
+            "request_timeout_seconds": 1,
+            "_ops05_response_max_bytes": len(body),
+        },
+    )()
+    provider = AlpacaProvider(
+        ScannerConfig(alpaca_api_key_id="id", alpaca_api_secret_key="secret")
+    )
+    response = _Response(body)
+    monkeypatch.setattr(
+        "intraday_scanner.providers.alpaca_provider.open_allowlisted_url",
+        lambda *_args, **_kwargs: response,
+    )
+    assert provider._request_json("/v2/stocks/bars", {}, config) == {"ok": 1}
+    assert response.read_calls == [len(body) + 1]

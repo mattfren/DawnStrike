@@ -24,6 +24,7 @@ from intraday_scanner.network_safety import open_allowlisted_url
 from intraday_scanner.providers.base import IntradayPage, MarketDataProvider
 
 LOGGER = logging.getLogger(__name__)
+_OPTIONAL_RESPONSE_MAX_BYTES = "_ops05_response_max_bytes"
 
 
 class AlpacaProvider(MarketDataProvider):
@@ -71,7 +72,20 @@ class AlpacaProvider(MarketDataProvider):
                     timeout=config.request_timeout_seconds,
                     allowed_hosts=("data.alpaca.markets",),
                 ) as response:
-                    return json.loads(response.read().decode("utf-8"))
+                    response_limit = getattr(config, _OPTIONAL_RESPONSE_MAX_BYTES, None)
+                    if response_limit is not None:
+                        if not isinstance(response_limit, int) or response_limit < 1:
+                            raise DataProviderError("invalid bounded response size")
+                        # A one-byte sentinel distinguishes an exact-limit body
+                        # from an oversized body without decoding or parsing it.
+                        raw = response.read(response_limit + 1)
+                        if len(raw) > response_limit:
+                            raise DataProviderError(
+                                "Alpaca response exceeds the bounded read size"
+                            )
+                    else:
+                        raw = response.read()
+                    return json.loads(raw.decode("utf-8"))
             except urllib.error.HTTPError as exc:
                 body = exc.read().decode("utf-8", errors="replace")
                 if exc.code == 429:

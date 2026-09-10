@@ -8,7 +8,6 @@ page provider so the source contract can be independently checked first.
 
 from __future__ import annotations
 
-import copy
 import ctypes
 import ctypes.wintypes
 import hashlib
@@ -42,6 +41,17 @@ RECEIPT_SCHEMA = "dawnstrike.ops05.historical_bars_receipt.v1"
 
 class Ops05Error(ValueError):
     """The bounded historical source contract is invalid."""
+
+
+class _BoundedProviderConfig:
+    """Delegate normal config fields while carrying an OPS05-only read cap."""
+
+    def __init__(self, source: Any, *, response_max_bytes: int) -> None:
+        self._source = source
+        self._ops05_response_max_bytes = response_max_bytes
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._source, name)
 
 
 class HistoricalBarsProvider(Protocol):
@@ -284,8 +294,8 @@ def _fetch_pages(
     items: list[dict[str, Any]] = []
     page_receipts: list[dict[str, Any]] = []
     token: str | None = None
-    call_config = copy.copy(config)
-    if hasattr(call_config, "request_retries"):
+    call_config = _BoundedProviderConfig(config, response_max_bytes=MAX_BYTES)
+    if hasattr(config, "request_retries"):
         call_config.request_retries = 1
     for page_number in range(MAX_PAGES):
         _check_runtime(started_at)
