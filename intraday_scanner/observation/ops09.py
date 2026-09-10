@@ -457,10 +457,24 @@ def _run_capture(*, plan: dict[str, Any], session: dict[str, Any], contract: dic
     except subprocess.TimeoutExpired:
         return {"status": "DEGRADED", "reason": "capture_wall_timeout", "command": args}
     output = (completed.stdout or "").splitlines()
+    # The native runner durably mirrors child stdout into its observer log and
+    # may not replay that stream to the PowerShell caller.  Read that existing
+    # bounded log as the authoritative pipeline status channel; never infer a
+    # successful downstream phase from the capture receipt alone.
+    stdout_log = Path(log_root) / "ops05_observer.stdout.log"
+    if stdout_log.is_file():
+        output.extend(stdout_log.read_text(encoding="utf-8").splitlines())
     payload: dict[str, Any] = {}
-    if output:
-        try: payload = json.loads(output[-1])
-        except json.JSONDecodeError: payload = {}
+    for line in reversed(output):
+        try:
+            candidate = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict) and candidate.get("decision_status") == "BOUND":
+            payload = candidate
+            break
+        if not payload and isinstance(candidate, dict):
+            payload = candidate
     if completed.returncode != 0:
         return {"status": "PARTIAL", "reason": "capture_failed", "exit_code": completed.returncode,
                 "stderr": completed.stderr[-2000:], "command": args}
@@ -613,6 +627,7 @@ def _resume_ops09_unlocked(*, output_root: Path, input_root: Path, scope_root: P
             session.update({"status": "PARTIAL" if capture.get("status") == "PARTIAL" else "DEGRADED", "decision_eligibility": "ZERO"}); continue
         if capture.get("pipeline", {}).get("decision_status") == "BOUND":
             pipeline = capture["pipeline"]
+            session.pop("reason", None)
             session.update({
                 "status": "COMPLETE", "decision_status": "BOUND",
                 "decision_eligibility": "DELAYED_LABEL_ONLY",
