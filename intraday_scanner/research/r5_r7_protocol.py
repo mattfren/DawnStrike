@@ -12,10 +12,17 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import random
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation, getcontext
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+from zoneinfo import ZoneInfo
+
+from intraday_scanner.alpha.execution_cost import DEFAULT_EXECUTION_COST_MODEL, estimate_round_trip_cost
+from intraday_scanner.alpha.outcome_semantics import account_equity_drawdown
+from intraday_scanner.alpha.v5_policy import DEFAULT_V5_POLICY, evaluate_v5_official_paper
+from intraday_scanner.performance.account_contract import account_session_return_pct
 
 getcontext().prec = 28
 
@@ -34,6 +41,7 @@ SCOPE_IDS = (
 FIXED_PANEL = ("DIA", "IWM", "QQQ", "SPY", "TLT")
 V5_COST_MODEL_VERSION = "alphaops-v5-cost-model-50bps-0.005ps"
 V5_POLICY_VERSION = "alphaops-v5-official-paper-policy-2026-07-31"
+_MANIFEST_IDENTITY_KEYS = ("session_id", "universe_manifest_sha256", "source_config_sha256", "raw_events_sha256")
 
 
 def _canonical(value: Any) -> str:
@@ -180,6 +188,8 @@ def evaluate_gap_orb15_signal(
     corporate_action_valid: bool,
     close_at: str,
     scope: str = "gap_orb15_continuation_research_v1",
+    ticker: str = "",
+    expected_opening_bars: int = 15,
 ) -> dict[str, Any]:
     """Evaluate one fixed ORB rule without same-bar or hindsight fills."""
 
@@ -187,10 +197,14 @@ def evaluate_gap_orb15_signal(
         return _rejected("unknown_scope")
     if not bars or prior_close is None or not math.isfinite(float(prior_close)) or prior_close <= 0:
         return _rejected("missing_prior_close")
+    if scope == "panel_orb15_continuation_research_v1" and ticker.upper() not in FIXED_PANEL:
+        return _rejected("panel_membership_invalid")
     ordered = sorted((dict(row) for row in bars), key=lambda row: str(row.get("event_at") or row.get("bar_start_at") or ""))
+    if any(not _chronology_valid(row) for row in ordered):
+        return _rejected("source_availability_or_ingestion_invalid")
     opening = [row for row in ordered if "09:30" <= _clock(row) < "09:45"]
     later = [row for row in ordered if "09:45" <= _clock(row) < "11:30"]
-    if len(opening) < 1:
+    if len(opening) < expected_opening_bars:
         return _rejected("opening_range_missing")
     first_open = _number(opening[0].get("open"))
     last_close = _number(opening[-1].get("close"))
@@ -208,12 +222,21 @@ def evaluate_gap_orb15_signal(
         return _rejected("gap_below_0_75_pct")
     if scope == "gap_orb15_continuation_research_v1" and not corporate_action_valid:
         return _rejected("corporate_action_prior_close_unverified")
-    break_row = next((row for row in later if (_number(row.get("high")) or -math.inf) > opening_high), None)
+    # Break detection uses a later quote only.  A later bar high is not a
+    # decision-time executable observation and therefore cannot trigger entry.
+    break_row = next(
+        (
+            row for row in later
+            if _number(row.get("ask") or row.get("executable_ask")) is not None
+            and _number(row.get("ask") or row.get("executable_ask")) > opening_high
+        ),
+        None,
+    )
     if break_row is None:
         return _rejected("upside_break_missing_before_11_30")
     if not _chronology_valid(break_row):
         return _rejected("break_availability_invalid")
-    entry = _number(break_row.get("executable_ask") or break_row.get("ask"))
+    entry = _number(break_row.get("ask") or break_row.get("executable_ask"))
     if entry is None or entry <= opening_low:
         return _rejected("executable_quote_missing")
     stop = opening_low
@@ -222,6 +245,10 @@ def evaluate_gap_orb15_signal(
         return _rejected("nonpositive_range_risk")
     break_at = _parse_time(break_row.get("event_at") or break_row.get("bar_start_at"))
     close_dt = _parse_time(close_at)
+    decision_at = _parse_time(break_row.get("ingested_at") or break_row.get("available_at") or break_row.get("event_at"))
+    # Every input used by the decision must have arrived by that decision.
+    if any(_parse_time(row.get("ingested_at")) > decision_at for row in opening + [break_row]):
+        return _rejected("decision_input_ingested_after_decision")
     deadline = close_dt - timedelta(minutes=10)
     maximum_exit = break_at + timedelta(minutes=60)
     exit_deadline = min(maximum_exit, deadline)
@@ -238,6 +265,8 @@ def evaluate_gap_orb15_signal(
         "opening_return_pct": opening_return * 100.0,
         "overnight_gap_pct": gap_pct * 100.0,
         "break_event_at": break_at.isoformat(),
+        "decision_at": decision_at.isoformat(),
+        "ticker": ticker.upper(),
         "maximum_exit_at": exit_deadline.isoformat(),
         "close_deadline_at": deadline.isoformat(),
         "same_bar_fill": False,
@@ -252,7 +281,6 @@ def replay_account_twr(*, sessions: Sequence[Mapping[str, Any]]) -> dict[str, An
 
     equity = None
     returns: list[float] = []
-    equity_curve: list[float] = []
     missing: list[str] = []
     total_fees = 0.0
     total_turnover = 0.0
@@ -261,32 +289,36 @@ def replay_account_twr(*, sessions: Sequence[Mapping[str, Any]]) -> dict[str, An
     valid_no_trade = 0
     for row in sessions:
         sid = str(row.get("session_id") or "")
-        if not sid or row.get("ending_equity_after_fees") is None:
+        if not sid or row.get("starting_equity_cents") is None or row.get("ending_equity_cents") is None or "external_flow_cents" not in row:
             missing.append(sid or "unknown")
             continue
         try:
-            ending = float(row["ending_equity_after_fees"])
-            flow_before = float(row.get("external_flow_before", 0.0))
-            flow_after = float(row.get("external_flow_after", 0.0))
+            beginning_cents = int(row["starting_equity_cents"])
+            ending_cents = int(row["ending_equity_cents"])
+            flow_cents = int(row["external_flow_cents"])
             fees = float(row["fees"])
             turnover = float(row.get("turnover", 0.0))
             exposure = float(row.get("average_gross_exposure", 0.0))
         except (KeyError, TypeError, ValueError):
             missing.append(sid or "unknown")
             continue
-        if not all(math.isfinite(value) for value in (ending, flow_before, flow_after, fees, turnover, exposure)):
+        if not all(math.isfinite(value) for value in (fees, turnover, exposure)):
             missing.append(sid or "unknown")
             continue
-        start = float(row.get("starting_equity", equity if equity is not None else ending))
-        denominator = start + flow_before
-        numerator = ending - flow_after
-        if denominator <= 0 or numerator <= 0:
+        if beginning_cents <= 0 or ending_cents <= 0:
             missing.append(sid or "unknown")
             continue
-        daily_return = numerator / denominator - 1.0
+        validation = account_session_return_pct(
+            beginning_equity_cents=beginning_cents,
+            ending_equity_cents=ending_cents,
+            external_flow_cents=flow_cents,
+        )
+        if validation is None:
+            missing.append(sid or "unknown")
+            continue
+        daily_return = float(validation / Decimal("100"))
         returns.append(daily_return)
-        equity = ending
-        equity_curve.append(ending)
+        equity = ending_cents
         total_fees += fees
         total_turnover += turnover
         exposures.append(exposure)
@@ -296,12 +328,20 @@ def replay_account_twr(*, sessions: Sequence[Mapping[str, Any]]) -> dict[str, An
             valid_no_trade += 1
     if not returns:
         return {"status": "NO_VALID_SESSIONS", "returns": [], "missing_sessions": missing}
+    accounting_rows = []
+    for row in sessions:
+        if row.get("starting_equity_cents") is None or row.get("ending_equity_cents") is None or "external_flow_cents" not in row:
+            continue
+        accounting_rows.append({
+            "account_equity": row["ending_equity_cents"],
+            "cash_flow": row["external_flow_cents"],
+            "cash_flow_timing": row.get("cash_flow_timing", "start"),
+            "valuation_currency": row.get("valuation_currency", "USD"),
+        })
+    unitized_drawdown = account_equity_drawdown(accounting_rows)
+    if unitized_drawdown is None:
+        return {"status": "INVALID_FLOW_EVIDENCE", "returns": returns, "missing_sessions": missing}
     linked = math.prod(1.0 + value for value in returns) - 1.0
-    peak = equity_curve[0]
-    max_drawdown = 0.0
-    for value in equity_curve:
-        peak = max(peak, value)
-        max_drawdown = max(max_drawdown, (peak - value) / peak if peak else 0.0)
     tail = sorted(returns)[: max(1, math.ceil(len(returns) * 0.10))]
     return {
         "status": "COMPLETE" if not missing else "PARTIAL_MISSING_SESSIONS",
@@ -313,7 +353,7 @@ def replay_account_twr(*, sessions: Sequence[Mapping[str, Any]]) -> dict[str, An
         "total_fees": total_fees,
         "total_turnover": total_turnover,
         "mean_gross_exposure": sum(exposures) / len(exposures),
-        "maximum_drawdown": max_drawdown,
+        "maximum_drawdown": abs(float(unitized_drawdown)) / 100.0,
         "losing_day_count": losing_days,
         "valid_no_trade_sessions": valid_no_trade,
         "tail_mean_bottom_10pct": sum(tail) / len(tail),
@@ -321,6 +361,195 @@ def replay_account_twr(*, sessions: Sequence[Mapping[str, Any]]) -> dict[str, An
         "mfe_used": False,
         "price_optimism_used": False,
     }
+
+
+def bootstrap_paired_session_returns(
+    *,
+    challenger_returns: Sequence[float],
+    baseline_returns: Sequence[float],
+    block_length: int = 5,
+    resamples: int = 10_000,
+    seed: int = 27_029,
+) -> dict[str, Any]:
+    """Compute the preregistered fixed-block paired log-return interval.
+
+    The samples are derived from the two supplied account/session ledgers.  No
+    caller-provided interval or significance flag is accepted.  Incomplete
+    blocks are excluded rather than padded with zero performance.
+    """
+
+    if block_length < 1 or resamples < 1 or len(challenger_returns) != len(baseline_returns):
+        return {"status": "INVALID_INPUT", "reason": "paired_series_shape_invalid"}
+    if len(challenger_returns) < block_length:
+        return {"status": "WAITING", "reason": "insufficient_complete_block_sessions"}
+    diffs: list[float] = []
+    for challenger, baseline in zip(challenger_returns, baseline_returns):
+        c = _number(challenger)
+        b = _number(baseline)
+        if c is None or b is None or c <= -1.0 or b <= -1.0:
+            return {"status": "INVALID_INPUT", "reason": "nonfinite_or_invalid_return"}
+        diffs.append(math.log1p(c) - math.log1p(b))
+    block_count = len(diffs) // block_length
+    blocks = [diffs[index * block_length : (index + 1) * block_length] for index in range(block_count)]
+    if not blocks:
+        return {"status": "WAITING", "reason": "no_complete_blocks"}
+    observed = sum(diffs) / len(diffs)
+    rng = random.Random(seed)
+    samples: list[float] = []
+    for _ in range(resamples):
+        picked = [blocks[rng.randrange(block_count)] for _ in range(block_count)]
+        samples.append(sum(value for block in picked for value in block) / len(diffs))
+    samples.sort()
+    lower_index = min(len(samples) - 1, max(0, math.floor(0.05 * len(samples))))
+    return {
+        "status": "COMPLETE",
+        "block_length_sessions": block_length,
+        "complete_block_count": block_count,
+        "session_count": len(diffs),
+        "resamples": resamples,
+        "seed": seed,
+        "observed_mean_daily_log_return": observed,
+        "one_sided_lower_bound_95": samples[lower_index],
+        "caller_interval_ignored": True,
+    }
+
+
+def admit_d022_trade(*, proposal: Mapping[str, Any], portfolio: Mapping[str, Any], wrapper: Mapping[str, Any]) -> dict[str, Any]:
+    """Execute the D022 aggregate admission boundary on current+proposed state."""
+
+    required = ("symbol", "notional", "open_risk_pct", "sector_theme", "direction")
+    if any(key not in proposal for key in required):
+        return {"status": "REJECTED", "reason": "proposal_state_missing"}
+    if any(key not in portfolio for key in ("gross_pct", "net_pct", "open_risk_pct", "sector_theme_pct", "daily_loss_pct", "drawdown_pct", "concurrent_positions", "entries")):
+        return {"status": "REJECTED", "reason": "portfolio_state_missing"}
+    wrapper_keys = ("max_symbol_notional_pct", "gross_exposure_pct", "net_exposure_pct", "sector_theme_exposure_pct", "aggregate_open_risk_pct", "daily_loss_stop_pct", "drawdown_stop_pct", "max_concurrent_positions", "max_entries_per_session")
+    if any(key not in wrapper for key in wrapper_keys):
+        return {"status": "REJECTED", "reason": "wrapper_state_missing"}
+    wrapper_values = [_number(wrapper.get(key)) for key in wrapper_keys]
+    if any(value is None or value < 0 for value in wrapper_values):
+        return {"status": "REJECTED", "reason": "wrapper_state_nonfinite"}
+    values = [proposal.get("notional"), proposal.get("open_risk_pct"), portfolio.get("gross_pct"), portfolio.get("net_pct"), portfolio.get("open_risk_pct"), portfolio.get("sector_theme_pct"), portfolio.get("daily_loss_pct"), portfolio.get("drawdown_pct")]
+    if any(_number(value) is None for value in values):
+        return {"status": "REJECTED", "reason": "portfolio_state_nonfinite"}
+    if str(proposal.get("direction")).lower() != "long":
+        return {"status": "REJECTED", "reason": "long_only"}
+    symbol_pct = float(proposal["notional"])
+    proposed_risk = float(proposal["open_risk_pct"])
+    theme_pct = float(portfolio["sector_theme_pct"])
+    if symbol_pct < 0 or proposed_risk < 0 or theme_pct < 0:
+        return {"status": "REJECTED", "reason": "portfolio_state_negative"}
+    try:
+        concurrent = int(portfolio["concurrent_positions"])
+        entries = int(portfolio["entries"])
+    except (TypeError, ValueError):
+        return {"status": "REJECTED", "reason": "portfolio_count_invalid"}
+    if concurrent < 0 or entries < 0 or concurrent != float(portfolio["concurrent_positions"]) or entries != float(portfolio["entries"]):
+        return {"status": "REJECTED", "reason": "portfolio_count_invalid"}
+    checks = {
+        "symbol_notional": symbol_pct <= float(wrapper["max_symbol_notional_pct"]),
+        "gross": float(portfolio["gross_pct"]) + symbol_pct <= float(wrapper["gross_exposure_pct"]),
+        "net": float(portfolio["net_pct"]) + symbol_pct <= float(wrapper["net_exposure_pct"]),
+        "sector_theme": theme_pct + symbol_pct <= float(wrapper["sector_theme_exposure_pct"]),
+        "open_risk": float(portfolio["open_risk_pct"]) + proposed_risk <= float(wrapper["aggregate_open_risk_pct"]),
+        "daily_loss": float(portfolio["daily_loss_pct"]) < float(wrapper["daily_loss_stop_pct"]),
+        "drawdown": float(portfolio["drawdown_pct"]) < float(wrapper["drawdown_stop_pct"]),
+        "concurrency": concurrent < int(wrapper["max_concurrent_positions"]),
+        "entries": entries < int(wrapper["max_entries_per_session"]),
+    }
+    return {"status": "ADMITTED" if all(checks.values()) else "REJECTED", "checks": checks, "policy": "D022_intersection"}
+
+
+def run_v5_admission(*, signal: Mapping[str, Any], observation: Mapping[str, Any]) -> dict[str, Any]:
+    """Run the existing frozen V5 admission function and preserve its trace."""
+
+    decision = evaluate_v5_official_paper(dict(signal), dict(observation), policy=DEFAULT_V5_POLICY)
+    return decision.to_dict()
+
+
+def simulate_causal_fill_lifecycle(
+    *,
+    manifest: Mapping[str, Any],
+    decision: Mapping[str, Any],
+    signal: Mapping[str, Any],
+    quotes: Sequence[Mapping[str, Any]],
+    path_events: Sequence[Mapping[str, Any]],
+    portfolio: Mapping[str, Any],
+    wrapper: Mapping[str, Any],
+    desired_quantity: int,
+    v5_signal: Mapping[str, Any] | None = None,
+    v5_observation: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Journal a no-network hypothetical entry and causal exit lifecycle."""
+
+    journal: list[dict[str, Any]] = []
+    def finish(payload: dict[str, Any]) -> dict[str, Any]:
+        payload["journal"] = journal
+        payload["journal_sha256"] = _hash(journal)
+        return payload
+
+    if str(manifest.get("status") or "") != "COMPLETE":
+        return finish({"status": "MISSING", "reason": "manifest_not_complete"})
+    if not _manifest_identity_valid(manifest):
+        return finish({"status": "MISSING", "reason": "manifest_identity_missing"})
+    journal.append({"kind": "raw_manifest", "manifest_identity": {key: manifest[key] for key in _MANIFEST_IDENTITY_KEYS}})
+    if not _decision_chronology_valid(decision):
+        return finish({"status": "REJECTED", "reason": "decision_chronology_invalid"})
+    if desired_quantity < 1:
+        return finish({"status": "REJECTED", "reason": "quantity_invalid"})
+    if v5_signal is not None:
+        v5_trace = run_v5_admission(signal=v5_signal, observation=v5_observation or {})
+        journal.append({"kind": "v5_admission", "payload": v5_trace})
+        if v5_trace.get("eligible_for_official_paper") is not True:
+            return finish({"status": "REJECTED", "reason": "v5_admission", "v5_trace": v5_trace})
+    admission = admit_d022_trade(proposal=signal, portfolio=portfolio, wrapper=wrapper)
+    journal.append({"kind": "admission", "payload": admission})
+    if admission.get("status") != "ADMITTED":
+        return finish({"status": "REJECTED", "reason": "d022_admission", "admission": admission})
+    decision_at = _parse_time(decision["decision_at"])
+    quote = next((dict(row) for row in sorted(quotes, key=lambda row: str(row.get("event_at") or "")) if _causal_quote(row, decision_at)), None)
+    if quote is None:
+        return finish({"status": "UNFILLED", "reason": "entry_quote_missing_or_noncausal", "admission": admission})
+    quantity = min(desired_quantity, int(quote.get("fill_quantity") or desired_quantity))
+    if quantity <= 0:
+        return finish({"status": "UNFILLED", "reason": "partial_nonfill_zero", "admission": admission})
+    entry_raw = _number(quote.get("ask"))
+    if entry_raw is None:
+        return finish({"status": "UNFILLED", "reason": "entry_ask_missing", "admission": admission})
+    entry_cost = estimate_round_trip_cost(entry_raw, entry_raw, quantity, model=DEFAULT_EXECUTION_COST_MODEL)
+    entry_fill = entry_cost.entry_fill_price
+    journal.append({"kind": "entry_fill", "event_at": quote.get("event_at"), "quantity": quantity, "raw_price": entry_raw, "fill_price": entry_fill})
+    deadline = _parse_time(str(signal["maximum_exit_at"]))
+    exit_event = None
+    exit_reason = "deadline"
+    for row in sorted(path_events, key=lambda value: str(value.get("event_at") or "")):
+        if not _causal_path(row, decision_at, entry_at=_parse_time(str(quote["event_at"]))):
+            continue
+        at = _parse_time(row["event_at"])
+        if at > deadline:
+            continue
+        if row.get("halt") is True:
+            return finish({"status": "CENSORED", "reason": "halt_before_exit", "quantity": quantity})
+        high = _number(row.get("high")); low = _number(row.get("low"))
+        if high is not None and low is not None and low <= float(signal["stop_price"]) and high >= float(signal["target_price"]):
+            return finish({"status": "AMBIGUOUS", "reason": "same_bar_stop_target", "quantity": quantity})
+        if low is not None and low <= float(signal["stop_price"]):
+            exit_event, exit_reason = row, "stop"
+            break
+        if high is not None and high >= float(signal["target_price"]):
+            exit_event, exit_reason = row, "target"
+            break
+        if at == deadline:
+            exit_event, exit_reason = row, "close_deadline"
+            break
+    if exit_event is None:
+        return finish({"status": "CENSORED", "reason": "exit_path_missing", "quantity": quantity})
+    exit_raw = _number(exit_event.get("close") or exit_event.get("bid"))
+    if exit_raw is None:
+        return finish({"status": "CENSORED", "reason": "exit_price_missing", "quantity": quantity})
+    round_trip = estimate_round_trip_cost(entry_raw, exit_raw, quantity, model=DEFAULT_EXECUTION_COST_MODEL)
+    journal.append({"kind": "exit_fill", "event_at": exit_event.get("event_at"), "reason": exit_reason, "quantity": quantity, "raw_price": exit_raw, "fill_price": round_trip.exit_fill_price, "fees": round_trip.commission})
+    gross_pnl = (exit_raw - entry_raw) * quantity
+    return finish({"status": "COMPLETE", "exit_reason": exit_reason, "quantity": quantity, "entry_fill": entry_fill, "exit_fill": round_trip.exit_fill_price, "fees": round_trip.commission, "total_cost": round_trip.total_cost, "gross_pnl": gross_pnl, "net_pnl": gross_pnl - round_trip.total_cost, "cost_model_version": round_trip.model_version, "cost_status": round_trip.status, "economic_eligibility": "WAITING_COST_EVIDENCE", "financial_pass": False, "research_only": True, "broker_execution_enabled": False, "position_flat": True})
 
 
 def evaluate_confirmation_summary(
@@ -486,6 +715,18 @@ def _rejected(reason: str) -> dict[str, Any]:
     return {"status": "REJECTED", "reason": reason, "research_only": True, "broker_execution_enabled": False}
 
 
+def _manifest_identity_valid(manifest: Mapping[str, Any]) -> bool:
+    """Require a source-bound manifest identity before hypothetical fills."""
+
+    if not str(manifest.get("session_id") or "").strip():
+        return False
+    for key in _MANIFEST_IDENTITY_KEYS[1:]:
+        value = str(manifest.get(key) or "").lower()
+        if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+            return False
+    return True
+
+
 def _number(value: Any) -> float | None:
     try:
         value = float(value)
@@ -496,21 +737,68 @@ def _number(value: Any) -> float | None:
 
 def _clock(row: Mapping[str, Any]) -> str:
     value = str(row.get("event_at") or row.get("bar_start_at") or "")
-    return value[11:16] if len(value) >= 16 else ""
+    try:
+        return _parse_time(value).astimezone(ZoneInfo("America/New_York")).strftime("%H:%M")
+    except ValueError:
+        return ""
 
 
 def _parse_time(value: Any) -> datetime:
     text = str(value or "").replace("Z", "+00:00")
-    return datetime.fromisoformat(text)
+    parsed = datetime.fromisoformat(text)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("timezone-aware timestamp required")
+    return parsed
 
 
 def _chronology_valid(row: Mapping[str, Any]) -> bool:
     event = row.get("event_at") or row.get("bar_start_at")
     available = row.get("available_at") or row.get("provider_available_at")
-    if not event or not available:
+    ingested = row.get("ingested_at")
+    if not event or not available or not ingested:
         return False
     try:
-        return _parse_time(available) >= _parse_time(event)
+        return _parse_time(event) <= _parse_time(available) <= _parse_time(ingested)
+    except ValueError:
+        return False
+
+
+def _decision_chronology_valid(row: Mapping[str, Any]) -> bool:
+    event = row.get("feature_event_at") or row.get("feature_timestamp")
+    available = row.get("feature_available_at") or row.get("provider_available_at")
+    ingested = row.get("feature_ingested_at") or row.get("ingested_at")
+    decision = row.get("decision_at")
+    if not event or not available or not ingested or not decision:
+        return False
+    try:
+        return _parse_time(event) <= _parse_time(available) <= _parse_time(ingested) <= _parse_time(decision)
+    except ValueError:
+        return False
+
+
+def _causal_quote(row: Mapping[str, Any], decision_at: datetime) -> bool:
+    if _number(row.get("ask")) is None or _number(row.get("bid")) is None:
+        return False
+    event = row.get("event_at")
+    available = row.get("provider_available_at") or row.get("available_at")
+    ingested = row.get("ingested_at")
+    if not event or not available or not ingested:
+        return False
+    try:
+        return _parse_time(event) >= decision_at and _parse_time(event) <= _parse_time(available) <= _parse_time(ingested)
+    except ValueError:
+        return False
+
+
+def _causal_path(row: Mapping[str, Any], decision_at: datetime, *, entry_at: datetime) -> bool:
+    event = row.get("event_at")
+    available = row.get("provider_available_at") or row.get("available_at")
+    ingested = row.get("ingested_at")
+    if not event or not available or not ingested:
+        return False
+    try:
+        at = _parse_time(event)
+        return at >= entry_at and _parse_time(available) >= at and _parse_time(ingested) >= _parse_time(available)
     except ValueError:
         return False
 
@@ -521,10 +809,14 @@ __all__ = [
     "SCOPE_IDS",
     "V5_COST_MODEL_VERSION",
     "build_income_illustration",
+    "admit_d022_trade",
+    "bootstrap_paired_session_returns",
     "build_observer_controller",
     "build_research_protocol",
     "evaluate_confirmation_summary",
     "evaluate_controller_update",
     "evaluate_gap_orb15_signal",
+    "run_v5_admission",
+    "simulate_causal_fill_lifecycle",
     "replay_account_twr",
 ]
