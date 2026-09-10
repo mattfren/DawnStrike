@@ -25,10 +25,9 @@ Corporate-action-dependent labels remain ineligible until the entitlement
 receipt proves that endpoint.
 
 The capture service's hard provider page limit remains 100. The cohort's
-`max-pages=1000` setting is an offline observer/derivative bound only; it does
-not expand provider requests. The September 9 development replay used a
-separate offline diagnostic override of 10000 pages solely because its retained
-10,000-event derivative exceeds the normal local page bound.
+`max-pages=10000` setting is an offline observer/derivative bound only; it does
+not expand provider requests. The prior `max-pages=1000` development attempt
+and its `page_bound_exceeded` receipt remain preserved as historical evidence.
 
 ## Actual source binding
 
@@ -76,7 +75,7 @@ program-verification root. The future per-session inputs are expected at
   --source-config-sha256 57b70a84187844789cb8a92684fbac9690e1abf50dac275b2c570fecdeb79b28 `
   --entitlement-receipt 'C:\r\dawnstrike-capture-config-20260830\alpaca-sip-entitlement-receipt.json' `
   --runtime-env 'C:\r\dawnstrike-state\secrets\runtime.env' `
-  --max-pages 1000 --max-events 10000 --max-bytes 67108864 `
+  --max-pages 10000 --max-events 10000 --max-bytes 67108864 `
   --max-rss-bytes 268435456 --max-wall-seconds 1800
 ```
 
