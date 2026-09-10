@@ -40,6 +40,8 @@ def _manifest(tmp_path: Path, *, deadline: str = "2026-01-02T15:00:00Z") -> Path
             "source_config_sha256": "a" * 64,
             "session_id": "XNYS:2026-01-02:regular",
             "code_sha": "c" * 40,
+            "raw_events_path": str(tmp_path / "events.jsonl"),
+            "raw_events_sha256": hashlib.sha256(b"").hexdigest(),
         },
         "scopes": {
             "original_small_cap_gap": [
@@ -61,6 +63,15 @@ def _source(tmp_path: Path, rows: list[dict]) -> Path:
     path = tmp_path / "events.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    manifest_path = next(
+        (candidate for candidate in (tmp_path, *tmp_path.parents) if (candidate / "universe.json").is_file()),
+        None,
+    )
+    if manifest_path is not None:
+        manifest = json.loads((manifest_path / "universe.json").read_text(encoding="utf-8"))
+        manifest["source_lineage"]["raw_events_path"] = str(path.resolve())
+        manifest["source_lineage"]["raw_events_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+        (manifest_path / "universe.json").write_text(json.dumps(manifest), encoding="utf-8")
     return path
 
 
@@ -222,27 +233,47 @@ def test_capture_artifact_producer_binds_real_lineage(tmp_path: Path) -> None:
     page_path = tmp_path / "capture" / "pages" / "AAA" / "bars" / "page-000000.json"
     page_path.parent.mkdir(parents=True)
     page_hash = "d" * 64
-    page_path.write_text(
-        json.dumps(
-            {
-                "raw_payload_hash_sha256": page_hash,
-                "items": [{"t": "2026-01-02T10:00:00Z", "c": 10.5}],
-            }
-        ),
-        encoding="utf-8",
-    )
+    page_value = {
+        "page_number": 0,
+        "cursor_in": None,
+        "cursor_out": None,
+        "provider": "alpaca",
+        "feed": "sip",
+        "endpoint": "bars",
+        "raw_payload_hash_sha256": page_hash,
+        "previous_page_hash_sha256": None,
+        "items": [{"t": "2026-01-02T10:00:00Z", "c": 10.5}],
+    }
+    page_path.write_text(json.dumps(page_value), encoding="utf-8")
+    page_artifact_hash = hashlib.sha256(canonical_json(page_value)).hexdigest()
     state_path = tmp_path / "capture" / "capture_run_state.json"
     state_path.write_text(
         json.dumps(
             {
+                "status": "COMPLETE",
+                "request": {
+                    "provider": "alpaca",
+                    "feed": "sip",
+                    "market_date": "2026-01-02",
+                    "exchange_session_id": "XNYS:2026-01-02:regular",
+                    "source_config_hash": "a" * 64,
+                    "code_sha": "c" * 40,
+                },
                 "symbols": {
                     "AAA": {
                         "bars": {
                             "pages": [
                                 {
                                     "page_path": str(page_path),
+                                    "page_number": 0,
+                                    "cursor_in": None,
+                                    "cursor_out": None,
+                                    "provider": "alpaca",
+                                    "feed": "sip",
+                                    "endpoint": "bars",
                                     "raw_payload_hash_sha256": page_hash,
-                                    "raw_artifact_hash_sha256": "e" * 64,
+                                    "raw_artifact_hash_sha256": page_artifact_hash,
+                                    "previous_page_hash_sha256": None,
                                 }
                             ]
                         }
@@ -389,6 +420,12 @@ def test_delayed_replay_whitespace_and_cursor_replacement_stay_truthful(tmp_path
 
     whitespace = tmp_path / "whitespace.jsonl"
     whitespace.write_text(" \n\t\n", encoding="utf-8")
+    manifest_value = json.loads(manifest.read_text(encoding="utf-8"))
+    manifest_value["source_lineage"]["raw_events_path"] = str(whitespace.resolve())
+    manifest_value["source_lineage"]["raw_events_sha256"] = hashlib.sha256(
+        whitespace.read_bytes()
+    ).hexdigest()
+    manifest.write_text(json.dumps(manifest_value), encoding="utf-8")
     blank = run_observer(
         manifest_path=manifest,
         source_events_path=whitespace,
@@ -415,7 +452,7 @@ def test_delayed_replay_whitespace_and_cursor_replacement_stay_truthful(tmp_path
         now=NOW,
     )
     assert replaced.status == "BLOCKED"
-    assert "cursor" in replaced.receipt["reason"]
+    assert replaced.receipt["reason"] == "source_raw_events_hash_mismatch"
 
 
 def test_cli_process_stop_and_resume_preserve_raw_input(tmp_path: Path) -> None:

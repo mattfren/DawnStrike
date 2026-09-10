@@ -116,6 +116,8 @@ def _source_identity(manifest: UniverseManifest, source_path: Path | None) -> di
         "universe_manifest_sha256": manifest.manifest_sha256,
         "source_config_sha256": manifest.source_config_sha256,
         "capture_receipt_sha256": manifest.source_lineage["capture_receipt_sha256"],
+        "raw_events_sha256": manifest.source_lineage["raw_events_sha256"],
+        "raw_events_path": manifest.source_lineage["raw_events_path"],
         "source_path": str(source_path) if source_path else None,
     }
 
@@ -266,10 +268,28 @@ def run_observer(
             "retries": retries,
             "source_events_path": str(source_path) if source_path else None,
             "capture_receipt_sha256": manifest.source_lineage["capture_receipt_sha256"],
+            "raw_events_sha256": manifest.source_lineage["raw_events_sha256"],
+            "recovered_lock_paths": [],
         }
     )
+    if source_path is not None and source_path.is_file():
+        expected_path = str(manifest.source_lineage["raw_events_path"])
+        if str(source_path) != expected_path:
+            receipt.update({"status": "BLOCKED", "reason": "source_path_identity_mismatch"})
+            return ObservationRunResult("BLOCKED", _write_receipt(store, receipt), receipt)
+        actual_source_hash = hashlib.sha256(source_bytes).hexdigest()
+        if actual_source_hash != manifest.source_lineage["raw_events_sha256"]:
+            receipt.update(
+                {
+                    "status": "BLOCKED",
+                    "reason": "source_raw_events_hash_mismatch",
+                    "actual_raw_events_sha256": actual_source_hash,
+                }
+            )
+            return ObservationRunResult("BLOCKED", _write_receipt(store, receipt), receipt)
     try:
-        with ObservationLock(store.lock_path):
+        lock = ObservationLock(store.lock_path)
+        with lock:
             store.ensure_identity(_source_identity(manifest, source_path))
             _validate_cursor(
                 store.last_cursor(),
@@ -456,6 +476,7 @@ def run_observer(
                     receipt.update({"status": "FAILED", "reason": "no_valid_events"})
                 elif required_missing:
                     receipt.update({"status": "PARTIAL", "reason": "declared_coverage_incomplete"})
+            receipt["recovered_lock_paths"] = list(lock.recovered_lock_paths)
     except ObservationLockError:
         receipt.update({"status": "BLOCKED", "reason": "lock_contention"})
     except ObservationStoreError as exc:

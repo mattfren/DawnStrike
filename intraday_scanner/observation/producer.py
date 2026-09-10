@@ -10,6 +10,10 @@ from typing import Any
 
 from .contracts import SCOPES, canonical_json, parse_utc, sha256_json
 from .runner import validate_output_root
+from intraday_scanner.services.intraday_evidence_capture_service import (
+    CaptureContractError,
+    _validate_checkpoint_pages,
+)
 
 
 class ObservationProducerError(ValueError):
@@ -46,8 +50,15 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
     os.replace(temp, path)
 
 
-def _page_items(state: dict[str, Any], *, root: Path) -> list[dict[str, Any]]:
+def _page_items(
+    state: dict[str, Any],
+    *,
+    root: Path,
+    provider: str,
+    feed: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     items: list[dict[str, Any]] = []
+    artifacts: list[dict[str, Any]] = []
     for symbol, endpoints in (state.get("symbols") or {}).items():
         if not isinstance(endpoints, dict):
             continue
@@ -56,17 +67,52 @@ def _page_items(state: dict[str, Any], *, root: Path) -> list[dict[str, Any]]:
                 continue
             if endpoint not in {"bars", "trades", "quotes", "corporate_actions"}:
                 continue
-            for page in endpoint_state.get("pages", []):
+            pages = endpoint_state.get("pages", [])
+            if not isinstance(pages, list):
+                raise ObservationProducerError("capture state pages are invalid")
+            try:
+                _validate_checkpoint_pages(
+                    pages,
+                    provider=provider,
+                    feed=feed,
+                    endpoint=endpoint,
+                )
+            except (CaptureContractError, OSError, ValueError) as exc:
+                raise ObservationProducerError(
+                    f"capture checkpoint validation failed for {symbol}/{endpoint}"
+                ) from exc
+            for page in pages:
                 if not isinstance(page, dict):
                     raise ObservationProducerError("capture state page is invalid")
                 page_path = Path(str(page.get("page_path") or ""))
                 if not page_path.is_absolute():
                     page_path = root / page_path
+                try:
+                    page_path.resolve().relative_to(root.resolve())
+                except ValueError as exc:
+                    raise ObservationProducerError(
+                        "capture page escapes the authenticated capture root"
+                    ) from exc
                 page_value = _read_json(page_path, label="capture page")
                 if page_value.get("raw_payload_hash_sha256") != page.get(
                     "raw_payload_hash_sha256"
                 ):
                     raise ObservationProducerError("capture page hash identity changed")
+                for key in (
+                    "page_number",
+                    "cursor_in",
+                    "cursor_out",
+                    "provider",
+                    "feed",
+                    "endpoint",
+                    "raw_payload_hash_sha256",
+                    "raw_artifact_hash_sha256",
+                    "previous_page_hash_sha256",
+                ):
+                    if key in page and key in page_value and page_value.get(key) != page.get(key):
+                        raise ObservationProducerError(
+                            f"capture page checkpoint field changed: {key}"
+                        )
                 raw_items = page_value.get("items")
                 if not isinstance(raw_items, list):
                     raise ObservationProducerError("capture page items are missing")
@@ -84,7 +130,21 @@ def _page_items(state: dict[str, Any], *, root: Path) -> list[dict[str, Any]]:
                                 ),
                             }
                         )
-    return items
+            if endpoint_state.get("artifact_manifest_id"):
+                artifacts.append(
+                    {
+                        "artifact_manifest_id": endpoint_state.get("artifact_manifest_id"),
+                        "endpoint": endpoint,
+                        "normalized_artifact_hash_sha256": endpoint_state.get(
+                            "aggregate_normalized_hash"
+                        ),
+                        "raw_artifact_hash_sha256": endpoint_state.get(
+                            "aggregate_raw_hash"
+                        ),
+                        "symbol": str(symbol).upper(),
+                    }
+                )
+    return items, artifacts
 
 
 def build_observation_inputs(
@@ -148,8 +208,57 @@ def build_observation_inputs(
     captured_symbols = {str(symbol).upper() for symbol in (receipt.get("symbols") or [])}
     if not captured_symbols.issubset(symbols):
         raise ObservationProducerError("capture symbols are absent from the two-scope declaration")
-    page_items = _page_items(state, root=state_path.parent)
+    if state.get("status") != receipt.get("status"):
+        raise ObservationProducerError("capture state status does not match receipt")
+    request = state.get("request")
+    if not isinstance(request, dict):
+        raise ObservationProducerError("capture state request identity is missing")
+    for key, expected in (
+        ("provider", provider),
+        ("feed", feed),
+        ("market_date", market_date),
+        ("exchange_session_id", session_id),
+        ("source_config_hash", source_config_hash),
+        ("code_sha", code_sha),
+    ):
+        if request.get(key) != expected:
+            raise ObservationProducerError(f"capture state request identity mismatch: {key}")
+    request_start = parse_utc(str(receipt.get("request_start") or ""), label="request_start")
+    request_end = parse_utc(str(receipt.get("request_end") or ""), label="request_end")
     completed_at = parse_utc(str(receipt.get("completed_at") or ""), label="completed_at")
+    if request_end <= request_start or completed_at < request_end:
+        raise ObservationProducerError("capture receipt timing is not chronological")
+    page_items, page_artifacts = _page_items(
+        state,
+        root=state_path.parent,
+        provider=provider,
+        feed=feed,
+    )
+    artifact_items = sorted(
+        [item for item in page_artifacts if item.get("raw_artifact_hash_sha256")],
+        key=canonical_json,
+    )
+    expected_artifact_hash = hashlib.sha256(
+        canonical_json({"items": artifact_items})
+    ).hexdigest()
+    artifact_identity = receipt.get("artifact_identity")
+    if isinstance(artifact_identity, dict) and artifact_identity.get("sha256") != expected_artifact_hash:
+        raise ObservationProducerError("capture artifact identity hash mismatch")
+    expected_raw_artifact_hash = hashlib.sha256(
+        canonical_json(
+            [
+                {
+                    "endpoint": item["endpoint"],
+                    "hash": item["raw_artifact_hash_sha256"],
+                    "symbol": item["symbol"],
+                }
+                for item in artifact_items
+                if item.get("raw_artifact_hash_sha256")
+            ]
+        )
+    ).hexdigest()
+    if receipt.get("raw_artifact_hash_sha256") not in {None, expected_raw_artifact_hash}:
+        raise ObservationProducerError("capture raw artifact identity hash mismatch")
     raw_events: list[dict[str, Any]] = []
     for row in page_items:
         item = row["item"]
@@ -157,6 +266,8 @@ def build_observation_inputs(
         if not event_raw:
             continue
         event_at = parse_utc(str(event_raw), label="provider event timestamp")
+        if event_at < request_start or event_at >= request_end:
+            raise ObservationProducerError("provider event is outside the capture request window")
         raw_events.append(
             {
                 "session_id": session_id,
@@ -184,6 +295,9 @@ def build_observation_inputs(
     if len(raw_events) > max_events or len(raw_bytes) > max_bytes:
         raise ObservationProducerError("producer output exceeds bounded event limits")
     expectation_status = "COMPLETE" if receipt.get("status") == "COMPLETE" else "INCOMPLETE"
+    raw_events_sha256 = hashlib.sha256(raw_bytes).hexdigest()
+    manifest_path = root / "universe-manifest.json"
+    events_path = root / "raw-events.jsonl"
     manifest = {
         "schema_version": "dawnstrike.observation.universe.v1",
         "session_id": session_id,
@@ -209,11 +323,11 @@ def build_observation_inputs(
             "request_start": receipt.get("request_start"),
             "request_end": receipt.get("request_end"),
             "completed_at": receipt.get("completed_at"),
+            "raw_events_path": str(events_path),
+            "raw_events_sha256": raw_events_sha256,
         },
         "scopes": scopes,
     }
-    manifest_path = root / "universe-manifest.json"
-    events_path = root / "raw-events.jsonl"
     _atomic_json(manifest_path, manifest)
     events_path.write_bytes(raw_bytes)
     producer_receipt = {

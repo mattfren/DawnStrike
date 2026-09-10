@@ -137,6 +137,10 @@ class UniverseManifest:
             raise ValueError("source_lineage session identity mismatch")
         if lineage.get("source_config_sha256") != source_hash:
             raise ValueError("source_lineage source config identity mismatch")
+        raw_events_sha256 = str(lineage.get("raw_events_sha256") or "")
+        raw_events_path = str(lineage.get("raw_events_path") or "").strip()
+        if not re.fullmatch(r"[0-9a-f]{64}", raw_events_sha256) or not raw_events_path:
+            raise ValueError("source_lineage raw event stream identity is incomplete")
         entries: list[UniverseEntry] = []
         scopes = value.get("scopes")
         if not isinstance(scopes, Mapping) or set(scopes) != set(SCOPES):
