@@ -1075,6 +1075,11 @@ def _read_distribution_record(
             if os.path.commonpath((str(target), str(prefix))) != str(prefix):
                 _fail("installed dependency RECORD contains a path outside the approved prefix")
             target_key = os.path.normcase(str(target))
+            # The approved materializer omits unhashed interpreter cache files
+            # while preserving their RECORD rows.  They are optional: source
+            # imports are verified and compiled in memory by the locked loader.
+            if relative.endswith(".pyc") and not target.exists():
+                continue
             owned_paths.add(target_key)
             parts = PurePosixPath(relative).parts
             if parts and parts[0] not in {".", ".."}:
