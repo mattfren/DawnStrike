@@ -10,6 +10,12 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from scripts.refresh_luna_core_universe import (
+    _archive_provably_dead_lock,
+    _lock_owner_is_dead,
+    _lock_owner_metadata,
+)
+
 
 class ObservationStoreError(RuntimeError):
     pass
@@ -20,32 +26,69 @@ class ObservationLockError(ObservationStoreError):
 
 
 class ObservationLock(AbstractContextManager["ObservationLock"]):
-    """Fail-closed process lock; stale locks require explicit operator review."""
+    """Identity-bound process lock with exact dead-owner archival."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
         self.token = uuid4().hex
+        self.recovered_lock_paths: list[str] = []
 
     def __enter__(self) -> ObservationLock:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"pid": os.getpid(), "token": self.token}
-        try:
-            handle = self.path.open("x", encoding="utf-8")
-        except FileExistsError as exc:
-            raise ObservationLockError(f"observation lock is already held: {self.path}") from exc
-        try:
-            json.dump(payload, handle, sort_keys=True)
-            handle.write("\n")
-        finally:
-            handle.close()
-        return self
+        payload = _lock_owner_metadata()
+        payload["owner_token"] = self.token
+        payload["operation"] = "dawnstrike.observation.sidecar"
+        owner_bytes = (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode(
+            "utf-8"
+        )
+        for _attempt in range(3):
+            descriptor: int | None = None
+            try:
+                descriptor = os.open(
+                    self.path,
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                    0o600,
+                )
+            except FileExistsError as exc:
+                try:
+                    existing = json.loads(self.path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    raise ObservationLockError(
+                        f"observation lock is already held or unreadable: {self.path}"
+                    ) from exc
+                if not _lock_owner_is_dead(existing):
+                    raise ObservationLockError(
+                        f"observation lock is already held: {self.path}"
+                    ) from exc
+                prior_archives = set(self.path.parent.glob(f"{self.path.name}.dead.*"))
+                if not _archive_provably_dead_lock(self.path):
+                    raise ObservationLockError(
+                        f"observation lock could not be archived: {self.path}"
+                    ) from exc
+                archived = sorted(
+                    set(self.path.parent.glob(f"{self.path.name}.dead.*")) - prior_archives,
+                    key=lambda candidate: candidate.stat().st_mtime_ns,
+                )
+                self.recovered_lock_paths.extend(str(candidate) for candidate in archived)
+                continue
+            except OSError as exc:
+                raise ObservationLockError(f"observation lock unavailable: {self.path}") from exc
+            try:
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(owner_bytes)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            except OSError as exc:
+                raise ObservationLockError(f"observation lock could not be written: {self.path}") from exc
+            return self
+        raise ObservationLockError(f"observation lock could not be acquired: {self.path}")
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
         try:
             value = json.loads(self.path.read_text(encoding="utf-8"))
         except (FileNotFoundError, json.JSONDecodeError):
             return
-        if value.get("token") == self.token:
+        if value.get("owner_token") == self.token and value.get("pid") == os.getpid():
             self.path.unlink(missing_ok=True)
 
 
