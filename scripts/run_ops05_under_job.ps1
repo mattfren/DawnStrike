@@ -6,7 +6,10 @@ param(
     [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$ArgumentJson,
     [Parameter()][ValidateRange(1, 1800)][int]$TimeoutSeconds = 1800,
     [Parameter()][string]$DependencyStageRoot = '',
-    [Parameter()][string]$DependencyStageReceiptPath = ''
+    [Parameter()][string]$DependencyStageReceiptPath = '',
+    [Parameter()][ValidateRange(1, 268435456)][UInt64]$JobMemoryLimitBytes = 268435456,
+    [Parameter()][ValidateRange(1, 268435456)][UInt64]$ProcessTreeRssLimitBytes = 268435456,
+    [Parameter()][ValidateRange(1, 10000)][int]$RssSampleMilliseconds = 100
 )
 
 Set-StrictMode -Version Latest
@@ -35,6 +38,9 @@ $receipt = Invoke-DawnstrikeNativeProcess `
     -TimeoutSeconds $TimeoutSeconds `
     -DependencyStageRoot $DependencyStageRoot `
     -DependencyStageReceiptPath $DependencyStageReceiptPath `
+    -JobMemoryLimitBytes $JobMemoryLimitBytes `
+    -ProcessTreeRssLimitBytes $ProcessTreeRssLimitBytes `
+    -RssSampleMilliseconds $RssSampleMilliseconds `
     -SuppressConsoleReplay
 $receipt | ConvertTo-Json -Depth 8
 if ([int]$receipt.exit_code -ne 0) {
