@@ -5,6 +5,7 @@ import json
 from datetime import UTC, datetime, timedelta
 
 from intraday_scanner.alpha.v6.dataset_builder import build_return_dataset
+from intraday_scanner.alpha.v6.decision_ledger import build_candidate_decisions
 from intraday_scanner.alpha.v6.models import current_training_rows, model_eligibility
 from intraday_scanner.alpha.v6.observation_dataset import build_observation_dataset
 from intraday_scanner.observation.contracts import UniverseManifest
@@ -21,6 +22,11 @@ def _fixture() -> tuple[dict, dict, list[dict], dict]:
         "decision_deadline": "2026-01-02T12:00:00+00:00",
         "universe_generation_id": "fixture-generation-1",
         "source_config_sha256": source_hash,
+        "session_close_identity": {
+            "close_at": "2026-01-02T22:01:00+00:00",
+            "early_close": False,
+            "calendar_version": "XNYS-2026-v1",
+        },
         "collection_expectation": {"status": "COMPLETE", "receipt_id": "receipt-1", "expected_entries": 2},
         "source_lineage": {
             "provider": "fixture-provider",
@@ -167,6 +173,20 @@ def test_forged_receipt_identity_is_rejected() -> None:
     assert "receipt_source_config_sha256_mismatch" in packet["reason"]
 
 
+def test_cross_session_decision_is_quarantined() -> None:
+    manifest, receipt, events, decision = _fixture()
+    decision["market_date"] = "2026-01-03"
+    packet = build_observation_dataset(
+        manifest=manifest,
+        producer_receipt=receipt,
+        raw_events=events,
+        decisions=[decision],
+        as_of="2026-01-02T22:30:00+00:00",
+    )
+    assert packet["status"] == "AMBIGUOUS"
+    assert packet["diagnostics"][0]["reason"] == "decision_session_mismatch"
+
+
 def test_future_or_malformed_event_is_quarantined() -> None:
     manifest, receipt, events, decision = _fixture()
     events[2]["available_at"] = "2026-01-02T11:00:00+00:00"
@@ -200,3 +220,78 @@ def test_daily_monitor_routes_observation_packet_to_dataset_consumer(tmp_path) -
     assert result["observation_dataset"]["status"] == "READY"
     assert result["dataset"]["row_count"] == 1
     assert result["dataset"]["observational_row_count"] == 1
+
+
+def test_cli_routes_actual_decision_producer_artifact_to_observation_consumer(
+    tmp_path, capsys
+) -> None:
+    manifest, receipt, events, _ = _fixture()
+    event_path, receipt = _authenticated_event_path(tmp_path, events, receipt)
+    decisions = build_candidate_decisions(
+        signals=[
+            {
+                "scan_id": "scan-producer",
+                "signal_id": "signal-aaa",
+                "ticker": "AAA",
+                "timestamp": "2026-01-02T12:00:00+00:00",
+                "can_alert": True,
+                "alert_gate_status": "PASS",
+                "source_confidence": 90.0,
+            }
+        ],
+        candidates=[{"ticker": "AAA"}],
+        feature_vectors=[
+            {
+                "ticker": "AAA",
+                "timestamp": "2026-01-02T11:59:00+00:00",
+                "feature_available_at": "2026-01-02T11:59:30+00:00",
+                "feature_ingested_at": "2026-01-02T11:59:45+00:00",
+                "config_hash": "d" * 64,
+                "feature_json": {"liquidity_execution": {"spread_pct": 0.1}},
+            }
+        ],
+        source_summary={"status": "success", "producer": "alpha_cycle_fixture"},
+        regime={"regime": "SELECTIVE"},
+        prior_outcomes=[],
+        decision_at="2026-01-02T12:00:00+00:00",
+        scan_id="scan-producer",
+        universe_membership_by_ticker={
+            "AAA": {
+                "universe_id": "fixture-generation-1",
+                "status": "ACTIVE",
+                "source_lineage_hash_sha256": "1" * 64,
+            }
+        },
+    )
+    assert decisions and decisions[0]["action"] == "SHADOW_TRACK"
+    decision_artifact = tmp_path / "alpha_v6_decisions.json"
+    decision_artifact.write_text(json.dumps(decisions, sort_keys=True), encoding="utf-8")
+    observation_root = tmp_path / "observation"
+    observation_root.mkdir()
+    (observation_root / "universe-manifest.json").write_text(
+        json.dumps(manifest, sort_keys=True), encoding="utf-8"
+    )
+    (observation_root / "producer-receipt.json").write_text(
+        json.dumps(receipt, sort_keys=True), encoding="utf-8"
+    )
+    (observation_root / "raw-events.jsonl").write_bytes(event_path.read_bytes())
+    db_path = tmp_path / "cli.sqlite"
+    from intraday_scanner.cli import main
+
+    assert main(
+        [
+            "alpha-v6-daily-monitor",
+            "--db-path",
+            str(db_path),
+            "--market-date",
+            "2026-01-02",
+            "--observation-root",
+            str(observation_root),
+            "--decision-artifact",
+            str(decision_artifact),
+        ]
+    ) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["observation_dataset"]["status"] == "READY"
+    assert report["dataset"]["observational_row_count"] == 1
+    assert report["dataset"]["row_count"] == 1

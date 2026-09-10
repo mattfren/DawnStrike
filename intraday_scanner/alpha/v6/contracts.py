@@ -52,6 +52,15 @@ def point_in_time_valid(decision: dict[str, Any]) -> bool:
         return False
     if point_in_time.get("all_inputs_observed_at_or_before_decision") is not True:
         return False
+    if (
+        str(decision.get("action") or "") == "SHADOW_NO_TRADE"
+        and point_in_time.get("no_feature_inputs") is True
+    ):
+        decision_at = _parse_aware_timestamp(decision.get("decision_at"))
+        return decision_at is not None and bool(
+            decision.get("input_hash_sha256")
+            and decision.get("source_lineage_hash_sha256")
+        )
     feature_timestamp = (
         decision.get("feature_timestamp")
         or decision.get("features_observed_at")

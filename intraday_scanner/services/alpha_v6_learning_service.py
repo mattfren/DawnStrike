@@ -8,8 +8,10 @@ never alters V5, creates orders, or changes a production policy.
 from __future__ import annotations
 
 import math
+import json
 from collections import defaultdict
 from typing import Any
+from pathlib import Path
 
 from intraday_scanner.alpha.fill_truth import MISSING_COMMITTED_FILL_TRUTH
 from intraday_scanner.alpha.v6.calibration import calibration_report, interval_coverage
@@ -68,6 +70,66 @@ MODEL_COMPETITION_CONTRACT = {
 }
 
 
+def load_observation_source_from_artifacts(
+    *,
+    observation_root: str | Path,
+    decision_artifact: str | Path,
+    as_of: str | None = None,
+) -> dict[str, Any]:
+    """Bind R2 producer artifacts to the actual Alpha cycle decision output."""
+
+    root = Path(observation_root).resolve()
+    decision_path = Path(decision_artifact).resolve()
+    required = {
+        "manifest": root / "universe-manifest.json",
+        "producer_receipt": root / "producer-receipt.json",
+        "raw_events": root / "raw-events.jsonl",
+    }
+    missing = [str(path) for path in [*required.values(), decision_path] if not path.is_file()]
+    if missing:
+        return {
+            "status": "MISSING_DEPENDENCY",
+            "reason": "observation_or_decision_artifact_missing",
+            "missing_paths": missing,
+            "research_only": True,
+            "broker_execution_enabled": False,
+        }
+    try:
+        decisions = json.loads(decision_path.read_text(encoding="utf-8"))
+        manifest = json.loads(required["manifest"].read_text(encoding="utf-8"))
+        receipt = json.loads(required["producer_receipt"].read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {
+            "status": "INVALID_SCHEMA",
+            "reason": f"producer_artifact_read_failed:{exc}",
+            "research_only": True,
+            "broker_execution_enabled": False,
+        }
+    if not isinstance(decisions, list) or not all(isinstance(row, dict) for row in decisions):
+        return {
+            "status": "INVALID_SCHEMA",
+            "reason": "alpha_v6_decision_artifact_must_be_array",
+            "research_only": True,
+            "broker_execution_enabled": False,
+        }
+    return {
+        "status": "READY",
+        "manifest": manifest,
+        "producer_receipt": receipt,
+        "raw_events": required["raw_events"],
+        "decisions": decisions,
+        "as_of": as_of,
+        "decision_artifact_path": str(decision_path),
+        "decision_artifact_sha256": _sha256_file(decision_path),
+    }
+
+
+def _sha256_file(path: Path) -> str:
+    import hashlib
+
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def run_alpha_v6_daily_monitor(
     store: SQLiteScanStore,
     *,
@@ -100,15 +162,35 @@ def run_alpha_v6_daily_monitor(
     observation_decisions: list[dict[str, Any]] = []
     observation_labels: list[dict[str, Any]] = []
     if observation_source is not None:
-        observation_packet = build_observation_dataset(
-            manifest=observation_source["manifest"],
-            producer_receipt=observation_source["producer_receipt"],
-            raw_events=observation_source["raw_events"],
-            decisions=observation_source.get("decisions") or decisions,
-            as_of=observation_source.get("as_of"),
-        )
-        observation_decisions = list(observation_packet.get("decisions") or [])
-        observation_labels = list(observation_packet.get("labels") or [])
+        if observation_source.get("status") not in {None, "READY"}:
+            observation_packet = {
+                "schema_version": "dawnstrike.v6.observational_dataset.v1",
+                "status": observation_source.get("status"),
+                "reason": observation_source.get("reason"),
+                "missing_paths": list(observation_source.get("missing_paths") or []),
+                "row_count": 0,
+                "labels": [],
+                "decisions": [],
+                "research_only": True,
+                "broker_execution_enabled": False,
+            }
+        else:
+            observation_packet = build_observation_dataset(
+                manifest=observation_source["manifest"],
+                producer_receipt=observation_source["producer_receipt"],
+                raw_events=observation_source["raw_events"],
+                decisions=observation_source.get("decisions") or decisions,
+                as_of=observation_source.get("as_of"),
+            )
+            observation_packet["decision_artifact_path"] = observation_source.get(
+                "decision_artifact_path"
+            )
+            observation_packet["decision_artifact_sha256"] = observation_source.get(
+                "decision_artifact_sha256"
+            )
+        if observation_packet:
+            observation_decisions = list(observation_packet.get("decisions") or [])
+            observation_labels = list(observation_packet.get("labels") or [])
     dataset = build_return_dataset(
         decisions=[*decisions, *observation_decisions],
         labels=persisted_labels,
@@ -137,6 +219,7 @@ def run_alpha_v6_daily_monitor(
         outcome_count=len(outcomes),
         label_generation=label_generation,
         drift=drift,
+        observation_dataset=observation_packet,
     )
     receipt_inserted = store.persist_alpha_v6_operational_receipt(receipt)
     return {
@@ -1385,6 +1468,7 @@ def _operational_receipt(
     outcome_count: int,
     label_generation: dict[str, Any],
     drift: dict[str, Any],
+    observation_dataset: dict[str, Any] | None = None,
     model_run_id: str | None = None,
     evaluation_id: str | None = None,
 ) -> dict[str, Any]:
@@ -1399,6 +1483,14 @@ def _operational_receipt(
         "drift_report_id": drift.get("drift_report_id"),
         "model_run_id": model_run_id,
         "evaluation_id": evaluation_id,
+        "observation_dataset": {
+            "status": observation_dataset.get("status"),
+            "row_count": observation_dataset.get("row_count"),
+            "training_identity": observation_dataset.get("training_identity"),
+            "decision_artifact_sha256": observation_dataset.get("decision_artifact_sha256"),
+        }
+        if isinstance(observation_dataset, dict)
+        else None,
     }
     input_hash = canonical_hash(content)
     receipt = {
@@ -1422,6 +1514,7 @@ def _operational_receipt(
 
 __all__ = [
     "MODEL_COMPETITION_CONTRACT",
+    "load_observation_source_from_artifacts",
     "run_alpha_v6_daily_monitor",
     "run_alpha_v6_learning",
     "run_alpha_v6_weekly_training",

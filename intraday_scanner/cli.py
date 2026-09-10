@@ -87,6 +87,7 @@ from intraday_scanner.services.alpha_v6_holdout_service import (
     evaluate_registered_holdout,
 )
 from intraday_scanner.services.alpha_v6_learning_service import (
+    load_observation_source_from_artifacts,
     run_alpha_v6_daily_monitor,
     run_alpha_v6_learning,
     run_alpha_v6_weekly_training,
@@ -620,6 +621,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--recent-window", default=None,
         help="Optional JSON object or path containing a frozen recent drift window",
     )
+    alpha_v6_daily_monitor_parser.add_argument(
+        "--observation-root", default=None,
+        help="R2 producer output root containing manifest, receipt, and raw events",
+    )
+    alpha_v6_daily_monitor_parser.add_argument(
+        "--decision-artifact", default=None,
+        help="Alpha cycle alpha_v6_decisions.json emitted by the actual producer",
+    )
 
     daily_strategy_learning_parser = subparsers.add_parser(
         "strategy-learning-daily",
@@ -703,6 +712,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     alpha_v6_train_weekly_parser.add_argument("--attempt-id", default=None)
     alpha_v6_train_weekly_parser.add_argument("--reference-window", default=None)
     alpha_v6_train_weekly_parser.add_argument("--recent-window", default=None)
+    alpha_v6_train_weekly_parser.add_argument("--observation-root", default=None)
+    alpha_v6_train_weekly_parser.add_argument("--decision-artifact", default=None)
 
     alpha_v6_register_experiment_parser = subparsers.add_parser(
         "alpha-v6-register-experiment",
@@ -2066,11 +2077,23 @@ def _run_alpha_v6_learn(args: argparse.Namespace) -> int:
 
 
 def _run_alpha_v6_daily_monitor(args: argparse.Namespace) -> int:
+    observation_source = None
+    if args.observation_root or args.decision_artifact:
+        if not args.observation_root or not args.decision_artifact:
+            raise SnapshotValidationError(
+                "--observation-root and --decision-artifact must be supplied together"
+            )
+        observation_source = load_observation_source_from_artifacts(
+            observation_root=args.observation_root,
+            decision_artifact=args.decision_artifact,
+            as_of=None,
+        )
     result = run_alpha_v6_daily_monitor(
         SQLiteScanStore(args.db_path),
         market_date=args.market_date,
         reference_window=_read_v6_window(getattr(args, "reference_window", None)),
         recent_window=_read_v6_window(getattr(args, "recent_window", None)),
+        observation_source=observation_source,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
@@ -4206,6 +4229,17 @@ def _run_strategy_challenger_weekly(args: argparse.Namespace) -> int:
 
 
 def _run_alpha_v6_train_weekly(args: argparse.Namespace) -> int:
+    observation_source = None
+    if args.observation_root or args.decision_artifact:
+        if not args.observation_root or not args.decision_artifact:
+            raise SnapshotValidationError(
+                "--observation-root and --decision-artifact must be supplied together"
+            )
+        observation_source = load_observation_source_from_artifacts(
+            observation_root=args.observation_root,
+            decision_artifact=args.decision_artifact,
+            as_of=None,
+        )
     result = run_alpha_v6_weekly_training(
         SQLiteScanStore(args.db_path),
         code_sha=args.code_sha,
@@ -4215,6 +4249,7 @@ def _run_alpha_v6_train_weekly(args: argparse.Namespace) -> int:
         experiment_id=getattr(args, "experiment_id", None),
         arm_id=getattr(args, "arm_id", None),
         attempt_id=getattr(args, "attempt_id", None),
+        observation_source=observation_source,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0

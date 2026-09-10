@@ -36,6 +36,17 @@ def build_feature_vector(
         "scan_id": scan_id,
         "ticker": _text(candidate.get("ticker")),
         "timestamp": timestamp,
+        # Availability and ingestion are source-bound producer fields.  They
+        # stay absent when the upstream capture did not provide them; callers
+        # must not infer either timestamp from the decision clock.
+        "feature_available_at": _text(
+            candidate.get("feature_available_at")
+            or candidate.get("source_available_at")
+        ),
+        "feature_ingested_at": _text(
+            candidate.get("feature_ingested_at")
+            or candidate.get("source_ingested_at")
+        ),
         "model_version": model_version,
         "config_hash": config_hash,
         "feature_json": feature_json,

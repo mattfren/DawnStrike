@@ -50,6 +50,8 @@ def _feature(ticker: str) -> dict[str, object]:
     return {
         "ticker": ticker,
         "timestamp": "2026-08-03T11:59:00+00:00",
+        "feature_available_at": "2026-08-03T11:59:30+00:00",
+        "feature_ingested_at": "2026-08-03T11:59:45+00:00",
         "config_hash": "c" * 64,
         "feature_json": {"liquidity_execution": {"spread_pct": 0.1}},
     }

@@ -284,6 +284,8 @@ def _current_observational_label(label: dict[str, Any], *, decision: dict[str, A
         and label.get("evidence_class") == "observational_matured"
         and label.get("fill_truth_bound") is False
         and label.get("fill_truth_status") == "not_applicable_observation"
+        and label.get("horizon_unit") == "minutes"
+        and isinstance(label.get("close_identity"), dict)
         and label.get("learning_eligible") is True
         and str(label.get("decision_id") or "") == str(decision.get("decision_id") or "")
         and label.get("research_only") is True

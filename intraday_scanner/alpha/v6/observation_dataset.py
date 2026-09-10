@@ -67,14 +67,17 @@ def build_observation_dataset(
             decisions=list(decisions),
             labels=[],
             coverage=_coverage(typed_manifest, events),
+            close_identity=_close_identity(manifest_value),
         )
     decision_rows = [dict(row) for row in decisions]
+    close_identity = _close_identity(manifest_value)
     event_rows = _validated_events(events)
     if event_rows is None:
         return _base_packet(
             typed_manifest, receipt_value, status="INVALID_SCHEMA",
             reason="raw_event_schema_invalid", decisions=decision_rows, labels=[],
             coverage=_coverage(typed_manifest, events),
+            close_identity=_close_identity(manifest_value),
         )
     now = _timestamp(as_of) if as_of is not None else max(
         (_timestamp(row["available_at"]) for row in event_rows), default=datetime.now(UTC)
@@ -90,6 +93,21 @@ def build_observation_dataset(
     for decision in decision_rows:
         ticker = str(decision.get("ticker") or "").upper()
         if ticker not in entry_by_symbol:
+            continue
+        # A decision from another market date/session is never allowed to be
+        # joined to this manifest.  Keeping this check at the producer
+        # boundary prevents a validly shaped artifact from becoming a
+        # cross-session training row.
+        decision_market_date = str(decision.get("market_date") or "")
+        try:
+            decision_at = _timestamp(decision.get("decision_at")) if decision.get("decision_at") else None
+        except (TypeError, ValueError):
+            diagnostics.append(_diagnostic(decision, "DELAYED_INELIGIBLE", "decision_timestamp_invalid"))
+            continue
+        if decision_market_date != typed_manifest.market_date or (
+            decision_at is not None and decision_at.date().isoformat() != typed_manifest.market_date
+        ):
+            diagnostics.append(_diagnostic(decision, "AMBIGUOUS", "decision_session_mismatch"))
             continue
         membership = decision.get("universe_membership")
         if (
@@ -118,7 +136,11 @@ def build_observation_dataset(
             continue
         source_events = by_symbol.get(ticker, [])
         result = _matured_observation(
-            decision=decision, events=source_events, now=now, session_id=typed_manifest.session_id
+            decision=decision,
+            events=source_events,
+            now=now,
+            session_id=typed_manifest.session_id,
+            close_identity=close_identity,
         )
         diagnostics.append(result["diagnostic"])
         if result.get("label") is not None:
@@ -128,6 +150,7 @@ def build_observation_dataset(
         "WAITING_IMMATURE" if "IMMATURE" in diagnostic_statuses
         else "MISSING_INPUT" if "MISSING_INPUT" in diagnostic_statuses
         else "AMBIGUOUS" if "AMBIGUOUS" in diagnostic_statuses
+        else "CENSORED" if "CENSORED" in diagnostic_statuses
         else "VALID_NO_TRADE" if not decision_rows else "DELAYED_INELIGIBLE"
     )
     return _base_packet(
@@ -135,20 +158,26 @@ def build_observation_dataset(
         reason=None if labels else "no_mature_eligible_observations",
         decisions=decision_rows, labels=labels,
         coverage=_coverage(typed_manifest, events), diagnostics=diagnostics,
+        close_identity=close_identity,
     )
 
 
 def _matured_observation(
     *, decision: Mapping[str, Any], events: Sequence[Mapping[str, Any]],
-    now: datetime, session_id: str,
+    now: datetime, session_id: str, close_identity: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     decision_at = _timestamp(decision.get("decision_at"))
     assert decision_at is not None
     ordered = sorted(events, key=lambda row: (_timestamp(row["event_time"]), str(row["event_id"])))
     selected: dict[str, dict[str, Any]] = {}
+    if close_identity is None:
+        return {"diagnostic": _diagnostic(
+            decision, "CENSORED", "session_close_identity_missing"
+        )}
+    close_at = _timestamp(str(close_identity["close_at"]))
     for field, predicate in (
         ("gap", lambda event: _timestamp(event["event_time"]) >= decision_at),
-        ("close", lambda event: True),
+        ("close", lambda event: _timestamp(event["event_time"]) <= close_at),
     ):
         candidates = [event for event in ordered if predicate(event)]
         if candidates:
@@ -175,6 +204,10 @@ def _matured_observation(
         )}
     gap = selected["gap"]
     close = selected["close"]
+    if _timestamp(close["event_time"]) != close_at:
+        return {"diagnostic": _diagnostic(
+            decision, "CENSORED", "session_close_observation_missing"
+        )}
     open_value = _number((gap.get("payload") or {}).get("o"))
     close_value = _number((close.get("payload") or {}).get("c"))
     if open_value is None or close_value is None or open_value <= 0:
@@ -204,9 +237,14 @@ def _matured_observation(
         "research_only": True,
         "broker_execution_enabled": False,
         "return_basis": "observed_path_close_vs_gap_open",
+        "horizon_unit": "minutes",
+        "close_identity": dict(close_identity),
         "observed_path": {"gap": gap, "close": close},
         "maturity_minutes": list(MATURITY_MINUTES),
         "maturity_status": maturity,
+        "maturity_at": {
+            key: event["event_time"] for key, event in maturity_events.items()
+        },
         "label_available_at": max(
             _timestamp(gap["available_at"]), _timestamp(close["available_at"]),
             *(_timestamp(event["available_at"]) for event in maturity_events.values()),
@@ -232,7 +270,8 @@ def _matured_observation(
 
 def _base_packet(manifest: UniverseManifest, receipt: Mapping[str, Any], *, status: str,
                  reason: str | None, decisions: list[dict[str, Any]], labels: list[dict[str, Any]],
-                 coverage: list[dict[str, Any]], diagnostics: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+                 coverage: list[dict[str, Any]], diagnostics: list[dict[str, Any]] | None = None,
+                 close_identity: Mapping[str, Any] | None = None) -> dict[str, Any]:
     return {
         "schema_version": "dawnstrike.v6.observational_dataset.v1",
         "status": status,
@@ -252,6 +291,8 @@ def _base_packet(manifest: UniverseManifest, receipt: Mapping[str, Any], *, stat
         "diagnostics": diagnostics or [],
         "maturity_minutes": list(MATURITY_MINUTES),
         "path_availability_fields": list(PATH_AVAILABILITY_FIELDS),
+        "horizon_unit": "minutes",
+        "close_identity": dict(close_identity or {}),
         "evidence_class": OBSERVATIONAL_EVIDENCE_CLASS,
         "research_only": True,
         "broker_execution_enabled": False,
@@ -269,6 +310,26 @@ def _failed_packet(status: str, reason: str) -> dict[str, Any]:
             "research_only": True, "broker_execution_enabled": False}
 
 
+def _close_identity(value: Mapping[str, Any]) -> dict[str, Any] | None:
+    raw = value.get("session_close_identity")
+    if not isinstance(raw, Mapping):
+        return None
+    close_at = str(raw.get("close_at") or "")
+    try:
+        parse_utc(close_at, label="session_close_identity.close_at")
+    except ValueError:
+        return None
+    if not str(raw.get("calendar_version") or "").strip():
+        return None
+    if not isinstance(raw.get("early_close"), bool):
+        return None
+    return {
+        "close_at": close_at,
+        "early_close": raw["early_close"],
+        "calendar_version": str(raw["calendar_version"]),
+    }
+
+
 def _coverage(manifest: UniverseManifest, events: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     counts: dict[tuple[str, str], int] = {}
     for event in events:
@@ -276,7 +337,10 @@ def _coverage(manifest: UniverseManifest, events: Sequence[Mapping[str, Any]]) -
         counts[key] = counts.get(key, 0) + 1
     return [{**entry.as_dict(), "observation_count": counts.get((entry.scope, entry.symbol), 0),
              "status": "OBSERVED" if counts.get((entry.scope, entry.symbol), 0) else (
-                 "MISSING_INPUT" if entry.membership == "missing_input" else "MISSING_OBSERVATION")}
+                 "MISSING_DEPENDENCY" if entry.membership == "missing_input"
+                 and "producer_missing" in entry.reason_codes
+                 else "MISSING_INPUT" if entry.membership == "missing_input"
+                 else "MISSING_OBSERVATION")}
             for entry in manifest.entries]
 
 

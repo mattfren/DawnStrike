@@ -214,6 +214,8 @@ def build_v6_shadow_decisions(
                 "all_inputs_observed_at_or_before_decision": True,
                 "decision_timestamp": decision_at,
                 "feature_timestamp": feature.get("timestamp"),
+                "feature_available_at": feature.get("feature_available_at"),
+                "feature_ingested_at": feature.get("feature_ingested_at"),
             },
             "research_only": True,
             "broker_execution_enabled": False,
