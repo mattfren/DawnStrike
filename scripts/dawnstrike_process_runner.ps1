@@ -706,7 +706,8 @@ function ConvertTo-DawnstrikeIsolatedPythonArguments {
     param(
         [Parameter(Mandatory = $true)][string[]]$ArgumentList,
         [Parameter(Mandatory = $true)][string]$ReleaseRoot,
-        [Parameter(Mandatory = $true)][string]$ExpectedSha
+        [Parameter(Mandatory = $true)][string]$ExpectedSha,
+        [string]$DependencyStageRoot = ''
     )
 
     $source = @($ArgumentList)
@@ -747,6 +748,9 @@ function ConvertTo-DawnstrikeIsolatedPythonArguments {
         '-c', (Get-DawnstrikeProcessBootstrapPreloader), $bootstrap, $bootstrapSha256,
         '--release-root', $ReleaseRoot, '--expected-sha', $ExpectedSha
     )
+    if ($DependencyStageRoot) {
+        $bootstrapLaunch += @('--dependency-stage-root', [IO.Path]::GetFullPath($DependencyStageRoot))
+    }
     if ($source.Count -gt 0 -and [string]$source[0] -eq '-m') {
         if ($source.Count -lt 2 -or [string]::IsNullOrWhiteSpace([string]$source[1])) {
             throw "Scheduled Python module target is incomplete."
@@ -792,6 +796,7 @@ function Invoke-DawnstrikeNativeProcess {
         [Parameter()][ValidateRange(1, 60)][int]$OutputDrainTimeoutSeconds = 5,
         [Parameter()][string]$WorkingDirectory = (Get-Location).Path,
         [Parameter()][hashtable]$EnvironmentOverrides = @{},
+        [Parameter()][string]$DependencyStageRoot = '',
         [Parameter()][switch]$NoSite,
         [Parameter()][switch]$SuppressConsoleReplay
     )
@@ -846,7 +851,8 @@ function Invoke-DawnstrikeNativeProcess {
             $releaseRoot = [string]$sourceIdentity.root
             $effectiveArguments = ConvertTo-DawnstrikeIsolatedPythonArguments `
                 -ArgumentList $effectiveArguments -ReleaseRoot $releaseRoot `
-                -ExpectedSha ([string]$sourceIdentity.head)
+                -ExpectedSha ([string]$sourceIdentity.head) `
+                -DependencyStageRoot $DependencyStageRoot
             $pythonBootstrapPath = Join-Path $releaseRoot "scripts\dawnstrike_python_bootstrap.py"
             $pythonBootstrapSha256 = Get-DawnstrikeRuntimeLockHash $pythonBootstrapPath
             $effectiveEnvironmentOverrides = @{
@@ -926,6 +932,9 @@ function Invoke-DawnstrikeNativeProcess {
         python_isolated = $pythonIsolated
         python_bootstrap_path = $pythonBootstrapPath
         python_bootstrap_sha256 = $pythonBootstrapSha256
+        dependency_scope = if ($DependencyStageRoot) { 'isolated_observer' } else { 'protected_runtime' }
+        dependency_stage_root = if ($DependencyStageRoot) { [IO.Path]::GetFullPath($DependencyStageRoot) } else { $null }
+        dependency_record_set_sha256 = if ($DependencyStageRoot) { '447a0d12feffcfd6c353d9acb4cfd1e5cc1b35e3548cd7e9ad58666516b4b3af' } else { $null }
         started_at = $startedAt.ToString("o")
         completed_at = $completedAt.ToString("o")
         duration_ms = [math]::Round(($completedAt - $startedAt).TotalMilliseconds)

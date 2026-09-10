@@ -1121,3 +1121,38 @@ def test_distribution_record_swap_cannot_change_captured_ownership(
         assert os.path.normcase(str(prefix / "fixture" / "__init__.py")) in owned
         assert os.path.normcase(str(prefix / "hostile.py")) not in owned
     assert raced is True
+
+
+def test_explicit_observer_stage_requires_lib_site_packages(tmp_path: Path) -> None:
+    bootstrap = __import__("scripts.dawnstrike_python_bootstrap", fromlist=["main"])
+    stage = tmp_path / "stage"
+    (stage / "Lib" / "site-packages").mkdir(parents=True)
+
+    paths, prefix = bootstrap._resolve_isolated_dependency_stage(str(stage))
+
+    assert paths == (stage / "Lib" / "site-packages",)
+    assert prefix == stage / "Lib" / "site-packages"
+
+
+def test_explicit_observer_stage_verifies_payload_hash_before_import(tmp_path: Path) -> None:
+    bootstrap = __import__("scripts.dawnstrike_python_bootstrap", fromlist=["main"])
+    stage = tmp_path / "stage" / "Lib" / "site-packages"
+    stage.mkdir(parents=True)
+    payload = stage / "fixture.py"
+    payload.write_bytes(b"fixture = 1\n")
+    key = __import__("os").path.normcase(str(payload))
+    expected = __import__("hashlib").sha256(payload.read_bytes()).digest()
+    bootstrap._verify_dependency_payloads(
+        stage,
+        (stage,),
+        {key},
+        {key: (expected, payload.stat().st_size)},
+    )
+    payload.write_bytes(b"fixture = 2\n")
+    with pytest.raises(RuntimeError, match="payload hash changed"):
+        bootstrap._verify_dependency_payloads(
+            stage,
+            (stage,),
+            {key},
+            {key: (expected, len(b"fixture = 1\n"))},
+        )
