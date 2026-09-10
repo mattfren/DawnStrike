@@ -63,10 +63,18 @@ class _DurableCapture:
     schema = "dawnstrike.ops05.durable_capture.v1"
 
     def __init__(
-        self, *, root: Path, identity: dict[str, Any], resume_across_roots: bool = False
+        self,
+        *,
+        root: Path,
+        identity: dict[str, Any],
+        max_bytes: int = MAX_BYTES,
+        resume_across_roots: bool = False,
     ) -> None:
         self.root = root
         self.identity = identity
+        if not 1 <= max_bytes <= MAX_BYTES:
+            raise Ops05Error("OPS05 byte limit must be between 1 and 64 MiB")
+        self.max_bytes = max_bytes
         self.resume_across_roots = resume_across_roots
         self.fingerprint = _sha256(identity)
         ledger_parent = (
@@ -87,7 +95,7 @@ class _DurableCapture:
         self.state: dict[str, Any] = {}
         self._held = False
         self.owner_generation: str | None = None
-        self._terminal_reserve = min(4096, max(512, MAX_BYTES // 8))
+        self._terminal_reserve = min(4096, max(512, self.max_bytes // 8))
 
     def _known_roots(self) -> list[Path]:
         roots: list[Path] = []
@@ -121,9 +129,9 @@ class _DurableCapture:
 
     def _budgeted_write(self, path: Path, data: bytes, *, terminal: bool = False) -> None:
         current = self._committed_bytes()
-        if current + len(data) > MAX_BYTES:
+        if current + len(data) > self.max_bytes:
             raise Ops05Error("OPS05 cumulative persisted-byte cap exceeded")
-        if not terminal and current + len(data) + self._terminal_reserve > MAX_BYTES:
+        if not terminal and current + len(data) + self._terminal_reserve > self.max_bytes:
             raise Ops05Error("OPS05 persisted-byte cap must retain terminal receipt capacity")
         _atomic_write(path, data)
 
@@ -151,6 +159,7 @@ class _DurableCapture:
             "started_at": self.state.get("started_at"),
             "owner_generation": self.owner_generation,
             "fingerprint": self.fingerprint,
+            "max_bytes": self.max_bytes,
             "identity": self.identity,
             "state_sha256": self._state_hash(),
             "page_manifest_sha256": self._page_manifest_hash(),
@@ -165,6 +174,7 @@ class _DurableCapture:
         return (
             state.get("identity") == self.identity
             and state.get("fingerprint") == self.fingerprint
+            and int(state.get("max_bytes", MAX_BYTES)) == self.max_bytes
         )
 
     def existing_receipt(self) -> dict[str, Any] | None:
@@ -184,6 +194,9 @@ class _DurableCapture:
             or lineage.get("capture_receipt_sha256") != self.identity["capture_receipt_sha256"]
         ):
             raise Ops05Error("immutable OPS05 output conflicts with capture identity")
+        recorded_limit = int((value.get("limits") or {}).get("max_bytes", MAX_BYTES))
+        if recorded_limit != self.max_bytes:
+            raise Ops05Error("immutable OPS05 output conflicts with configured byte limit")
         raw_path = self.root / "raw-bars.jsonl"
         if raw_path.is_file():
             rows = [
@@ -238,7 +251,10 @@ class _DurableCapture:
         self.state = state
         self._verify_state_pages(state)
         canonical_capture = _DurableCapture(
-            root=canonical, identity=self.identity, resume_across_roots=True
+            root=canonical,
+            identity=self.identity,
+            max_bytes=self.max_bytes,
+            resume_across_roots=True,
         )
         receipt = canonical_capture.existing_receipt()
         if receipt is None:
@@ -347,6 +363,7 @@ class _DurableCapture:
                 "schema_version": self.schema,
                 "fingerprint": self.fingerprint,
                 "identity": self.identity,
+                "max_bytes": self.max_bytes,
                 "status": "RUNNING",
                 "started_at": _now(),
                 "original_timestamps": {},
@@ -358,6 +375,9 @@ class _DurableCapture:
                 "raw_payload_bytes": 0,
                 "wall_seconds_observed": 0.0,
             }
+        if int(self.state.get("max_bytes", MAX_BYTES)) != self.max_bytes:
+            raise Ops05Error("OPS05 capture byte limit conflicts with durable state")
+        self.state["max_bytes"] = self.max_bytes
         self.state["owner_generation"] = self.owner_generation
         self.state.setdefault("owner_pid_start_at", self._lock_payload()["pid_start_at"])
         self._save()
@@ -462,8 +482,8 @@ class _DurableCapture:
         self._budgeted_json(self.root / "capture-state.json", self.state, terminal=terminal)
         self._refresh_lock()
         ledger_bytes = self.ledger_bytes()
-        if ledger_bytes > MAX_BYTES:
-            raise Ops05Error("OPS05 durable journal exceeds the 64 MiB bound")
+        if ledger_bytes > self.max_bytes:
+            raise Ops05Error("OPS05 durable journal exceeds the configured byte bound")
 
     def ledger_bytes(self) -> int:
         return self._committed_bytes()
@@ -473,8 +493,8 @@ class _DurableCapture:
             raise Ops05Error("provider page cap exceeded")
         if int(self.state.get("event_count", 0)) + events > MAX_EVENTS:
             raise Ops05Error("derived event cap exceeded")
-        if int(self.state.get("raw_payload_bytes", 0)) + payload_bytes > MAX_BYTES:
-            raise Ops05Error("raw provider payload exceeds the 64 MiB bound")
+        if int(self.state.get("raw_payload_bytes", 0)) + payload_bytes > self.max_bytes:
+            raise Ops05Error("raw provider payload exceeds the configured byte bound")
         if float(self.state.get("wall_seconds_observed", 0.0)) > MAX_WALL_SECONDS:
             raise Ops05Error("OPS05 wall-time cap exceeded")
 
@@ -909,11 +929,12 @@ def _fetch_pages(
     expected_endpoint: str,
     logical_key_prefix: str = "capture",
     durable: _DurableCapture | None = None,
+    max_bytes: int = MAX_BYTES,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     items: list[dict[str, Any]] = []
     page_receipts: list[dict[str, Any]] = []
     token: str | None = None
-    call_config = _BoundedProviderConfig(config, response_max_bytes=MAX_BYTES)
+    call_config = _BoundedProviderConfig(config, response_max_bytes=max_bytes)
     if hasattr(config, "request_retries"):
         call_config.request_retries = 1
     for page_number in range(MAX_PAGES):
@@ -990,8 +1011,8 @@ def _fetch_pages(
         computed_page_hash = _sha256(page_items)
         page_bytes = sum(len(_canonical_json(item)) for item in page_items)
         byte_counter[0] += page_bytes
-        if byte_counter[0] > MAX_BYTES:
-            raise Ops05Error("raw provider payload exceeds the 64 MiB bound")
+        if byte_counter[0] > max_bytes:
+            raise Ops05Error("raw provider payload exceeds the configured byte bound")
         event_counter[0] += len(page.items)
         if event_counter[0] > MAX_EVENTS:
             raise Ops05Error("derived event cap exceeded")
@@ -1133,6 +1154,7 @@ def _produce_historical_bars(
     output_root: str | Path,
     source_config_hash: str,
     capture_receipt_hash: str,
+    max_bytes: int = MAX_BYTES,
     durable: _DurableCapture | None = None,
 ) -> dict[str, Any]:
     """Produce a bounded delayed archive using a supplied provider adapter."""
@@ -1161,7 +1183,7 @@ def _produce_historical_bars(
             "census_sha256": _sha256(census_rows),
             "windows": {key: value.as_dict() for key, value in windows.items()},
         }
-        durable = _DurableCapture(root=root, identity=identity)
+        durable = _DurableCapture(root=root, identity=identity, max_bytes=max_bytes)
     started_at = wall_clock.monotonic()
     page_counter = [0]
     event_counter = [0]
@@ -1189,6 +1211,7 @@ def _produce_historical_bars(
                 expected_endpoint="bars",
                 logical_key_prefix=window_name,
                 durable=durable,
+                max_bytes=max_bytes,
             )
         except BaseException as exc:
             durable.fail(window_name, exc)
@@ -1244,6 +1267,7 @@ def _produce_historical_bars(
             expected_endpoint="corporate_actions",
             logical_key_prefix="corporate_actions",
             durable=durable,
+            max_bytes=max_bytes,
         )
     except BaseException as exc:
         durable.fail("corporate_actions", exc)
@@ -1296,7 +1320,7 @@ def _produce_historical_bars(
             "max_pages_total": MAX_PAGES,
             "max_retries_per_page": MAX_RETRIES,
             "max_events": MAX_EVENTS,
-            "max_bytes": MAX_BYTES,
+            "max_bytes": max_bytes,
             "max_rss_bytes_process_tree": MAX_RSS_BYTES,
             "max_wall_seconds": MAX_WALL_SECONDS,
             "max_mover_symbols": MAX_MOVER_SYMBOLS,
@@ -1348,8 +1372,8 @@ def _produce_historical_bars(
         for value in (raw_bars_text, boundary_text, census_text, receipt_text)
     )
     receipt["coverage"]["persisted_output_bytes"] = persisted_bytes
-    if persisted_bytes > MAX_BYTES:
-        raise Ops05Error("persisted output exceeds the 64 MiB bound")
+    if persisted_bytes > max_bytes:
+        raise Ops05Error("persisted output exceeds the configured byte bound")
     binding = {
         "schema_version": "dawnstrike.ops05.capture_binding.v1",
         "market_date": market_date,
@@ -1389,8 +1413,8 @@ def _produce_historical_bars(
         ) + binding_bytes
         receipt["coverage"]["persisted_output_bytes"] = persisted_bytes
     receipt_text = json.dumps(receipt, sort_keys=True, indent=2) + "\n"
-    if persisted_bytes + durable_bytes > MAX_BYTES:
-        raise Ops05Error("persisted capture binding exceeds the 64 MiB bound")
+    if persisted_bytes + durable_bytes > max_bytes:
+        raise Ops05Error("persisted capture binding exceeds the configured byte bound")
     for path, text in (
         (root / "raw-bars.jsonl", raw_bars_text),
         (root / "boundary-events.jsonl", boundary_text),
@@ -1415,6 +1439,7 @@ def produce_historical_bars(
     output_root: str | Path,
     source_config_hash: str,
     capture_receipt_hash: str,
+    max_bytes: int = MAX_BYTES,
     resume_across_roots: bool = False,
 ) -> dict[str, Any]:
     """Run or resume one durable, bounded OPS05 capture."""
@@ -1422,6 +1447,8 @@ def produce_historical_bars(
         raise Ops05Error("OPS05 requires the existing Alpaca SIP provider; no feed fallback")
     if len(source_config_hash) != 64 or len(capture_receipt_hash) != 64:
         raise Ops05Error("source and capture identities must be SHA-256 values")
+    if not 1 <= max_bytes <= MAX_BYTES:
+        raise Ops05Error("OPS05 byte limit must be between 1 and 64 MiB")
     root = Path(output_root).resolve()
     root.mkdir(parents=True, exist_ok=True)
     windows = build_windows(market_date)
@@ -1436,7 +1463,10 @@ def produce_historical_bars(
         "windows": {key: value.as_dict() for key, value in windows.items()},
     }
     durable = _DurableCapture(
-        root=root, identity=identity, resume_across_roots=resume_across_roots
+        root=root,
+        identity=identity,
+        max_bytes=max_bytes,
+        resume_across_roots=resume_across_roots,
     )
     existing = durable.existing_receipt()
     if existing is not None:
@@ -1455,6 +1485,7 @@ def produce_historical_bars(
                 output_root=root,
                 source_config_hash=source_config_hash,
                 capture_receipt_hash=capture_receipt_hash,
+                max_bytes=max_bytes,
                 durable=durable,
             )
     except BaseException as exc:

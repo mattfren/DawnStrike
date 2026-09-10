@@ -30,6 +30,9 @@ namespace Dawnstrike.Native
         public int ProcessTreeRssSamples { get; set; }
         public bool ProcessTreeRssMeasurementAvailable { get; set; }
         public string GuardFailure { get; set; }
+        public ulong OutputCaptureLimitBytes { get; set; }
+        public ulong OutputBytesObserved { get; set; }
+        public string OutputCaptureFailure { get; set; }
     }
 
     public static class JobProcessRunner
@@ -167,6 +170,21 @@ namespace Dawnstrike.Native
             public int ProcessTreeRssSamples;
             public bool ProcessTreeRssMeasurementAvailable;
             public bool JobTerminatedByGuard;
+        }
+
+        private sealed class OutputCaptureState
+        {
+            public readonly object Sync = new object();
+            public readonly StringBuilder Stdout = new StringBuilder();
+            public readonly StringBuilder Stderr = new StringBuilder();
+            public readonly ulong LimitBytes;
+            public ulong BytesObserved;
+            public string Failure;
+
+            public OutputCaptureState(ulong limitBytes)
+            {
+                LimitBytes = limitBytes;
+            }
         }
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -333,7 +351,8 @@ namespace Dawnstrike.Native
                 0,
                 0,
                 0,
-                false
+                false,
+                0
             );
         }
 
@@ -361,7 +380,38 @@ namespace Dawnstrike.Native
                 jobMemoryLimitBytes,
                 processTreeRssLimitBytes,
                 rssSampleMilliseconds,
-                true
+                true,
+                0
+            );
+        }
+
+        public static JobProcessResult Run(
+            string filePath,
+            string[] arguments,
+            string workingDirectory,
+            string label,
+            int timeoutMilliseconds,
+            int outputDrainMilliseconds,
+            string[] environmentOverrides,
+            ulong jobMemoryLimitBytes,
+            ulong processTreeRssLimitBytes,
+            int rssSampleMilliseconds,
+            ulong outputCaptureLimitBytes
+        )
+        {
+            return RunInternal(
+                filePath,
+                arguments,
+                workingDirectory,
+                label,
+                timeoutMilliseconds,
+                outputDrainMilliseconds,
+                environmentOverrides,
+                jobMemoryLimitBytes,
+                processTreeRssLimitBytes,
+                rssSampleMilliseconds,
+                true,
+                outputCaptureLimitBytes
             );
         }
 
@@ -376,7 +426,8 @@ namespace Dawnstrike.Native
             ulong jobMemoryLimitBytes,
             ulong processTreeRssLimitBytes,
             int rssSampleMilliseconds,
-            bool enableResourceGuard
+            bool enableResourceGuard,
+            ulong outputCaptureLimitBytes
         )
         {
             if (String.IsNullOrWhiteSpace(filePath))
@@ -399,6 +450,10 @@ namespace Dawnstrike.Native
             {
                 throw new ArgumentException("resource guard values require the observer overload.");
             }
+            if (outputCaptureLimitBytes > 8UL * 1024UL * 1024UL)
+            {
+                throw new ArgumentOutOfRangeException("output capture limit cannot exceed 8 MiB.");
+            }
 
             IntPtr job = IntPtr.Zero;
             IntPtr stdoutRead = IntPtr.Zero;
@@ -414,8 +469,11 @@ namespace Dawnstrike.Native
             int activeAfterCleanup = -1;
             StreamReader stdoutReader = null;
             StreamReader stderrReader = null;
-            Task<string> stdoutTask = null;
-            Task<string> stderrTask = null;
+            Task stdoutTask = null;
+            Task stderrTask = null;
+            OutputCaptureState outputCapture = outputCaptureLimitBytes > 0
+                ? new OutputCaptureState(outputCaptureLimitBytes)
+                : null;
             CancellationTokenSource guardStop = null;
             Task guardTask = null;
             GuardState guard = new GuardState();
@@ -471,8 +529,20 @@ namespace Dawnstrike.Native
 
                 stdoutReader = ReaderFor(ref stdoutRead);
                 stderrReader = ReaderFor(ref stderrRead);
-                stdoutTask = stdoutReader.ReadToEndAsync();
-                stderrTask = stderrReader.ReadToEndAsync();
+                if (outputCapture == null)
+                {
+                    stdoutTask = stdoutReader.ReadToEndAsync();
+                    stderrTask = stderrReader.ReadToEndAsync();
+                }
+                else
+                {
+                    stdoutTask = Task.Run(() => ReadBoundedOutput(
+                        stdoutReader, "stdout", outputCapture, job
+                    ));
+                    stderrTask = Task.Run(() => ReadBoundedOutput(
+                        stderrReader, "stderr", outputCapture, job
+                    ));
+                }
 
                 if (ResumeThread(processInfo.hThread) == UInt32.MaxValue)
                 {
@@ -528,8 +598,12 @@ namespace Dawnstrike.Native
                     throw new InvalidOperationException(label + " output drain timed out after root exit.");
                 }
 
-                string stdout = stdoutTask.Result.Trim();
-                string stderr = stderrTask.Result.Trim();
+                string stdout = outputCapture == null
+                    ? ((Task<string>)stdoutTask).Result.Trim()
+                    : outputCapture.Stdout.ToString().Trim();
+                string stderr = outputCapture == null
+                    ? ((Task<string>)stderrTask).Result.Trim()
+                    : outputCapture.Stderr.ToString().Trim();
                 if (rawExitCode != 0)
                 {
                     activeAfterCleanup = TerminateOwnedJob(
@@ -568,7 +642,10 @@ namespace Dawnstrike.Native
                     LastProcessTreeRssBytes = guard.LastProcessTreeRssBytes,
                     ProcessTreeRssSamples = guard.ProcessTreeRssSamples,
                     ProcessTreeRssMeasurementAvailable = guard.ProcessTreeRssMeasurementAvailable,
-                    GuardFailure = guard.Failure
+                    GuardFailure = guard.Failure,
+                    OutputCaptureLimitBytes = outputCaptureLimitBytes,
+                    OutputBytesObserved = outputCapture == null ? 0 : outputCapture.BytesObserved,
+                    OutputCaptureFailure = outputCapture == null ? null : outputCapture.Failure
                 };
             }
             catch (Exception failure)
@@ -693,6 +770,51 @@ namespace Dawnstrike.Native
             handle = IntPtr.Zero;
             FileStream stream = new FileStream(safe, FileAccess.Read, 4096, false);
             return new StreamReader(stream, Encoding.UTF8, true, 4096, false);
+        }
+
+        private static void ReadBoundedOutput(
+            StreamReader reader,
+            string streamName,
+            OutputCaptureState capture,
+            IntPtr job
+        )
+        {
+            char[] buffer = new char[4096];
+            while (true)
+            {
+                int count = reader.Read(buffer, 0, buffer.Length);
+                if (count == 0)
+                {
+                    return;
+                }
+                ulong bytes = (ulong)Encoding.UTF8.GetByteCount(buffer, 0, count);
+                lock (capture.Sync)
+                {
+                    if (capture.Failure != null)
+                    {
+                        return;
+                    }
+                    if (capture.BytesObserved + bytes > capture.LimitBytes)
+                    {
+                        capture.Failure = String.Format(
+                            "native {0} output capture limit exceeded: combined UTF-8 bytes exceeded {1}.",
+                            streamName,
+                            capture.LimitBytes
+                        );
+                        try { TerminateJobObject(job, JOB_TERMINATION_EXIT_CODE); } catch { }
+                        return;
+                    }
+                    if (streamName == "stdout")
+                    {
+                        capture.Stdout.Append(buffer, 0, count);
+                    }
+                    else
+                    {
+                        capture.Stderr.Append(buffer, 0, count);
+                    }
+                    capture.BytesObserved += bytes;
+                }
+            }
         }
 
         private static JOBOBJECT_EXTENDED_LIMIT_INFORMATION ConfigureJobLimits(
@@ -1200,7 +1322,8 @@ function Invoke-DawnstrikeJobProcess {
         [Parameter()][hashtable]$EnvironmentOverrides = @{},
         [Parameter()][ValidateRange(0, 268435456)][UInt64]$JobMemoryLimitBytes = 0,
         [Parameter()][ValidateRange(0, 268435456)][UInt64]$ProcessTreeRssLimitBytes = 0,
-        [Parameter()][ValidateRange(0, 10000)][int]$RssSampleMilliseconds = 0
+        [Parameter()][ValidateRange(0, 10000)][int]$RssSampleMilliseconds = 0,
+        [Parameter()][ValidateRange(0, 8388608)][UInt64]$OutputCaptureLimitBytes = 0
     )
 
     $environmentPairs = @(
@@ -1216,6 +1339,9 @@ function Invoke-DawnstrikeJobProcess {
     if ($guardEnabled -and ($JobMemoryLimitBytes -gt 268435456 -or $ProcessTreeRssLimitBytes -gt 268435456)) {
         throw 'Observer resource guard limits cannot exceed 256 MiB.'
     }
+    if (-not $guardEnabled -and $OutputCaptureLimitBytes -gt 0) {
+        throw 'Bounded native output capture is available only for observer resource guards.'
+    }
     if (-not $guardEnabled) {
         return [Dawnstrike.Native.JobProcessRunner]::Run(
             $FilePath,
@@ -1225,6 +1351,19 @@ function Invoke-DawnstrikeJobProcess {
             $TimeoutSeconds * 1000,
             $OutputDrainTimeoutSeconds * 1000,
             $environmentPairs
+        )
+    }
+    if ($OutputCaptureLimitBytes -gt 0) {
+        return [Dawnstrike.Native.JobProcessRunner]::Run(
+            $FilePath,
+            @($ArgumentList),
+            $WorkingDirectory,
+            $Label,
+            $TimeoutSeconds * 1000,
+            $OutputDrainTimeoutSeconds * 1000,
+            $environmentPairs,
+            $JobMemoryLimitBytes, $ProcessTreeRssLimitBytes, $RssSampleMilliseconds,
+            $OutputCaptureLimitBytes
         )
     }
     return [Dawnstrike.Native.JobProcessRunner]::Run(

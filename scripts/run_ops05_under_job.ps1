@@ -38,6 +38,7 @@ $receipt = Invoke-DawnstrikeNativeProcess `
     -JobMemoryLimitBytes ([UInt64]268435456) `
     -ProcessTreeRssLimitBytes ([UInt64]268435456) `
     -RssSampleMilliseconds 100 `
+    -OutputCaptureLimitBytes ([UInt64]8388608) `
     -SuppressConsoleReplay
 $receipt | ConvertTo-Json -Depth 8
 if ([int]$receipt.exit_code -ne 0) {
