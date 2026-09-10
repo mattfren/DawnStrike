@@ -105,10 +105,14 @@ def load_observation_source_from_artifacts(
             "research_only": True,
             "broker_execution_enabled": False,
         }
+    producer_envelope: dict[str, Any] = {}
+    if isinstance(decisions, dict):
+        producer_envelope = dict(decisions)
+        decisions = producer_envelope.get("v6_decision_records")
     if not isinstance(decisions, list) or not all(isinstance(row, dict) for row in decisions):
         return {
             "status": "INVALID_SCHEMA",
-            "reason": "alpha_v6_decision_artifact_must_be_array",
+            "reason": "alpha_v6_decision_artifact_must_be_array_or_cycle_envelope",
             "research_only": True,
             "broker_execution_enabled": False,
         }
@@ -121,6 +125,11 @@ def load_observation_source_from_artifacts(
         "as_of": as_of,
         "decision_artifact_path": str(decision_path),
         "decision_artifact_sha256": _sha256_file(decision_path),
+        "producer_identity": {
+            key: producer_envelope.get(key)
+            for key in ("code_sha", "scan_id", "producer_run_id", "market_date", "run_type")
+            if producer_envelope.get(key) is not None
+        },
     }
 
 
@@ -187,6 +196,9 @@ def run_alpha_v6_daily_monitor(
             )
             observation_packet["decision_artifact_sha256"] = observation_source.get(
                 "decision_artifact_sha256"
+            )
+            observation_packet["producer_identity"] = dict(
+                observation_source.get("producer_identity") or {}
             )
         if observation_packet:
             observation_decisions = list(observation_packet.get("decisions") or [])
