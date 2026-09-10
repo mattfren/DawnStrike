@@ -44,8 +44,22 @@ def test_mae_is_not_account_drawdown_and_equity_series_is_reconciled() -> None:
     assert missing["avg_return_pct"] is None
     assert missing["win_rate_pct"] is None
     rows = [
-        {"rank": 1, "close_return_pct": 2, "max_adverse_excursion": -20, "account_equity": 100},
-        {"rank": 2, "close_return_pct": -1, "max_adverse_excursion": -30, "account_equity": 90},
+        {
+            "rank": 1,
+            "close_return_pct": 2,
+            "max_adverse_excursion": -20,
+            "account_equity": 100,
+            "cash_flow": 0,
+            "valuation_currency": "USD",
+        },
+        {
+            "rank": 2,
+            "close_return_pct": -1,
+            "max_adverse_excursion": -30,
+            "account_equity": 90,
+            "cash_flow": 0,
+            "valuation_currency": "USD",
+        },
     ]
     assert round(account_equity_drawdown(rows), 6) == -10
     assert round(build_truth_report(rows, real_days_collected=20)["max_drawdown_pct"], 6) == -10
@@ -113,6 +127,9 @@ def test_cash_flows_are_unitized_with_explicit_timing_and_currency() -> None:
     assert account_equity_drawdown(withdrawal[:2]) == 0.0
     assert account_equity_drawdown(
         [{"account_equity": 100}, {"account_equity": 200, "cash_flow": 100}]
+    ) is None
+    assert account_equity_drawdown(
+        [{"account_equity": 100}, {"account_equity": 200}]
     ) is None
     assert account_equity_drawdown(
         [

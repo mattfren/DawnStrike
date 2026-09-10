@@ -77,11 +77,14 @@ def account_equity_drawdown(rows: list[dict[str, Any]]) -> float | None:
         if equity is None or equity <= 0:
             return None
         currency = str(row.get("valuation_currency") or row.get("currency") or "").strip()
-        # An omitted flow means no flow was recorded for this valuation.  A
-        # present non-finite value is invalid measurement data and must stay
-        # unavailable; coercing NaN/inf to zero would manufacture performance.
+        # The initial valuation has no prior interval and therefore needs no
+        # flow row. Every later interval must carry an explicit finite flow,
+        # including an explicit zero. A present non-finite value is invalid
+        # measurement data and must stay unavailable; coercing NaN/inf or an
+        # absent interval to zero would manufacture performance.
         raw_flow = row.get("cash_flow")
-        if "cash_flow" in row and raw_flow not in {None, ""}:
+        has_explicit_flow = "cash_flow" in row and raw_flow not in {None, ""}
+        if has_explicit_flow:
             flow = finite_number(raw_flow)
             if flow is None:
                 return None
@@ -98,6 +101,8 @@ def account_equity_drawdown(rows: list[dict[str, Any]]) -> float | None:
             previous_equity = equity
             previous_currency = currency or None
             continue
+        if not has_explicit_flow:
+            return None
         if previous_currency and currency and previous_currency != currency:
             return None
         period_base = previous_equity
