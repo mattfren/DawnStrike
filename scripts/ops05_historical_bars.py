@@ -107,6 +107,7 @@ def main() -> int:
         output_root=args.output_root,
         source_config_hash=args.source_config_hash,
         capture_receipt_hash=args.capture_receipt_hash,
+        resume_across_roots=True,
     )
     print(
         json.dumps(
