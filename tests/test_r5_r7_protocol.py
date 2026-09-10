@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from intraday_scanner.research.r5_r7_protocol import (
     FIXED_PANEL,
     LEGACY_REJECTED_STRATEGY,
@@ -11,6 +13,8 @@ from intraday_scanner.research.r5_r7_protocol import (
     evaluate_gap_orb15_signal,
     bootstrap_paired_session_returns,
     compare_v5_baseline_challenger,
+    dispatch_r7_weekly,
+    export_income_artifacts,
     run_r7_weekly_controller,
     run_v5_admission,
     simulate_causal_fill_lifecycle,
@@ -24,8 +28,8 @@ def _bars() -> list[dict]:
     for minute in range(15):
         hour, minute_in_hour = divmod(9 * 60 + 30 + minute, 60)
         stamp = f"2026-01-02T{hour:02d}:{minute_in_hour:02d}:00-05:00"
-        rows.append({"event_at": stamp, "available_at": stamp.replace(":00-05:00", ":01-05:00"), "ingested_at": stamp.replace(":00-05:00", ":02-05:00"), "open": 101, "high": 102, "low": 100, "close": 101.1})
-    rows.append({"event_at": "2026-01-02T10:00:00-05:00", "available_at": "2026-01-02T10:00:01-05:00", "ingested_at": "2026-01-02T10:00:02-05:00", "ask": 102.2, "bid": 102.1, "high": 103, "low": 101.7, "close": 102.5})
+        rows.append({"event_at": stamp, "available_at": stamp.replace(":00-05:00", ":01-05:00"), "ingested_at": stamp.replace(":00-05:00", ":02-05:00"), "instrument_id": "AAA", "session_id": "XNYS:2026-01-02:regular", "open": 101, "high": 102, "low": 100, "close": 101.1})
+    rows.append({"event_at": "2026-01-02T10:00:00-05:00", "available_at": "2026-01-02T10:00:01-05:00", "ingested_at": "2026-01-02T10:00:02-05:00", "instrument_id": "AAA", "session_id": "XNYS:2026-01-02:regular", "ask": 102.2, "bid": 102.1, "high": 103, "low": 101.7, "close": 102.5})
     return rows
 
 
@@ -44,7 +48,7 @@ def test_orb_signal_requires_causal_break_and_close_deadline() -> None:
     signal = evaluate_gap_orb15_signal(
         bars=_bars(), prior_close=100.0, corporate_action_valid=True,
         close_at="2026-01-02T16:00:00-05:00",
-        expected_opening_bars=15,
+        expected_opening_bars=15, ticker="AAA", instrument_id="AAA", session_id="XNYS:2026-01-02:regular",
     )
     assert signal["status"] == "SIGNAL"
     assert signal["target_price"] > signal["entry_price"]
@@ -53,7 +57,7 @@ def test_orb_signal_requires_causal_break_and_close_deadline() -> None:
     bad = evaluate_gap_orb15_signal(
         bars=_bars(), prior_close=100.0, corporate_action_valid=False,
         close_at="2026-01-02T16:00:00-05:00",
-        expected_opening_bars=15,
+        expected_opening_bars=15, ticker="AAA", instrument_id="AAA", session_id="XNYS:2026-01-02:regular",
     )
     assert bad["status"] == "REJECTED"
     assert bad["reason"] == "corporate_action_prior_close_unverified"
@@ -62,8 +66,8 @@ def test_orb_signal_requires_causal_break_and_close_deadline() -> None:
 def test_twr_requires_flow_timing_and_preserves_missing_sessions() -> None:
     report = replay_account_twr(
         sessions=[
-            {"session_id": "s1", "starting_equity_cents": 10000000, "ending_equity_cents": 10100000, "external_flow_cents": 0, "cash_flow_timing": "start", "fees": 10, "turnover": 20000, "average_gross_exposure": .2, "trade_count": 1},
-            {"session_id": "s2", "starting_equity_cents": 10100000, "ending_equity_cents": 10150000, "external_flow_cents": 100000, "cash_flow_timing": "start", "fees": 5, "turnover": 0, "average_gross_exposure": 0, "trade_count": 0},
+            {"session_id": "s1", "starting_equity_cents": 10000000, "ending_equity_cents": 10100000, "external_flow_cents": 0, "cash_flow_timing": "start", "valuation_currency": "USD", "cash_flow_source_id": "fixture:s1", "fees": 10, "turnover": 20000, "average_gross_exposure": .2, "trade_count": 1},
+            {"session_id": "s2", "starting_equity_cents": 10100000, "ending_equity_cents": 10150000, "external_flow_cents": 100000, "cash_flow_timing": "start", "valuation_currency": "USD", "cash_flow_source_id": "fixture:s2", "fees": 5, "turnover": 0, "average_gross_exposure": 0, "trade_count": 0},
             {"session_id": "missed"},
         ]
     )
@@ -164,11 +168,25 @@ def test_lifecycle_rejects_overrisk_halt_and_same_bar_ambiguity() -> None:
 def test_future_quote_and_v5_trace_fail_closed() -> None:
     bars = _bars()
     bars[-1]["available_at"] = "2026-01-02T09:59:00-05:00"
-    rejected = evaluate_gap_orb15_signal(bars=bars, prior_close=100.0, corporate_action_valid=True, close_at="2026-01-02T16:00:00-05:00")
+    rejected = evaluate_gap_orb15_signal(bars=bars, prior_close=100.0, corporate_action_valid=True, close_at="2026-01-02T16:00:00-05:00", ticker="AAA", instrument_id="AAA", session_id="XNYS:2026-01-02:regular")
     assert rejected["reason"] == "source_availability_or_ingestion_invalid"
     trace = run_v5_admission(signal={"ticker": "AAA", "strategy_id": "alphaops_v5", "strategy_version": "dawnstrike-alphaops-v5.0.0"}, observation={"price": 100, "observed_at": "2026-08-03T14:00:00+00:00"})
     assert trace["eligible_for_official_paper"] is False
     assert trace["action"]
+
+
+def test_independent_int04_regressions_remain_fail_closed() -> None:
+    panel = evaluate_gap_orb15_signal(bars=_bars(), prior_close=100.0, corporate_action_valid=False, close_at="2026-01-02T16:00:00-05:00", scope="panel_orb15_continuation_research_v1", ticker="SPY", instrument_id="SPY", session_id="XNYS:2026-01-02:regular")
+    assert panel["status"] == "REJECTED"
+    duplicate = _bars()
+    for row in duplicate[:15]:
+        row["event_at"] = "2026-01-02T09:30:00-05:00"
+    assert evaluate_gap_orb15_signal(bars=duplicate, prior_close=100.0, corporate_action_valid=True, close_at="2026-01-02T16:00:00-05:00", ticker="AAA", instrument_id="AAA", session_id="XNYS:2026-01-02:regular")["status"] == "REJECTED"
+    closed = evaluate_gap_orb15_signal(bars=_bars(), prior_close=100.0, corporate_action_valid=True, close_at="2026-07-03T15:00:00-04:00", ticker="AAA", instrument_id="AAA", session_id="XNYS:2026-07-03:regular")
+    assert closed["status"] == "REJECTED"
+    missing_meta = replay_account_twr(sessions=[{"session_id": "s1", "starting_equity_cents": 100, "ending_equity_cents": 102, "external_flow_cents": 0, "fees": 0}])
+    assert missing_meta["status"] == "NO_VALID_SESSIONS"
+    assert bootstrap_paired_session_returns(sessions=[], block_length=3, protocol_hash="a" * 64, journal_hash="b" * 64, trial_hash="c" * 64)["status"] == "REJECTED"
 
 
 def test_confirmation_summary_waits_for_real_market_evidence() -> None:
@@ -193,21 +211,18 @@ def test_confirmation_summary_waits_for_real_market_evidence() -> None:
 
 def test_fixed_block_bootstrap_is_derived_from_paired_sessions() -> None:
     report = bootstrap_paired_session_returns(
-        challenger_returns=[.01, .02, -.01, .00, .03, .01, .00, -.02, .02, .01],
-        baseline_returns=[.00, .01, -.01, -.01, .01, .00, .00, -.01, .01, .00],
-        block_length=5,
-        resamples=100,
-        seed=27029,
+        sessions=[{"session_id": f"s{i}", "market_date": f"2026-01-{i+1:02d}", "challenger_return": c, "baseline_return": b, "eligible": True, "decision_at": f"2026-01-{i+1:02d}T10:00:00-05:00", "label_available_at": f"2026-01-{i+1:02d}T16:01:00-05:00", "journal_hash": "a" * 64, "trial_hash": "b" * 64} for i, (c, b) in enumerate(zip([.01, .02, -.01, .00, .03, .01, .00, -.02, .02, .01], [.00, .01, -.01, -.01, .01, .00, .00, -.01, .01, .00]))],
+        protocol_hash="c" * 64, journal_hash="a" * 64, trial_hash="b" * 64,
     )
     assert report["status"] == "COMPLETE"
     assert report["complete_block_count"] == 2
-    assert report["resamples"] == 100
+    assert report["resamples"] == 10000
     assert report["one_sided_lower_bound_95"] <= report["observed_mean_daily_log_return"]
-    waiting = bootstrap_paired_session_returns(challenger_returns=[.01], baseline_returns=[.00], block_length=5)
+    waiting = bootstrap_paired_session_returns(sessions=[], protocol_hash="c" * 64, journal_hash="a" * 64, trial_hash="b" * 64)
     assert waiting["status"] == "WAITING"
 
 
-def test_r7_controller_invokes_existing_learner_and_income_sequence_is_executable() -> None:
+def test_r7_controller_invokes_existing_learner_and_income_sequence_is_executable(tmp_path) -> None:
     protocol = build_research_protocol()
     rows = []
     for index in range(100):
@@ -227,3 +242,11 @@ def test_r7_controller_invokes_existing_learner_and_income_sequence_is_executabl
     assert len(income["forward_replay"]["periods"]) == 4
     assert income["sequence_difference"] != 0
     assert income["capacity_status"] == "UNKNOWN_NO_CAPACITY_EVIDENCE"
+    changed = build_income_illustration(illustrative_capital=100000, annual_return_assumption=.01, tax_rate=.2, annual_withdrawal_rate=.02, annual_cost_rate=.01, reserve_months=24, decay_rate=.9, period_returns=[.20, -.20, .20, -.20], fixed_withdrawal=500)
+    assert changed["forward_replay"]["ending_capital"] != income["forward_replay"]["ending_capital"]
+    artifacts = export_income_artifacts(illustration=income, output_dir=tmp_path, as_of_date="2026-09-10")
+    assert artifacts["status"] == "WRITTEN"
+    assert Path(artifacts["scenario_path"]).exists()
+    dispatch = dispatch_r7_weekly(dataset={"dataset_hash_sha256": "b" * 64, "feature_schema_version": "fixture-v1", "rows": rows}, protocol=protocol, code_sha="c" * 40, state_path=tmp_path / "r7_state.json", dispatch_id="dispatch-1")
+    assert dispatch["result"]["research_only"] is True
+    assert dispatch_r7_weekly(dataset={"dataset_hash_sha256": "b" * 64, "feature_schema_version": "fixture-v1", "rows": rows}, protocol=protocol, code_sha="c" * 40, state_path=tmp_path / "r7_state.json", dispatch_id="dispatch-1")["idempotent_replay"] is True

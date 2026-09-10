@@ -4,6 +4,7 @@ from .r5_r7_protocol import (
     admit_d022_trade,
     bootstrap_paired_session_returns,
     compare_v5_baseline_challenger,
+    dispatch_r7_weekly,
     build_income_illustration,
     build_observer_controller,
     build_research_protocol,
@@ -12,6 +13,7 @@ from .r5_r7_protocol import (
     evaluate_gap_orb15_signal,
     run_v5_admission,
     run_r7_weekly_controller,
+    export_income_artifacts,
     replay_account_twr,
     simulate_causal_fill_lifecycle,
 )
@@ -21,6 +23,7 @@ __all__ = [
     "admit_d022_trade",
     "bootstrap_paired_session_returns",
     "compare_v5_baseline_challenger",
+    "dispatch_r7_weekly",
     "build_observer_controller",
     "build_research_protocol",
     "evaluate_confirmation_summary",
@@ -28,6 +31,7 @@ __all__ = [
     "evaluate_gap_orb15_signal",
     "run_v5_admission",
     "run_r7_weekly_controller",
+    "export_income_artifacts",
     "replay_account_twr",
     "simulate_causal_fill_lifecycle",
 ]
