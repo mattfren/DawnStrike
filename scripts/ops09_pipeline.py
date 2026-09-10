@@ -119,15 +119,33 @@ def main() -> int:
         repo_sha=args.repo_sha,
         in_memory=args.in_memory_consumer,
     )
+    consumer_result_bytes = json.dumps(
+        {
+            "schema_version": "dawnstrike.ops09.guarded_consumer_results.v1",
+            "market_date": args.market_date,
+            "database_mode": consumers["database_mode"],
+            "daily": consumers["daily"],
+            "weekly": consumers["weekly"],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8") + b"\n"
+    consumer_result_path = adapter_root / "consumer-results.json"
+    bounded_writer(consumer_result_path, consumer_result_bytes)
     payload.update({
         "decision_status": "BOUND",
         "adapter_output_root": str(adapter_root),
         "adapter_status": adapted["adapter_packet"].get("status"),
         "label_count": len(adapted["adapter_packet"].get("labels", [])),
+        "consumer_results_path": str(consumer_result_path),
+        "consumer_results_sha256": __import__("hashlib").sha256(consumer_result_bytes).hexdigest(),
         "consumers": {
             "daily_status": consumers["daily"].get("status"),
             "weekly_status": consumers["weekly"].get("status"),
             "database_path": consumers["database_path"],
+            "database_mode": consumers["database_mode"],
+            "consumer_results_path": str(consumer_result_path),
         },
     })
     print(json.dumps(payload, sort_keys=True))

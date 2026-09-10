@@ -143,6 +143,8 @@ def _tree_bytes(root: Path) -> int:
     total = 0
     if not root.exists():
         return 0
+    if root.is_file() and not root.is_symlink():
+        return root.stat().st_size
     for path in root.rglob("*"):
         if path.is_file() and not path.is_symlink():
             total += path.stat().st_size
@@ -627,11 +629,15 @@ def _run_consumers(
         store = SQLiteScanStore(database_path, connection_factory=lambda: connection)
     else:
         store = SQLiteScanStore(database_path)
-    store.initialize()
-    daily = run_alpha_v6_daily_monitor(store, market_date=session["market_date"], observation_source=adapted)
-    weekly = run_alpha_v6_weekly_training(store, code_sha=repo_sha, market_date=session["market_date"], observation_source=adapted)
-    if connection is not None:
-        connection.close()
+    try:
+        store.initialize()
+        daily = run_alpha_v6_daily_monitor(store, market_date=session["market_date"], observation_source=adapted)
+        weekly = run_alpha_v6_weekly_training(
+            store, code_sha=repo_sha, market_date=session["market_date"], observation_source=adapted
+        )
+    finally:
+        if connection is not None:
+            connection.close()
     return {
         "daily": daily, "weekly": weekly, "database_path": str(database_path.resolve()),
         "database_mode": "in_memory" if in_memory else "disk", "isolated": True,
@@ -688,16 +694,6 @@ def _resume_ops09_unlocked(*, output_root: Path, input_root: Path, scope_root: P
     identity = _admitted_repository_identity(state, repo_root)
     if state.get("database_root") != str(database_root.resolve()) or database_root.resolve() == Path(r"C:\r\dawnstrike-state\shadow_real.sqlite").resolve():
         raise Ops09Error("OPS09 database root is not isolated")
-    ledger = _ByteLedger(
-        output_root=output_root,
-        database_root=database_root,
-        identity={
-            "cohort_id": state.get("cohort_id"),
-            "output_root": str(output_root),
-            "database_root": str(database_root.resolve()),
-            "repository": identity,
-        },
-    )
     now_utc = now or datetime.now(UTC)
     invocation_started_mono = time.monotonic()
     stop_path = output_root / ".cohort.stop"
@@ -739,6 +735,21 @@ def _resume_ops09_unlocked(*, output_root: Path, input_root: Path, scope_root: P
             _atomic_json(state_path, state)
             return state
         session_root = output_root / session["market_date"]; session_root.mkdir(parents=True, exist_ok=True)
+        database_path = database_root / f"{session['market_date']}.sqlite"
+        # Each expected date owns an independent durable ledger.  A cohort-wide
+        # ledger would allow an earlier date's output to consume a later date's
+        # budget and would make retry/restart accounting ambiguous.
+        ledger = _ByteLedger(
+            output_root=session_root,
+            database_root=database_path,
+            identity={
+                "cohort_id": state.get("cohort_id"),
+                "market_date": session["market_date"],
+                "output_root": str(session_root.resolve()),
+                "database_root": str(database_path.resolve()),
+                "repository": identity,
+            },
+        )
         if int(session.get("attempts") or 0) >= MAX_ATTEMPTS:
             session.update({"status": "DEGRADED", "reason": "capture attempt budget exhausted", "decision_eligibility": "ZERO"})
             continue
@@ -761,7 +772,7 @@ def _resume_ops09_unlocked(*, output_root: Path, input_root: Path, scope_root: P
             ledger=ledger, plan=state, session=session, contract=contract, scope=scope, scope_path=scope_path,
             session_root=session_root, fixture=fixture, execute=execute, timeout_seconds=remaining,
             decision_artifact=decision_path if decision_path is not None and decision_path.is_file() else None,
-            database_path=database_root / f"{session['market_date']}.sqlite",
+            database_path=database_path,
             as_of=state["expected_sessions"][index]["end_utc"],
         )
         session.update({"capture": {k: v for k, v in capture.items() if k not in {"receipt"}},
@@ -779,52 +790,37 @@ def _resume_ops09_unlocked(*, output_root: Path, input_root: Path, scope_root: P
                 "coverage_class": "delayed_historical_label_only",
                 "consumer_cadence": "existing_public_daily_monitor_and_existing_weekly_due_or_not_due",
             })
+            session_bytes = _tree_bytes(session_root)
+            capture_tree_bytes = _tree_bytes(session_root / "capture")
+            downstream_tree_bytes = _tree_bytes(session_root / "ops06")
+            session["resource_receipt"] = {
+                "persisted_bytes": session_bytes,
+                "capture_tree_bytes": capture_tree_bytes,
+                "downstream_tree_bytes": downstream_tree_bytes,
+                "capture_bytes_cap": CAPTURE_BYTES,
+                "downstream_bytes_cap": DOWNSTREAM_BYTES,
+                "total_bytes_cap": MAX_BYTES,
+                "ledger_scope": "single_market_date",
+                "database_mode": pipeline.get("consumers", {}).get("database_mode", "in_memory"),
+            }
+            if (session_bytes > MAX_BYTES or capture_tree_bytes > CAPTURE_BYTES
+                    or downstream_tree_bytes > DOWNSTREAM_BYTES):
+                session.update({"status": "DEGRADED", "decision_eligibility": "ZERO",
+                                "reason": "session artifact budget exceeded"})
+            _atomic_json(session_root / "session-receipt.json", session)
             _atomic_json(state_path, state)
             continue
         if decision_path is None or not decision_path.is_file():
             session.update({"status": "PARTIAL", "decision_status": "MISSING_INPUT", "decision_eligibility": "ZERO", "reason": "raw capture retained; decision artifact missing"}); continue
-        try:
-            remaining = _refresh_session_elapsed(
-                state=state, session=session, now_utc=now_utc,
-                state_path=state_path, invocation_started_mono=invocation_started_mono, phase="before_downstream",
-            )
-            if remaining < 1:
-                session.update({"status": "DEGRADED", "decision_eligibility": "ZERO", "reason": "session wall-time budget exhausted before downstream"})
-                continue
-            downstream_phase = f"downstream:{session['market_date']}"
-            ledger.admit(downstream_phase, DOWNSTREAM_BYTES)
-            try:
-                _assert_budget(output_root, DOWNSTREAM_BYTES, "adapter and consumer phase")
-                adapted = adapt_ops05_to_r3(observation_root=Path(capture["capture_root"]), decision_artifact=decision_path,
-                                            output_root=session_root / "ops06", as_of=state["expected_sessions"][index]["end_utc"])
-                consumers = _run_consumers(adapted=adapted, database_path=database_root / f"{session['market_date']}.sqlite",
-                                           session=session, repo_sha=identity["code_sha"])
-            finally:
-                ledger.release(downstream_phase)
-        except (Ops06AdapterError, ValueError, OSError) as exc:
-            session.update({"status": "DEGRADED", "decision_status": "INVALID_OR_LATE", "decision_eligibility": "ZERO", "reason": str(exc)}); continue
-        session.update({"status": "COMPLETE", "decision_status": "BOUND", "decision_eligibility": "DELAYED_LABEL_ONLY",
-                        "ops06": {k: v for k, v in adapted.items() if k not in {"adapter_packet", "decisions"}},
-                        "consumers": {"daily_status": consumers["daily"].get("status"), "weekly_status": consumers["weekly"].get("status"),
-                                      "database_path": consumers["database_path"]},
-                        "coverage_class": "delayed_historical_label_only",
-                        "consumer_cadence": "existing_public_daily_monitor_and_existing_weekly_due_or_not_due"})
-        session_bytes = _tree_bytes(session_root)
-        capture_tree_bytes = _tree_bytes(session_root / "capture")
-        downstream_tree_bytes = _tree_bytes(session_root / "ops06")
-        session["resource_receipt"] = {
-            "persisted_bytes": session_bytes,
-            "capture_tree_bytes": capture_tree_bytes,
-            "downstream_tree_bytes": downstream_tree_bytes,
-            "capture_bytes_cap": CAPTURE_BYTES,
-            "downstream_bytes_cap": DOWNSTREAM_BYTES,
-            "total_bytes_cap": MAX_BYTES,
-        }
-        if (session_bytes > MAX_BYTES or capture_tree_bytes > CAPTURE_BYTES
-                or downstream_tree_bytes > DOWNSTREAM_BYTES):
-            session.update({"status": "DEGRADED", "decision_eligibility": "ZERO",
-                            "reason": "session artifact budget exceeded"})
-        _atomic_json(session_root / "session-receipt.json", session)
+        # A CAPTURED child that did not return BOUND is never completed by a
+        # parent-side adapter or consumer fallback.  That would escape the
+        # native admission boundary and make the receipt untrustworthy.
+        session.update({
+            "status": "DEGRADED",
+            "decision_status": "CONSUMER_INCOMPLETE",
+            "decision_eligibility": "ZERO",
+            "reason": "guarded child did not complete adapter and consumers",
+        })
         _atomic_json(state_path, state)
     statuses = {str(row.get("status")) for row in state["sessions"]}
     state["status"] = "RUNNING" if statuses & {"EXPECTED", "RUNNING"} else "COMPLETE"
