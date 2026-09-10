@@ -5,7 +5,10 @@ param(
     [Parameter(Mandatory = $true)][string]$LaunchManifestPath,
     [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')][string]$LaunchManifestSha256,
     [string]$StateRoot = "C:\r\dawnstrike-state",
-    [string]$MarketDate = (Get-Date).ToString("yyyy-MM-dd")
+    [string]$MarketDate = (Get-Date).ToString("yyyy-MM-dd"),
+    [string]$ObservationRoot = "",
+    [string]$DecisionArtifact = "",
+    [string]$DecisionDb = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -68,15 +71,21 @@ try {
         exit 4
     }
 
+    $trainingArguments = @(
+        "-m", "intraday_scanner.cli", "alpha-v6-train-weekly",
+        "--db-path", $dbPath,
+        "--code-sha", $releaseSha,
+        "--market-date", $MarketDate,
+        "--attempt-id", "weekly-$MarketDate-$releaseSha"
+    )
+    if ($ObservationRoot -or $DecisionArtifact) {
+        if (-not $ObservationRoot -or -not $DecisionArtifact) { throw "ObservationRoot and DecisionArtifact must be supplied together." }
+        $trainingArguments += @("--observation-root", $ObservationRoot, "--decision-artifact", $DecisionArtifact)
+        if ($DecisionDb) { $trainingArguments += @("--decision-db", $DecisionDb) }
+    }
     $training = Invoke-DawnstrikeNativeProcess `
         -FilePath "py.exe" `
-        -ArgumentList @(
-            "-m", "intraday_scanner.cli", "alpha-v6-train-weekly",
-            "--db-path", $dbPath,
-            "--code-sha", $releaseSha,
-            "--market-date", $MarketDate,
-            "--attempt-id", "weekly-$MarketDate-$releaseSha"
-        ) `
+        -ArgumentList $trainingArguments `
         -LogRoot $logRoot `
         -LogName "alpha_v6_weekly_training-$MarketDate"
     if ($training.exit_code -ne 0) {

@@ -7,11 +7,13 @@ never alters V5, creates orders, or changes a production policy.
 
 from __future__ import annotations
 
-import math
 import json
+import math
+import sqlite3
+import urllib.parse
 from collections import defaultdict
-from typing import Any
 from pathlib import Path
+from typing import Any
 
 from intraday_scanner.alpha.fill_truth import MISSING_COMMITTED_FILL_TRUTH
 from intraday_scanner.alpha.v6.calibration import calibration_report, interval_coverage
@@ -22,11 +24,11 @@ from intraday_scanner.alpha.v6.contracts import (
     utc_now,
 )
 from intraday_scanner.alpha.v6.dataset_builder import build_return_dataset
-from intraday_scanner.alpha.v6.observation_dataset import build_observation_dataset
 from intraday_scanner.alpha.v6.decision_ledger import validate_decision_batch
 from intraday_scanner.alpha.v6.drift import build_drift_report
 from intraday_scanner.alpha.v6.experiment_ledger import build_trial_receipt
 from intraday_scanner.alpha.v6.label_builder import build_label_families
+from intraday_scanner.alpha.v6.observation_dataset import build_observation_dataset
 from intraday_scanner.alpha.v6.registry import promotion_review_packet
 from intraday_scanner.alpha.v6.training import (
     train_shadow_challengers,
@@ -74,6 +76,8 @@ def load_observation_source_from_artifacts(
     *,
     observation_root: str | Path,
     decision_artifact: str | Path,
+    decision_db: str | Path | None = None,
+    market_date: str | None = None,
     as_of: str | None = None,
 ) -> dict[str, Any]:
     """Bind R2 producer artifacts to the actual Alpha cycle decision output."""
@@ -106,9 +110,23 @@ def load_observation_source_from_artifacts(
             "broker_execution_enabled": False,
         }
     producer_envelope: dict[str, Any] = {}
+    decision_db_identity: dict[str, Any] = {}
     if isinstance(decisions, dict):
         producer_envelope = dict(decisions)
         decisions = producer_envelope.get("v6_decision_records")
+        if not isinstance(decisions, list) and decision_db is not None:
+            decisions, decision_db_identity = _load_decisions_from_read_only_db(
+                decision_db,
+                market_date=(
+                    market_date
+                    or str(producer_envelope.get("market_date") or "")
+                    or str(
+                        (producer_envelope.get("source_summary") or {}).get(
+                            "requested_observed_at", ""
+                        )
+                    )[:10]
+                ),
+            )
     if not isinstance(decisions, list) or not all(isinstance(row, dict) for row in decisions):
         return {
             "status": "INVALID_SCHEMA",
@@ -125,11 +143,78 @@ def load_observation_source_from_artifacts(
         "as_of": as_of,
         "decision_artifact_path": str(decision_path),
         "decision_artifact_sha256": _sha256_file(decision_path),
+        "decision_db_identity": decision_db_identity or None,
         "producer_identity": {
             key: producer_envelope.get(key)
             for key in ("code_sha", "scan_id", "producer_run_id", "market_date", "run_type")
             if producer_envelope.get(key) is not None
         },
+    }
+
+
+def _load_decisions_from_read_only_db(
+    decision_db: str | Path, *, market_date: str
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Extract persisted actual decisions without mutating the source DB.
+
+    Historical alpha-cycle envelopes before the decision-artifact contract do
+    not carry ``v6_decision_records``.  The persisted rows are the authoritative
+    actual source for that envelope; an empty list would erase evidence and is
+    therefore never used as a fallback.
+    """
+
+    path = Path(decision_db).resolve()
+    if not path.is_file():
+        raise ValueError(f"decision source database is missing: {path}")
+    if not market_date or len(market_date) < 10:
+        raise ValueError("decision source database requires an exact market date")
+    raw_hash = _sha256_file(path)
+    uri = "file:" + urllib.parse.quote(path.as_posix(), safe="/:\\") + "?mode=ro"
+    try:
+        with sqlite3.connect(uri, uri=True) as connection:
+            connection.execute("PRAGMA query_only = ON")
+            connection.row_factory = sqlite3.Row
+            columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(alpha_v6_decisions)")
+            }
+            if not columns:
+                raise ValueError("decision source database lacks alpha_v6_decisions")
+            rows = connection.execute(
+                "SELECT * FROM alpha_v6_decisions WHERE market_date = ? "
+                "ORDER BY decision_at, decision_id",
+                (str(market_date)[:10],),
+            ).fetchall()
+    except sqlite3.Error as exc:
+        raise ValueError(f"decision source database read failed: {exc}") from exc
+    decisions: list[dict[str, Any]] = []
+    for row in rows:
+        payload_raw = row["payload_json"] if "payload_json" in row.keys() else None
+        try:
+            payload = json.loads(str(payload_raw)) if payload_raw else {}
+        except json.JSONDecodeError as exc:
+            raise ValueError("decision source database has invalid payload_json") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("decision source database payload_json must be an object")
+        merged = dict(payload)
+        for field in (
+            "decision_id", "scan_id", "market_date", "decision_at", "ticker",
+            "strategy_version", "model_version", "action", "setup_key",
+            "source_lineage_hash_sha256", "source_artifact_hash_sha256",
+        ):
+            if field in row.keys() and row[field] is not None:
+                merged[field] = row[field]
+        if str(merged.get("market_date") or "")[:10] != str(market_date)[:10]:
+            raise ValueError("decision source database returned a cross-date row")
+        decisions.append(merged)
+    if not decisions:
+        raise ValueError(f"decision source database has no rows for {market_date[:10]}")
+    return decisions, {
+        "path": str(path),
+        "sha256": raw_hash,
+        "market_date": str(market_date)[:10],
+        "row_count": len(decisions),
+        "read_only": True,
     }
 
 

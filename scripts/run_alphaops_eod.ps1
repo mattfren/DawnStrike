@@ -9,6 +9,9 @@ param(
     [int]$PaperOpsRetryLimit = 3,
     [int]$PaperOpsRetryDelaySeconds = 60,
     [string]$BackupRoot = "C:\r\dawnstrike-state-backups",
+    [string]$ObservationRoot = "",
+    [string]$DecisionArtifact = "",
+    [string]$DecisionDb = "",
     [ValidateRange(1, 365)]
     [int]$BackupRetention = 7
 )
@@ -336,9 +339,15 @@ try {
         Set-OverallFailure -ExitCode $learnExit
     }
 
+    $v6DailyArguments = @("-m", "intraday_scanner.cli", "alpha-v6-daily-monitor", "--db-path", $dbPath, "--market-date", $MarketDate)
+    if ($ObservationRoot -or $DecisionArtifact) {
+        if (-not $ObservationRoot -or -not $DecisionArtifact) { throw "ObservationRoot and DecisionArtifact must be supplied together." }
+        $v6DailyArguments += @("--observation-root", $ObservationRoot, "--decision-artifact", $DecisionArtifact)
+        if ($DecisionDb) { $v6DailyArguments += @("--decision-db", $DecisionDb) }
+    }
     $v6DailyMonitor = Invoke-DawnstrikeNativeProcess `
         -FilePath "py.exe" `
-        -ArgumentList @("-m", "intraday_scanner.cli", "alpha-v6-daily-monitor", "--db-path", $dbPath, "--market-date", $MarketDate) `
+        -ArgumentList $v6DailyArguments `
         -LogRoot $logRoot `
         -LogName "alpha_v6_daily_monitor-$MarketDate"
     if ($v6DailyMonitor.exit_code -ne 0) {
