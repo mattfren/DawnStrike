@@ -15,6 +15,7 @@ import json
 import os
 import random
 import time as wall_clock
+import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
@@ -37,6 +38,7 @@ MAX_RSS_BYTES = 256 * 1024 * 1024
 MAX_WALL_SECONDS = 1_800
 WINDOW_SCHEMA = "dawnstrike.ops05.historical_window.v1"
 RECEIPT_SCHEMA = "dawnstrike.ops05.historical_bars_receipt.v1"
+TRUSTED_CAPTURE_STATE_ROOT = Path(r"C:\r\dawnstrike-ops05-logical-captures")
 
 
 def _atomic_write(path: Path, data: bytes) -> None:
@@ -65,8 +67,13 @@ class _DurableCapture:
     ) -> None:
         self.root = root
         self.identity = identity
+        self.resume_across_roots = resume_across_roots
         self.fingerprint = _sha256(identity)
-        ledger_parent = root.parent / ".ops05-capture-ledger"
+        ledger_parent = (
+            TRUSTED_CAPTURE_STATE_ROOT
+            if resume_across_roots
+            else root.parent / ".ops05-capture-ledger"
+        )
         root_key = (
             "shared"
             if resume_across_roots
@@ -79,6 +86,80 @@ class _DurableCapture:
         self.page_dir = self.ledger / "pages"
         self.state: dict[str, Any] = {}
         self._held = False
+        self.owner_generation: str | None = None
+        self._terminal_reserve = min(4096, max(512, MAX_BYTES // 8))
+
+    def _known_roots(self) -> list[Path]:
+        roots: list[Path] = []
+        if self.index_path.is_file():
+            try:
+                index = json.loads(self.index_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                index = {}
+            by_capture = (
+                index.get("output_roots_by_fingerprint", {})
+                if isinstance(index, dict)
+                else {}
+            )
+            for raw in by_capture.get(self.fingerprint, []) if isinstance(by_capture, dict) else []:
+                if isinstance(raw, str):
+                    roots.append(Path(raw))
+        roots.append(self.root)
+        return list(dict.fromkeys(path.resolve() for path in roots))
+
+    def _committed_bytes(self) -> int:
+        paths: set[Path] = set()
+        for base in (self.ledger.parent, *self._known_roots()):
+            if not base.exists():
+                continue
+            for path in base.rglob("*"):
+                if path.is_file():
+                    paths.add(path.resolve())
+        if self.index_path.is_file():
+            paths.add(self.index_path.resolve())
+        return sum(path.stat().st_size for path in paths if path.exists())
+
+    def _budgeted_write(self, path: Path, data: bytes, *, terminal: bool = False) -> None:
+        current = self._committed_bytes()
+        if current + len(data) > MAX_BYTES:
+            raise Ops05Error("OPS05 cumulative persisted-byte cap exceeded")
+        if not terminal and current + len(data) + self._terminal_reserve > MAX_BYTES:
+            raise Ops05Error("OPS05 persisted-byte cap must retain terminal receipt capacity")
+        _atomic_write(path, data)
+
+    def _budgeted_json(self, path: Path, value: Any, *, terminal: bool = False) -> None:
+        self._budgeted_write(
+            path,
+            json.dumps(value, sort_keys=True, indent=2).encode("utf-8") + b"\n",
+            terminal=terminal,
+        )
+
+    def _state_hash(self) -> str:
+        return _sha256(self.state)
+
+    def _page_manifest_hash(self) -> str:
+        manifest: list[dict[str, Any]] = []
+        for key, record in sorted((self.state.get("pages") or {}).items()):
+            manifest.append({"key": key, **dict(record)})
+        return _sha256(manifest)
+
+    def _lock_payload(self) -> dict[str, Any]:
+        return {
+            "schema_version": "dawnstrike.ops05.capture_owner.v2",
+            "pid": os.getpid(),
+            "pid_start_at": self.state.get("owner_pid_start_at") or _now(),
+            "started_at": self.state.get("started_at"),
+            "owner_generation": self.owner_generation,
+            "fingerprint": self.fingerprint,
+            "identity": self.identity,
+            "state_sha256": self._state_hash(),
+            "page_manifest_sha256": self._page_manifest_hash(),
+        }
+
+    def _refresh_lock(self) -> None:
+        if not self._held or not self.owner_generation:
+            return
+        self._budgeted_json(self.lock_path, self._lock_payload(), terminal=True)
 
     def _identity_matches(self, state: Mapping[str, Any]) -> bool:
         return (
@@ -120,6 +201,74 @@ class _DurableCapture:
                 raise Ops05Error("immutable OPS05 binding changed")
         return value
 
+    def _verify_state_pages(self, state: Mapping[str, Any]) -> None:
+        pages = state.get("pages") or {}
+        if not isinstance(pages, dict):
+            raise Ops05Error("OPS05 durable page manifest is invalid")
+        for key, record in pages.items():
+            if not isinstance(record, dict):
+                raise Ops05Error(f"OPS05 durable page record is invalid: {key}")
+            page_path = self.ledger / str(record.get("page_path") or "")
+            try:
+                page = json.loads(page_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise Ops05Error("OPS05 durable page body is unreadable") from exc
+            if (
+                not isinstance(page, dict)
+                or page.get("raw_payload_hash_sha256") != record.get("raw_payload_hash_sha256")
+                or _sha256(page.get("raw_payload_items", []))
+                != record.get("raw_payload_hash_sha256")
+            ):
+                raise Ops05Error("OPS05 durable page authentication failed")
+
+    def completed_replay(self) -> dict[str, Any] | None:
+        if not self.state_path.is_file() or not self.resume_across_roots:
+            return None
+        try:
+            state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise Ops05Error("OPS05 durable capture state is unreadable") from exc
+        if not isinstance(state, dict) or not self._identity_matches(state):
+            raise Ops05Error("OPS05 durable capture identity changed")
+        if state.get("status") != "CAPTURED":
+            return None
+        canonical = Path(str(state.get("canonical_output_root") or "")).resolve()
+        if not canonical.is_dir() or canonical == self.root:
+            return None
+        self.state = state
+        self._verify_state_pages(state)
+        canonical_capture = _DurableCapture(
+            root=canonical, identity=self.identity, resume_across_roots=True
+        )
+        receipt = canonical_capture.existing_receipt()
+        if receipt is None:
+            raise Ops05Error("OPS05 canonical capture receipt is missing")
+        return receipt
+
+    def write_reference(self, receipt: Mapping[str, Any]) -> None:
+        index: dict[str, Any] = {}
+        if self.index_path.is_file():
+            try:
+                index = json.loads(self.index_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise Ops05Error("OPS05 capture identity index is unreadable") from exc
+        by_capture = index.setdefault("output_roots_by_fingerprint", {})
+        roots = [str(Path(item).resolve()) for item in by_capture.get(self.fingerprint, [])]
+        if str(self.root) not in roots:
+            roots.append(str(self.root))
+        by_capture[self.fingerprint] = roots
+        self._budgeted_json(self.index_path, index, terminal=True)
+        self._budgeted_json(
+            self.root / "capture-reference.json",
+            {
+                "schema_version": "dawnstrike.ops05.capture_reference.v1",
+                "fingerprint": self.fingerprint,
+                "canonical_output_root": str(self.state["canonical_output_root"]),
+                "receipt_sha256": _sha256(dict(receipt)),
+            },
+            terminal=True,
+        )
+
     def __enter__(self) -> _DurableCapture:
         self.ledger.mkdir(parents=True, exist_ok=True)
         self.index_path.parent.mkdir(parents=True, exist_ok=True)
@@ -139,8 +288,13 @@ class _DurableCapture:
         prior_fingerprint = index.get(index_key)
         if prior_fingerprint and prior_fingerprint != self.fingerprint:
             raise Ops05Error("OPS05 source/config/window identity conflicts with prior capture")
+        by_capture = index.setdefault("output_roots_by_fingerprint", {})
+        roots = [str(Path(item).resolve()) for item in by_capture.get(self.fingerprint, [])]
+        if str(self.root) not in roots:
+            roots.append(str(self.root))
+        by_capture[self.fingerprint] = roots
         index[index_key] = self.fingerprint
-        _atomic_json(self.index_path, index)
+        self._budgeted_json(self.index_path, index, terminal=True)
         if self.lock_path.exists():
             try:
                 owner = json.loads(self.lock_path.read_text(encoding="utf-8"))
@@ -150,13 +304,15 @@ class _DurableCapture:
             if pid == os.getpid() or _pid_exists(pid):
                 raise Ops05Error("OPS05 capture already has a live owner")
             raise Ops05Error("OPS05 stale capture owner requires explicit reconciliation")
+        self.owner_generation = uuid.uuid4().hex
+        self._held = True
         try:
             fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError as exc:
+            self._held = False
             raise Ops05Error("OPS05 capture lock acquisition raced") from exc
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump({"pid": os.getpid(), "started_at": _now()}, handle, sort_keys=True)
-        self._held = True
+        os.close(fd)
+        self._budgeted_json(self.lock_path, self._lock_payload(), terminal=True)
         if self.state_path.is_file():
             try:
                 self.state = json.loads(self.state_path.read_text(encoding="utf-8"))
@@ -185,7 +341,7 @@ class _DurableCapture:
                     int(item.get("observed_item_bytes", 0))
                     for item in self.state["pages"].values()
                 )
-                self._save()
+                self.state["schema_migrated_at"] = _now()
         else:
             self.state = {
                 "schema_version": self.schema,
@@ -202,27 +358,115 @@ class _DurableCapture:
                 "raw_payload_bytes": 0,
                 "wall_seconds_observed": 0.0,
             }
-            self._save()
+        self.state["owner_generation"] = self.owner_generation
+        self.state.setdefault("owner_pid_start_at", self._lock_payload()["pid_start_at"])
+        self._save()
         return self
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         if self._held:
-            self.lock_path.unlink(missing_ok=True)
+            try:
+                payload = json.loads(self.lock_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                payload = {}
+            if payload.get("owner_generation") == self.owner_generation:
+                self.lock_path.unlink(missing_ok=True)
             self._held = False
 
-    def _save(self) -> None:
-        _atomic_json(self.state_path, self.state)
-        _atomic_json(self.root / "capture-state.json", self.state)
+    def reconcile_stale_owner(
+        self,
+        *,
+        expected_lock_sha256: str,
+        expected_state_sha256: str,
+        expected_page_manifest_sha256: str,
+        expected_pid: int,
+        expected_pid_start_at: str,
+        expected_owner_generation: str,
+    ) -> _DurableCapture:
+        """Adopt one dead owner only after exact identity/hash confirmation.
+
+        The caller must retain the returned object and call ``__exit__`` (or
+        use it as a context manager after adoption) to release the new owner.
+        Live, unknown, mismatched, and PID-reused owners are refused.
+        """
+        if self.lock_path.is_symlink() or not self.lock_path.is_file():
+            raise Ops05Error("OPS05 stale owner lock is missing")
+        lock_bytes = self.lock_path.read_bytes()
+        if hashlib.sha256(lock_bytes).hexdigest() != expected_lock_sha256:
+            raise Ops05Error("OPS05 stale owner lock changed")
+        try:
+            lock = json.loads(lock_bytes)
+        except json.JSONDecodeError as exc:
+            raise Ops05Error("OPS05 stale owner lock is invalid") from exc
+        if not isinstance(lock, dict):
+            raise Ops05Error("OPS05 stale owner lock is not an object")
+        if (
+            lock.get("pid") != expected_pid
+            or lock.get("pid_start_at") != expected_pid_start_at
+            or lock.get("owner_generation") != expected_owner_generation
+            or lock.get("fingerprint") != self.fingerprint
+            or lock.get("identity") != self.identity
+            or lock.get("state_sha256") != expected_state_sha256
+            or lock.get("page_manifest_sha256") != expected_page_manifest_sha256
+        ):
+            raise Ops05Error("OPS05 stale owner identity or hash mismatch")
+        if not isinstance(expected_pid, int) or expected_pid <= 0:
+            raise Ops05Error("OPS05 stale owner PID is unknown")
+        if _pid_exists(expected_pid):
+            raise Ops05Error("OPS05 stale owner is live or PID-reused")
+        if not self.state_path.is_file():
+            raise Ops05Error("OPS05 stale owner state is missing")
+        try:
+            state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise Ops05Error("OPS05 stale owner state is unreadable") from exc
+        if not isinstance(state, dict) or not self._identity_matches(state):
+            raise Ops05Error("OPS05 stale owner state identity mismatch")
+        self.state = state
+        if self._state_hash() != expected_state_sha256:
+            raise Ops05Error("OPS05 stale owner state hash mismatch")
+        self._verify_state_pages(state)
+        if self._page_manifest_hash() != expected_page_manifest_sha256:
+            raise Ops05Error("OPS05 stale owner page manifest mismatch")
+        reconcile_lock = self.ledger / "reconcile.lock"
+        try:
+            fd = os.open(reconcile_lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError as exc:
+            raise Ops05Error("OPS05 stale owner reconciliation is already held") from exc
+        os.close(fd)
+        try:
+            self._budgeted_json(
+                reconcile_lock,
+                {
+                    "pid": os.getpid(),
+                    "started_at": _now(),
+                    "expected_lock_sha256": expected_lock_sha256,
+                },
+                terminal=True,
+            )
+            if hashlib.sha256(self.lock_path.read_bytes()).hexdigest() != expected_lock_sha256:
+                raise Ops05Error("OPS05 stale owner lock changed during reconciliation")
+            self.owner_generation = uuid.uuid4().hex
+            self._held = True
+            self.state["owner_generation"] = self.owner_generation
+            self.state["owner_pid_start_at"] = _now()
+            self.state["reconciled_from_owner_generation"] = expected_owner_generation
+            self._save(terminal=True)
+            self._refresh_lock()
+            return self
+        finally:
+            reconcile_lock.unlink(missing_ok=True)
+
+    def _save(self, *, terminal: bool = False) -> None:
+        self._budgeted_json(self.state_path, self.state, terminal=terminal)
+        self._budgeted_json(self.root / "capture-state.json", self.state, terminal=terminal)
+        self._refresh_lock()
         ledger_bytes = self.ledger_bytes()
         if ledger_bytes > MAX_BYTES:
             raise Ops05Error("OPS05 durable journal exceeds the 64 MiB bound")
 
     def ledger_bytes(self) -> int:
-        if not self.state_path.is_file():
-            return 0
-        return self.state_path.stat().st_size + sum(
-            path.stat().st_size for path in self.page_dir.glob("*.json") if path.is_file()
-        )
+        return self._committed_bytes()
 
     def check_budget(self, *, events: int = 0, payload_bytes: int = 0) -> None:
         if int(self.state.get("page_count", 0)) >= MAX_PAGES:
@@ -291,7 +535,7 @@ class _DurableCapture:
         self.check_budget(events=int(page.get("item_count", 0)), payload_bytes=page_bytes)
         filename = hashlib.sha256(key.encode("utf-8")).hexdigest() + ".json"
         page_path = self.page_dir / filename
-        _atomic_json(page_path, page)
+        self._budgeted_json(page_path, page, terminal=False)
         record = {
             "page_path": f"pages/{filename}",
             "page_number": page["page_number"],
@@ -323,18 +567,27 @@ class _DurableCapture:
             "message": str(error),
             "at": _now(),
         }
-        self._save()
-        _atomic_json(self.root / "partial-receipt.json", {
-            "schema_version": "dawnstrike.ops05.partial_capture_receipt.v1",
-            "status": "PARTIAL",
-            "identity": self.identity,
-            "durable_page_count": len(self.state.get("pages", {})),
-            "derived_bar_count": self.state.get("derived_bar_count", 0),
-            "derived_boundary_count": self.state.get("derived_boundary_count", 0),
-            "derived_raw_stream_sha256": self.state.get("derived_raw_stream_sha256"),
-            "failure": self.state["failure"],
-            "prior_pages_retained": True,
-        })
+        try:
+            self._save(terminal=True)
+            self._budgeted_json(
+                self.root / "partial-receipt.json",
+                {
+                    "schema_version": "dawnstrike.ops05.partial_capture_receipt.v1",
+                    "status": "PARTIAL",
+                    "identity": self.identity,
+                    "durable_page_count": len(self.state.get("pages", {})),
+                    "derived_bar_count": self.state.get("derived_bar_count", 0),
+                    "derived_boundary_count": self.state.get("derived_boundary_count", 0),
+                    "derived_raw_stream_sha256": self.state.get("derived_raw_stream_sha256"),
+                    "failure": self.state["failure"],
+                    "prior_pages_retained": True,
+                },
+                terminal=True,
+            )
+        except Ops05Error:
+            # A terminal error receipt cannot exceed the hard cap.  The
+            # already-authenticated state/page journal remains authoritative.
+            return
 
     def checkpoint_derived(
         self, bars: Sequence[Mapping[str, Any]], boundary_events: Sequence[Mapping[str, Any]]
@@ -343,8 +596,14 @@ class _DurableCapture:
         boundary = "\n".join(
             json.dumps(row, sort_keys=True) for row in boundary_events
         ) + ("\n" if boundary_events else "")
-        _atomic_write(self.root / "partial" / "raw-bars.jsonl", raw.encode("utf-8"))
-        _atomic_write(self.root / "partial" / "boundary-events.jsonl", boundary.encode("utf-8"))
+        self._budgeted_write(
+            self.root / "partial" / "raw-bars.jsonl", raw.encode("utf-8"), terminal=False
+        )
+        self._budgeted_write(
+            self.root / "partial" / "boundary-events.jsonl",
+            boundary.encode("utf-8"),
+            terminal=False,
+        )
         self.state["derived_bar_count"] = len(bars)
         self.state["derived_boundary_count"] = len(boundary_events)
         self.state["derived_raw_stream_sha256"] = _sha256(list(bars))
@@ -353,7 +612,8 @@ class _DurableCapture:
 
     def complete(self) -> None:
         self.state["status"] = "CAPTURED"
-        self._save()
+        self.state["canonical_output_root"] = str(self.root)
+        self._save(terminal=True)
 
 
 def _now() -> str:
@@ -1141,7 +1401,7 @@ def _produce_historical_bars(
         if path.is_file() and path.read_text(encoding="utf-8") != text:
             raise Ops05Error(f"immutable OPS05 artifact conflict: {path.name}")
         if not path.is_file():
-            _atomic_write(path, text.encode("utf-8"))
+            durable._budgeted_write(path, text.encode("utf-8"), terminal=True)
     durable.complete()
     return receipt
 
@@ -1181,6 +1441,10 @@ def produce_historical_bars(
     existing = durable.existing_receipt()
     if existing is not None:
         return existing
+    replay = durable.completed_replay()
+    if replay is not None:
+        durable.write_reference(replay)
+        return replay
     try:
         with durable:
             return _produce_historical_bars(
@@ -1195,5 +1459,8 @@ def produce_historical_bars(
             )
     except BaseException as exc:
         if durable._held:
-            durable.fail("capture", exc)
+            try:
+                durable.fail("capture", exc)
+            finally:
+                durable.__exit__(type(exc), exc, exc.__traceback__)
         raise

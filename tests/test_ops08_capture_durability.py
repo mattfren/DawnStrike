@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 
 import pytest
@@ -59,10 +60,13 @@ class DurableProvider:
         )
 
 
-def _run(root, provider, **kwargs):
+def _run(root, provider, *, source_hash="a" * 64, capture_hash="b" * 64, **kwargs):
     return produce_historical_bars(
         market_date="2026-09-09", census=_census(), provider=provider, config=object(),
-        output_root=root, source_config_hash="a" * 64, capture_receipt_hash="b" * 64, **kwargs,
+        output_root=root,
+        source_config_hash=source_hash,
+        capture_receipt_hash=capture_hash,
+        **kwargs,
     )
 
 
@@ -144,3 +148,98 @@ def test_page_tamper_and_stale_owner_are_fail_closed(tmp_path) -> None:
     durable.lock_path.write_text(json.dumps({"pid": 99999999}))
     with pytest.raises(Ops05Error, match="stale capture owner"):
         _run(fresh, DurableProvider())
+
+
+def test_explicit_dead_owner_adoption_requires_exact_hashes_and_resumes(tmp_path) -> None:
+    root = tmp_path / "adopt"
+    source_hash = hashlib.sha256(f"source:{root}".encode()).hexdigest()
+    capture_hash = hashlib.sha256(f"capture:{root}".encode()).hexdigest()
+    with pytest.raises(KeyboardInterrupt):
+        _run(
+            root,
+            DurableProvider(interrupt_after_first=True),
+            source_hash=source_hash,
+            capture_hash=capture_hash,
+            resume_across_roots=True,
+        )
+    state = json.loads((root / "capture-state.json").read_text())
+    windows = ops05.build_windows("2026-09-09")
+    rows, _ = ops05.select_movers(_census())
+    identity = {
+        "market_date": "2026-09-09", "provider": "alpaca", "feed": "sip",
+        "source_config_sha256": source_hash, "capture_receipt_sha256": capture_hash,
+        "census_sha256": ops05._sha256(rows),
+        "windows": {key: value.as_dict() for key, value in windows.items()},
+    }
+    durable = ops05._DurableCapture(
+        root=root, identity=identity, resume_across_roots=True
+    )
+    durable.state = state
+    owner_generation = "dead-owner-generation"
+    lock = {
+        "schema_version": "dawnstrike.ops05.capture_owner.v2",
+        "pid": 99999999,
+        "pid_start_at": "2026-09-10T00:00:00Z",
+        "started_at": state["started_at"],
+        "owner_generation": owner_generation,
+        "fingerprint": durable.fingerprint,
+        "identity": identity,
+        "state_sha256": durable._state_hash(),
+        "page_manifest_sha256": durable._page_manifest_hash(),
+    }
+    durable.lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_bytes = json.dumps(lock, sort_keys=True).encode()
+    durable.lock_path.write_bytes(lock_bytes)
+    adopted = durable.reconcile_stale_owner(
+        expected_lock_sha256=ops05.hashlib.sha256(lock_bytes).hexdigest(),
+        expected_state_sha256=lock["state_sha256"],
+        expected_page_manifest_sha256=lock["page_manifest_sha256"],
+        expected_pid=lock["pid"],
+        expected_pid_start_at=lock["pid_start_at"],
+        expected_owner_generation=owner_generation,
+    )
+    adopted.__exit__(None, None, None)
+    assert not durable.lock_path.exists()
+    assert _run(
+        root,
+        DurableProvider(),
+        source_hash=source_hash,
+        capture_hash=capture_hash,
+        resume_across_roots=True,
+    )["status"] == "CAPTURED"
+
+
+def test_completed_cross_parent_replay_is_reference_only(tmp_path) -> None:
+    first = tmp_path / "parent-a" / "one"
+    second = tmp_path / "parent-b" / "two"
+    _run(first, DurableProvider(), resume_across_roots=True)
+    replay_provider = DurableProvider()
+    receipt = _run(second, replay_provider, resume_across_roots=True)
+    assert receipt["status"] == "CAPTURED"
+    assert replay_provider.calls == 0
+    assert (second / "capture-reference.json").is_file()
+    assert not (second / "raw-bars.jsonl").exists()
+
+
+def test_reduced_byte_cap_includes_partial_and_terminal_artifacts(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(ops05, "MAX_BYTES", 5000)
+    root = tmp_path / "bounded"
+    with pytest.raises(Ops05Error, match="persisted-byte|journal|raw provider|terminal"):
+        _run(
+            root,
+            DurableProvider(),
+            source_hash="e" * 64,
+            capture_hash="f" * 64,
+            resume_across_roots=True,
+        )
+    rows, _ = ops05.select_movers(_census())
+    identity_key = ops05._sha256({
+        "market_date": "2026-09-09", "capture_receipt_sha256": "f" * 64,
+        "census_sha256": ops05._sha256(rows), "provider": "alpaca", "feed": "sip",
+    })
+    index = json.loads((ops05.TRUSTED_CAPTURE_STATE_ROOT / "index.json").read_text())
+    fingerprint = index[identity_key]
+    trusted = ops05.TRUSTED_CAPTURE_STATE_ROOT / fingerprint
+    files = [path for path in trusted.rglob("*") if path.is_file()]
+    files.extend(path for path in root.rglob("*") if path.is_file())
+    assert sum(path.stat().st_size for path in files) <= 5000
