@@ -39,6 +39,7 @@ def build_observation_dataset(
     decisions: Sequence[Mapping[str, Any]],
     as_of: str | datetime | None = None,
     target_contract: Mapping[str, Any] | None = None,
+    observational_universe_id: str | None = None,
 ) -> dict[str, Any]:
     """Build an observational packet from one immutable R2 session.
 
@@ -126,10 +127,17 @@ def build_observation_dataset(
             diagnostics.append(_diagnostic(decision, "AMBIGUOUS", "decision_session_mismatch"))
             continue
         membership = decision.get("universe_membership")
+        # A source decision may truthfully retain UNREGISTERED/REJECTED or
+        # BLOCKED status while an isolated observational registration binds
+        # the same immutable row to a research universe.  Use that binding
+        # only for the join identity; never rewrite the decision payload.
+        effective_universe_id = (
+            observational_universe_id if observational_universe_id else
+            membership.get("universe_id") if isinstance(membership, Mapping) else None
+        )
         if (
             not isinstance(membership, Mapping)
-            or str(membership.get("universe_id") or "")
-            != typed_manifest.universe_generation_id
+            or str(effective_universe_id or "") != typed_manifest.universe_generation_id
             or str(decision.get("strategy_version") or "")
             != "dawnstrike-alphaops-v6-shadow"
         ):

@@ -23,7 +23,11 @@ class _BoundedWriter:
         self.baseline = self._tree_bytes()
 
     def _tree_bytes(self) -> int:
-        return sum(path.stat().st_size for path in self.root.rglob("*") if path.is_file() and not path.is_symlink())
+        return sum(
+            path.stat().st_size
+            for path in self.root.rglob("*")
+            if path.is_file() and not path.is_symlink()
+        )
 
     def __call__(self, path: Path, data: bytes) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -61,6 +65,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--env-file", type=Path)
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--decision-artifact", type=Path)
+    parser.add_argument("--registration-context", type=Path)
+    parser.add_argument(
+        "--retained-capture-root", type=Path,
+        help="consume an already authenticated archive without invoking OPS05/provider",
+    )
     parser.add_argument("--adapter-output-root", type=Path)
     parser.add_argument("--database-path", type=Path)
     parser.add_argument("--repo-sha", required=True)
@@ -73,42 +82,52 @@ def _parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = _parser().parse_args()
-    ops05_args = [
+    retained_root = args.retained_capture_root.resolve() if args.retained_capture_root else None
+    if retained_root is not None:
+        if not (retained_root / "receipt.json").is_file():
+            raise RuntimeError("retained capture receipt is missing")
+        capture_root = retained_root
+        exit_code = 0
+    else:
+        capture_root = args.output_root.resolve()
+        ops05_args = [
         "ops05_historical_bars.py", "--market-date", args.market_date,
         "--census", str(args.census), "--output-root", str(args.output_root),
         "--source-config-hash", args.source_config_hash,
         "--capture-receipt-hash", args.capture_receipt_hash,
         "--max-bytes", str(args.max_bytes),
-    ]
-    if args.fixture is not None:
-        ops05_args += ["--fixture", str(args.fixture)]
-    elif args.execute:
-        ops05_args += ["--execute", "--env-file", str(args.env_file or ".env")]
-    else:
-        print(json.dumps({"status": "READY", "capture_root": str(args.output_root.resolve())}))
-        return 0
-    old_argv = sys.argv
-    try:
-        sys.argv = ops05_args
-        exit_code = int(_ops05_main()() or 0)
-    finally:
-        sys.argv = old_argv
+        ]
+        if args.fixture is not None:
+            ops05_args += ["--fixture", str(args.fixture)]
+        elif args.execute:
+            ops05_args += ["--execute", "--env-file", str(args.env_file or ".env")]
+        else:
+            print(json.dumps({"status": "READY", "capture_root": str(args.output_root.resolve())}))
+            return 0
+        old_argv = sys.argv
+        try:
+            sys.argv = ops05_args
+            exit_code = int(_ops05_main()() or 0)
+        finally:
+            sys.argv = old_argv
     if exit_code != 0:
         return exit_code
-    receipt_path = args.output_root.resolve() / "receipt.json"
-    payload = {"status": "CAPTURED", "capture_root": str(args.output_root.resolve())}
+    payload = {"status": "CAPTURED", "capture_root": str(capture_root)}
     if args.decision_artifact is None or not args.decision_artifact.is_file():
         payload["decision_status"] = "MISSING_INPUT"
         print(json.dumps(payload, sort_keys=True))
         return 0
-    adapter_root = (args.adapter_output_root or (args.output_root.resolve().parent / "ops06")).resolve()
+    adapter_root = (
+        args.adapter_output_root or (args.output_root.resolve().parent / "ops06")
+    ).resolve()
     bounded_writer = _BoundedWriter(args.output_root.resolve().parent, args.downstream_max_bytes)
     adapted = adapt_ops05_to_r3(
-        observation_root=args.output_root.resolve(),
+        observation_root=capture_root,
         decision_artifact=args.decision_artifact.resolve(),
         output_root=adapter_root,
         as_of=args.as_of,
         write_bytes=bounded_writer,
+        registration_context=args.registration_context,
     )
     if args.database_path is None:
         raise RuntimeError("OPS09 native pipeline requires an isolated database path")

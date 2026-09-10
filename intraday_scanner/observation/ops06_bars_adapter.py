@@ -56,6 +56,102 @@ def _decisions(value: Any) -> list[dict[str, Any]]:
     return [dict(row) for row in value]
 
 
+def _registration_context(
+    path: str | Path, *, market_date: str, census: list[dict[str, Any]],
+    decisions: list[dict[str, Any]], receipt: dict[str, Any],
+) -> dict[str, Any]:
+    """Authenticate the optional actual-source producer handoff."""
+    context_path = Path(path).resolve()
+    try:
+        context = json.loads(context_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise Ops06AdapterError("observational registration context is unreadable") from exc
+    if (
+        not isinstance(context, dict)
+        or context.get("schema_version") != "dawnstrike.observation.scope_declaration.v1"
+    ):
+        raise Ops06AdapterError("observational registration context schema is invalid")
+    if context.get("market_date") != market_date:
+        raise Ops06AdapterError("observational registration context date mismatch")
+    registration = context.get("registration") or {}
+    if (
+        registration.get("production_registration_performed") is not False
+        or registration.get("external_approval") is not False
+    ):
+        raise Ops06AdapterError("observational context cannot confer production approval")
+    receipt_sha = str(registration.get("receipt_sha256") or "").lower()
+    receipt_path = context_path.parent / "registration-receipt.json"
+    if (
+        not _HEX64.fullmatch(receipt_sha)
+        or not receipt_path.is_file()
+        or _sha_bytes(receipt_path.read_bytes()) != receipt_sha
+    ):
+        raise Ops06AdapterError("observational registration receipt is not content-bound")
+    sources = context.get("source_artifacts") or {}
+    if not isinstance(sources, dict) or not sources:
+        raise Ops06AdapterError("observational source artifacts are missing")
+    for name, item in sources.items():
+        if not isinstance(item, dict):
+            raise Ops06AdapterError(f"observational source artifact is invalid: {name}")
+        source = Path(str(item.get("path") or ""))
+        declared = str(item.get("sha256") or "").lower()
+        if not source.is_file():
+            raise Ops06AdapterError(f"observational source artifact changed: {name}")
+        if (
+            name == "source_db"
+            and item.get("hash_semantics") == "read_only_rowset_at_extraction_time"
+        ):
+            if not _HEX64.fullmatch(str(item.get("rowset_sha256") or "")):
+                raise Ops06AdapterError("observational source DB row-set identity is invalid")
+            continue
+        if not _HEX64.fullmatch(declared) or _sha_bytes(source.read_bytes()) != declared:
+            raise Ops06AdapterError(f"observational source artifact changed: {name}")
+    config_item = sources.get("source_config")
+    if (
+        not isinstance(config_item, dict)
+        or str(config_item.get("sha256") or "").lower()
+        != str((receipt.get("source_lineage") or {}).get("source_config_sha256") or "").lower()
+    ):
+        raise Ops06AdapterError("observational source config differs from capture config")
+    census_rows = context.get("scopes", {}).get("original_small_cap_gap")
+    if not isinstance(census_rows, list) or not census_rows:
+        raise Ops06AdapterError("observational full census is missing")
+    full_symbols = {str(row.get("symbol") or "").upper() for row in census_rows}
+    if len(full_symbols) != len(census_rows) or any(not s for s in full_symbols):
+        raise Ops06AdapterError("observational full census is duplicate or malformed")
+    sample_symbols = {str(row.get("symbol") or "").upper() for row in census}
+    if not sample_symbols <= full_symbols:
+        raise Ops06AdapterError("OPS05 sampled census is outside authenticated full census")
+    decision_info = context.get("decision_artifact") or {}
+    decision_path = Path(str(decision_info.get("path") or ""))
+    decision_hash = str(decision_info.get("sha256") or "").lower()
+    if (
+        not decision_path.is_file()
+        or not _HEX64.fullmatch(decision_hash)
+        or _sha_bytes(decision_path.read_bytes()) != decision_hash
+    ):
+        raise Ops06AdapterError("observational decision artifact is not content-bound")
+    bound_decisions = _decisions(json.loads(decision_path.read_text(encoding="utf-8")))
+    if bound_decisions != decisions:
+        raise Ops06AdapterError("caller decision artifact differs from registered decision rows")
+    source_identity = context.get("source_identity") or {}
+    if (
+        source_identity.get("market_date") != market_date
+        or not source_identity.get("handoff_run_id")
+    ):
+        raise Ops06AdapterError("observational source identity is incomplete")
+    return {
+        "path": str(context_path),
+        "sha256": _sha_bytes(context_path.read_bytes()),
+        "versioned_universe_id": registration.get("versioned_universe_id"),
+        "source_identity": source_identity,
+        "full_census_count": len(census_rows),
+        "sample_count": len(census),
+        "decision_artifact_sha256": decision_hash,
+        "registration_receipt_sha256": receipt_sha,
+    }
+
+
 def _capture_binding(root: Path, receipt: dict[str, Any]) -> dict[str, Any]:
     path = root / "capture-binding.json"
     if not path.is_file():
@@ -209,7 +305,8 @@ def _validate_raw_rows(
 
 
 def _manifest(
-    receipt: dict[str, Any], census: list[dict[str, Any]], raw_hash: str, generation: str
+    receipt: dict[str, Any], census: list[dict[str, Any]], raw_hash: str, generation: str,
+    registration: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     market_date = str(receipt["market_date"])
     full = receipt["windows"]["full_session"]
@@ -267,6 +364,10 @@ def _manifest(
         },
         "scopes": {"original_small_cap_gap": original, "liquid_reference_panel": panel},
     }
+    if registration is not None:
+        manifest["observational_registration"] = registration
+        manifest["source_lineage"]["collector_capture_receipt_sha256"] = capture
+        manifest["source_lineage"]["registration_source_sha256"] = registration["sha256"]
     return manifest
 
 
@@ -384,6 +485,7 @@ def adapt_ops05_to_r3(
     output_root: str | Path | None = None,
     as_of: str | None = None,
     write_bytes: Any | None = None,
+    registration_context: str | Path | None = None,
 ) -> dict[str, Any]:
     """Verify OPS05 bytes, emit R3-shaped artifacts, and run the existing consumer."""
     root = Path(observation_root).resolve()
@@ -410,23 +512,38 @@ def adapt_ops05_to_r3(
     _validate_raw_rows(receipt, raw_rows, page_map, binding)
     census = json.loads(census_path.read_text(encoding="utf-8"))
     decisions = _decisions(json.loads(Path(decision_artifact).read_text(encoding="utf-8")))
+    registration = (
+        _registration_context(
+            registration_context, market_date=str(receipt["market_date"]),
+            census=census, decisions=decisions, receipt=receipt,
+        )
+        if registration_context is not None else None
+    )
     session_id = str(receipt["windows"]["full_session"]["session_id"])
-    generation = (
-        "ops05-r3-"
-        + _sha_json(
+    if registration is not None:
+        generation = str(registration.get("versioned_universe_id") or "")
+        if not generation:
+            raise Ops06AdapterError("observational registration universe identity is missing")
+    else:
+        generation = "ops05-r3-" + _sha_json(
             {
                 "market_date": receipt["market_date"],
                 "source": receipt["source_lineage"],
                 "raw": raw_hash,
             }
         )[:24]
-    )
-    manifest = _manifest(receipt, census, raw_hash, generation)
+    manifest = _manifest(receipt, census, raw_hash, generation, registration)
     events = _events(receipt, raw_rows, session_id)
     output.mkdir(parents=True, exist_ok=True)
     writer = write_bytes or (lambda path, data: path.write_bytes(data))
-    writer(output / "universe-manifest.json", (json.dumps(manifest, sort_keys=True, indent=2) + "\n").encode())
-    writer(output / "raw-events.jsonl", b"".join((json.dumps(row, sort_keys=True) + "\n").encode() for row in events))
+    writer(
+        output / "universe-manifest.json",
+        (json.dumps(manifest, sort_keys=True, indent=2) + "\n").encode(),
+    )
+    writer(
+        output / "raw-events.jsonl",
+        b"".join((json.dumps(row, sort_keys=True) + "\n").encode() for row in events),
+    )
     producer = {
         "schema_version": "dawnstrike.observation.producer_receipt.v1",
         "status": "READY",
@@ -440,7 +557,20 @@ def adapt_ops05_to_r3(
         "research_only": True,
         "broker_execution_enabled": False,
     }
-    writer(output / "producer-receipt.json", (json.dumps(producer, sort_keys=True, indent=2) + "\n").encode())
+    if registration is not None:
+        producer["observational_registration"] = {
+            "context_sha256": registration["sha256"],
+            "receipt_sha256": registration["registration_receipt_sha256"],
+            "versioned_universe_id": registration["versioned_universe_id"],
+            "full_census_count": registration["full_census_count"],
+            "decision_artifact_sha256": registration["decision_artifact_sha256"],
+            "external_approval": False,
+            "production_registration_performed": False,
+        }
+    writer(
+        output / "producer-receipt.json",
+        (json.dumps(producer, sort_keys=True, indent=2) + "\n").encode(),
+    )
     target_contract = {
         "target_id": "one_minute_bar_close_return_60m_gross",
         "horizon_minutes": 60,
@@ -456,6 +586,7 @@ def adapt_ops05_to_r3(
         decisions=decisions,
         as_of=as_of,
         target_contract=target_contract,
+        observational_universe_id=(registration or {}).get("versioned_universe_id"),
     )
     close_at = _utc(manifest["session_close_identity"]["close_at"])
     horizons_by_identity: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
@@ -512,7 +643,10 @@ def adapt_ops05_to_r3(
         "broker_execution_enabled": False,
     }
     packet["horizon_summary"] = horizons
-    writer(output / "observation-dataset.json", (json.dumps(packet, sort_keys=True, indent=2) + "\n").encode())
+    writer(
+        output / "observation-dataset.json",
+        (json.dumps(packet, sort_keys=True, indent=2) + "\n").encode(),
+    )
     return {
         "status": "READY",
         "manifest": manifest,
@@ -524,6 +658,7 @@ def adapt_ops05_to_r3(
         "adapter_output_root": str(output),
         "adapter_packet": packet,
         "decision_artifact_path": str(Path(decision_artifact).resolve()),
+        "registration_context": registration,
     }
 
 

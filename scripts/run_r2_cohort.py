@@ -36,6 +36,11 @@ def _parser() -> argparse.ArgumentParser:
     prepare.add_argument("--runtime-env", type=Path)
     prepare.add_argument("--dependency-stage-root", type=Path)
     prepare.add_argument("--dependency-stage-receipt", type=Path)
+    prepare.add_argument("--producer-mode", choices=("fixture", "actual"), default="fixture")
+    prepare.add_argument("--actual-source-root", type=Path)
+    prepare.add_argument("--actual-entitlement", type=Path)
+    prepare.add_argument("--actual-census", type=Path)
+    prepare.add_argument("--retained-capture-root", type=Path)
     prepare.add_argument("--max-pages", type=int, default=10000)
     prepare.add_argument("--max-events", type=int, default=10000)
     prepare.add_argument("--max-bytes", type=int, default=64 * 1024 * 1024)
@@ -91,6 +96,11 @@ def main() -> int:
                     runtime_env=args.runtime_env, python_path=args.python,
                     dependency_stage_root=args.dependency_stage_root,
                     dependency_stage_receipt_path=args.dependency_stage_receipt,
+                    producer_mode=args.producer_mode,
+                    actual_source_root=args.actual_source_root,
+                    actual_entitlement=args.actual_entitlement,
+                    actual_census_path=args.actual_census,
+                    retained_capture_root=args.retained_capture_root,
                 )
             else:
                 value = prepare_cohort(
@@ -118,8 +128,12 @@ def main() -> int:
                     output_root=args.output_root, input_root=args.input_root,
                     scope_root=args.scope_root, database_root=args.database_root,
                     repo_root=args.repo_root, execute=args.execute,
-                    now=(__import__("datetime").datetime.fromisoformat(args.now.replace("Z", "+00:00"))
-                         if args.now else None),
+                    now=(
+                        __import__("datetime").datetime.fromisoformat(
+                            args.now.replace("Z", "+00:00")
+                        )
+                        if args.now else None
+                    ),
                     fixture_root=args.fixture_root, decision_root=args.decision_root,
                 )
             else:

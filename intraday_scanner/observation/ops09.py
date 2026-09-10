@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from intraday_scanner.alpha.v6.models import current_training_rows
 from intraday_scanner.observation.cohort import (
     APPROVED_PYTHON,
     APPROVED_PYTHON_SHA256,
@@ -26,15 +27,10 @@ from intraday_scanner.observation.cohort import (
     expected_market_sessions,
 )
 from intraday_scanner.observation.store import ObservationLock, ObservationLockError
-from intraday_scanner.observation.ops06_bars_adapter import (
-    Ops06AdapterError,
-    adapt_ops05_to_r3,
-)
 from intraday_scanner.services.alpha_v6_learning_service import (
     run_alpha_v6_daily_monitor,
     run_alpha_v6_weekly_training,
 )
-from intraday_scanner.alpha.v6.models import current_training_rows
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 OPS09_SCHEMA = "dawnstrike.observation.ops09_cohort.v1"
@@ -325,7 +321,20 @@ def validate_ops09_scope(path: Path, *, expected_date: str) -> dict[str, Any]:
     sources = value.get("source_artifacts") or {}
     for name, item in sources.items():
         source = Path(str(item.get("path") or ""))
-        if not source.is_file() or _sha_file(source) != str(item.get("sha256") or "").lower():
+        if not source.is_file():
+            raise Ops09Error(f"OPS09 scope source is missing: {name}")
+        if (
+            name == "source_db"
+            and item.get("hash_semantics") == "read_only_rowset_at_extraction_time"
+        ):
+            if not str(item.get("rowset_sha256") or ""):
+                raise Ops09Error("OPS09 source DB row-set identity is missing")
+            # The active SQLite file may legitimately receive later writes.
+            # Its historical whole-file hash is evidence only, never a stable
+            # registration identity.  The producer already authenticated the
+            # row-set while PRAGMA query_only was enabled.
+            continue
+        if _sha_file(source) != str(item.get("sha256") or "").lower():
             raise Ops09Error(f"OPS09 scope source changed: {name}")
     source_identity = value.get("source_identity") or {}
     if source_identity.get("market_date") != expected_date:
@@ -371,6 +380,9 @@ def prepare_ops09_cohort(
     source_config_path: Path | None = None,
     entitlement_receipt: Path | None = None, runtime_env: Path | None = None,
     dependency_stage_root: Path | None = None, dependency_stage_receipt_path: Path | None = None,
+    producer_mode: str = "fixture", actual_source_root: Path | None = None,
+    actual_entitlement: Path | None = None, actual_census_path: Path | None = None,
+    retained_capture_root: Path | None = None,
     python_path: Path = APPROVED_PYTHON,
 ) -> dict[str, Any]:
     toolchain = _toolchain(python_path)
@@ -387,6 +399,24 @@ def prepare_ops09_cohort(
         raise Ops09Error("OPS09 dependency stage receipt is missing")
     if database_root.resolve() == Path(r"C:\r\dawnstrike-state\shadow_real.sqlite").resolve():
         raise Ops09Error("OPS09 refuses the active shadow database")
+    if producer_mode not in {"fixture", "actual"}:
+        raise Ops09Error("OPS09 producer mode must be fixture or actual")
+    actual_registration: dict[str, Any] | None = None
+    if producer_mode == "actual":
+        if actual_source_root is None:
+            raise Ops09Error("OPS09 actual mode requires an existing source root")
+        from scripts.prepare_r3_observational_registration import (
+            prepare_actual_observational_registration,
+        )
+        actual_root = scope_root.resolve() / start_date / "actual-producer"
+        actual_registration = prepare_actual_observational_registration(
+            source_root=actual_source_root, output_root=actual_root,
+            market_date=start_date, entitlement=actual_entitlement,
+            source_config=source_config_path,
+            typed_census=actual_census_path,
+        )
+        if entitlement_receipt is None:
+            entitlement_receipt = actual_entitlement
     sessions = expected_market_sessions(start_date)
     output_root = output_root.resolve(); input_root = input_root.resolve(); scope_root = scope_root.resolve(); database_root = database_root.resolve()
     plan: dict[str, Any] = {
@@ -418,12 +448,41 @@ def prepare_ops09_cohort(
                    "no_auto_renewal": True, "no_second_ops03_stream": True},
         "sessions": [
             {**session, "status": "EXPECTED", "attempts": 0,
-             "scope_path": str(scope_root / session["market_date"] / "scope.json"),
-             "fixture_path": str(input_root / session["market_date"] / "fixture.json"),
+             "scope_path": str(
+                 (scope_root / session["market_date"] / "actual-producer" / "scope.json")
+                 if producer_mode == "actual" and session["market_date"] == start_date
+                 else (scope_root / session["market_date"] / "scope.json")
+             ),
+             "fixture_path": (
+                 None if producer_mode == "actual"
+                 else str(input_root / session["market_date"] / "fixture.json")
+             ),
+             "decision_artifact_path": (
+                 str((scope_root / session["market_date"] / "actual-producer" / "alpha_v6_decisions.actual.json"))
+                 if producer_mode == "actual" and session["market_date"] == start_date else None
+             ),
+             "registration_context_path": (
+                 str(scope_root / session["market_date"] / "actual-producer" / "scope.json")
+                 if producer_mode == "actual" and session["market_date"] == start_date else None
+             ),
+             "retained_capture_root": (
+                 str(retained_capture_root.resolve())
+                 if producer_mode == "actual" and retained_capture_root is not None
+                 and session["market_date"] == start_date else None
+             ),
              "request_contract_path": str(output_root / session["market_date"] / "request-contract.json")}
             for session in sessions
         ],
     }
+    plan["producer_mode"] = producer_mode
+    plan["actual_source_root"] = str(actual_source_root.resolve()) if actual_source_root else None
+    plan["retained_capture_root"] = str(retained_capture_root.resolve()) if retained_capture_root else None
+    plan["actual_census_path"] = str(actual_census_path.resolve()) if actual_census_path else None
+    plan["actual_registration"] = (
+        {"scope_path": actual_registration["scope_path"],
+         "status": actual_registration["status"]}
+        if actual_registration else None
+    )
     _atomic_json(output_root / "cohort-plan.json", plan)
     _atomic_json(output_root / "cohort-state.json", {**plan, "schema_version": OPS09_STATE_SCHEMA})
     return plan
@@ -443,6 +502,16 @@ def _request_contract(*, plan: dict[str, Any], session: dict[str, Any], scope: d
         "requested_at": datetime.now(UTC).isoformat(), "market_date": session["market_date"],
         "session_id": session["exchange_session_id"], "calendar": session,
         "scope_path": str(scope_path.resolve()), "scope_sha256": scope["sha256"],
+        "producer_mode": plan.get("producer_mode", "fixture"),
+        "registration_context_path": (
+            str(session.get("registration_context_path"))
+            if session.get("registration_context_path") else None
+        ),
+        "decision_artifact_path": (
+            str(session.get("decision_artifact_path"))
+            if session.get("decision_artifact_path") else None
+        ),
+        "retained_capture_root": session.get("retained_capture_root"),
         "source_config_sha256": lineage.get("source_config_sha256"),
         "source_config_path": lineage.get("source_config_path"),
         "entitlement_receipt_path": lineage.get("entitlement_receipt_path"),
@@ -498,6 +567,12 @@ def _validate_request_contract(
         raise Ops09Error("OPS09 immutable request contract dependency receipt changed")
     if contract.get("repository") != plan.get("repository") or contract.get("toolchain") != plan.get("toolchain"):
         raise Ops09Error("OPS09 immutable request contract runtime identity changed")
+    if contract.get("producer_mode", "fixture") != plan.get("producer_mode", "fixture"):
+        raise Ops09Error("OPS09 producer mode changed after preparation")
+    if contract.get("registration_context_path") != session.get("registration_context_path"):
+        raise Ops09Error("OPS09 authenticated registration context changed")
+    if contract.get("decision_artifact_path") != session.get("decision_artifact_path"):
+        raise Ops09Error("OPS09 authenticated decision artifact changed")
     if contract.get("provider") != "alpaca" or contract.get("feed") != "sip" or contract.get("endpoints") != ["bars", "corporate_actions"]:
         raise Ops09Error("OPS09 request parameters are outside the allowed provider scope")
     alias = contract.get("capture_receipt_hash_alias")
@@ -508,7 +583,9 @@ def _validate_request_contract(
 def _run_capture_unbudgeted(*, plan: dict[str, Any], session: dict[str, Any], contract: dict[str, Any],
                  scope: dict[str, Any], scope_path: Path, session_root: Path, fixture: Path | None,
                  execute: bool, timeout_seconds: int, decision_artifact: Path | None,
-                 database_path: Path, as_of: str, downstream_max_bytes: int) -> dict[str, Any]:
+                 database_path: Path, as_of: str, downstream_max_bytes: int,
+                 registration_context: Path | None = None,
+                 retained_capture_root: Path | None = None) -> dict[str, Any]:
     capture_root = session_root / "capture"
     census_path = session_root / "capture-census.json"
     _assert_budget(session_root.parent, CAPTURE_BYTES, "capture phase")
@@ -529,11 +606,15 @@ def _run_capture_unbudgeted(*, plan: dict[str, Any], session: dict[str, Any], co
             "--downstream-max-bytes", str(downstream_max_bytes),
             "--in-memory-consumer",
         ]
+        if registration_context is not None:
+            argument_list += ["--registration-context", str(registration_context)]
+        if retained_capture_root is not None:
+            argument_list += ["--retained-capture-root", str(retained_capture_root)]
     if fixture is not None:
         argument_list += ["--fixture", str(fixture)]
     elif execute:
         argument_list += ["--execute", "--env-file", str(plan["source_identity"].get("runtime_env_path") or ".env")]
-    else:
+    elif retained_capture_root is None:
         return {"status": "READY", "request": contract, "reason": "execute not requested"}
     wrapper = Path(plan["repository"]["root"]) / "scripts" / "run_ops05_under_job.ps1"
     log_root = session_root / "native-wrapper"
@@ -616,7 +697,9 @@ def _run_capture_unbudgeted(*, plan: dict[str, Any], session: dict[str, Any], co
 def _run_capture(*, ledger: _ByteLedger, plan: dict[str, Any], session: dict[str, Any],
                  contract: dict[str, Any], scope: dict[str, Any], scope_path: Path,
                  session_root: Path, fixture: Path | None, execute: bool, timeout_seconds: int,
-                 decision_artifact: Path | None, database_path: Path, as_of: str) -> dict[str, Any]:
+                 decision_artifact: Path | None, database_path: Path, as_of: str,
+                 registration_context: Path | None = None,
+                 retained_capture_root: Path | None = None) -> dict[str, Any]:
     """Reserve capture plus all native output before starting the child."""
     phase = f"capture:{session['market_date']}"
     ledger.admit(phase, CAPTURE_BYTES + NATIVE_RESERVED_BYTES)
@@ -631,6 +714,8 @@ def _run_capture(*, ledger: _ByteLedger, plan: dict[str, Any], session: dict[str
             timeout_seconds=timeout_seconds, decision_artifact=decision_artifact,
             database_path=database_path, as_of=as_of,
             downstream_max_bytes=downstream_max_bytes,
+            registration_context=registration_context,
+            retained_capture_root=retained_capture_root,
         )
     finally:
         ledger.release(phase)
@@ -829,15 +914,29 @@ def _resume_ops09_unlocked(*, output_root: Path, input_root: Path, scope_root: P
             _atomic_json(contract_path, contract)
         if not execute:
             session.update({"status": "READY", "request_contract_sha256": contract["request_contract_sha256"], "scope": scope}); continue
-        fixture = (fixture_root.resolve() / session["market_date"] / "fixture.json") if fixture_root else None
+        fixture = Path(str(session.get("fixture_path"))).resolve() if session.get("fixture_path") else (
+            (fixture_root.resolve() / session["market_date"] / "fixture.json") if fixture_root else None
+        )
         if fixture is not None and not fixture.is_file(): fixture = None
-        decision_path = (decision_root.resolve() / session["market_date"] / "decisions.json") if decision_root else None
+        decision_path = Path(str(session.get("decision_artifact_path"))).resolve() if session.get("decision_artifact_path") else (
+            (decision_root.resolve() / session["market_date"] / "decisions.json") if decision_root else None
+        )
+        registration_context = (
+            Path(str(session.get("registration_context_path"))).resolve()
+            if session.get("registration_context_path") else None
+        )
+        retained_capture_root = (
+            Path(str(session.get("retained_capture_root"))).resolve()
+            if session.get("retained_capture_root") else None
+        )
         capture = _run_capture(
             ledger=ledger, plan=state, session=session, contract=contract, scope=scope, scope_path=scope_path,
             session_root=session_root, fixture=fixture, execute=execute, timeout_seconds=remaining,
             decision_artifact=decision_path if decision_path is not None and decision_path.is_file() else None,
             database_path=database_path,
             as_of=state["expected_sessions"][index]["end_utc"],
+            registration_context=registration_context if registration_context is not None and registration_context.is_file() else None,
+            retained_capture_root=retained_capture_root if retained_capture_root is not None and retained_capture_root.is_dir() else None,
         )
         session.update({"capture": {k: v for k, v in capture.items() if k not in {"receipt"}},
                         "request_contract_sha256": contract["request_contract_sha256"]})
