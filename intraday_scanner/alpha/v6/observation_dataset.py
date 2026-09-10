@@ -25,6 +25,8 @@ from intraday_scanner.observation.contracts import UniverseManifest, parse_utc
 
 OBSERVATIONAL_LABEL_FAMILY = "observational_matured_return"
 OBSERVATIONAL_EVIDENCE_CLASS = "observational_matured"
+OBSERVATIONAL_BAR_TARGET_ID = "one_minute_bar_close_return_60m_gross"
+OBSERVATIONAL_BAR_EVIDENCE_CLASS = "observational_one_minute_bar_close_return_60m_gross"
 MATURITY_MINUTES = (60, 240, 600)
 PATH_AVAILABILITY_FIELDS = ("gap", "close")
 
@@ -36,6 +38,7 @@ def build_observation_dataset(
     raw_events: Sequence[Mapping[str, Any]] | str | Path,
     decisions: Sequence[Mapping[str, Any]],
     as_of: str | datetime | None = None,
+    target_contract: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build an observational packet from one immutable R2 session.
 
@@ -46,6 +49,7 @@ def build_observation_dataset(
     dataset is empty.
     """
 
+    target_contract_value = _target_contract(target_contract)
     manifest_value = _load_json(manifest)
     receipt_value = _load_json(producer_receipt)
     events, raw_file_hash = _load_jsonl(raw_events)
@@ -72,6 +76,7 @@ def build_observation_dataset(
             labels=[],
             coverage=_coverage(typed_manifest, events),
             close_identity=_close_identity(manifest_value),
+            target_contract=target_contract_value,
         )
     decision_rows = [dict(row) for row in decisions]
     close_identity = _close_identity(manifest_value)
@@ -82,6 +87,7 @@ def build_observation_dataset(
             reason="raw_event_schema_invalid", decisions=decision_rows, labels=[],
             coverage=_coverage(typed_manifest, events),
             close_identity=_close_identity(manifest_value),
+            target_contract=target_contract_value,
         )
     now = _timestamp(as_of) if as_of is not None else max(
         (_timestamp(row["available_at"]) for row in event_rows), default=datetime.now(UTC)
@@ -104,9 +110,15 @@ def build_observation_dataset(
         # cross-session training row.
         decision_market_date = str(decision.get("market_date") or "")
         try:
-            decision_at = _timestamp(decision.get("decision_at")) if decision.get("decision_at") else None
+            decision_at = (
+                _timestamp(decision.get("decision_at"))
+                if decision.get("decision_at")
+                else None
+            )
         except (TypeError, ValueError):
-            diagnostics.append(_diagnostic(decision, "DELAYED_INELIGIBLE", "decision_timestamp_invalid"))
+            diagnostics.append(
+                _diagnostic(decision, "DELAYED_INELIGIBLE", "decision_timestamp_invalid")
+            )
             continue
         if decision_market_date != typed_manifest.market_date or (
             decision_at is not None and decision_at.date().isoformat() != typed_manifest.market_date
@@ -136,7 +148,9 @@ def build_observation_dataset(
             continue
         decision_at = _timestamp(decision.get("decision_at"))
         if decision_at is None or not point_in_time_valid(decision):
-            diagnostics.append(_diagnostic(decision, "DELAYED_OR_INELIGIBLE", "decision_chronology"))
+            diagnostics.append(
+                _diagnostic(decision, "DELAYED_OR_INELIGIBLE", "decision_chronology")
+            )
             continue
         source_events = by_symbol.get(ticker, [])
         result = _matured_observation(
@@ -145,6 +159,7 @@ def build_observation_dataset(
             now=now,
             session_id=typed_manifest.session_id,
             close_identity=close_identity,
+            target_contract=target_contract_value,
         )
         diagnostics.append(result["diagnostic"])
         if result.get("label") is not None:
@@ -163,12 +178,14 @@ def build_observation_dataset(
         decisions=decision_rows, labels=labels,
         coverage=_coverage(typed_manifest, events), diagnostics=diagnostics,
         close_identity=close_identity,
+        target_contract=target_contract_value,
     )
 
 
 def _matured_observation(
     *, decision: Mapping[str, Any], events: Sequence[Mapping[str, Any]],
     now: datetime, session_id: str, close_identity: Mapping[str, Any] | None,
+    target_contract: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     decision_at = _timestamp(decision.get("decision_at"))
     assert decision_at is not None
@@ -195,7 +212,7 @@ def _matured_observation(
         if close_is_proxy and cutoff >= close_at:
             maturity[str(minutes)] = "CENSORED"
             continue
-        candidates = [event for event in ordered if _timestamp(event["event_time"]) >= cutoff]
+        candidates = [event for event in ordered if _timestamp(event["event_time"]) == cutoff]
         if not candidates:
             maturity[str(minutes)] = "IMMATURE"
             continue
@@ -205,10 +222,28 @@ def _matured_observation(
             continue
         maturity[str(minutes)] = "MATURE"
         maturity_events[str(minutes)] = event
-    if missing or not all(value in {"MATURE", "CENSORED"} for value in maturity.values()):
+    target_minutes = int(target_contract["horizon_minutes"]) if target_contract else None
+    target_status = maturity.get(str(target_minutes)) if target_minutes else None
+    if target_contract and target_status != "MATURE":
         return {"diagnostic": _diagnostic(
-            decision, "IMMATURE" if not missing and "IMMATURE" in maturity.values() else "DELAYED_INELIGIBLE",
-            ",".join(missing) or ",".join(f"maturity_{key}_{value}" for key, value in maturity.items() if value != "MATURE"),
+            decision, "IMMATURE" if target_status == "IMMATURE" else "DELAYED_INELIGIBLE",
+            f"target_{target_minutes}m_{str(target_status or 'MISSING').lower()}",
+        )}
+    if missing or (
+        not target_contract
+        and not all(value in {"MATURE", "CENSORED"} for value in maturity.values())
+    ):
+        return {"diagnostic": _diagnostic(
+            decision,
+            "IMMATURE"
+            if not missing and "IMMATURE" in maturity.values()
+            else "DELAYED_INELIGIBLE",
+            ",".join(missing)
+            or ",".join(
+                f"maturity_{key}_{value}"
+                for key, value in maturity.items()
+                if value != "MATURE"
+            ),
         )}
     gap = selected["gap"]
     close = selected["close"]
@@ -216,16 +251,24 @@ def _matured_observation(
         return {"diagnostic": _diagnostic(
             decision, "CENSORED", "session_close_observation_missing"
         )}
+    target_event = maturity_events.get(str(target_minutes)) if target_minutes else close
     open_value = _number((gap.get("payload") or {}).get("o"))
-    close_value = _number((close.get("payload") or {}).get("c"))
-    if open_value is None or close_value is None or open_value <= 0:
+    target_value = _number((target_event.get("payload") or {}).get("c"))
+    if open_value is None or target_value is None or open_value <= 0:
         return {"diagnostic": _diagnostic(decision, "AMBIGUOUS", "path_value_missing")}
-    label_value = (close_value / open_value - 1.0) * 100.0
+    label_value = (target_value / open_value - 1.0) * 100.0
+    evidence_class = (
+        str(target_contract["evidence_class"])
+        if target_contract
+        else OBSERVATIONAL_EVIDENCE_CLASS
+    )
+    target_id = str(target_contract["target_id"]) if target_contract else None
     label_identity = {
         "decision_id": decision.get("decision_id"),
         "strategy_id": decision.get("strategy_id") or "alphaops_v6",
         "strategy_version": decision.get("strategy_version"),
         "family": OBSERVATIONAL_LABEL_FAMILY,
+        "target_id": target_id,
         "value": label_value,
         "session_id": session_id,
         "maturity": maturity,
@@ -239,35 +282,66 @@ def _matured_observation(
         "return_label_eligible": True,
         "label_schema_version": LABEL_SCHEMA_VERSION,
         "eligibility_policy_version": ELIGIBILITY_POLICY_VERSION,
-        "evidence_class": OBSERVATIONAL_EVIDENCE_CLASS,
+        "evidence_class": evidence_class,
         "fill_truth_status": "not_applicable_observation",
         "fill_truth_bound": False,
         "research_only": True,
         "broker_execution_enabled": False,
-        "return_basis": "observed_path_close_proxy_vs_gap_open" if close_is_proxy else "observed_path_close_vs_gap_open",
-        "close_observation_semantics": "one_minute_bar_close_proxy" if close_is_proxy else "session_close_event",
+        "return_basis": (
+            str(target_contract["return_basis"])
+            if target_contract
+            else "observed_path_close_proxy_vs_gap_open"
+            if close_is_proxy
+            else "observed_path_close_vs_gap_open"
+        ),
+        "close_observation_semantics": (
+            str(target_contract["price_basis"])
+            if target_contract
+            else "one_minute_bar_close_proxy"
+            if close_is_proxy
+            else "session_close_event"
+        ),
         "horizon_unit": "minutes",
+        "observational_target_id": target_id,
+        "observational_evidence_class": evidence_class,
+        "target_contract": dict(target_contract or {}),
+        "target_horizon_minutes": target_minutes,
+        "target_price_time": target_event["event_time"],
+        "target_price_offset_minutes": (
+            _timestamp(target_event["event_time"]) - decision_at
+        ).total_seconds() / 60.0,
+        "return_units": str(target_contract["units"]) if target_contract else "percent",
+        "return_denominator": "gap_open_price",
+        "gross_return": True,
+        "costs_excluded": True,
+        "cost_availability_status": "excluded_by_observational_target",
         "close_identity": dict(close_identity),
-        "observed_path": {"gap": gap, "close": close},
+        "observed_path": {"gap": gap, "target": target_event, "close": close},
         "maturity_minutes": list(MATURITY_MINUTES),
         "maturity_status": maturity,
         "maturity_at": {
             key: event["event_time"] for key, event in maturity_events.items()
         },
         "label_available_at": max(
-            _timestamp(gap["available_at"]), _timestamp(close["available_at"]),
-            *(_timestamp(event["available_at"]) for event in maturity_events.values()),
+            _timestamp(gap["available_at"]),
+            _timestamp(close["available_at"]),
+            _timestamp(target_event["available_at"]),
         ).isoformat(),
         "source_artifact_hash_sha256": gap.get("source_artifact_hash_sha256"),
         "source_artifact_hashes": sorted({
             str(gap.get("source_artifact_hash_sha256") or ""),
             str(close.get("source_artifact_hash_sha256") or ""),
+            str(target_event.get("source_artifact_hash_sha256") or ""),
         } - {""}),
     }
     label["truth_lineage_hash_sha256"] = canonical_hash({
         "manifest_sha256": decision.get("universe_manifest_sha256"),
-        "event_ids": [gap["event_id"], close["event_id"], *[event["event_id"] for event in maturity_events.values()]],
-        "evidence_class": OBSERVATIONAL_EVIDENCE_CLASS,
+        "event_ids": [
+            gap["event_id"],
+            close["event_id"],
+            *[event["event_id"] for event in maturity_events.values()],
+        ],
+        "evidence_class": evidence_class,
     })
     label["label_id"] = "v6o-" + canonical_hash(label_identity)[:28]
     label["label_payload_hash_sha256"] = canonical_hash({
@@ -280,7 +354,8 @@ def _matured_observation(
 def _base_packet(manifest: UniverseManifest, receipt: Mapping[str, Any], *, status: str,
                  reason: str | None, decisions: list[dict[str, Any]], labels: list[dict[str, Any]],
                  coverage: list[dict[str, Any]], diagnostics: list[dict[str, Any]] | None = None,
-                 close_identity: Mapping[str, Any] | None = None) -> dict[str, Any]:
+                 close_identity: Mapping[str, Any] | None = None,
+                 target_contract: Mapping[str, Any] | None = None) -> dict[str, Any]:
     return {
         "schema_version": "dawnstrike.v6.observational_dataset.v1",
         "status": status,
@@ -292,7 +367,10 @@ def _base_packet(manifest: UniverseManifest, receipt: Mapping[str, Any], *, stat
         "source_config_sha256": manifest.source_config_sha256,
         "capture_receipt_sha256": receipt.get("capture_receipt_sha256"),
         "producer_receipt_sha256": canonical_hash(receipt),
-        "strategy_identity": {"strategy_id": "alphaops_v6", "strategy_version": "dawnstrike-alphaops-v6-shadow"},
+        "strategy_identity": {
+            "strategy_id": "alphaops_v6",
+            "strategy_version": "dawnstrike-alphaops-v6-shadow",
+        },
         "decisions": decisions,
         "labels": labels,
         "row_count": len(labels),
@@ -302,7 +380,12 @@ def _base_packet(manifest: UniverseManifest, receipt: Mapping[str, Any], *, stat
         "path_availability_fields": list(PATH_AVAILABILITY_FIELDS),
         "horizon_unit": "minutes",
         "close_identity": dict(close_identity or {}),
-        "evidence_class": OBSERVATIONAL_EVIDENCE_CLASS,
+        "target_contract": dict(target_contract or {}),
+        "evidence_class": (
+            str(target_contract["evidence_class"])
+            if target_contract
+            else OBSERVATIONAL_EVIDENCE_CLASS
+        ),
         "research_only": True,
         "broker_execution_enabled": False,
         "training_identity": {
@@ -311,6 +394,31 @@ def _base_packet(manifest: UniverseManifest, receipt: Mapping[str, Any], *, stat
             "dataset_hash_sha256": canonical_hash({"labels": labels, "decisions": decisions}),
         },
     }
+
+
+def _target_contract(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    contract = dict(value)
+    required = {
+        "target_id": OBSERVATIONAL_BAR_TARGET_ID,
+        "horizon_minutes": 60,
+        "units": "percent",
+        "price_basis": "one_minute_bar_close_proxy",
+        "return_basis": OBSERVATIONAL_BAR_TARGET_ID,
+        "evidence_class": OBSERVATIONAL_BAR_EVIDENCE_CLASS,
+    }
+    if any(contract.get(key) != expected for key, expected in required.items()):
+        raise ValueError("unsupported observational target contract")
+    contract.update(
+        {
+            "denominator": "gap_open_price",
+            "gross": True,
+            "costs_excluded": True,
+            "isolation": "research_only_observational_target",
+        }
+    )
+    return contract
 
 
 def _failed_packet(status: str, reason: str) -> dict[str, Any]:
@@ -339,7 +447,9 @@ def _close_identity(value: Mapping[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def _coverage(manifest: UniverseManifest, events: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def _coverage(
+    manifest: UniverseManifest, events: Sequence[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
     counts: dict[tuple[str, str], int] = {}
     for event in events:
         key = (str(event.get("scope") or ""), str(event.get("symbol") or "").upper())
@@ -361,8 +471,11 @@ def _receipt_identity_errors(
     raw_file_hash: str | None,
 ) -> list[str]:
     errors = []
-    for field, expected in (("session_id", manifest.session_id), ("manifest_sha256", manifest.manifest_sha256),
-                            ("source_config_sha256", manifest.source_config_sha256)):
+    for field, expected in (
+        ("session_id", manifest.session_id),
+        ("manifest_sha256", manifest.manifest_sha256),
+        ("source_config_sha256", manifest.source_config_sha256),
+    ):
         actual = receipt.get(field)
         if field == "manifest_sha256" and not actual:
             actual = receipt.get("universe_manifest_sha256")
@@ -380,7 +493,14 @@ def _validated_events(events: Sequence[Mapping[str, Any]]) -> list[dict[str, Any
     output = []
     for row in events:
         try:
-            for field in ("event_id", "session_id", "scope", "symbol", "event_time", "available_at"):
+            for field in (
+                "event_id",
+                "session_id",
+                "scope",
+                "symbol",
+                "event_time",
+                "available_at",
+            ):
                 if not str(row.get(field) or "").strip():
                     return None
             event_time = parse_utc(str(row["event_time"]), label="event_time")
@@ -396,8 +516,15 @@ def _validated_events(events: Sequence[Mapping[str, Any]]) -> list[dict[str, Any
     return output
 
 
-def _diagnostic(decision: Mapping[str, Any], status: str, reason: str) -> dict[str, Any]:
-    return {"decision_id": decision.get("decision_id"), "ticker": decision.get("ticker"), "status": status, "reason": reason}
+def _diagnostic(
+    decision: Mapping[str, Any], status: str, reason: str
+) -> dict[str, Any]:
+    return {
+        "decision_id": decision.get("decision_id"),
+        "ticker": decision.get("ticker"),
+        "status": status,
+        "reason": reason,
+    }
 
 
 def _load_json(value: Mapping[str, Any] | str | Path) -> dict[str, Any]:
@@ -431,7 +558,13 @@ def _number(value: Any) -> float | None:
 
 
 def _sha256(value: Any) -> bool:
-    return len(str(value or "")) == 64 and all(char in "0123456789abcdef" for char in str(value).lower())
+    return len(str(value or "")) == 64 and all(
+        char in "0123456789abcdef" for char in str(value).lower()
+    )
 
 
-__all__ = ["OBSERVATIONAL_EVIDENCE_CLASS", "OBSERVATIONAL_LABEL_FAMILY", "build_observation_dataset"]
+__all__ = [
+    "OBSERVATIONAL_EVIDENCE_CLASS",
+    "OBSERVATIONAL_LABEL_FAMILY",
+    "build_observation_dataset",
+]

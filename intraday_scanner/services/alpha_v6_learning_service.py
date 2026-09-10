@@ -94,11 +94,24 @@ def load_observation_source_from_artifacts(
             receipt_probe = json.loads(ops05_receipt.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             receipt_probe = None
-        if isinstance(receipt_probe, dict) and receipt_probe.get("schema_version") == "dawnstrike.ops05.historical_bars_receipt.v1":
+        if (
+            isinstance(receipt_probe, dict)
+            and receipt_probe.get("schema_version")
+            == "dawnstrike.ops05.historical_bars_receipt.v1"
+        ):
             try:
-                return adapt_ops05_to_r3(observation_root=root, decision_artifact=decision_path, as_of=as_of)
+                return adapt_ops05_to_r3(
+                    observation_root=root,
+                    decision_artifact=decision_path,
+                    as_of=as_of,
+                )
             except Ops06AdapterError as exc:
-                return {"status": "INVALID_SCHEMA", "reason": f"ops05_r3_adapter:{exc}", "research_only": True, "broker_execution_enabled": False}
+                return {
+                    "status": "INVALID_SCHEMA",
+                    "reason": f"ops05_r3_adapter:{exc}",
+                    "research_only": True,
+                    "broker_execution_enabled": False,
+                }
     required = {
         "manifest": root / "universe-manifest.json",
         "producer_receipt": root / "producer-receipt.json",
@@ -290,6 +303,8 @@ def run_alpha_v6_daily_monitor(
                 raw_events=observation_source["raw_events"],
                 decisions=observation_source.get("decisions") or decisions,
                 as_of=observation_source.get("as_of"),
+                target_contract=observation_source.get("target_contract")
+                or (observation_source.get("adapter_packet") or {}).get("target_contract"),
             )
             observation_packet["decision_artifact_path"] = observation_source.get(
                 "decision_artifact_path"
