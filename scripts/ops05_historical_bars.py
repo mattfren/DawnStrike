@@ -5,8 +5,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import sys
 from pathlib import Path
 from typing import Any
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from intraday_scanner.config import load_config
 from intraday_scanner.observation.ops05_historical_bars import produce_historical_bars
@@ -82,7 +86,7 @@ def main() -> int:
             env_file=args.env_file,
             provider="alpaca",
             alpaca_data_feed="sip",
-            request_retries=3,
+            request_retries=1,
             historical_intraday_max_pages=100,
             historical_intraday_page_limit=10_000,
         )
