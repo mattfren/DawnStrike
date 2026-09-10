@@ -466,6 +466,115 @@ def run_v5_admission(*, signal: Mapping[str, Any], observation: Mapping[str, Any
     return decision.to_dict()
 
 
+def compare_v5_baseline_challenger(
+    *, signal: Mapping[str, Any], observation: Mapping[str, Any],
+    challenger_signal: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Invoke the frozen V5 baseline and challenger on one bound input.
+
+    The challenger may alter only its strategy payload; observation, policy
+    identity, risk fields and cost model remain explicit in the comparison.
+    """
+    baseline = run_v5_admission(signal=signal, observation=observation)
+    challenger = run_v5_admission(signal=challenger_signal or signal, observation=observation)
+    shared = {
+        "observation_sha256": _hash(observation),
+        "risk_policy_version": DEFAULT_V5_POLICY.policy_version,
+        "cost_model_version": DEFAULT_V5_POLICY.cost_model_version,
+        "risk_fields_equal": all(signal.get(key) == (challenger_signal or signal).get(key) for key in ("entry_watch_level", "invalidation_level", "target_1")),
+    }
+    return {
+        "status": "COMPLETE",
+        "baseline": baseline,
+        "challenger": challenger,
+        "shared_binding": shared,
+        "equal_input_risk_cost": shared["risk_fields_equal"] and baseline.get("policy_version") == challenger.get("policy_version"),
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+
+
+def run_r7_weekly_controller(
+    *, dataset: Mapping[str, Any], protocol: Mapping[str, Any], code_sha: str,
+    prior_state: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run one offline D029 weekly controller against identity-bound rows."""
+    from intraday_scanner.alpha.v6.calibration import calibration_report
+    from intraday_scanner.alpha.v6.contracts import canonical_hash
+    from intraday_scanner.alpha.v6.drift import build_drift_report
+    from intraday_scanner.alpha.v6.training import train_shadow_challengers, walk_forward_challenger_predictions
+
+    rows = [dict(row) for row in list(dataset.get("rows") or [])]
+    if str(dataset.get("dataset_hash_sha256") or "") == "" or not code_sha:
+        return {"status": "QUARANTINED", "reason": "dataset_or_code_identity_missing", "research_only": True}
+    ordered = sorted(rows, key=lambda row: (str(row.get("market_date") or ""), str(row.get("decision_id") or "")))
+    dates = sorted({str(row.get("market_date") or "") for row in ordered})
+    if any(not row.get("decision_id") or not row.get("market_date") or not row.get("source_artifact_hash_sha256") for row in ordered):
+        return {"status": "QUARANTINED", "reason": "row_lineage_missing", "research_only": True}
+    if any(not _decision_chronology_valid(row) for row in ordered):
+        return {"status": "QUARANTINED", "reason": "future_or_invalid_chronology", "research_only": True}
+    if len(dates) < 100:
+        return {"status": "RETAIN_WAITING_MARKET_EVIDENCE", "reason": "insufficient_60_20_20_sessions", "session_count": len(dates), "research_only": True, "broker_execution_enabled": False}
+    training_dates = dates[:60]
+    validation_dates = dates[60:80]
+    shadow_dates = dates[80:100]
+    training_cutoff = training_dates[-1]
+    receipt = train_shadow_challengers(dict(dataset), code_sha=code_sha)
+    model_id = "v6m-" + _hash({"dataset": dataset.get("dataset_hash_sha256"), "cutoff": training_cutoff, "code": code_sha})[:28]
+    predictions = walk_forward_challenger_predictions(dict(dataset), model_run_id=model_id)
+    calibration = calibration_report([row for row in predictions if "activation_probability" in row])
+    split = max(20, len(dates) // 2)
+    baseline_dates = dates[:split]
+    recent_dates = dates[split:]
+    baseline_rows = [row for row in ordered if str(row.get("market_date")) in baseline_dates]
+    recent_rows = [row for row in ordered if str(row.get("market_date")) in recent_dates]
+    def _dimension_rows(rows_for_dim: list[dict[str, Any]], dimension: str) -> list[dict[str, Any]]:
+        return [{**row, "source": row.get("source_artifact_hash_sha256"), "feature_schema_version": dataset.get("feature_schema_version"), "cost_model_version": row.get("cost_model_version", V5_COST_MODEL_VERSION), "regime": row.get("regime_key", "unknown"), "decision_id": row.get("decision_id")} for row in rows_for_dim]
+    baseline_drift_rows = _dimension_rows(baseline_rows, "baseline")
+    recent_drift_rows = _dimension_rows(recent_rows, "recent")
+    reference_window = {"start": baseline_dates[0], "end": baseline_dates[-1], "market_dates": baseline_dates}
+    recent_window = {"start": recent_dates[0], "end": recent_dates[-1], "market_dates": recent_dates}
+    diagnostic = build_drift_report(
+        baseline_rows=baseline_drift_rows, current_rows=recent_drift_rows,
+        reference_window=reference_window, recent_window=recent_window,
+        config={"protocol_hash": protocol.get("protocol_hash_sha256")}, source={"dataset_hash": dataset.get("dataset_hash_sha256")},
+        config_hash_sha256=_hash({"protocol_hash": protocol.get("protocol_hash_sha256")}), source_hash_sha256=_hash({"dataset_hash": dataset.get("dataset_hash_sha256")}),
+        window_hash_sha256=canonical_hash({"reference": reference_window, "recent": recent_window}),
+        input_hash_sha256=canonical_hash({"reference": sorted(baseline_drift_rows, key=canonical_hash), "recent": sorted(recent_drift_rows, key=canonical_hash)}),
+        code_sha=code_sha, minimum_observations=20, minimum_market_sessions=5,
+    )
+    diagnostic_dimensions = {}
+    for name, required_fields in {
+        "data_quality": ("source_artifact_hash_sha256",),
+        "calibration": ("activation_probability", "activation_label"),
+        "conditional_expectancy": ("realized_net_excess_return_pct",),
+        "execution": ("cost_model_version", "cost_status"),
+        "regime": ("regime_key",),
+    }.items():
+        observed = sum(1 for row in ordered if all(row.get(field) not in {None, ""} for field in required_fields))
+        diagnostic_dimensions[name] = {"observations": observed, "status": "EVALUABLE" if observed >= 20 else "UNKNOWN_INSUFFICIENT_OBSERVATIONS", "minimum_observations": 20}
+    breaches = [row for row in ordered if _number(row.get("diagnostic_value")) is not None and float(row["diagnostic_value"]) < 0.5]
+    consecutive = len(breaches) >= 2 and str(breaches[-1].get("market_date")) > str(breaches[-2].get("market_date"))
+    prior = str((prior_state or {}).get("status") or "RETAIN_FROZEN_CHAMPION")
+    if diagnostic.get("status", "").startswith("QUARANTINE") or consecutive:
+        status = "ROLLBACK_FROZEN_CHAMPION" if prior == "OBSERVER_ONLY" else "RETAIN_FROZEN_CHAMPION"
+    elif receipt.get("status", "").startswith("TRAINED") and diagnostic.get("status") == "STABLE":
+        status = "OBSERVER_ONLY"
+    else:
+        status = "RETAIN_WAITING_MARKET_EVIDENCE"
+    return {
+        "status": status, "schedule": {"training_dates": training_dates, "validation_dates": validation_dates, "shadow_dates": shadow_dates},
+        "model_run_id": model_id, "training_cutoff": training_cutoff, "training_receipt": receipt,
+        "predictions": predictions, "calibration": calibration, "diagnostics": diagnostic,
+        "diagnostic_dimensions": diagnostic_dimensions,
+        "phases": {"collect": len(ordered), "validate": len(ordered), "mature": sum(1 for row in ordered if row.get("label_available_at") and str(row.get("label_available_at"))[:10] <= training_cutoff), "diagnose": True, "propose": True, "train": receipt.get("status"), "validate_predictions": sum(1 for row in predictions if str(row.get("market_date") or "") in validation_dates), "shadow_predictions": sum(1 for row in predictions if str(row.get("market_date") or "") in shadow_dates), "paired_comparison": "DERIVED_FROM_BOUND_ROWS"},
+        "breach_count": len(breaches), "consecutive_breaches": consecutive, "rollback_target": "frozen_v5",
+        "activation_time": None if status != "OBSERVER_ONLY" else datetime.now().astimezone().isoformat(),
+        "trial_history": [{"trial_id": "fixed-d029-1", "dataset_hash": dataset.get("dataset_hash_sha256"), "status": status}],
+        "research_only": True, "broker_execution_enabled": False, "economic_pass": False,
+    }
+
+
 def simulate_causal_fill_lifecycle(
     *,
     manifest: Mapping[str, Any],
@@ -680,16 +789,47 @@ def build_income_illustration(
     annual_cost_rate: float,
     reserve_months: int,
     decay_rate: float,
+    period_returns: Sequence[float] | None = None,
+    fixed_withdrawal: float | None = None,
 ) -> dict[str, Any]:
-    """Return arithmetic only; never infer owner capital or retirement timing."""
+    """Run an explicit illustrative multi-period cash model.
+
+    All inputs are hypothetical.  The return sequence is replayed in its
+    supplied order and in reverse order to expose sequence risk; no owner
+    capital, forecast, capacity or retirement date is inferred.
+    """
 
     values = (illustrative_capital, annual_return_assumption, tax_rate, annual_withdrawal_rate, annual_cost_rate, decay_rate)
     if illustrative_capital <= 0 or not all(math.isfinite(float(value)) for value in values):
         raise ValueError("illustrative assumptions must be finite and capital must be positive")
+    returns = list(period_returns) if period_returns is not None else [annual_return_assumption]
+    if not returns or any(not math.isfinite(float(value)) or float(value) <= -1 for value in returns):
+        raise ValueError("period_returns must be finite and greater than -100 percent")
+    withdrawal = float(fixed_withdrawal) if fixed_withdrawal is not None else illustrative_capital * annual_withdrawal_rate
+    if not math.isfinite(withdrawal) or withdrawal < 0:
+        raise ValueError("fixed_withdrawal must be finite and non-negative")
+    reserve_floor = illustrative_capital * max(0, int(reserve_months)) / 12 * annual_withdrawal_rate
+    def replay(sequence: Sequence[float]) -> dict[str, Any]:
+        balance = illustrative_capital
+        periods: list[dict[str, Any]] = []
+        losing_periods = 0
+        for index, rate in enumerate(sequence, start=1):
+            start = balance
+            gross = start * float(rate)
+            costs = start * annual_cost_rate
+            taxable = gross - costs
+            taxes = max(0.0, taxable * tax_rate)
+            ending = max(0.0, start + gross - costs - taxes - withdrawal)
+            if gross < 0:
+                losing_periods += 1
+            periods.append({"period": index, "starting_capital": start, "return_rate": float(rate), "gross_result": gross, "costs": costs, "taxes": taxes, "withdrawal": withdrawal, "ending_capital": ending})
+            balance = ending
+        return {"ending_capital": balance, "periods": periods, "losing_period_count": losing_periods}
+    forward = replay(returns)
+    reverse = replay(list(reversed(returns)))
     gross_income = illustrative_capital * annual_return_assumption
     costs = illustrative_capital * annual_cost_rate
     taxes = max(0.0, (gross_income - costs) * tax_rate)
-    withdrawal = illustrative_capital * annual_withdrawal_rate
     return {
         "status": "ILLUSTRATIVE_ONLY",
         "capital_assumption": illustrative_capital,
@@ -704,6 +844,12 @@ def build_income_illustration(
         "annual_tax_amount": taxes,
         "illustrative_net_income": gross_income - costs - taxes,
         "illustrative_withdrawal": withdrawal,
+        "period_returns": returns,
+        "forward_replay": forward,
+        "reverse_replay": reverse,
+        "sequence_difference": forward["ending_capital"] - reverse["ending_capital"],
+        "reserve_floor_assumption": reserve_floor,
+        "capacity_status": "UNKNOWN_NO_CAPACITY_EVIDENCE",
         "personal_capital_commitment": None,
         "retirement_date": None,
         "risk_budget": None,
@@ -811,12 +957,14 @@ __all__ = [
     "build_income_illustration",
     "admit_d022_trade",
     "bootstrap_paired_session_returns",
+    "compare_v5_baseline_challenger",
     "build_observer_controller",
     "build_research_protocol",
     "evaluate_confirmation_summary",
     "evaluate_controller_update",
     "evaluate_gap_orb15_signal",
     "run_v5_admission",
+    "run_r7_weekly_controller",
     "simulate_causal_fill_lifecycle",
     "replay_account_twr",
 ]

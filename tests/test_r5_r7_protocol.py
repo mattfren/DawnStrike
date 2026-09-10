@@ -10,6 +10,8 @@ from intraday_scanner.research.r5_r7_protocol import (
     evaluate_controller_update,
     evaluate_gap_orb15_signal,
     bootstrap_paired_session_returns,
+    compare_v5_baseline_challenger,
+    run_r7_weekly_controller,
     run_v5_admission,
     simulate_causal_fill_lifecycle,
     replay_account_twr,
@@ -127,6 +129,25 @@ def test_causal_lifecycle_records_partial_fill_and_close_exit() -> None:
     assert any(row["kind"] == "v5_admission" and row["payload"]["eligible_for_official_paper"] for row in result["journal"])
 
 
+def test_profitable_after_cost_control_and_v5_comparator_parity() -> None:
+    decision = {"feature_event_at": "2026-01-02T09:44:00-05:00", "feature_available_at": "2026-01-02T09:44:01-05:00", "feature_ingested_at": "2026-01-02T09:44:02-05:00", "decision_at": "2026-01-02T09:45:00-05:00"}
+    signal = {"symbol": "AAA", "direction": "long", "notional": 5.0, "open_risk_pct": .10, "sector_theme": "tech", "entry_price": 102.2, "stop_price": 100.0, "target_price": 108.8, "maximum_exit_at": "2026-01-02T10:30:00-05:00"}
+    manifest = {"status": "COMPLETE", "session_id": "XNYS:2026-01-02:regular", "universe_manifest_sha256": "a" * 64, "source_config_sha256": "b" * 64, "raw_events_sha256": "c" * 64}
+    result = simulate_causal_fill_lifecycle(
+        manifest=manifest, decision=decision, signal=signal,
+        quotes=[{"event_at": "2026-01-02T10:00:01-05:00", "provider_available_at": "2026-01-02T10:00:02-05:00", "ingested_at": "2026-01-02T10:00:03-05:00", "ask": 102.2, "bid": 102.1, "fill_quantity": 3}],
+        path_events=[{"event_at": "2026-01-02T10:01:00-05:00", "provider_available_at": "2026-01-02T10:01:01-05:00", "ingested_at": "2026-01-02T10:01:02-05:00", "close": 110.0, "high": 110.0, "low": 105.0}],
+        portfolio={"gross_pct": 0, "net_pct": 0, "open_risk_pct": 0, "sector_theme_pct": 0, "daily_loss_pct": 0, "drawdown_pct": 0, "concurrent_positions": 0, "entries": 0},
+        wrapper={"max_symbol_notional_pct": 10, "gross_exposure_pct": 30, "net_exposure_pct": 30, "sector_theme_exposure_pct": 20, "aggregate_open_risk_pct": .75, "daily_loss_stop_pct": 1, "drawdown_stop_pct": 8, "max_concurrent_positions": 3, "max_entries_per_session": 5},
+        desired_quantity=3, v5_signal=_v5_signal_fixture(), v5_observation={"price": 10.05, "observed_at": "2026-08-03T14:00:00+00:00", "requested_at": "2026-08-03T14:00:00+00:00", "freshness_seconds": 0, "is_usable": True},
+    )
+    assert result["net_pnl"] > 0
+    comparison = compare_v5_baseline_challenger(signal=_v5_signal_fixture(), observation={"price": 10.05, "observed_at": "2026-08-03T14:00:00+00:00", "requested_at": "2026-08-03T14:00:00+00:00", "freshness_seconds": 0, "is_usable": True})
+    assert comparison["equal_input_risk_cost"] is True
+    assert comparison["baseline"]["eligible_for_official_paper"] is True
+    assert comparison["challenger"]["eligible_for_official_paper"] is True
+
+
 def test_lifecycle_rejects_overrisk_halt_and_same_bar_ambiguity() -> None:
     decision = {"feature_event_at": "2026-01-02T09:44:00-05:00", "feature_available_at": "2026-01-02T09:44:01-05:00", "feature_ingested_at": "2026-01-02T09:44:02-05:00", "decision_at": "2026-01-02T09:45:00-05:00"}
     signal = {"symbol": "AAA", "direction": "long", "notional": 5.0, "open_risk_pct": .10, "sector_theme": "tech", "entry_price": 102.2, "stop_price": 100.0, "target_price": 108.8, "maximum_exit_at": "2026-01-02T10:30:00-05:00"}
@@ -184,3 +205,25 @@ def test_fixed_block_bootstrap_is_derived_from_paired_sessions() -> None:
     assert report["one_sided_lower_bound_95"] <= report["observed_mean_daily_log_return"]
     waiting = bootstrap_paired_session_returns(challenger_returns=[.01], baseline_returns=[.00], block_length=5)
     assert waiting["status"] == "WAITING"
+
+
+def test_r7_controller_invokes_existing_learner_and_income_sequence_is_executable() -> None:
+    protocol = build_research_protocol()
+    rows = []
+    for index in range(100):
+        day = index + 1
+        rows.append({
+            "decision_id": f"r7-{index}", "market_date": f"2026-{(day - 1) // 28 + 1:02d}-{(day - 1) % 28 + 1:02d}",
+            "source_artifact_hash_sha256": "a" * 64,
+            "feature_event_at": f"2026-{(day - 1) // 28 + 1:02d}-{(day - 1) % 28 + 1:02d}T13:30:00+00:00",
+            "feature_available_at": f"2026-{(day - 1) // 28 + 1:02d}-{(day - 1) % 28 + 1:02d}T13:31:00+00:00",
+            "feature_ingested_at": f"2026-{(day - 1) // 28 + 1:02d}-{(day - 1) % 28 + 1:02d}T13:32:00+00:00",
+            "decision_at": f"2026-{(day - 1) // 28 + 1:02d}-{(day - 1) % 28 + 1:02d}T13:33:00+00:00",
+        })
+    controller = run_r7_weekly_controller(dataset={"dataset_hash_sha256": "b" * 64, "feature_schema_version": "fixture-v1", "rows": rows}, protocol=protocol, code_sha="c" * 40)
+    assert controller["status"] in {"RETAIN_WAITING_MARKET_EVIDENCE", "RETAIN_FROZEN_CHAMPION"}
+    assert controller["training_receipt"]["status"] == "NOT_TRAINED_INSUFFICIENT_LABELS"
+    income = build_income_illustration(illustrative_capital=100000, annual_return_assumption=.01, tax_rate=.2, annual_withdrawal_rate=.02, annual_cost_rate=.01, reserve_months=6, decay_rate=.1, period_returns=[.20, -.20, .20, -.20], fixed_withdrawal=500)
+    assert len(income["forward_replay"]["periods"]) == 4
+    assert income["sequence_difference"] != 0
+    assert income["capacity_status"] == "UNKNOWN_NO_CAPACITY_EVIDENCE"
