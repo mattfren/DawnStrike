@@ -1,0 +1,362 @@
+"""R2 observation-to-V6 observational dataset adapter.
+
+This path is deliberately separate from committed FillTruth.  It consumes an
+authenticated observation manifest/receipt and raw event stream, preserves
+coverage and maturity failures, and can produce research-only observational
+labels without broker orders or execution evidence.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+from intraday_scanner.alpha.v6.contracts import LABEL_SCHEMA_VERSION, canonical_hash, point_in_time_valid
+from intraday_scanner.alpha.path_replay import ELIGIBILITY_POLICY_VERSION
+from intraday_scanner.observation.contracts import UniverseManifest, parse_utc
+
+OBSERVATIONAL_LABEL_FAMILY = "observational_matured_return"
+OBSERVATIONAL_EVIDENCE_CLASS = "observational_matured"
+MATURITY_MINUTES = (60, 240, 600)
+PATH_AVAILABILITY_FIELDS = ("gap", "close")
+
+
+def build_observation_dataset(
+    *,
+    manifest: Mapping[str, Any] | str | Path,
+    producer_receipt: Mapping[str, Any] | str | Path,
+    raw_events: Sequence[Mapping[str, Any]] | str | Path,
+    decisions: Sequence[Mapping[str, Any]],
+    as_of: str | datetime | None = None,
+) -> dict[str, Any]:
+    """Build an observational packet from one immutable R2 session.
+
+    ``READY`` means the source collection is complete and at least one
+    selected decision has every required path/maturity clock.  ``PARTIAL``
+    and other non-ready states retain diagnostics but produce no eligible
+    labels.  The caller may use the packet for daily reporting even when the
+    dataset is empty.
+    """
+
+    manifest_value = _load_json(manifest)
+    receipt_value = _load_json(producer_receipt)
+    events, raw_file_hash = _load_jsonl(raw_events)
+    try:
+        typed_manifest = UniverseManifest.from_mapping(manifest_value)
+    except (TypeError, ValueError) as exc:
+        return _failed_packet("INVALID_SCHEMA", f"universe_manifest:{exc}")
+    identity_errors = _receipt_identity_errors(
+        typed_manifest, receipt_value, events, raw_file_hash=raw_file_hash
+    )
+    if identity_errors:
+        return _failed_packet("INVALID_SCHEMA", ";".join(identity_errors))
+    expectation_status = str(
+        typed_manifest.collection_expectation.get("status") or ""
+    ).upper()
+    receipt_status = str(receipt_value.get("status") or "").upper()
+    if expectation_status != "COMPLETE" or receipt_status != "READY":
+        return _base_packet(
+            typed_manifest,
+            receipt_value,
+            status="PARTIAL" if receipt_status in {"PARTIAL", "READY"} else "FAILED_COLLECTION",
+            reason="collection_not_complete",
+            decisions=list(decisions),
+            labels=[],
+            coverage=_coverage(typed_manifest, events),
+        )
+    decision_rows = [dict(row) for row in decisions]
+    event_rows = _validated_events(events)
+    if event_rows is None:
+        return _base_packet(
+            typed_manifest, receipt_value, status="INVALID_SCHEMA",
+            reason="raw_event_schema_invalid", decisions=decision_rows, labels=[],
+            coverage=_coverage(typed_manifest, events),
+        )
+    now = _timestamp(as_of) if as_of is not None else max(
+        (_timestamp(row["available_at"]) for row in event_rows), default=datetime.now(UTC)
+    )
+    by_symbol: dict[str, list[dict[str, Any]]] = {}
+    for event in event_rows:
+        by_symbol.setdefault(str(event["symbol"]).upper(), []).append(event)
+    labels: list[dict[str, Any]] = []
+    diagnostics: list[dict[str, Any]] = []
+    entry_by_symbol = {
+        entry.symbol: entry for entry in typed_manifest.entries if entry.membership == "selected"
+    }
+    for decision in decision_rows:
+        ticker = str(decision.get("ticker") or "").upper()
+        if ticker not in entry_by_symbol:
+            continue
+        membership = decision.get("universe_membership")
+        if (
+            not isinstance(membership, Mapping)
+            or str(membership.get("universe_id") or "")
+            != typed_manifest.universe_generation_id
+            or str(decision.get("strategy_version") or "")
+            != "dawnstrike-alphaops-v6-shadow"
+        ):
+            diagnostics.append(_diagnostic(decision, "AMBIGUOUS", "strategy_or_universe_identity"))
+            continue
+        required_inputs = set(entry_by_symbol[ticker].required_inputs)
+        observed_inputs = {
+            str(event.get("kind") or "").strip().lower()
+            for event in by_symbol.get(ticker, [])
+        }
+        missing_inputs = sorted(required_inputs - observed_inputs)
+        if missing_inputs:
+            diagnostics.append(
+                _diagnostic(decision, "MISSING_INPUT", ",".join(missing_inputs))
+            )
+            continue
+        decision_at = _timestamp(decision.get("decision_at"))
+        if decision_at is None or not point_in_time_valid(decision):
+            diagnostics.append(_diagnostic(decision, "DELAYED_OR_INELIGIBLE", "decision_chronology"))
+            continue
+        source_events = by_symbol.get(ticker, [])
+        result = _matured_observation(
+            decision=decision, events=source_events, now=now, session_id=typed_manifest.session_id
+        )
+        diagnostics.append(result["diagnostic"])
+        if result.get("label") is not None:
+            labels.append(result["label"])
+    diagnostic_statuses = {str(item.get("status") or "") for item in diagnostics}
+    status = "READY" if labels else (
+        "WAITING_IMMATURE" if "IMMATURE" in diagnostic_statuses
+        else "MISSING_INPUT" if "MISSING_INPUT" in diagnostic_statuses
+        else "AMBIGUOUS" if "AMBIGUOUS" in diagnostic_statuses
+        else "VALID_NO_TRADE" if not decision_rows else "DELAYED_INELIGIBLE"
+    )
+    return _base_packet(
+        typed_manifest, receipt_value, status=status,
+        reason=None if labels else "no_mature_eligible_observations",
+        decisions=decision_rows, labels=labels,
+        coverage=_coverage(typed_manifest, events), diagnostics=diagnostics,
+    )
+
+
+def _matured_observation(
+    *, decision: Mapping[str, Any], events: Sequence[Mapping[str, Any]],
+    now: datetime, session_id: str,
+) -> dict[str, Any]:
+    decision_at = _timestamp(decision.get("decision_at"))
+    assert decision_at is not None
+    ordered = sorted(events, key=lambda row: (_timestamp(row["event_time"]), str(row["event_id"])))
+    selected: dict[str, dict[str, Any]] = {}
+    for field, predicate in (
+        ("gap", lambda event: _timestamp(event["event_time"]) >= decision_at),
+        ("close", lambda event: True),
+    ):
+        candidates = [event for event in ordered if predicate(event)]
+        if candidates:
+            selected[field] = candidates[0] if field == "gap" else candidates[-1]
+    missing = [field for field in PATH_AVAILABILITY_FIELDS if field not in selected]
+    maturity: dict[str, str] = {}
+    maturity_events: dict[str, dict[str, Any]] = {}
+    for minutes in MATURITY_MINUTES:
+        cutoff = decision_at + timedelta(minutes=minutes)
+        candidates = [event for event in ordered if _timestamp(event["event_time"]) >= cutoff]
+        if not candidates:
+            maturity[str(minutes)] = "IMMATURE"
+            continue
+        event = candidates[0]
+        if _timestamp(event["available_at"]) > now:
+            maturity[str(minutes)] = "DELAYED"
+            continue
+        maturity[str(minutes)] = "MATURE"
+        maturity_events[str(minutes)] = event
+    if missing or not all(value == "MATURE" for value in maturity.values()):
+        return {"diagnostic": _diagnostic(
+            decision, "IMMATURE" if not missing and "IMMATURE" in maturity.values() else "DELAYED_INELIGIBLE",
+            ",".join(missing) or ",".join(f"maturity_{key}_{value}" for key, value in maturity.items() if value != "MATURE"),
+        )}
+    gap = selected["gap"]
+    close = selected["close"]
+    open_value = _number((gap.get("payload") or {}).get("o"))
+    close_value = _number((close.get("payload") or {}).get("c"))
+    if open_value is None or close_value is None or open_value <= 0:
+        return {"diagnostic": _diagnostic(decision, "AMBIGUOUS", "path_value_missing")}
+    label_value = (close_value / open_value - 1.0) * 100.0
+    label_identity = {
+        "decision_id": decision.get("decision_id"),
+        "strategy_id": decision.get("strategy_id") or "alphaops_v6",
+        "strategy_version": decision.get("strategy_version"),
+        "family": OBSERVATIONAL_LABEL_FAMILY,
+        "value": label_value,
+        "session_id": session_id,
+        "maturity": maturity,
+    }
+    label = {
+        **dict(decision),
+        "decision_id": decision.get("decision_id"),
+        "label_family": OBSERVATIONAL_LABEL_FAMILY,
+        "label_value": round(label_value, 10),
+        "learning_eligible": True,
+        "return_label_eligible": True,
+        "label_schema_version": LABEL_SCHEMA_VERSION,
+        "eligibility_policy_version": ELIGIBILITY_POLICY_VERSION,
+        "evidence_class": OBSERVATIONAL_EVIDENCE_CLASS,
+        "fill_truth_status": "not_applicable_observation",
+        "fill_truth_bound": False,
+        "research_only": True,
+        "broker_execution_enabled": False,
+        "return_basis": "observed_path_close_vs_gap_open",
+        "observed_path": {"gap": gap, "close": close},
+        "maturity_minutes": list(MATURITY_MINUTES),
+        "maturity_status": maturity,
+        "label_available_at": max(
+            _timestamp(gap["available_at"]), _timestamp(close["available_at"]),
+            *(_timestamp(event["available_at"]) for event in maturity_events.values()),
+        ).isoformat(),
+        "source_artifact_hash_sha256": gap.get("source_artifact_hash_sha256"),
+        "source_artifact_hashes": sorted({
+            str(gap.get("source_artifact_hash_sha256") or ""),
+            str(close.get("source_artifact_hash_sha256") or ""),
+        } - {""}),
+    }
+    label["truth_lineage_hash_sha256"] = canonical_hash({
+        "manifest_sha256": decision.get("universe_manifest_sha256"),
+        "event_ids": [gap["event_id"], close["event_id"], *[event["event_id"] for event in maturity_events.values()]],
+        "evidence_class": OBSERVATIONAL_EVIDENCE_CLASS,
+    })
+    label["label_id"] = "v6o-" + canonical_hash(label_identity)[:28]
+    label["label_payload_hash_sha256"] = canonical_hash({
+        "label_id": label["label_id"], "label_identity": label_identity,
+        "truth_lineage_hash_sha256": label["truth_lineage_hash_sha256"],
+    })
+    return {"label": label, "diagnostic": _diagnostic(decision, "MATURE", "eligible_observation")}
+
+
+def _base_packet(manifest: UniverseManifest, receipt: Mapping[str, Any], *, status: str,
+                 reason: str | None, decisions: list[dict[str, Any]], labels: list[dict[str, Any]],
+                 coverage: list[dict[str, Any]], diagnostics: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    return {
+        "schema_version": "dawnstrike.v6.observational_dataset.v1",
+        "status": status,
+        "reason": reason,
+        "session_id": manifest.session_id,
+        "market_date": manifest.market_date,
+        "universe_generation_id": manifest.universe_generation_id,
+        "universe_manifest_sha256": manifest.manifest_sha256,
+        "source_config_sha256": manifest.source_config_sha256,
+        "capture_receipt_sha256": receipt.get("capture_receipt_sha256"),
+        "producer_receipt_sha256": canonical_hash(receipt),
+        "strategy_identity": {"strategy_id": "alphaops_v6", "strategy_version": "dawnstrike-alphaops-v6-shadow"},
+        "decisions": decisions,
+        "labels": labels,
+        "row_count": len(labels),
+        "coverage": coverage,
+        "diagnostics": diagnostics or [],
+        "maturity_minutes": list(MATURITY_MINUTES),
+        "path_availability_fields": list(PATH_AVAILABILITY_FIELDS),
+        "evidence_class": OBSERVATIONAL_EVIDENCE_CLASS,
+        "research_only": True,
+        "broker_execution_enabled": False,
+        "training_identity": {
+            "dataset_schema_version": "dawnstrike.v6.observational_dataset.v1",
+            "eligibility_policy_version": ELIGIBILITY_POLICY_VERSION,
+            "dataset_hash_sha256": canonical_hash({"labels": labels, "decisions": decisions}),
+        },
+    }
+
+
+def _failed_packet(status: str, reason: str) -> dict[str, Any]:
+    return {"schema_version": "dawnstrike.v6.observational_dataset.v1", "status": status,
+            "reason": reason, "row_count": 0, "labels": [], "decisions": [],
+            "research_only": True, "broker_execution_enabled": False}
+
+
+def _coverage(manifest: UniverseManifest, events: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    counts: dict[tuple[str, str], int] = {}
+    for event in events:
+        key = (str(event.get("scope") or ""), str(event.get("symbol") or "").upper())
+        counts[key] = counts.get(key, 0) + 1
+    return [{**entry.as_dict(), "observation_count": counts.get((entry.scope, entry.symbol), 0),
+             "status": "OBSERVED" if counts.get((entry.scope, entry.symbol), 0) else (
+                 "MISSING_INPUT" if entry.membership == "missing_input" else "MISSING_OBSERVATION")}
+            for entry in manifest.entries]
+
+
+def _receipt_identity_errors(
+    manifest: UniverseManifest,
+    receipt: Mapping[str, Any],
+    events: Sequence[Mapping[str, Any]],
+    *,
+    raw_file_hash: str | None,
+) -> list[str]:
+    errors = []
+    for field, expected in (("session_id", manifest.session_id), ("manifest_sha256", manifest.manifest_sha256),
+                            ("source_config_sha256", manifest.source_config_sha256)):
+        actual = receipt.get(field) or receipt.get("universe_manifest_sha256") if field == "manifest_sha256" else receipt.get(field)
+        if actual != expected:
+            errors.append(f"receipt_{field}_mismatch")
+    raw_hash = receipt.get("raw_events_sha256")
+    if raw_hash and not _sha256(raw_hash):
+        errors.append("receipt_raw_events_hash_invalid")
+    if raw_file_hash and raw_hash != raw_file_hash:
+        errors.append("receipt_raw_events_hash_mismatch")
+    return errors
+
+
+def _validated_events(events: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]] | None:
+    output = []
+    for row in events:
+        try:
+            for field in ("event_id", "session_id", "scope", "symbol", "event_time", "available_at"):
+                if not str(row.get(field) or "").strip():
+                    return None
+            event_time = parse_utc(str(row["event_time"]), label="event_time")
+            available_at = parse_utc(str(row["available_at"]), label="available_at")
+            if available_at < event_time or not isinstance(row.get("payload"), Mapping):
+                return None
+            # Keep the authenticated source event JSON serializable.  Parsed
+            # timestamps are validation-only and must never leak into the
+            # persisted observed path as datetime objects.
+            output.append({**dict(row), "symbol": str(row["symbol"]).upper()})
+        except (TypeError, ValueError):
+            return None
+    return output
+
+
+def _diagnostic(decision: Mapping[str, Any], status: str, reason: str) -> dict[str, Any]:
+    return {"decision_id": decision.get("decision_id"), "ticker": decision.get("ticker"), "status": status, "reason": reason}
+
+
+def _load_json(value: Mapping[str, Any] | str | Path) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        return dict(value)
+    return json.loads(Path(value).read_text(encoding="utf-8"))
+
+
+def _load_jsonl(
+    value: Sequence[Mapping[str, Any]] | str | Path,
+) -> tuple[list[dict[str, Any]], str | None]:
+    if not isinstance(value, (str, Path)):
+        return [dict(row) for row in value], None
+    raw = Path(value).read_bytes()
+    return (
+        [json.loads(line) for line in raw.decode("utf-8").splitlines() if line.strip()],
+        hashlib.sha256(raw).hexdigest(),
+    )
+
+
+def _timestamp(value: Any) -> datetime:
+    return parse_utc(str(value), label="timestamp")
+
+
+def _number(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed == parsed and abs(parsed) != float("inf") else None
+
+
+def _sha256(value: Any) -> bool:
+    return len(str(value or "")) == 64 and all(char in "0123456789abcdef" for char in str(value).lower())
+
+
+__all__ = ["OBSERVATIONAL_EVIDENCE_CLASS", "OBSERVATIONAL_LABEL_FAMILY", "build_observation_dataset"]

@@ -20,6 +20,7 @@ from intraday_scanner.alpha.v6.contracts import (
     utc_now,
 )
 from intraday_scanner.alpha.v6.dataset_builder import build_return_dataset
+from intraday_scanner.alpha.v6.observation_dataset import build_observation_dataset
 from intraday_scanner.alpha.v6.decision_ledger import validate_decision_batch
 from intraday_scanner.alpha.v6.drift import build_drift_report
 from intraday_scanner.alpha.v6.experiment_ledger import build_trial_receipt
@@ -73,6 +74,7 @@ def run_alpha_v6_daily_monitor(
     market_date: str | None = None,
     reference_window: dict[str, Any] | None = None,
     recent_window: dict[str, Any] | None = None,
+    observation_source: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Persist daily outcome, label, dataset, and drift evidence without refitting.
 
@@ -94,7 +96,24 @@ def run_alpha_v6_daily_monitor(
     ]
     label_stats = store.persist_alpha_v6_labels(labels) if labels else {"inserted": 0, "skipped": 0}
     persisted_labels = store.load_alpha_v6_labels()
-    dataset = build_return_dataset(decisions=decisions, labels=persisted_labels)
+    observation_packet: dict[str, Any] | None = None
+    observation_decisions: list[dict[str, Any]] = []
+    observation_labels: list[dict[str, Any]] = []
+    if observation_source is not None:
+        observation_packet = build_observation_dataset(
+            manifest=observation_source["manifest"],
+            producer_receipt=observation_source["producer_receipt"],
+            raw_events=observation_source["raw_events"],
+            decisions=observation_source.get("decisions") or decisions,
+            as_of=observation_source.get("as_of"),
+        )
+        observation_decisions = list(observation_packet.get("decisions") or [])
+        observation_labels = list(observation_packet.get("labels") or [])
+    dataset = build_return_dataset(
+        decisions=[*decisions, *observation_decisions],
+        labels=persisted_labels,
+        observational_labels=observation_labels,
+    )
     dataset_inserted = store.persist_alpha_v6_dataset(dataset)
     quarantined_return_count = int(
         dataset["exclusion_counts"].get("committed_fill_truth_missing", 0)
@@ -124,6 +143,7 @@ def run_alpha_v6_daily_monitor(
         "schema_version": "dawnstrike.alphaops_v6.daily_monitor.v1",
         "status": "COMPLETE",
         "outcome_sync": outcome_sync,
+        "observation_dataset": observation_packet,
         "decision_contract": validate_decision_batch(decisions),
         "label_generation": label_generation,
         "dataset": {**_dataset_summary(dataset), "inserted": dataset_inserted},
@@ -149,6 +169,7 @@ def run_alpha_v6_weekly_training(
     experiment_id: str | None = None,
     arm_id: str | None = None,
     attempt_id: str | None = None,
+    observation_source: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run the separately scheduled V6 refit and all-family OOF evaluation."""
 
@@ -157,11 +178,27 @@ def run_alpha_v6_weekly_training(
         market_date=market_date,
         reference_window=reference_window,
         recent_window=recent_window,
+        observation_source=observation_source,
     )
     decisions = store.load_alpha_v6_decisions()
     outcomes = store.load_alpha_v6_outcomes()
     persisted_labels = store.load_alpha_v6_labels()
-    dataset = build_return_dataset(decisions=decisions, labels=persisted_labels)
+    observation_packet = daily_monitor.get("observation_dataset")
+    observation_decisions = (
+        list(observation_packet.get("decisions") or [])
+        if isinstance(observation_packet, dict)
+        else []
+    )
+    observation_labels = (
+        list(observation_packet.get("labels") or [])
+        if isinstance(observation_packet, dict)
+        else []
+    )
+    dataset = build_return_dataset(
+        decisions=[*decisions, *observation_decisions],
+        labels=persisted_labels,
+        observational_labels=observation_labels,
+    )
     dataset_inserted = store.persist_alpha_v6_dataset(dataset)
     experiment = store.load_alpha_v6_experiment(experiment_id) if experiment_id else None
     # A small/empty historical set retains the legacy NOT_TRAINED result.  Any
@@ -1329,6 +1366,9 @@ def _dataset_summary(dataset: dict[str, Any]) -> dict[str, Any]:
             "training_cutoff",
             "row_count",
             "activation_row_count",
+            "observational_row_count",
+            "observational_label_family",
+            "dataset_mode",
             "exclusion_counts",
             "feature_schema_version",
             "eligibility_counts",
