@@ -158,6 +158,25 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
+def _atomic_json_bounded(
+    path: Path, value: dict[str, Any], *, root: Path, baseline_bytes: int, max_bytes: int
+) -> None:
+    """Publish one exact receipt only when its temp+final peak fits the child cap."""
+    data = json.dumps(value, sort_keys=True, indent=2, default=str).encode() + b"\n"
+    current = _tree_bytes(root)
+    existing = path.stat().st_size if path.is_file() else 0
+    projected_delta = current - baseline_bytes + existing + len(data) + len(data)
+    if projected_delta > max_bytes:
+        raise Ops09Error(
+            f"OPS09 downstream publication budget rejects {path.name}: "
+            f"projected={projected_delta}, cap={max_bytes}"
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_bytes(data)
+    temporary.replace(path)
+
+
 def _assert_budget(root: Path, reserve: int, phase: str) -> None:
     """Admit a bounded phase before it can create any child output."""
     used = _tree_bytes(root)
@@ -802,12 +821,21 @@ def _resume_ops09_unlocked(*, output_root: Path, input_root: Path, scope_root: P
                 "total_bytes_cap": MAX_BYTES,
                 "ledger_scope": "single_market_date",
                 "database_mode": pipeline.get("consumers", {}).get("database_mode", "in_memory"),
+                "downstream_baseline_bytes": pipeline.get("downstream_baseline_bytes"),
+                "downstream_max_bytes": pipeline.get("downstream_max_bytes", DOWNSTREAM_BYTES),
             }
             if (session_bytes > MAX_BYTES or capture_tree_bytes > CAPTURE_BYTES
                     or downstream_tree_bytes > DOWNSTREAM_BYTES):
                 session.update({"status": "DEGRADED", "decision_eligibility": "ZERO",
                                 "reason": "session artifact budget exceeded"})
-            _atomic_json(session_root / "session-receipt.json", session)
+            baseline = pipeline.get("downstream_baseline_bytes")
+            downstream_cap = pipeline.get("downstream_max_bytes", DOWNSTREAM_BYTES)
+            if not isinstance(baseline, int) or not isinstance(downstream_cap, int):
+                raise Ops09Error("guarded child omitted bounded publication identity")
+            _atomic_json_bounded(
+                session_root / "session-receipt.json", session,
+                root=session_root, baseline_bytes=baseline, max_bytes=downstream_cap,
+            )
             _atomic_json(state_path, state)
             continue
         if decision_path is None or not decision_path.is_file():

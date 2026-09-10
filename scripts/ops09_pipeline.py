@@ -140,6 +140,8 @@ def main() -> int:
         "label_count": len(adapted["adapter_packet"].get("labels", [])),
         "consumer_results_path": str(consumer_result_path),
         "consumer_results_sha256": __import__("hashlib").sha256(consumer_result_bytes).hexdigest(),
+        "downstream_baseline_bytes": bounded_writer.baseline,
+        "downstream_max_bytes": args.downstream_max_bytes,
         "consumers": {
             "daily_status": consumers["daily"].get("status"),
             "weekly_status": consumers["weekly"].get("status"),
