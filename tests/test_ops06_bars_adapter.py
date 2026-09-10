@@ -11,6 +11,7 @@ from intraday_scanner.observation.ops05_historical_bars import (
     produce_historical_bars,
 )
 from intraday_scanner.observation.ops06_bars_adapter import adapt_ops05_to_r3
+import intraday_scanner.observation.ops06_bars_adapter as ops06_adapter
 from intraday_scanner.providers.base import IntradayPage
 
 
@@ -43,7 +44,7 @@ def _bar(symbol: str, timestamp: str, close: float) -> dict[str, object]:
     }
 
 
-def _archive(tmp_path):
+def _archive(tmp_path, *, multi: bool = False):
     census = [{"symbol": "M001", "membership": "selected"}]
     symbols = [*PANEL_SYMBOLS, "M001"]
     pages = [
@@ -53,6 +54,7 @@ def _archive(tmp_path):
             for item in (
                 _bar(symbol, "2026-09-09T13:30:00Z", 101),
                 _bar(symbol, "2026-09-09T14:30:00Z", 102),
+                *([_bar(symbol, "2026-09-09T15:30:00Z", 100)] if multi and symbol == "QQQ" else []),
                 _bar(symbol, "2026-09-09T17:30:00Z", 103),
             )
         ],
@@ -106,8 +108,17 @@ def _archive(tmp_path):
             "feature_ingested_at": "2026-09-09T13:29:45+00:00",
         },
     }
+    records = [decision]
+    if multi:
+        second = dict(decision)
+        second.update({
+            "decision_id": "ops06-negative",
+            "decision_at": "2026-09-09T14:30:00+00:00",
+            "ticker": "QQQ",
+        })
+        records.append(second)
     decision_path = tmp_path / "decisions.json"
-    decision_path.write_text(json.dumps({"v6_decision_records": [decision]}), encoding="utf-8")
+    decision_path.write_text(json.dumps({"v6_decision_records": records}), encoding="utf-8")
     return tmp_path / "ops05", decision_path
 
 
@@ -129,6 +140,67 @@ def test_ops05_archive_adapts_to_matured_label_only_horizons(tmp_path) -> None:
         "CENSORED_BY_SESSION_CLOSE",
     ]
     assert packet["ops06_adapter"]["page_hashes_verified"] == 3
+
+
+def test_horizons_bind_to_each_decision_identity(tmp_path, monkeypatch) -> None:
+    root, decisions_path = _archive(tmp_path)
+    payload = json.loads(decisions_path.read_text(encoding="utf-8"))
+    second = dict(payload["v6_decision_records"][0])
+    second["decision_id"] = "ops06-second"
+    payload["v6_decision_records"].append(second)
+    decisions_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    monkeypatch.setattr(
+        ops06_adapter,
+        "_horizon_summary",
+        lambda decision, events, close_at: [{
+            "horizon_minutes": 60,
+            "status": "MATURED_DELAYED_LABEL",
+            "marker": decision["decision_id"],
+        }],
+    )
+    packet = adapt_ops05_to_r3(
+        observation_root=root, decision_artifact=decisions_path, as_of="2026-09-10T00:00:00+00:00"
+    )["adapter_packet"]
+    assert [label["horizon_definitions"][0]["marker"] for label in packet["labels"]] == [
+        "ops06-positive", "ops06-second"
+    ]
+    assert all(label["horizon_binding"]["binding"] == "exact_decision_identity" for label in packet["labels"])
+
+
+def test_multi_symbol_public_adapter_keeps_positive_negative_and_censoring_distinct(tmp_path) -> None:
+    root, decisions_path = _archive(tmp_path, multi=True)
+    packet = adapt_ops05_to_r3(
+        observation_root=root, decision_artifact=decisions_path, as_of="2026-09-10T00:00:00+00:00"
+    )["adapter_packet"]
+    labels = {label["decision_id"]: label for label in packet["labels"]}
+    assert set(labels) == {"ops06-positive", "ops06-negative"}
+    assert labels["ops06-positive"]["label_value"] > 0
+    assert labels["ops06-negative"]["label_value"] < 0
+    assert labels["ops06-positive"]["horizon_binding"]["symbol"] == "SPY"
+    assert labels["ops06-negative"]["horizon_binding"]["symbol"] == "QQQ"
+    assert labels["ops06-positive"]["maturity_status"]["600"] == "CENSORED"
+    assert labels["ops06-negative"]["target_price_offset_minutes"] == 60.0
+
+
+def test_multi_symbol_public_daily_consumer_persists_both_rows(tmp_path, capsys) -> None:
+    root, decisions = _archive(tmp_path, multi=True)
+    assert main(
+        [
+            "alpha-v6-daily-monitor",
+            "--db-path",
+            str(tmp_path / "multi.sqlite"),
+            "--market-date",
+            "2026-09-09",
+            "--observation-root",
+            str(root),
+            "--decision-artifact",
+            str(decisions),
+        ]
+    ) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["observation_dataset"]["row_count"] == 2
+    assert report["observation_dataset"]["research_only"] is True
 
 
 def test_ops05_archive_routes_through_public_daily_cli(tmp_path, capsys) -> None:

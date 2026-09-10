@@ -39,6 +39,7 @@ def build_observation_dataset(
     decisions: Sequence[Mapping[str, Any]],
     as_of: str | datetime | None = None,
     target_contract: Mapping[str, Any] | None = None,
+    observational_universe_id: str | None = None,
 ) -> dict[str, Any]:
     """Build an observational packet from one immutable R2 session.
 
@@ -97,12 +98,23 @@ def build_observation_dataset(
         by_symbol.setdefault(str(event["symbol"]).upper(), []).append(event)
     labels: list[dict[str, Any]] = []
     diagnostics: list[dict[str, Any]] = []
+    authenticated_registration = observational_universe_id is not None
     entry_by_symbol = {
-        entry.symbol: entry for entry in typed_manifest.entries if entry.membership == "selected"
+        entry.symbol: entry
+        for entry in typed_manifest.entries
+        if authenticated_registration or entry.membership == "selected"
     }
     for decision in decision_rows:
         ticker = str(decision.get("ticker") or "").upper()
         if ticker not in entry_by_symbol:
+            if authenticated_registration:
+                diagnostics.append(
+                    _diagnostic(
+                        decision,
+                        "MISSING_INPUT",
+                        "decision_symbol_not_in_registered_census",
+                    )
+                )
             continue
         # A decision from another market date/session is never allowed to be
         # joined to this manifest.  Keeping this check at the producer
@@ -126,10 +138,17 @@ def build_observation_dataset(
             diagnostics.append(_diagnostic(decision, "AMBIGUOUS", "decision_session_mismatch"))
             continue
         membership = decision.get("universe_membership")
+        # A source decision may truthfully retain UNREGISTERED/REJECTED or
+        # BLOCKED status while an isolated observational registration binds
+        # the same immutable row to a research universe.  Use that binding
+        # only for the join identity; never rewrite the decision payload.
+        effective_universe_id = (
+            observational_universe_id if observational_universe_id else
+            membership.get("universe_id") if isinstance(membership, Mapping) else None
+        )
         if (
             not isinstance(membership, Mapping)
-            or str(membership.get("universe_id") or "")
-            != typed_manifest.universe_generation_id
+            or str(effective_universe_id or "") != typed_manifest.universe_generation_id
             or str(decision.get("strategy_version") or "")
             != "dawnstrike-alphaops-v6-shadow"
         ):
@@ -161,6 +180,11 @@ def build_observation_dataset(
             close_identity=close_identity,
             target_contract=target_contract_value,
         )
+        result["diagnostic"]["registered_membership"] = entry_by_symbol[ticker].membership
+        result["diagnostic"]["trade_eligibility"] = False
+        if result.get("label") is not None:
+            result["label"]["registered_membership"] = entry_by_symbol[ticker].membership
+            result["label"]["trade_eligibility"] = False
         diagnostics.append(result["diagnostic"])
         if result.get("label") is not None:
             labels.append(result["label"])

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -11,7 +12,10 @@ from intraday_scanner.alpha.v6.decision_ledger import build_candidate_decisions
 from intraday_scanner.alpha.v6.models import current_training_rows, model_eligibility
 from intraday_scanner.alpha.v6.observation_dataset import build_observation_dataset
 from intraday_scanner.observation.contracts import UniverseManifest
-from intraday_scanner.services.alpha_v6_learning_service import run_alpha_v6_daily_monitor
+from intraday_scanner.services.alpha_v6_learning_service import (
+    run_alpha_v6_daily_monitor,
+    run_alpha_v6_weekly_training,
+)
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 _BAR_TARGET = {
@@ -139,6 +143,78 @@ def _authenticated_event_path(tmp_path, events: list[dict], receipt: dict):
     path.write_bytes(raw)
     bound_receipt = {**receipt, "raw_events_sha256": hashlib.sha256(raw).hexdigest()}
     return path, bound_receipt
+
+
+def _authenticated_rejected_observation_source(tmp_path) -> dict:
+    manifest, receipt, events, decision = _fixture()
+    generation = manifest["universe_generation_id"]
+    manifest["session_close_identity"]["close_at"] = "2026-01-02T18:00:00+00:00"
+    manifest["scopes"]["original_small_cap_gap"] = [
+        {
+            "symbol": "AAA",
+            "membership": "rejected",
+            "reason_codes": ["policy_rejected"],
+            "required_inputs": ["bars"],
+        },
+        {
+            "symbol": "BBB",
+            "membership": "rejected",
+            "reason_codes": ["policy_rejected"],
+            "required_inputs": ["bars"],
+        },
+    ]
+    manifest["scopes"]["liquid_reference_panel"][0]["symbol"] = "CCC"
+    manifest["collection_expectation"]["expected_entries"] = 3
+    manifest["observational_registration"] = {
+        "versioned_universe_id": generation,
+    }
+    receipt["observational_registration"] = {
+        "versioned_universe_id": generation,
+        "external_approval": False,
+        "production_registration_performed": False,
+    }
+    decision_b = deepcopy(decision)
+    decision_b.update({"decision_id": "decision-bbb", "ticker": "BBB"})
+    close_a = deepcopy(events[2])
+    close_a.update({
+        "event_id": "aaa-session-close",
+        "event_time": "2026-01-02T18:00:00+00:00",
+        "available_at": "2026-01-02T18:00:01+00:00",
+        "close_proxy": True,
+    })
+    events_b = [deepcopy(row) for row in events[:3]]
+    close_b = deepcopy(close_a)
+    close_b.update({"event_id": "bbb-session-close", "symbol": "BBB"})
+    for row in events_b:
+        row["event_id"] = f"bbb-{row['event_id']}"
+        row["symbol"] = "BBB"
+        if row["event_time"].startswith("2026-01-02T13:00:00"):
+            row["payload"] = {"o": 100.0, "c": 95.0}
+    events = [*events[:3], close_a, *events_b, close_b]
+    typed_manifest = UniverseManifest.from_mapping(manifest)
+    receipt["manifest_sha256"] = typed_manifest.manifest_sha256
+    event_path, receipt = _authenticated_event_path(tmp_path, events, receipt)
+    registration = {
+        "versioned_universe_id": generation,
+        "external_approval": False,
+        "production_registration_performed": False,
+    }
+    return {
+        "manifest": manifest,
+        "producer_receipt": receipt,
+        "raw_events": event_path,
+        "decisions": [decision, decision_b],
+        "as_of": "2026-01-02T22:30:00+00:00",
+        "target_contract": _BAR_TARGET,
+        "registration_context": registration,
+        "adapter_packet": {"target_contract": _BAR_TARGET},
+        "decision_artifact_path": str(tmp_path / "decisions.json"),
+        "decision_artifact_sha256": "d" * 64,
+        "producer_identity": {
+            "source_config_sha256": "a" * 64,
+            "observational_registration": registration,
+        },
+    }
 
 
 def test_actual_observation_consumer_builds_matured_non_fill_truth_dataset(tmp_path) -> None:
@@ -313,6 +389,56 @@ def test_daily_monitor_routes_observation_packet_to_dataset_consumer(tmp_path) -
     assert result["observation_dataset"]["status"] == "READY"
     assert result["dataset"]["row_count"] == 1
     assert result["dataset"]["observational_row_count"] == 1
+
+
+def test_public_daily_preserves_authenticated_rejected_rows_and_weekly_nested_daily(
+    tmp_path,
+) -> None:
+    source = _authenticated_rejected_observation_source(tmp_path)
+    store = SQLiteScanStore(tmp_path / "authenticated.sqlite")
+    store.initialize()
+    daily = run_alpha_v6_daily_monitor(
+        store, market_date="2026-01-02", observation_source=source
+    )
+    packet = daily["observation_dataset"]
+    assert packet["status"] == "READY"
+    assert packet["row_count"] == 2
+    rows = {row["decision_id"]: row for row in packet["labels"]}
+    assert {row["registered_membership"] for row in rows.values()} == {"rejected"}
+    assert {rows["decision-aaa"]["label_value"], rows["decision-bbb"]["label_value"]} == {
+        2.0,
+        -5.0,
+    }
+    assert all(row["trade_eligibility"] is False for row in rows.values())
+    assert all(row["maturity_status"]["60"] == "MATURE" for row in rows.values())
+    assert all(row["maturity_status"]["600"] == "CENSORED" for row in rows.values())
+    assert packet["universe_generation_id"] == "fixture-generation-1"
+    assert (
+        packet["producer_identity"]["observational_registration"]["versioned_universe_id"]
+        == "fixture-generation-1"
+    )
+
+    weekly_store = SQLiteScanStore(tmp_path / "weekly.sqlite")
+    weekly_store.initialize()
+    weekly = run_alpha_v6_weekly_training(
+        weekly_store,
+        code_sha="fixture-code-sha",
+        market_date="2026-01-02",
+        observation_source=source,
+    )
+    assert weekly["daily_monitor"]["observation_dataset"]["row_count"] == 2
+    assert weekly["daily_monitor"]["observation_dataset"]["labels"]
+
+    for context in (None, {"versioned_universe_id": "forged-universe"}):
+        negative_source = dict(source)
+        negative_source["registration_context"] = context
+        negative_store = SQLiteScanStore(tmp_path / f"negative-{context is None}.sqlite")
+        negative_store.initialize()
+        negative = run_alpha_v6_daily_monitor(
+            negative_store, market_date="2026-01-02", observation_source=negative_source
+        )
+        assert negative["observation_dataset"]["row_count"] == 0
+        assert negative["observation_dataset"]["labels"] == []
 
 
 def test_cli_routes_actual_decision_producer_artifact_to_observation_consumer(

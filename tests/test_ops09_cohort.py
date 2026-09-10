@@ -1,0 +1,535 @@
+from __future__ import annotations
+
+import json
+import shutil
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+
+from intraday_scanner.observation import ops09 as ops09_module
+from intraday_scanner.observation.cohort import APPROVED_PYTHON
+from scripts.ops09_pipeline import _compact_consumer_value
+from intraday_scanner.observation.ops09 import (
+    CAPTURE_BYTES,
+    DOWNSTREAM_BYTES,
+    MAX_BYTES,
+    NATIVE_RESERVED_BYTES,
+    Ops09Error,
+    SharedBoundedWriter,
+    _account_attempt_elapsed,
+    _ByteLedger,
+    _sample_movers,
+    prepare_ops09_cohort,
+    resume_ops09_cohort,
+    validate_ops09_scope,
+)
+
+
+def _source_config(tmp_path: Path) -> tuple[Path, str]:
+    path = tmp_path / "source-config.json"
+    path.write_text('{"provider":"fixture","feed":"sip"}\n', encoding="utf-8")
+    import hashlib
+
+    return path, hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _scope(tmp_path: Path, market_date: str = "2026-09-10", *, missing: bool = False) -> Path:
+    marker = tmp_path / "producer.json"
+    marker.write_text(json.dumps({"source": "fixture", "market_date": market_date}), encoding="utf-8")
+    import hashlib
+
+    movers = [] if missing else [
+        {"symbol": f"S{i:03d}", "membership": "selected", "source_lane": "mover"}
+        for i in range(2)
+    ] + [
+        {"symbol": f"R{i:03d}", "membership": "rejected", "source_lane": "mover"}
+        for i in range(10)
+    ] + [
+        {"symbol": f"U{i:03d}", "membership": "unselected", "source_lane": "mover"}
+        for i in range(167)
+    ] + [
+        {"symbol": f"M{i:03d}", "membership": "missing_input", "source_lane": "mover"}
+        for i in range(2)
+    ]
+    panel = [{"symbol": name, "source_lane": "reference_panel"} for name in ("DIA", "IWM", "QQQ", "SPY", "TLT")]
+    count = len(movers)
+    payload = {
+        "schema_version": "dawnstrike.observation.scope_declaration.v1",
+        "market_date": market_date,
+        "scopes": {"original_small_cap_gap": movers, "liquid_reference_panel": panel},
+        "producer_completeness": {
+            "status": "MISSING_INPUT" if missing else "COMPLETE",
+            "source_count": count,
+            "declared_count": count,
+            "included_count": count,
+            "source_as_of": market_date,
+            "truncated": False,
+            "survivorship_filter": False,
+        },
+        "missing_input": missing,
+        "source_identity": {"market_date": market_date, "producer": "fixture"},
+        "source_artifacts": {"producer": {"path": str(marker), "sha256": hashlib.sha256(marker.read_bytes()).hexdigest()}},
+    }
+    path = tmp_path / "scope.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def _actual_plan(tmp_path: Path, *, start_date: str = "2026-09-10") -> tuple[Path, dict]:
+    source_path, source_hash = _source_config(tmp_path)
+    plan = prepare_ops09_cohort(
+        output_root=tmp_path / "out", input_root=tmp_path / "in", scope_root=tmp_path / "scope",
+        database_root=tmp_path / "db", repo_root=Path(__file__).parents[1],
+        source_config_hash=source_hash, source_config_path=source_path, python_path=APPROVED_PYTHON,
+        start_date=start_date, producer_mode="actual", actual_source_root=tmp_path / "actual-source",
+    )
+    (tmp_path / "actual-source").mkdir()
+    return tmp_path / "out", plan
+
+
+def test_d042_sampling_keeps_four_strata_and_missing_input() -> None:
+    rows = (
+        [{"symbol": f"S{i}", "membership": "selected"} for i in range(2)]
+        + [{"symbol": f"R{i}", "membership": "rejected"} for i in range(10)]
+        + [{"symbol": f"U{i}", "membership": "unselected"} for i in range(167)]
+        + [{"symbol": f"M{i}", "membership": "missing_input"} for i in range(2)]
+    )
+    result = _sample_movers(rows)
+    assert {name: sum(row["membership"] == name for row in result["rows"]) for name in ("selected", "rejected", "unselected", "missing_input")} == {"selected": 2, "rejected": 4, "unselected": 4, "missing_input": 2}
+    assert result["population_counts"] == {"selected": 2, "rejected": 10, "unselected": 167, "missing_input": 2}
+
+
+def test_d081_sampling_redistributes_when_strata_are_unavailable() -> None:
+    rows = (
+        [{"symbol": "S0", "membership": "selected"}]
+        + [{"symbol": "R0", "membership": "rejected"}]
+        + [{"symbol": f"U{i}", "membership": "unselected"} for i in range(5)]
+    )
+    result = _sample_movers(rows)
+    assert result["population_counts"] == {"selected": 1, "rejected": 1, "unselected": 5, "missing_input": 0}
+    assert result["sampled_count"] == 7
+    assert {row["membership"] for row in result["rows"]} == {"selected", "rejected", "unselected"}
+    assert next(row for row in result["rows"] if row["membership"] == "selected")["inclusion_probability"] == 1.0
+
+
+def test_scope_requires_date_bound_complete_producer(tmp_path: Path) -> None:
+    path = _scope(tmp_path)
+    value = validate_ops09_scope(path, expected_date="2026-09-10")
+    assert value["mover_count"] == 181
+    assert value["sampling"]["sampled_count"] == 12
+    with pytest.raises(Ops09Error, match="date mismatch"):
+        validate_ops09_scope(path, expected_date="2026-09-11")
+
+
+def test_missing_input_is_explicit_panel_partial(tmp_path: Path) -> None:
+    value = validate_ops09_scope(_scope(tmp_path, missing=True), expected_date="2026-09-10")
+    assert value["missing_input"] is True
+    assert value["mover_count"] == 0
+
+
+def test_prepare_freezes_ten_sessions_and_caps(tmp_path: Path) -> None:
+    source_path, source_hash = _source_config(tmp_path)
+    plan = prepare_ops09_cohort(
+        output_root=tmp_path / "out", input_root=tmp_path / "in", scope_root=tmp_path / "scope",
+        database_root=tmp_path / "db", repo_root=Path(__file__).parents[1],
+        source_config_hash=source_hash, source_config_path=source_path, python_path=APPROVED_PYTHON,
+    )
+    assert len(plan["expected_sessions"]) == 10
+    assert plan["caps"]["max_pages"] == 100
+    assert plan["caps"]["max_attempts_total"] == 3
+    assert plan["caps"]["capture_bytes"] == 48 * 1024 * 1024
+    assert plan["safety"]["no_auto_renewal"] is True
+
+
+def test_operator_stop_is_durable_and_stops_pending_sessions(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    source_path, source_hash = _source_config(tmp_path)
+    prepare_ops09_cohort(
+        output_root=out, input_root=tmp_path / "in", scope_root=tmp_path / "scope",
+        database_root=tmp_path / "db", repo_root=Path(__file__).parents[1],
+        source_config_hash=source_hash, source_config_path=source_path, python_path=APPROVED_PYTHON,
+    )
+    (out / ".cohort.stop").write_text("operator test\n", encoding="utf-8")
+    state = resume_ops09_cohort(
+        output_root=out, input_root=tmp_path / "in", scope_root=tmp_path / "scope",
+        database_root=tmp_path / "db", repo_root=Path(__file__).parents[1],
+        now=None,
+    )
+    assert state["status"] == "STOPPED"
+    assert all(row["status"] == "STOPPED" for row in state["sessions"])
+
+
+def test_actual_readiness_missing_first_and_later_scope_is_pending_without_attempts(tmp_path: Path) -> None:
+    out, _ = _actual_plan(tmp_path)
+    state = resume_ops09_cohort(
+        output_root=out, input_root=tmp_path / "in", scope_root=tmp_path / "scope",
+        database_root=tmp_path / "db", repo_root=Path(__file__).parents[1],
+        execute=False, now=datetime(2026, 9, 10, 20, 1, tzinfo=timezone.utc),
+    )
+    first = state["sessions"][0]
+    assert first["status"] == "PENDING_PRODUCER"
+    assert first["attempts"] == 0
+    assert first["request_contract_sha256"] is None
+    assert first["request_contract_status"] == "MISSING"
+    assert first["missing_input"] == "date_bound_actual_scope"
+
+    state = resume_ops09_cohort(
+        output_root=out, input_root=tmp_path / "in", scope_root=tmp_path / "scope",
+        database_root=tmp_path / "db", repo_root=Path(__file__).parents[1],
+        execute=False, now=datetime(2026, 9, 11, 20, 1, tzinfo=timezone.utc),
+    )
+    assert state["sessions"][0]["status"] == "MISSED_SESSION"
+    later = state["sessions"][1]
+    assert later["status"] == "PENDING_PRODUCER"
+    assert later["attempts"] == 0
+    assert later["request_contract_sha256"] is None
+    assert later["request_contract_status"] == "MISSING"
+
+
+def test_actual_readiness_existing_scope_still_returns_ready_with_contract(tmp_path: Path) -> None:
+    out, plan = _actual_plan(tmp_path)
+    scope_path = Path(plan["sessions"][0]["scope_path"])
+    scope_path.parent.mkdir(parents=True)
+    shutil.copyfile(_scope(tmp_path, "2026-09-10"), scope_path)
+    state = resume_ops09_cohort(
+        output_root=out, input_root=tmp_path / "in", scope_root=tmp_path / "scope",
+        database_root=tmp_path / "db", repo_root=Path(__file__).parents[1],
+        execute=False, now=datetime(2026, 9, 10, 20, 1, tzinfo=timezone.utc),
+    )
+    session = state["sessions"][0]
+    assert session["status"] == "READY"
+    assert session["attempts"] == 0
+    assert isinstance(session["request_contract_sha256"], str)
+    assert Path(session["request_contract_path"]).is_file()
+
+
+def test_fixture_readiness_existing_scope_does_not_consume_attempt(tmp_path: Path) -> None:
+    source_path, source_hash = _source_config(tmp_path)
+    out = tmp_path / "out"
+    prepare_ops09_cohort(
+        output_root=out, input_root=tmp_path / "in", scope_root=tmp_path / "scope",
+        database_root=tmp_path / "db", repo_root=Path(__file__).parents[1],
+        source_config_hash=source_hash, source_config_path=source_path, python_path=APPROVED_PYTHON,
+        start_date="2026-09-10",
+    )
+    scope_path = tmp_path / "scope" / "2026-09-10" / "scope.json"
+    scope_path.parent.mkdir(parents=True)
+    shutil.copyfile(_scope(tmp_path, "2026-09-10"), scope_path)
+    state = resume_ops09_cohort(
+        output_root=out, input_root=tmp_path / "in", scope_root=tmp_path / "scope",
+        database_root=tmp_path / "db", repo_root=Path(__file__).parents[1],
+        execute=False, now=datetime(2026, 9, 10, 20, 1, tzinfo=timezone.utc),
+    )
+    assert state["sessions"][0]["status"] == "READY"
+    assert state["sessions"][0]["attempts"] == 0
+
+
+def test_consumer_payloads_are_canonical_reusable_and_lossless(tmp_path: Path) -> None:
+    root = tmp_path / "session"
+    adapter = root / "ops06"
+    writer = SharedBoundedWriter(roots=(root, adapter), max_bytes=1024 * 1024)
+    payload = {
+        "observation_dataset": {
+            "rows": [{"id": i, "nested": {"values": list(range(101))}} for i in range(2)],
+            "unique": {"deep": {"a": {"b": {"c": {"d": {"e": {"f": {"g": [1, 2, 3]}}}}}}}},
+        },
+        "unique_result": {"values": list(range(101))},
+    }
+    cache: dict[str, Path] = {}
+    daily = _compact_consumer_value(
+        payload, writer=writer, payload_root=adapter / "consumer-payloads", cache=cache,
+    )
+    weekly = _compact_consumer_value(
+        payload, writer=writer, payload_root=adapter / "consumer-payloads", cache=cache,
+    )
+    daily_ref = daily["observation_dataset"]
+    weekly_ref = weekly["observation_dataset"]
+    assert daily["unique_result"] == payload["unique_result"]
+    assert daily_ref == weekly_ref
+    path = Path(daily_ref["reference_path"])
+    assert path.read_bytes() == _canonical_json_bytes_for_test(payload["observation_dataset"])
+    assert __import__("hashlib").sha256(path.read_bytes()).hexdigest() == daily_ref["reference_sha256"]
+    retry = _compact_consumer_value(
+        payload, writer=writer, payload_root=adapter / "consumer-payloads", cache={},
+    )
+    assert retry["observation_dataset"] == daily_ref
+    path.write_bytes(b"tampered")
+    with pytest.raises(RuntimeError, match="does not match its SHA-256"):
+        _compact_consumer_value(
+            payload, writer=writer, payload_root=adapter / "consumer-payloads", cache={},
+        )
+
+
+def _canonical_json_bytes_for_test(value: object) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def test_consumer_canonical_payload_rejection_leaves_no_target(tmp_path: Path) -> None:
+    root = tmp_path / "session"
+    adapter = root / "ops06"
+    writer = SharedBoundedWriter(roots=(root, adapter), max_bytes=64)
+    payload = {"observation_dataset": {"values": list(range(100))}}
+    with pytest.raises(Ops09Error, match="shared byte budget"):
+        _compact_consumer_value(
+            payload, writer=writer, payload_root=adapter / "consumer-payloads", cache={},
+        )
+    payload_root = adapter / "consumer-payloads"
+    assert not list(payload_root.glob("*"))
+
+
+def test_actual_execute_missing_scope_still_enters_child_without_reused_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out, plan = _actual_plan(tmp_path)
+    calls: list[tuple[object, object, Path]] = []
+
+    def fake_capture(**kwargs: object) -> dict[str, object]:
+        calls.append((kwargs["scope"], kwargs["contract"], kwargs["scope_path"]))
+        return {"status": "PARTIAL", "attempt_elapsed_seconds": 0.0}
+
+    monkeypatch.setattr(ops09_module, "_run_capture", fake_capture)
+    state = resume_ops09_cohort(
+        output_root=out, input_root=tmp_path / "in", scope_root=tmp_path / "scope",
+        database_root=tmp_path / "db", repo_root=Path(__file__).parents[1],
+        execute=True, now=datetime(2026, 9, 10, 20, 1, tzinfo=timezone.utc),
+    )
+    assert len(calls) == 1
+    scope, contract, scope_path = calls[0]
+    assert scope is None
+    assert contract is None
+    assert scope_path == Path(plan["sessions"][0]["scope_path"])
+    assert state["sessions"][0]["status"] == "PARTIAL"
+    assert state["sessions"][0]["attempts"] == 1
+    assert state["sessions"][0].get("request_contract_sha256") is None
+
+
+def test_requested_missing_fixture_fails_before_attempt_or_native(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_path, source_hash = _source_config(tmp_path)
+    out = tmp_path / "out"
+    plan = prepare_ops09_cohort(
+        output_root=out, input_root=tmp_path / "in", scope_root=tmp_path / "scope",
+        database_root=tmp_path / "db", repo_root=Path(__file__).parents[1],
+        source_config_hash=source_hash, source_config_path=source_path, python_path=APPROVED_PYTHON,
+        start_date="2026-09-10",
+    )
+    scope_path = Path(plan["sessions"][0]["scope_path"])
+    scope_path.parent.mkdir(parents=True)
+    shutil.copyfile(_scope(tmp_path, "2026-09-10"), scope_path)
+    monkeypatch.setattr(
+        ops09_module, "_run_capture", lambda **_: pytest.fail("native capture must not be called")
+    )
+    with pytest.raises(Ops09Error, match="required offline fixture is missing"):
+        resume_ops09_cohort(
+            output_root=out, input_root=tmp_path / "in", scope_root=tmp_path / "scope",
+            database_root=tmp_path / "db", repo_root=Path(__file__).parents[1],
+            execute=True, now=datetime(2026, 9, 10, 20, 1, tzinfo=timezone.utc),
+        )
+    state = json.loads((out / "cohort-state.json").read_text(encoding="utf-8"))
+    assert state["sessions"][0]["attempts"] == 0
+    assert state["sessions"][0]["status"] == "EXPECTED"
+    assert not (out / "2026-09-10" / ".ops09-attempt.json").exists()
+    assert not (out / "2026-09-10" / "request-contract.json").exists()
+
+
+def test_requested_fixture_root_missing_date_fails_before_attempt_or_native(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out, _ = _actual_plan(tmp_path)
+    monkeypatch.setattr(
+        ops09_module, "_run_capture", lambda **_: pytest.fail("native capture must not be called")
+    )
+    with pytest.raises(Ops09Error, match="required offline fixture is missing"):
+        resume_ops09_cohort(
+            output_root=out, input_root=tmp_path / "in", scope_root=tmp_path / "scope",
+            database_root=tmp_path / "db", repo_root=Path(__file__).parents[1],
+            execute=True, fixture_root=tmp_path / "missing-fixtures",
+            now=datetime(2026, 9, 10, 20, 1, tzinfo=timezone.utc),
+        )
+    state = json.loads((out / "cohort-state.json").read_text(encoding="utf-8"))
+    assert state["sessions"][0]["attempts"] == 0
+    assert state["sessions"][0]["status"] == "EXPECTED"
+    assert not (out / "2026-09-10" / ".ops09-attempt.json").exists()
+    assert not (out / "2026-09-10" / "request-contract.json").exists()
+
+
+def test_existing_fixture_routes_fixture_only_through_capture_seam(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_path, source_hash = _source_config(tmp_path)
+    out = tmp_path / "out"
+    plan = prepare_ops09_cohort(
+        output_root=out, input_root=tmp_path / "in", scope_root=tmp_path / "scope",
+        database_root=tmp_path / "db", repo_root=Path(__file__).parents[1],
+        source_config_hash=source_hash, source_config_path=source_path, python_path=APPROVED_PYTHON,
+        start_date="2026-09-10",
+    )
+    scope_path = Path(plan["sessions"][0]["scope_path"])
+    scope_path.parent.mkdir(parents=True)
+    shutil.copyfile(_scope(tmp_path, "2026-09-10"), scope_path)
+    fixture = tmp_path / "in" / "2026-09-10" / "fixture.json"
+    fixture.parent.mkdir(parents=True)
+    fixture.write_text(json.dumps({"bars": [{"items": []}], "corporate_actions": [{"items": []}]}), encoding="utf-8")
+    calls: list[Path | None] = []
+
+    def fake_capture(**kwargs: object) -> dict[str, object]:
+        calls.append(kwargs["fixture"])
+        return {"status": "PARTIAL", "attempt_elapsed_seconds": 0.0}
+
+    monkeypatch.setattr(ops09_module, "_run_capture", fake_capture)
+    state = resume_ops09_cohort(
+        output_root=out, input_root=tmp_path / "in", scope_root=tmp_path / "scope",
+        database_root=tmp_path / "db", repo_root=Path(__file__).parents[1],
+        execute=True, now=datetime(2026, 9, 10, 20, 1, tzinfo=timezone.utc),
+    )
+    assert calls == [fixture.resolve()]
+    assert state["sessions"][0]["attempts"] == 1
+    assert state["sessions"][0]["status"] == "PARTIAL"
+
+
+def test_byte_ledger_admits_native_capture_and_rejects_overcommitted_downstream(
+    tmp_path: Path,
+) -> None:
+    output_root = tmp_path / "output"
+    database_root = tmp_path / "database"
+    identity = {
+        "cohort_id": "cohort-test",
+        "output_root": str(output_root.resolve()),
+        "database_root": str(database_root.resolve()),
+        "repository": {"code_sha": "a" * 40, "tree_sha": "b" * 40, "root": "fixture"},
+    }
+    ledger = _ByteLedger(output_root=output_root, database_root=database_root, identity=identity)
+    ledger.admit("capture", CAPTURE_BYTES + NATIVE_RESERVED_BYTES)
+    with pytest.raises(Ops09Error, match="cumulative byte budget rejects downstream"):
+        ledger.admit("downstream", DOWNSTREAM_BYTES)
+    released = ledger.release("capture")
+    assert released["reserved_bytes"] == CAPTURE_BYTES + NATIVE_RESERVED_BYTES
+    ledger.admit("downstream", DOWNSTREAM_BYTES)
+    ledger.release("downstream")
+    payload = json.loads((output_root / ".ops09-byte-ledger.json").read_text(encoding="utf-8"))
+    assert payload["max_bytes"] == MAX_BYTES
+    assert payload["reservations"] == {}
+
+
+def test_byte_ledger_rejects_identity_reuse_across_database_root(tmp_path: Path) -> None:
+    output_root = tmp_path / "output"
+    identity = {
+        "cohort_id": "cohort-test",
+        "output_root": str(output_root.resolve()),
+        "database_root": str((tmp_path / "database").resolve()),
+        "repository": {"code_sha": "a" * 40, "tree_sha": "b" * 40, "root": "fixture"},
+    }
+    _ByteLedger(output_root=output_root, database_root=tmp_path / "database", identity=identity)
+    changed = dict(identity)
+    changed["database_root"] = str((tmp_path / "other-database").resolve())
+    with pytest.raises(Ops09Error, match="identity changed"):
+        _ByteLedger(output_root=output_root, database_root=tmp_path / "other-database", identity=changed)
+
+
+def test_shared_writer_accounts_multiple_roots_and_replacement_once(tmp_path: Path) -> None:
+    root = tmp_path / "session"
+    capture = root / "capture"
+    adapter = root / "ops06"
+    writer = SharedBoundedWriter(
+        roots=(root, adapter), max_bytes=64, excluded_roots=(capture,)
+    )
+    writer(adapter / "one.json", b"1234567890")
+    writer(adapter / "one.json", b"123")
+    writer(root / "control.json", b"abcd")
+    assert (adapter / "one.json").read_bytes() == b"123"
+    with pytest.raises(Ops09Error, match="shared byte budget"):
+        writer(adapter / "overflow.json", b"x" * 100)
+    assert not (adapter / "overflow.json").exists()
+
+
+def test_shared_writer_accounts_retained_target_during_shrink(tmp_path: Path) -> None:
+    root = tmp_path / "session"
+    root.mkdir()
+    writer = SharedBoundedWriter(roots=(root,), max_bytes=100)
+    target = root / "target.json"
+    target.write_bytes(b"o" * 95)
+    old = target.read_bytes()
+
+    # The old target (95) and new temporary (10) coexist before replace.
+    with pytest.raises(Ops09Error, match=r"projected_peak=105, cap=100"):
+        writer(target, b"n" * 10)
+    assert target.read_bytes() == old
+    assert not list(root.glob(".target.json.*.tmp"))
+
+    safe_root = root / "safe"
+    safe_root.mkdir()
+    safe = safe_root / "safe.json"
+    safe.write_bytes(b"o" * 80)
+    SharedBoundedWriter(roots=(safe_root,), max_bytes=100)(safe, b"n" * 10)
+    assert safe.read_bytes() == b"n" * 10
+
+    equal_root = root / "equal"
+    equal_root.mkdir()
+    equal = equal_root / "equal.json"
+    equal.write_bytes(b"o" * 50)
+    SharedBoundedWriter(roots=(equal_root,), max_bytes=100)(equal, b"n" * 50)
+    assert equal.read_bytes() == b"n" * 50
+
+    growth_root = root / "growth"
+    growth_root.mkdir()
+    growth = growth_root / "growth.json"
+    growth.write_bytes(b"o" * 10)
+    growth_writer = SharedBoundedWriter(roots=(growth_root,), max_bytes=160)
+    growth_writer(growth, b"n" * 80)
+    assert growth.read_bytes() == b"n" * 80
+
+    multi_root = root / "multi"
+    multi_root.mkdir()
+    other = multi_root / "other.json"
+    other.write_bytes(b"x" * 20)
+    multi = multi_root / "multi.json"
+    multi.write_bytes(b"o" * 10)
+    multi_writer = SharedBoundedWriter(roots=(multi_root,), max_bytes=65)
+    multi_writer(multi, b"n" * 15)
+    assert multi.read_bytes() == b"n" * 15
+    assert other.read_bytes() == b"x" * 20
+
+
+def test_shared_writer_observes_old_and_temp_at_replace_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "boundary"
+    root.mkdir()
+    target = root / "target.json"
+    target.write_bytes(b"o" * 95)
+    observed: list[tuple[int, int]] = []
+    original_replace = Path.replace
+
+    def observe_replace(source: Path, destination: Path) -> Path:
+        if source.name.startswith(".target.json.") and source.name.endswith(".tmp"):
+            observed.append((destination.stat().st_size, source.stat().st_size))
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(Path, "replace", observe_replace)
+    SharedBoundedWriter(roots=(root,), max_bytes=105)(target, b"n" * 10)
+    assert observed == [(95, 10)]
+    assert target.read_bytes() == b"n" * 10
+
+
+def test_elapsed_and_attempt_identity_are_authoritative_before_marker(tmp_path: Path) -> None:
+    state_path = tmp_path / "cohort-state.json"
+    attempt_path = tmp_path / ".ops09-attempt.json"
+    session = {"elapsed_seconds": 4.0}
+    state = {"sessions": [session], "repository": {}}
+    attempt = {
+        "schema_version": "dawnstrike.ops09.attempt.v1",
+        "attempt_id": "2026-09-10:1",
+        "accounting_status": "PENDING",
+    }
+    _account_attempt_elapsed(
+        state=state, session=session, attempt_state=attempt,
+        state_path=state_path, attempt_path=attempt_path, charge=7.5,
+    )
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    assert persisted["sessions"][0]["elapsed_seconds"] == 11.5
+    assert persisted["sessions"][0]["accounted_attempt_ids"] == ["2026-09-10:1"]
+    assert session["elapsed_seconds"] == 11.5
+    assert session["accounted_attempt_ids"] == ["2026-09-10:1"]
+    assert attempt["accounting_status"] == "ACCOUNTED"
