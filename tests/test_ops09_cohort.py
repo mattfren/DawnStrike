@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
+from intraday_scanner.observation import ops09 as ops09_module
 from intraday_scanner.observation.cohort import APPROVED_PYTHON
 from intraday_scanner.observation.ops09 import (
     CAPTURE_BYTES,
@@ -70,6 +73,18 @@ def _scope(tmp_path: Path, market_date: str = "2026-09-10", *, missing: bool = F
     path = tmp_path / "scope.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path
+
+
+def _actual_plan(tmp_path: Path, *, start_date: str = "2026-09-10") -> tuple[Path, dict]:
+    source_path, source_hash = _source_config(tmp_path)
+    plan = prepare_ops09_cohort(
+        output_root=tmp_path / "out", input_root=tmp_path / "in", scope_root=tmp_path / "scope",
+        database_root=tmp_path / "db", repo_root=Path(__file__).parents[1],
+        source_config_hash=source_hash, source_config_path=source_path, python_path=APPROVED_PYTHON,
+        start_date=start_date, producer_mode="actual", actual_source_root=tmp_path / "actual-source",
+    )
+    (tmp_path / "actual-source").mkdir()
+    return tmp_path / "out", plan
 
 
 def test_d042_sampling_keeps_four_strata_and_missing_input() -> None:
@@ -142,6 +157,76 @@ def test_operator_stop_is_durable_and_stops_pending_sessions(tmp_path: Path) -> 
     )
     assert state["status"] == "STOPPED"
     assert all(row["status"] == "STOPPED" for row in state["sessions"])
+
+
+def test_actual_readiness_missing_first_and_later_scope_is_pending_without_attempts(tmp_path: Path) -> None:
+    out, _ = _actual_plan(tmp_path)
+    state = resume_ops09_cohort(
+        output_root=out, input_root=tmp_path / "in", scope_root=tmp_path / "scope",
+        database_root=tmp_path / "db", repo_root=Path(__file__).parents[1],
+        execute=False, now=datetime(2026, 9, 10, 20, 1, tzinfo=timezone.utc),
+    )
+    first = state["sessions"][0]
+    assert first["status"] == "PENDING_PRODUCER"
+    assert first["attempts"] == 0
+    assert first["request_contract_sha256"] is None
+    assert first["request_contract_status"] == "MISSING"
+    assert first["missing_input"] == "date_bound_actual_scope"
+
+    state = resume_ops09_cohort(
+        output_root=out, input_root=tmp_path / "in", scope_root=tmp_path / "scope",
+        database_root=tmp_path / "db", repo_root=Path(__file__).parents[1],
+        execute=False, now=datetime(2026, 9, 11, 20, 1, tzinfo=timezone.utc),
+    )
+    assert state["sessions"][0]["status"] == "MISSED_SESSION"
+    later = state["sessions"][1]
+    assert later["status"] == "PENDING_PRODUCER"
+    assert later["attempts"] == 0
+    assert later["request_contract_sha256"] is None
+    assert later["request_contract_status"] == "MISSING"
+
+
+def test_actual_readiness_existing_scope_still_returns_ready_with_contract(tmp_path: Path) -> None:
+    out, plan = _actual_plan(tmp_path)
+    scope_path = Path(plan["sessions"][0]["scope_path"])
+    scope_path.parent.mkdir(parents=True)
+    shutil.copyfile(_scope(tmp_path, "2026-09-10"), scope_path)
+    state = resume_ops09_cohort(
+        output_root=out, input_root=tmp_path / "in", scope_root=tmp_path / "scope",
+        database_root=tmp_path / "db", repo_root=Path(__file__).parents[1],
+        execute=False, now=datetime(2026, 9, 10, 20, 1, tzinfo=timezone.utc),
+    )
+    session = state["sessions"][0]
+    assert session["status"] == "READY"
+    assert session["attempts"] == 1
+    assert isinstance(session["request_contract_sha256"], str)
+    assert Path(session["request_contract_path"]).is_file()
+
+
+def test_actual_execute_missing_scope_still_enters_child_without_reused_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out, plan = _actual_plan(tmp_path)
+    calls: list[tuple[object, object, Path]] = []
+
+    def fake_capture(**kwargs: object) -> dict[str, object]:
+        calls.append((kwargs["scope"], kwargs["contract"], kwargs["scope_path"]))
+        return {"status": "PARTIAL", "attempt_elapsed_seconds": 0.0}
+
+    monkeypatch.setattr(ops09_module, "_run_capture", fake_capture)
+    state = resume_ops09_cohort(
+        output_root=out, input_root=tmp_path / "in", scope_root=tmp_path / "scope",
+        database_root=tmp_path / "db", repo_root=Path(__file__).parents[1],
+        execute=True, now=datetime(2026, 9, 10, 20, 1, tzinfo=timezone.utc),
+    )
+    assert len(calls) == 1
+    scope, contract, scope_path = calls[0]
+    assert scope is None
+    assert contract is None
+    assert scope_path == Path(plan["sessions"][0]["scope_path"])
+    assert state["sessions"][0]["status"] == "PARTIAL"
+    assert state["sessions"][0]["attempts"] == 1
+    assert state["sessions"][0].get("request_contract_sha256") is None
 
 
 def test_byte_ledger_admits_native_capture_and_rejects_overcommitted_downstream(

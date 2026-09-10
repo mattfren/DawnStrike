@@ -1092,6 +1092,20 @@ def _resume_ops09_unlocked(*, output_root: Path, input_root: Path, scope_root: P
             )
         except Ops09Error as exc:
             session.update({"status": "DEGRADED", "reason": str(exc), "operator_intervention": "repair exact date-bound scope"}); continue
+        if not execute and actual_source_pending:
+            # Actual source discovery belongs to the admitted child.  A
+            # readiness probe must expose the missing date-bound contract
+            # without fabricating an identity or consuming an attempt.
+            session.update({
+                "status": "PENDING_PRODUCER",
+                "reason": "date-bound actual producer scope is pending admitted execution",
+                "missing_input": "date_bound_actual_scope",
+                "request_contract_status": "MISSING",
+                "request_contract_sha256": None,
+                "scope": None,
+            })
+            _atomic_json(state_path, state)
+            continue
         session_root = output_root / session["market_date"]
         session_root.mkdir(parents=True, exist_ok=True)
         _recover_attempt_accounting(
