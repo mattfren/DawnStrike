@@ -707,7 +707,8 @@ function ConvertTo-DawnstrikeIsolatedPythonArguments {
         [Parameter(Mandatory = $true)][string[]]$ArgumentList,
         [Parameter(Mandatory = $true)][string]$ReleaseRoot,
         [Parameter(Mandatory = $true)][string]$ExpectedSha,
-        [string]$DependencyStageRoot = ''
+        [string]$DependencyStageRoot = '',
+        [string]$DependencyStageReceiptPath = ''
     )
 
     $source = @($ArgumentList)
@@ -750,6 +751,10 @@ function ConvertTo-DawnstrikeIsolatedPythonArguments {
     )
     if ($DependencyStageRoot) {
         $bootstrapLaunch += @('--dependency-stage-root', [IO.Path]::GetFullPath($DependencyStageRoot))
+        if (-not $DependencyStageReceiptPath) {
+            throw 'Isolated observer dependency receipt is required with a stage root.'
+        }
+        $bootstrapLaunch += @('--dependency-stage-receipt', [IO.Path]::GetFullPath($DependencyStageReceiptPath))
     }
     if ($source.Count -gt 0 -and [string]$source[0] -eq '-m') {
         if ($source.Count -lt 2 -or [string]::IsNullOrWhiteSpace([string]$source[1])) {
@@ -797,6 +802,7 @@ function Invoke-DawnstrikeNativeProcess {
         [Parameter()][string]$WorkingDirectory = (Get-Location).Path,
         [Parameter()][hashtable]$EnvironmentOverrides = @{},
         [Parameter()][string]$DependencyStageRoot = '',
+        [Parameter()][string]$DependencyStageReceiptPath = '',
         [Parameter()][switch]$NoSite,
         [Parameter()][switch]$SuppressConsoleReplay
     )
@@ -852,7 +858,8 @@ function Invoke-DawnstrikeNativeProcess {
             $effectiveArguments = ConvertTo-DawnstrikeIsolatedPythonArguments `
                 -ArgumentList $effectiveArguments -ReleaseRoot $releaseRoot `
                 -ExpectedSha ([string]$sourceIdentity.head) `
-                -DependencyStageRoot $DependencyStageRoot
+                -DependencyStageRoot $DependencyStageRoot `
+                -DependencyStageReceiptPath $DependencyStageReceiptPath
             $pythonBootstrapPath = Join-Path $releaseRoot "scripts\dawnstrike_python_bootstrap.py"
             $pythonBootstrapSha256 = Get-DawnstrikeRuntimeLockHash $pythonBootstrapPath
             $effectiveEnvironmentOverrides = @{
@@ -934,6 +941,7 @@ function Invoke-DawnstrikeNativeProcess {
         python_bootstrap_sha256 = $pythonBootstrapSha256
         dependency_scope = if ($DependencyStageRoot) { 'isolated_observer' } else { 'protected_runtime' }
         dependency_stage_root = if ($DependencyStageRoot) { [IO.Path]::GetFullPath($DependencyStageRoot) } else { $null }
+        dependency_stage_receipt_path = if ($DependencyStageReceiptPath) { [IO.Path]::GetFullPath($DependencyStageReceiptPath) } else { $null }
         dependency_record_set_sha256 = if ($DependencyStageRoot) { '447a0d12feffcfd6c353d9acb4cfd1e5cc1b35e3548cd7e9ad58666516b4b3af' } else { $null }
         started_at = $startedAt.ToString("o")
         completed_at = $completedAt.ToString("o")

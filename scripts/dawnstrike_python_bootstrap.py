@@ -19,6 +19,7 @@ import importlib.machinery
 import importlib.metadata
 import importlib.util
 import io
+import json
 import os
 import re
 import runpy
@@ -971,6 +972,33 @@ def _resolve_isolated_dependency_stage(raw_stage: str) -> tuple[tuple[Path, ...]
     return (site_packages,), stage
 
 
+def _read_isolated_stage_receipt(raw_receipt: str, stage: Path) -> str:
+    """Admit an explicit materializer receipt bound to this exact stage root."""
+
+    receipt_path = Path(raw_receipt).resolve(strict=True)
+    if _is_reparse(receipt_path) or not receipt_path.is_file():
+        _fail("isolated observer dependency receipt is not a regular file")
+    try:
+        payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        _fail(f"isolated observer dependency receipt is unreadable: {exc}")
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != "dawnstrike.dependency_materialization.v1"
+        or payload.get("status") != "PASS"
+        or payload.get("research_only") is not True
+        or payload.get("broker_execution_enabled") is not False
+        or payload.get("record_set_sha256") != _APPROVED_DISTRIBUTION_RECORD_SET_SHA256
+        or payload.get("distribution_count") != 105
+        or payload.get("stage_root") != str(stage)
+    ):
+        _fail("isolated observer dependency receipt identity is invalid")
+    stage_tree = payload.get("stage_tree_sha256")
+    if not isinstance(stage_tree, str) or re.fullmatch(r"[0-9a-f]{64}", stage_tree) is None:
+        _fail("isolated observer dependency receipt lacks a valid stage tree identity")
+    return stage_tree
+
+
 def _locked_requirements(root: Path, release_bytes: dict[str, bytes]) -> dict[str, str]:
     """Read exact package pins from the repository's hash-locked manifest."""
 
@@ -1123,6 +1151,7 @@ def _assert_locked_dependencies(
     *,
     dependency_prefix: Path | None = None,
     dependency_inventory_root: Path | None = None,
+    expected_stage_tree_sha256: str | None = None,
 ) -> tuple[frozenset[str], frozenset[str], dict[str, tuple[bytes, int | None]]]:
     """Require one explicit dependency boundary to match requirements.lock."""
 
@@ -1168,6 +1197,12 @@ def _assert_locked_dependencies(
         owned_hashes,
         inventory_root=dependency_inventory_root,
     )
+    if expected_stage_tree_sha256 is not None:
+        if dependency_inventory_root is None:
+            _fail("isolated observer stage identity lacks an inventory root")
+        actual_stage_tree = _stage_tree_sha256(dependency_inventory_root)
+        if actual_stage_tree != expected_stage_tree_sha256:
+            _fail("isolated observer dependency stage tree changed")
     return frozenset(allowed_top_level), frozenset(owned_paths), owned_hashes
 
 
@@ -1230,6 +1265,25 @@ def _verify_dependency_payloads(
         path = Path(key)
         if not path.exists():
             _fail("installed dependency RECORD names a missing payload")
+
+
+def _stage_tree_sha256(root: Path) -> str:
+    digest = hashlib.sha256()
+    resolved_root = root.resolve(strict=True)
+    for path in sorted(resolved_root.rglob("*"), key=lambda item: item.as_posix()):
+        if path.is_dir():
+            if _is_reparse(path):
+                _fail("isolated observer dependency stage contains a reparse point")
+            continue
+        if _is_reparse(path) or not path.is_file():
+            _fail("isolated observer dependency stage contains an unsafe entry")
+        relative = path.relative_to(resolved_root).as_posix().encode("utf-8")
+        digest.update(relative + b"\0")
+        try:
+            digest.update(hashlib.sha256(path.read_bytes()).digest())
+        except OSError as exc:
+            _fail(f"isolated observer dependency stage is unreadable: {exc}")
+    return digest.hexdigest()
 
 
 class _LockedDependencyGuard(importlib.abc.MetaPathFinder):
@@ -1421,6 +1475,7 @@ def _parse_bootstrap_args(argv: list[str] | None) -> tuple[argparse.Namespace, l
     parser.add_argument("--release-root", required=True)
     parser.add_argument("--expected-sha", required=True)
     parser.add_argument("--dependency-stage-root")
+    parser.add_argument("--dependency-stage-receipt")
     target = parser.add_mutually_exclusive_group(required=True)
     target.add_argument("--module")
     target.add_argument("--script")
@@ -1438,6 +1493,8 @@ def _parse_bootstrap_args(argv: list[str] | None) -> tuple[argparse.Namespace, l
 
 def main(argv: list[str] | None = None) -> int:
     args, remainder = _parse_bootstrap_args(argv)
+    if args.dependency_stage_receipt and not args.dependency_stage_root:
+        _fail("isolated observer dependency receipt requires a stage root")
     root = _release_root(args.release_root)
     retry_budget = _ExactSourceRetryBudget()
     source_guard = retry_budget.admit(root, args.expected_sha)
@@ -1448,6 +1505,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.dependency_stage_root:
             dependency_paths, dependency_prefix = _resolve_isolated_dependency_stage(
                 args.dependency_stage_root
+            )
+            if not args.dependency_stage_receipt:
+                _fail("isolated observer dependency receipt is required")
+            expected_stage_tree = _read_isolated_stage_receipt(
+                args.dependency_stage_receipt, dependency_prefix
             )
             for dependency in dependency_paths:
                 text = str(dependency)
@@ -1460,6 +1522,7 @@ def main(argv: list[str] | None = None) -> int:
                     source_guard.source_bytes,
                     dependency_prefix=dependency_prefix,
                     dependency_inventory_root=Path(args.dependency_stage_root),
+                    expected_stage_tree_sha256=expected_stage_tree,
                 )
             )
         else:
@@ -1505,6 +1568,7 @@ def main(argv: list[str] | None = None) -> int:
                     **(
                         {"dependency_prefix": dependency_prefix}
                         | {"dependency_inventory_root": Path(args.dependency_stage_root)}
+                        | {"expected_stage_tree_sha256": expected_stage_tree}
                         if args.dependency_stage_root
                         else {}
                     ),

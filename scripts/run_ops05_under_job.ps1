@@ -5,7 +5,8 @@ param(
     [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedSourceSha,
     [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$ArgumentJson,
     [Parameter()][ValidateRange(1, 1800)][int]$TimeoutSeconds = 1800,
-    [Parameter()][string]$DependencyStageRoot = ''
+    [Parameter()][string]$DependencyStageRoot = '',
+    [Parameter()][string]$DependencyStageReceiptPath = ''
 )
 
 Set-StrictMode -Version Latest
@@ -33,6 +34,7 @@ $receipt = Invoke-DawnstrikeNativeProcess `
     -WorkingDirectory $resolvedRoot `
     -TimeoutSeconds $TimeoutSeconds `
     -DependencyStageRoot $DependencyStageRoot `
+    -DependencyStageReceiptPath $DependencyStageReceiptPath `
     -SuppressConsoleReplay
 $receipt | ConvertTo-Json -Depth 8
 if ([int]$receipt.exit_code -ne 0) {
