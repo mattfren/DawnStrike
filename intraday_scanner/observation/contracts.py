@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
+
+from intraday_scanner.market_calendar import canonical_regular_session_id, market_session
 
 SCOPES = ("original_small_cap_gap", "liquid_reference_panel")
 MEMBERSHIP = ("selected", "rejected", "unselected", "missing_input")
@@ -85,6 +88,8 @@ class UniverseManifest:
     universe_generation_id: str
     source_config_sha256: str
     entries: tuple[UniverseEntry, ...]
+    collection_expectation: Mapping[str, Any]
+    source_lineage: Mapping[str, Any]
     manifest_sha256: str
 
     @classmethod
@@ -95,12 +100,49 @@ class UniverseManifest:
         market_date = str(value.get("market_date") or "").strip()
         generation = str(value.get("universe_generation_id") or "").strip()
         source_hash = str(value.get("source_config_sha256") or "").strip()
-        if not session_id or not market_date or not generation or len(source_hash) != 64:
+        if not session_id or not market_date or not generation or not re.fullmatch(
+            r"[0-9a-f]{64}", source_hash
+        ):
             raise ValueError("universe manifest identity fields are incomplete")
+        try:
+            parsed_date = date.fromisoformat(market_date)
+            if parsed_date.isoformat() != market_date:
+                raise ValueError
+            if not market_session(parsed_date).is_trading_day:
+                raise ValueError("market date is not a trading session")
+        except (TypeError, ValueError) as exc:
+            raise ValueError("market_date must be a covered trading date") from exc
+        if session_id != canonical_regular_session_id(parsed_date):
+            raise ValueError("session_id does not match market_date")
+        decision_deadline = parse_utc(value["decision_deadline"], label="decision_deadline")
+        if decision_deadline.date() != parsed_date:
+            raise ValueError("decision_deadline must be on market_date")
+        expectation = value.get("collection_expectation")
+        if not isinstance(expectation, Mapping):
+            raise ValueError("collection_expectation is required")
+        if expectation.get("status") not in {"COMPLETE", "INCOMPLETE"} or not str(
+            expectation.get("receipt_id") or ""
+        ).strip():
+            raise ValueError("collection_expectation requires a complete receipt_id")
+        lineage = value.get("source_lineage")
+        if not isinstance(lineage, Mapping):
+            raise ValueError("source_lineage is required")
+        if not str(lineage.get("provider") or "").strip() or not str(
+            lineage.get("feed") or ""
+        ).strip():
+            raise ValueError("source_lineage requires provider and feed")
+        if not re.fullmatch(r"[0-9a-f]{64}", str(lineage.get("capture_receipt_sha256") or "")):
+            raise ValueError("source_lineage capture receipt hash is invalid")
+        if lineage.get("session_id") != session_id:
+            raise ValueError("source_lineage session identity mismatch")
+        if lineage.get("source_config_sha256") != source_hash:
+            raise ValueError("source_lineage source config identity mismatch")
         entries: list[UniverseEntry] = []
         scopes = value.get("scopes")
         if not isinstance(scopes, Mapping) or set(scopes) != set(SCOPES):
             raise ValueError("universe manifest must declare exactly the two named scopes")
+        if expectation.get("expected_entries") != sum(len(scopes[scope]) for scope in SCOPES):
+            raise ValueError("collection_expectation expected_entries mismatch")
         for scope in SCOPES:
             rows = scopes[scope]
             if not isinstance(rows, list):
@@ -111,10 +153,12 @@ class UniverseManifest:
         return cls(
             session_id=session_id,
             market_date=market_date,
-            decision_deadline=parse_utc(value["decision_deadline"], label="decision_deadline"),
+            decision_deadline=decision_deadline,
             universe_generation_id=generation,
             source_config_sha256=source_hash,
             entries=tuple(entries),
+            collection_expectation=dict(expectation),
+            source_lineage=dict(lineage),
             manifest_sha256=sha256_json(value),
         )
 
@@ -125,6 +169,8 @@ class UniverseManifest:
                 "market_date": self.market_date,
                 "universe_generation_id": self.universe_generation_id,
                 "manifest_sha256": self.manifest_sha256,
+                "collection_expectation": dict(self.collection_expectation),
+                "source_lineage": dict(self.source_lineage),
                 **entry.as_dict(),
             }
             for entry in self.entries

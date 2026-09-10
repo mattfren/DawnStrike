@@ -58,6 +58,7 @@ class ObservationStore:
         self.receipts_path = self.root / "receipts.jsonl"
         self.corrections_path = self.root / "corrections.jsonl"
         self.cursor_path = self.root / "cursor.json"
+        self.identity_path = self.root / "root-identity.json"
         self.lock_path = self.root / ".observer.lock"
 
     def append(self, path: Path, value: dict[str, Any]) -> None:
@@ -109,6 +110,35 @@ class ObservationStore:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(name, self.cursor_path)
+        finally:
+            Path(name).unlink(missing_ok=True)
+
+    def ensure_identity(self, value: dict[str, Any]) -> None:
+        """Bind one output root to one immutable session/source identity."""
+
+        if self.identity_path.exists():
+            try:
+                existing = json.loads(self.identity_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ObservationStoreError("output-root identity is unreadable") from exc
+            if existing != value:
+                raise ObservationStoreError("output-root identity conflicts with this session")
+            return
+        fd, name = tempfile.mkstemp(prefix=".root-identity.", dir=self.root)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                json.dump(value, handle, sort_keys=True, separators=(",", ":"))
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                os.link(name, self.identity_path)
+            except FileExistsError:
+                existing = json.loads(self.identity_path.read_text(encoding="utf-8"))
+                if existing != value:
+                    raise ObservationStoreError(
+                        "output-root identity conflicts with this session"
+                    ) from None
         finally:
             Path(name).unlink(missing_ok=True)
 
