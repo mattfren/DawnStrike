@@ -15,8 +15,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from intraday_scanner.alpha.v6.contracts import LABEL_SCHEMA_VERSION, canonical_hash, point_in_time_valid
 from intraday_scanner.alpha.path_replay import ELIGIBILITY_POLICY_VERSION
+from intraday_scanner.alpha.v6.contracts import (
+    LABEL_SCHEMA_VERSION,
+    canonical_hash,
+    point_in_time_valid,
+)
 from intraday_scanner.observation.contracts import UniverseManifest, parse_utc
 
 OBSERVATIONAL_LABEL_FAMILY = "observational_matured_return"
@@ -183,10 +187,14 @@ def _matured_observation(
         if candidates:
             selected[field] = candidates[0] if field == "gap" else candidates[-1]
     missing = [field for field in PATH_AVAILABILITY_FIELDS if field not in selected]
+    close_is_proxy = bool(selected.get("close", {}).get("close_proxy"))
     maturity: dict[str, str] = {}
     maturity_events: dict[str, dict[str, Any]] = {}
     for minutes in MATURITY_MINUTES:
         cutoff = decision_at + timedelta(minutes=minutes)
+        if close_is_proxy and cutoff >= close_at:
+            maturity[str(minutes)] = "CENSORED"
+            continue
         candidates = [event for event in ordered if _timestamp(event["event_time"]) >= cutoff]
         if not candidates:
             maturity[str(minutes)] = "IMMATURE"
@@ -197,14 +205,14 @@ def _matured_observation(
             continue
         maturity[str(minutes)] = "MATURE"
         maturity_events[str(minutes)] = event
-    if missing or not all(value == "MATURE" for value in maturity.values()):
+    if missing or not all(value in {"MATURE", "CENSORED"} for value in maturity.values()):
         return {"diagnostic": _diagnostic(
             decision, "IMMATURE" if not missing and "IMMATURE" in maturity.values() else "DELAYED_INELIGIBLE",
             ",".join(missing) or ",".join(f"maturity_{key}_{value}" for key, value in maturity.items() if value != "MATURE"),
         )}
     gap = selected["gap"]
     close = selected["close"]
-    if _timestamp(close["event_time"]) != close_at:
+    if _timestamp(close["event_time"]) != close_at and not close_is_proxy:
         return {"diagnostic": _diagnostic(
             decision, "CENSORED", "session_close_observation_missing"
         )}
@@ -236,7 +244,8 @@ def _matured_observation(
         "fill_truth_bound": False,
         "research_only": True,
         "broker_execution_enabled": False,
-        "return_basis": "observed_path_close_vs_gap_open",
+        "return_basis": "observed_path_close_proxy_vs_gap_open" if close_is_proxy else "observed_path_close_vs_gap_open",
+        "close_observation_semantics": "one_minute_bar_close_proxy" if close_is_proxy else "session_close_event",
         "horizon_unit": "minutes",
         "close_identity": dict(close_identity),
         "observed_path": {"gap": gap, "close": close},

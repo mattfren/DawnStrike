@@ -39,6 +39,10 @@ from intraday_scanner.alpha.v6.validation import (
     evaluate_return_predictions,
     expanding_purged_splits,
 )
+from intraday_scanner.observation.ops06_bars_adapter import (
+    Ops06AdapterError,
+    adapt_ops05_to_r3,
+)
 from intraday_scanner.services.v6_learning_service import synchronize_v6_outcomes
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
@@ -84,6 +88,17 @@ def load_observation_source_from_artifacts(
 
     root = Path(observation_root).resolve()
     decision_path = Path(decision_artifact).resolve()
+    ops05_receipt = root / "receipt.json"
+    if ops05_receipt.is_file() and decision_path.is_file():
+        try:
+            receipt_probe = json.loads(ops05_receipt.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            receipt_probe = None
+        if isinstance(receipt_probe, dict) and receipt_probe.get("schema_version") == "dawnstrike.ops05.historical_bars_receipt.v1":
+            try:
+                return adapt_ops05_to_r3(observation_root=root, decision_artifact=decision_path, as_of=as_of)
+            except Ops06AdapterError as exc:
+                return {"status": "INVALID_SCHEMA", "reason": f"ops05_r3_adapter:{exc}", "research_only": True, "broker_execution_enabled": False}
     required = {
         "manifest": root / "universe-manifest.json",
         "producer_receipt": root / "producer-receipt.json",
