@@ -968,7 +968,7 @@ def _resolve_isolated_dependency_stage(raw_stage: str) -> tuple[tuple[Path, ...]
         if stage not in cursor.parents:
             _fail("isolated observer dependency stage escaped its root")
         cursor = cursor.parent
-    return (site_packages,), site_packages
+    return (site_packages,), stage
 
 
 def _locked_requirements(root: Path, release_bytes: dict[str, bytes]) -> dict[str, str]:
