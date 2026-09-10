@@ -52,7 +52,17 @@ def _invoke_command(
     label: str,
     timeout_seconds: int,
     output_drain_timeout_seconds: int = 1,
+    job_memory_limit_bytes: int | None = None,
+    rss_limit_bytes: int | None = None,
+    rss_sample_milliseconds: int | None = None,
 ) -> str:
+    guard_options = ""
+    if job_memory_limit_bytes is not None:
+        guard_options += f" -JobMemoryLimitBytes {job_memory_limit_bytes}"
+    if rss_limit_bytes is not None:
+        guard_options += f" -ProcessTreeRssLimitBytes {rss_limit_bytes}"
+    if rss_sample_milliseconds is not None:
+        guard_options += f" -RssSampleMilliseconds {rss_sample_milliseconds}"
     return (
         f". {_ps_literal(HELPER)}; "
         "$ErrorActionPreference = 'Stop'; "
@@ -62,7 +72,7 @@ def _invoke_command(
         f"-WorkingDirectory {_ps_literal(ROOT)} "
         f"-Label {_ps_literal(label)} "
         f"-TimeoutSeconds {timeout_seconds} "
-        f"-OutputDrainTimeoutSeconds {output_drain_timeout_seconds}; "
+        f"-OutputDrainTimeoutSeconds {output_drain_timeout_seconds}{guard_options}; "
         "$result | ConvertTo-Json -Compress"
     )
 
@@ -73,12 +83,18 @@ def _failure_command(
     label: str,
     timeout_seconds: int,
     output_drain_timeout_seconds: int = 1,
+    job_memory_limit_bytes: int | None = None,
+    rss_limit_bytes: int | None = None,
+    rss_sample_milliseconds: int | None = None,
 ) -> str:
     invocation = _invoke_command(
         arguments,
         label=label,
         timeout_seconds=timeout_seconds,
         output_drain_timeout_seconds=output_drain_timeout_seconds,
+        job_memory_limit_bytes=job_memory_limit_bytes,
+        rss_limit_bytes=rss_limit_bytes,
+        rss_sample_milliseconds=rss_sample_milliseconds,
     ).rsplit("; $result | ConvertTo-Json -Compress", maxsplit=1)[0]
     return (
         invocation.replace("$result = Invoke-DawnstrikeJobProcess", "try { "
@@ -136,6 +152,56 @@ def test_job_runner_succeeds_and_round_trips_windows_arguments(tmp_path: Path) -
     assert payload["ActiveJobMembersAfterCleanup"] == 0
     assert json.loads(payload["Stdout"]) == expected
     assert payload["Stderr"] == ""
+
+
+def test_job_runner_reports_native_memory_and_rss_guard_readback(tmp_path: Path) -> None:
+    fixture = tmp_path / "guard telemetry.js"
+    fixture.write_text(
+        "const buffer = Buffer.alloc(8 * 1024 * 1024, 1);\n"
+        "setTimeout(() => process.exit(buffer[0] === 1 ? 0 : 9), 150);\n",
+        encoding="utf-8",
+    )
+
+    completed = _run_powershell(
+        _invoke_command([fixture], label="guard telemetry probe", timeout_seconds=5)
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(completed.stdout)
+    assert payload["ExitCode"] == 0
+    assert payload["ActiveJobMembersAfterCleanup"] == 0
+    assert payload["JobMemoryLimitBytes"] == 268435456
+    assert payload["JobMemoryLimitReadbackBytes"] == 268435456
+    assert payload["JobLimitFlags"] & 0x2200 == 0x2200
+    assert payload["ProcessTreeRssLimitBytes"] == 268435456
+    assert payload["ProcessTreeRssMeasurementAvailable"] is True
+    assert payload["ProcessTreeRssSamples"] > 0
+    assert payload["GuardFailure"] is None
+
+
+def test_job_runner_rss_supervisor_terminates_noncooperative_process(tmp_path: Path) -> None:
+    fixture = tmp_path / "rss pressure.js"
+    fixture.write_text(
+        "const buffer = Buffer.alloc(64 * 1024 * 1024, 1);\n"
+        "setTimeout(() => process.exit(buffer[0] === 1 ? 0 : 9), 5000);\n",
+        encoding="utf-8",
+    )
+
+    completed = _run_powershell(
+        _failure_command(
+            [fixture],
+            label="rss supervisor probe",
+            timeout_seconds=10,
+            job_memory_limit_bytes=268435456,
+            rss_limit_bytes=16 * 1024 * 1024,
+            rss_sample_milliseconds=50,
+        )
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    message = json.loads(completed.stdout)["Message"]
+    assert "process-tree RSS cap exceeded" in message
+    assert "active_job_members_after_cleanup=0" in message
 
 
 def test_job_runner_preserves_real_nonzero_exit_and_stderr(tmp_path: Path) -> None:

@@ -803,6 +803,9 @@ function Invoke-DawnstrikeNativeProcess {
         [Parameter()][hashtable]$EnvironmentOverrides = @{},
         [Parameter()][string]$DependencyStageRoot = '',
         [Parameter()][string]$DependencyStageReceiptPath = '',
+        [Parameter()][ValidateRange(1, 268435456)][UInt64]$JobMemoryLimitBytes = 268435456,
+        [Parameter()][ValidateRange(1, 268435456)][UInt64]$ProcessTreeRssLimitBytes = 268435456,
+        [Parameter()][ValidateRange(1, 10000)][int]$RssSampleMilliseconds = 100,
         [Parameter()][switch]$NoSite,
         [Parameter()][switch]$SuppressConsoleReplay
     )
@@ -837,6 +840,15 @@ function Invoke-DawnstrikeNativeProcess {
     $pythonIsolated = $false
     $pythonBootstrapPath = $null
     $pythonBootstrapSha256 = $null
+    $peakJobMemoryUsedBytes = $null
+    $jobMemoryLimitReadbackBytes = $null
+    $jobLimitFlags = $null
+    $lastJobMemoryUsedBytes = $null
+    $peakProcessTreeRssBytes = $null
+    $lastProcessTreeRssBytes = $null
+    $processTreeRssSamples = $null
+    $processTreeRssMeasurementAvailable = $false
+    $guardFailure = $null
 
     try {
         # Windows PowerShell promotes native stderr records to PowerShell error
@@ -896,9 +908,21 @@ function Invoke-DawnstrikeNativeProcess {
             -Label $LogName `
             -TimeoutSeconds $TimeoutSeconds `
             -OutputDrainTimeoutSeconds $OutputDrainTimeoutSeconds `
-            -EnvironmentOverrides $effectiveEnvironmentOverrides
+            -EnvironmentOverrides $effectiveEnvironmentOverrides `
+            -JobMemoryLimitBytes $JobMemoryLimitBytes `
+            -ProcessTreeRssLimitBytes $ProcessTreeRssLimitBytes `
+            -RssSampleMilliseconds $RssSampleMilliseconds
         $exitCode = [int]$result.ExitCode
         $activeJobMembersAfterCleanup = [int]$result.ActiveJobMembersAfterCleanup
+        $peakJobMemoryUsedBytes = [UInt64]$result.PeakJobMemoryUsedBytes
+        $jobMemoryLimitReadbackBytes = [UInt64]$result.JobMemoryLimitReadbackBytes
+        $jobLimitFlags = [UInt32]$result.JobLimitFlags
+        $lastJobMemoryUsedBytes = [UInt64]$result.LastJobMemoryUsedBytes
+        $peakProcessTreeRssBytes = [UInt64]$result.PeakProcessTreeRssBytes
+        $lastProcessTreeRssBytes = [UInt64]$result.LastProcessTreeRssBytes
+        $processTreeRssSamples = [int]$result.ProcessTreeRssSamples
+        $processTreeRssMeasurementAvailable = [bool]$result.ProcessTreeRssMeasurementAvailable
+        $guardFailure = $result.GuardFailure
         [System.IO.File]::WriteAllText($stdoutPath, [string]$result.Stdout, [System.Text.UTF8Encoding]::new($false))
         [System.IO.File]::WriteAllText($stderrPath, [string]$result.Stderr, [System.Text.UTF8Encoding]::new($false))
     }
@@ -918,6 +942,14 @@ function Invoke-DawnstrikeNativeProcess {
             }
         }
         [System.IO.File]::WriteAllText($stderrPath, $startError, [System.Text.UTF8Encoding]::new($false))
+        $cleanupMatch = [regex]::Match(
+            [string]$startError,
+            "(?i)active_job_members_after_cleanup=(\d+)"
+        )
+        if ($cleanupMatch.Success) {
+            $activeJobMembersAfterCleanup = [int]$cleanupMatch.Groups[1].Value
+        }
+        $guardFailure = $startError
     }
     finally {
         $ErrorActionPreference = $previousErrorActionPreference
@@ -951,6 +983,17 @@ function Invoke-DawnstrikeNativeProcess {
         timed_out = $timedOut
         active_job_members_after_cleanup = $activeJobMembersAfterCleanup
         timeout_cleanup_confirmed = ($timedOut -and $activeJobMembersAfterCleanup -eq 0)
+        job_memory_limit_bytes = [UInt64]$JobMemoryLimitBytes
+        job_memory_limit_readback_bytes = $jobMemoryLimitReadbackBytes
+        job_limit_flags = $jobLimitFlags
+        process_tree_rss_limit_bytes = [UInt64]$ProcessTreeRssLimitBytes
+        peak_job_memory_used_bytes = $peakJobMemoryUsedBytes
+        last_job_memory_used_bytes = $lastJobMemoryUsedBytes
+        peak_process_tree_rss_bytes = $peakProcessTreeRssBytes
+        last_process_tree_rss_bytes = $lastProcessTreeRssBytes
+        process_tree_rss_samples = $processTreeRssSamples
+        process_tree_rss_measurement_available = $processTreeRssMeasurementAvailable
+        resource_guard_failure = $guardFailure
         stdout_path = $stdoutPath
         stderr_path = $stderrPath
         stdout_sha256 = $stdoutHash
