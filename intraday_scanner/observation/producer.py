@@ -20,6 +20,18 @@ class ObservationProducerError(ValueError):
     """Existing capture evidence cannot be safely bound to R2 inputs."""
 
 
+WINDOW_CONTRACT_SCHEMA_VERSION = "dawnstrike.provider_window_contract.v1"
+DERIVED_WINDOW_SEMANTICS = "half_open_v1"
+_PROVIDER_WINDOW_CONTRACTS = {
+    ("alpaca", "sip"): {
+        "contract_id": "alpaca.stock.historical.v1",
+        "request_start": "inclusive",
+        "request_end": "inclusive",
+        "authority": "https://docs.alpaca.markets/us/reference/stockbars",
+    }
+}
+
+
 def _read_json(path: Path, *, label: str, max_bytes: int = 16 * 1024 * 1024) -> dict[str, Any]:
     if path.is_symlink() or not path.is_file():
         raise ObservationProducerError(f"{label} is not a regular file: {path}")
@@ -50,15 +62,14 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
     os.replace(temp, path)
 
 
-def _page_items(
+def _iter_page_items(
     state: dict[str, Any],
     *,
     root: Path,
     provider: str,
     feed: str,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    items: list[dict[str, Any]] = []
-    artifacts: list[dict[str, Any]] = []
+    artifacts: list[dict[str, Any]],
+):
     for symbol, endpoints in (state.get("symbols") or {}).items():
         if not isinstance(endpoints, dict):
             continue
@@ -118,18 +129,16 @@ def _page_items(
                     raise ObservationProducerError("capture page items are missing")
                 for item in raw_items:
                     if isinstance(item, dict):
-                        items.append(
-                            {
-                                "symbol": str(symbol).upper(),
-                                "endpoint": endpoint,
-                                "item": item,
-                                "source_artifact_hash_sha256": str(
-                                    page.get("raw_artifact_hash_sha256")
-                                    or page.get("raw_payload_hash_sha256")
-                                    or ""
-                                ),
-                            }
-                        )
+                        yield {
+                            "symbol": str(symbol).upper(),
+                            "endpoint": endpoint,
+                            "item": item,
+                            "source_artifact_hash_sha256": str(
+                                page.get("raw_artifact_hash_sha256")
+                                or page.get("raw_payload_hash_sha256")
+                                or ""
+                            ),
+                        }
             if endpoint_state.get("artifact_manifest_id"):
                 artifacts.append(
                     {
@@ -144,7 +153,27 @@ def _page_items(
                         "symbol": str(symbol).upper(),
                     }
                 )
-    return items, artifacts
+
+
+def _page_items(
+    state: dict[str, Any],
+    *,
+    root: Path,
+    provider: str,
+    feed: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Compatibility wrapper; production binding uses the streaming iterator."""
+
+    artifacts: list[dict[str, Any]] = []
+    return list(
+        _iter_page_items(
+            state,
+            root=root,
+            provider=provider,
+            feed=feed,
+            artifacts=artifacts,
+        )
+    ), artifacts
 
 
 def build_observation_inputs(
@@ -156,11 +185,14 @@ def build_observation_inputs(
     repository_root: str | Path | None = None,
     max_events: int = 100_000,
     max_bytes: int = 64 * 1024 * 1024,
+    reduction_mode: str = "none",
 ) -> dict[str, Any]:
-    """Create a bound two-scope manifest and raw event stream from capture evidence."""
+    """Create a bound two-scope manifest and bounded derived event streams."""
 
     if not 1 <= max_events <= 100_000 or not 1 <= max_bytes <= 64 * 1024 * 1024:
         raise ObservationProducerError("producer bounds are outside the supported range")
+    if reduction_mode not in {"none", "bounded_derivative"}:
+        raise ObservationProducerError("unsupported producer reduction mode")
     root = validate_output_root(output_root, repository_root=repository_root)
     root.mkdir(parents=True, exist_ok=True)
     receipt_path = Path(capture_receipt_path).resolve()
@@ -178,6 +210,11 @@ def build_observation_inputs(
         raise ObservationProducerError("capture receipt lacks session/config identity")
     if not provider or not feed or not code_sha:
         raise ObservationProducerError("capture receipt lacks provider/code lineage")
+    window_contract = _PROVIDER_WINDOW_CONTRACTS.get((provider.lower(), feed.lower()))
+    if window_contract is None:
+        raise ObservationProducerError(
+            f"no versioned provider window contract for {provider}:{feed}"
+        )
     if (
         receipt.get("research_only") is not True
         or receipt.get("broker_execution_enabled") is not False
@@ -228,12 +265,138 @@ def build_observation_inputs(
     completed_at = parse_utc(str(receipt.get("completed_at") or ""), label="completed_at")
     if request_end <= request_start or completed_at < request_end:
         raise ObservationProducerError("capture receipt timing is not chronological")
-    page_items, page_artifacts = _page_items(
+    page_artifacts: list[dict[str, Any]] = []
+    page_items = _iter_page_items(
         state,
         root=state_path.parent,
         provider=provider,
         feed=feed,
+        artifacts=page_artifacts,
     )
+    manifest_path = root / "universe-manifest.json"
+    events_path = root / "raw-events.jsonl"
+    boundary_events_path = root / "boundary-events.jsonl"
+    tmp_events_path = root / f".raw-events.{os.getpid()}.tmp"
+    tmp_boundary_path = root / f".boundary-events.{os.getpid()}.tmp"
+    scope_by_symbol = {
+        entry["symbol"]: scope
+        for scope in SCOPES
+        for entry in entries[scope]
+    }
+    seen_keys: set[str] = set()
+    raw_hasher = hashlib.sha256()
+    boundary_hasher = hashlib.sha256()
+    raw_event_count = 0
+    boundary_event_count = 0
+    derived_raw_count = 0
+    derived_boundary_count = 0
+    source_item_count = 0
+    source_timestamp_count = 0
+    source_missing_timestamp_count = 0
+    source_duplicate_count = 0
+    source_out_of_range_count = 0
+    source_boundary_count = 0
+    truncated = False
+    raw_byte_count = 0
+    boundary_byte_count = 0
+    next_window_identity = f"{session_id}@{request_end.isoformat()}"
+
+    try:
+        with tmp_events_path.open("wb") as events_file, tmp_boundary_path.open(
+            "wb"
+        ) as boundary_file:
+            for row in page_items:
+                source_item_count += 1
+                item = row["item"]
+                event_raw = item.get("timestamp") or item.get("t") or item.get("time")
+                if not event_raw:
+                    source_missing_timestamp_count += 1
+                    continue
+                source_timestamp_count += 1
+                event_at = parse_utc(str(event_raw), label="provider event timestamp")
+                if event_at < request_start or event_at > request_end:
+                    source_out_of_range_count += 1
+                    raise ObservationProducerError(
+                        "provider event is outside the capture request window"
+                    )
+                event = {
+                    "session_id": session_id,
+                    "scope": scope_by_symbol[row["symbol"]],
+                    "symbol": row["symbol"],
+                    "source": f"{provider}:{feed}:{row['endpoint']}",
+                    "provider": provider,
+                    "feed": feed,
+                    "capture_receipt_sha256": receipt_hash,
+                    "source_config_sha256": source_config_hash,
+                    "code_sha": code_sha,
+                    "event_time": event_at.isoformat(),
+                    "available_at": completed_at.isoformat(),
+                    "kind": row["endpoint"],
+                    "payload": item,
+                    "source_artifact_hash_sha256": row["source_artifact_hash_sha256"],
+                    "window_contract_id": window_contract["contract_id"],
+                }
+                event_key = hashlib.sha256(
+                    canonical_json(
+                        {
+                            "symbol": row["symbol"],
+                            "endpoint": row["endpoint"],
+                            "event_time": event_at.isoformat(),
+                            "payload": item,
+                        }
+                    )
+                ).hexdigest()
+                if event_key in seen_keys:
+                    source_duplicate_count += 1
+                    continue
+                if len(seen_keys) < max_events:
+                    seen_keys.add(event_key)
+                if event_at == request_end:
+                    source_boundary_count += 1
+                    boundary_event_count += 1
+                    event.update(
+                        {
+                            "window_classification": "inclusive_provider_end_excluded_from_current_half_open",
+                            "derived_window_semantics": DERIVED_WINDOW_SEMANTICS,
+                            "next_window_identity": next_window_identity,
+                        }
+                    )
+                    encoded = (
+                        json.dumps(event, sort_keys=True, separators=(",", ":")).encode()
+                        + b"\n"
+                    )
+                    if boundary_byte_count + raw_byte_count + len(encoded) <= max_bytes:
+                        boundary_file.write(encoded)
+                        boundary_hasher.update(encoded)
+                        boundary_byte_count += len(encoded)
+                        derived_boundary_count += 1
+                    else:
+                        truncated = True
+                    continue
+                event["window_classification"] = "current_half_open"
+                encoded = (
+                    json.dumps(event, sort_keys=True, separators=(",", ":")).encode()
+                    + b"\n"
+                )
+                if raw_event_count >= max_events or raw_byte_count + boundary_byte_count + len(
+                    encoded
+                ) > max_bytes:
+                    if reduction_mode == "none":
+                        raise ObservationProducerError(
+                            "producer output exceeds bounded event limits"
+                        )
+                    truncated = True
+                    continue
+                events_file.write(encoded)
+                raw_hasher.update(encoded)
+                raw_byte_count += len(encoded)
+                raw_event_count += 1
+                derived_raw_count += 1
+    except Exception:
+        for temporary in (tmp_events_path, tmp_boundary_path):
+            temporary.unlink(missing_ok=True)
+        raise
+
     artifact_items = sorted(
         [item for item in page_artifacts if item.get("raw_artifact_hash_sha256")],
         key=canonical_json,
@@ -243,6 +406,8 @@ def build_observation_inputs(
     ).hexdigest()
     artifact_identity = receipt.get("artifact_identity")
     if isinstance(artifact_identity, dict) and artifact_identity.get("sha256") != expected_artifact_hash:
+        for temporary in (tmp_events_path, tmp_boundary_path):
+            temporary.unlink(missing_ok=True)
         raise ObservationProducerError("capture artifact identity hash mismatch")
     expected_raw_artifact_hash = hashlib.sha256(
         canonical_json(
@@ -258,46 +423,20 @@ def build_observation_inputs(
         )
     ).hexdigest()
     if receipt.get("raw_artifact_hash_sha256") not in {None, expected_raw_artifact_hash}:
+        for temporary in (tmp_events_path, tmp_boundary_path):
+            temporary.unlink(missing_ok=True)
         raise ObservationProducerError("capture raw artifact identity hash mismatch")
-    raw_events: list[dict[str, Any]] = []
-    for row in page_items:
-        item = row["item"]
-        event_raw = item.get("timestamp") or item.get("t") or item.get("time")
-        if not event_raw:
-            continue
-        event_at = parse_utc(str(event_raw), label="provider event timestamp")
-        if event_at < request_start or event_at >= request_end:
-            raise ObservationProducerError("provider event is outside the capture request window")
-        raw_events.append(
-            {
-                "session_id": session_id,
-                "scope": next(scope for scope in SCOPES if row["symbol"] in {
-                    entry["symbol"] for entry in entries[scope]
-                }),
-                "symbol": row["symbol"],
-                "source": f"{provider}:{feed}:{row['endpoint']}",
-                "provider": provider,
-                "feed": feed,
-                "capture_receipt_sha256": receipt_hash,
-                "source_config_sha256": source_config_hash,
-                "code_sha": code_sha,
-                "event_time": event_at.isoformat(),
-                "available_at": completed_at.isoformat(),
-                "kind": row["endpoint"],
-                "payload": item,
-                "source_artifact_hash_sha256": row["source_artifact_hash_sha256"],
-            }
-        )
-    raw_bytes = b"".join(
-        json.dumps(row, sort_keys=True, separators=(",", ":")).encode() + b"\n"
-        for row in raw_events
+
+    os.replace(tmp_events_path, events_path)
+    os.replace(tmp_boundary_path, boundary_events_path)
+    raw_events_sha256 = raw_hasher.hexdigest()
+    boundary_events_sha256 = boundary_hasher.hexdigest()
+    expectation_status = (
+        "INCOMPLETE"
+        if truncated or receipt.get("status") != "COMPLETE"
+        else "COMPLETE"
     )
-    if len(raw_events) > max_events or len(raw_bytes) > max_bytes:
-        raise ObservationProducerError("producer output exceeds bounded event limits")
-    expectation_status = "COMPLETE" if receipt.get("status") == "COMPLETE" else "INCOMPLETE"
-    raw_events_sha256 = hashlib.sha256(raw_bytes).hexdigest()
-    manifest_path = root / "universe-manifest.json"
-    events_path = root / "raw-events.jsonl"
+    coverage_class = "BOUNDED_DERIVATIVE" if truncated else "FULL_DERIVED"
     manifest = {
         "schema_version": "dawnstrike.observation.universe.v1",
         "session_id": session_id,
@@ -311,10 +450,22 @@ def build_observation_inputs(
             "status": expectation_status,
             "expected_entries": len(symbols),
             "receipt_id": str(receipt.get("run_id") or receipt_hash),
+            "coverage_class": coverage_class,
+            "source_item_count": source_item_count,
+            "source_timestamp_count": source_timestamp_count,
+            "source_missing_timestamp_count": source_missing_timestamp_count,
+            "source_duplicate_count": source_duplicate_count,
+            "source_boundary_count": source_boundary_count,
+            "derived_event_count": derived_raw_count,
+            "derived_boundary_event_count": derived_boundary_count,
+            "reduction_mode": reduction_mode,
         },
         "source_lineage": {
             "provider": provider,
             "feed": feed,
+            "provider_window_contract_schema": WINDOW_CONTRACT_SCHEMA_VERSION,
+            "provider_window_contract": window_contract,
+            "derived_window_semantics": DERIVED_WINDOW_SEMANTICS,
             "capture_receipt_sha256": receipt_hash,
             "source_config_sha256": source_config_hash,
             "session_id": session_id,
@@ -325,24 +476,64 @@ def build_observation_inputs(
             "completed_at": receipt.get("completed_at"),
             "raw_events_path": str(events_path),
             "raw_events_sha256": raw_events_sha256,
+            "boundary_events_path": str(boundary_events_path),
+            "boundary_events_sha256": boundary_events_sha256,
+            "next_window_identity": next_window_identity,
+            "source_item_count": source_item_count,
+            "source_out_of_range_count": source_out_of_range_count,
+            "coverage_class": coverage_class,
+        },
+        "provider_window_contract": {
+            "schema_version": WINDOW_CONTRACT_SCHEMA_VERSION,
+            **window_contract,
+            "current_derived_window": {
+                "start": request_start.isoformat(),
+                "end": request_end.isoformat(),
+                "semantics": DERIVED_WINDOW_SEMANTICS,
+            },
+            "next_window_identity": next_window_identity,
+        },
+        "derivation": {
+            "coverage_class": coverage_class,
+            "reduction_mode": reduction_mode,
+            "source_item_count": source_item_count,
+            "source_event_count": source_timestamp_count,
+            "derived_event_count": derived_raw_count,
+            "boundary_event_count": source_boundary_count,
+            "derived_boundary_event_count": derived_boundary_count,
+            "source_full_coverage_claim": not truncated,
         },
         "scopes": scopes,
     }
     _atomic_json(manifest_path, manifest)
-    events_path.write_bytes(raw_bytes)
     producer_receipt = {
         "schema_version": "dawnstrike.observation.producer_receipt.v1",
         "status": "READY",
         "manifest_path": str(manifest_path),
         "manifest_sha256": sha256_json(manifest),
         "raw_events_path": str(events_path),
-        "raw_events_sha256": hashlib.sha256(raw_bytes).hexdigest(),
+        "raw_events_sha256": raw_events_sha256,
         "capture_receipt_path": str(receipt_path),
         "capture_receipt_sha256": receipt_hash,
         "source_config_sha256": source_config_hash,
         "provider": provider,
         "feed": feed,
         "session_id": session_id,
+        "provider_window_contract_schema": WINDOW_CONTRACT_SCHEMA_VERSION,
+        "provider_window_contract_id": window_contract["contract_id"],
+        "derived_window_semantics": DERIVED_WINDOW_SEMANTICS,
+        "boundary_events_path": str(boundary_events_path),
+        "boundary_events_sha256": boundary_events_sha256,
+        "next_window_identity": next_window_identity,
+        "coverage_class": coverage_class,
+        "reduction_mode": reduction_mode,
+        "source_item_count": source_item_count,
+        "source_timestamp_count": source_timestamp_count,
+        "source_boundary_count": source_boundary_count,
+        "source_duplicate_count": source_duplicate_count,
+        "derived_event_count": derived_raw_count,
+        "derived_boundary_event_count": derived_boundary_count,
+        "source_full_coverage_claim": not truncated,
         "research_only": True,
         "broker_execution_enabled": False,
     }
