@@ -180,6 +180,49 @@ def test_indeterminate_research_is_allowed_as_an_optional_stage(tmp_path: Path) 
     assert snapshot["run"]["status"] == "IN_PROGRESS"
 
 
+def test_luna_core_refresh_degradation_is_recorded_without_blocking_the_chain(
+    tmp_path: Path,
+) -> None:
+    """A dead core lane must be visible, but must not end the trading day.
+
+    The refresh failing is lane-local by design, so the morning task still exits
+    0.  Between 2026-08-31 and 2026-09-09 that meant the S&P 500 and Nasdaq-100
+    lanes were empty for nine sessions with no failing signal anywhere.
+    """
+
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+
+    snapshot = record_daily_stage(
+        db_path=tmp_path / "state.sqlite",
+        market_date="2026-09-09",
+        stage_name="luna_core_refresh",
+        status="DEGRADED",
+        runtime_root=runtime,
+        state_root=state,
+        release_sha="b" * 40,
+        required=False,
+        exit_code=2,
+        error_code="core_universe_manifest_unavailable",
+    )
+
+    stage = snapshot["latest_stage_statuses"]["luna_core_refresh"]
+    persisted_stage = next(
+        row
+        for row in snapshot["stages"]
+        if row["stage_name"] == "luna_core_refresh"
+    )
+    assert stage["status"] == "DEGRADED"
+    assert stage["error_code"] == "core_universe_manifest_unavailable"
+    assert persisted_stage["required"] is False
+    # The degradation is recorded, but a not-required stage must not mark the
+    # run failed - the mover lane still produces a tradeable day.
+    assert snapshot["run"]["failed_stage"] is None
+    assert snapshot["run"]["status"] == "IN_PROGRESS"
+
+
 def test_release_manifest_binds_runtime_state_schema_and_artifacts(
     tmp_path: Path,
 ) -> None:

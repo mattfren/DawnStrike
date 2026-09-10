@@ -29,6 +29,11 @@ def _active_strategy_versions(*, paperops_version: str) -> dict[str, str]:
 DAILY_RUN_SCHEMA = "dawnstrike.daily_run.v1"
 SCHEDULER_VERSION = "dawnstrike-scheduler-v6"
 DAILY_STAGE_ORDER = (
+    # Runs before morning_collection and is deliberately not required: a stale
+    # core manifest degrades the core lane without ending the trading day.  It is
+    # registered so that degradation is recorded rather than inferred from an
+    # exit code that stays 0 either way.
+    "luna_core_refresh",
     "morning_collection",
     "ranking_delivery",
     "indeterminate_research",

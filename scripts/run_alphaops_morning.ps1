@@ -152,11 +152,27 @@ try {
     catch {
         $coreRefresh = [pscustomobject]@{ exit_code = 2 }
     }
+    # Record the outcome either way.  The refresh failing is lane-local by
+    # design, so the stage exit code stays 0 and the day still runs on the mover
+    # lane - which meant the core lane sat empty from 2026-08-31 to 2026-09-09
+    # with every task result reading success.  The stage is registered as
+    # not-required, so this reports the degradation without blocking the chain.
     if ($coreRefresh.exit_code -eq 0) {
         $CoreUniverseManifest = $defaultCoreUniverseManifest
+        Write-MorningStage `
+            -Name "luna_core_refresh" `
+            -Status "COMPLETE" `
+            -ExitCode 0 `
+            -NotRequired
     }
     else {
         $CoreUniverseManifest = ""
+        Write-MorningStage `
+            -Name "luna_core_refresh" `
+            -Status "DEGRADED" `
+            -ExitCode $coreRefresh.exit_code `
+            -ErrorCode "core_universe_manifest_unavailable" `
+            -NotRequired
     }
 
     $configPath = $sourceConfigPath
