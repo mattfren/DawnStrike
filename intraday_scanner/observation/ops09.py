@@ -155,6 +155,77 @@ def _tree_bytes(root: Path) -> int:
     return total
 
 
+class SharedBoundedWriter:
+    """Atomically publish bounded output across the one OPS09 account.
+
+    Capture/native bytes have their own admission reservation.  This writer
+    owns the remaining producer/control/adapter roots and charges a replaced
+    file once while including the temporary and final copies in the peak.
+    """
+
+    def __init__(
+        self,
+        *,
+        roots: tuple[Path, ...],
+        max_bytes: int,
+        excluded_roots: tuple[Path, ...] = (),
+    ) -> None:
+        self.roots = tuple(path.resolve() for path in roots)
+        self.excluded_roots = tuple(path.resolve() for path in excluded_roots)
+        self.max_bytes = int(max_bytes)
+        if self.max_bytes < 0:
+            raise Ops09Error("OPS09 shared writer budget is invalid")
+        for root in self.roots:
+            root.mkdir(parents=True, exist_ok=True)
+
+    def _included(self, path: Path) -> bool:
+        return not any(path == root or root in path.parents for root in self.excluded_roots)
+
+    def _tree_bytes(self) -> int:
+        total = 0
+        seen: set[Path] = set()
+        for root in self.roots:
+            if not root.exists():
+                continue
+            paths = [root] if root.is_file() else root.rglob("*")
+            for path in paths:
+                resolved = path.resolve()
+                if (
+                    resolved in seen
+                    or path.is_symlink()
+                    or not path.is_file()
+                    or not self._included(resolved)
+                ):
+                    continue
+                seen.add(resolved)
+                total += path.stat().st_size
+        return total
+
+    def __call__(self, path: Path, data: bytes) -> None:
+        raw_path = Path(path)
+        if raw_path.is_symlink() or any(parent.is_symlink() for parent in raw_path.parents):
+            raise Ops09Error(f"OPS09 shared publication target is a reparse path: {raw_path}")
+        path = raw_path.resolve()
+        if not any(path == root or root in path.parents for root in self.roots):
+            raise Ops09Error(f"OPS09 shared publication escaped account roots: {path}")
+        if not self._included(path):
+            raise Ops09Error(f"OPS09 shared publication entered excluded root: {path}")
+        if path.is_symlink():
+            raise Ops09Error(f"OPS09 shared publication target is a reparse path: {path}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        existing = path.stat().st_size if path.is_file() else 0
+        current = self._tree_bytes() - existing
+        projected_peak = current + len(data) * 2
+        if projected_peak > self.max_bytes:
+            raise Ops09Error(
+                f"OPS09 shared byte budget rejects {path.name}: "
+                f"projected_peak={projected_peak}, cap={self.max_bytes}"
+            )
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        temporary.write_bytes(data)
+        temporary.replace(path)
+
+
 def _atomic_json(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{__import__('os').getpid()}.tmp")
@@ -587,14 +658,20 @@ def _run_capture_unbudgeted(*, plan: dict[str, Any], session: dict[str, Any], co
                  execute: bool, timeout_seconds: int, decision_artifact: Path | None,
                  database_path: Path, as_of: str, downstream_max_bytes: int,
                  registration_context: Path | None = None,
-                 retained_capture_root: Path | None = None) -> dict[str, Any]:
+                 retained_capture_root: Path | None = None,
+                 capture_reserve_bytes: int = CAPTURE_BYTES) -> dict[str, Any]:
     capture_root = session_root / "capture"
     census_path = session_root / "capture-census.json"
-    _assert_budget(session_root.parent, CAPTURE_BYTES, "capture phase")
+    _assert_budget(session_root.parent, capture_reserve_bytes, "capture phase")
+    control_writer = SharedBoundedWriter(
+        roots=(session_root.parent, scope_path.parent, session_root / "ops06"),
+        max_bytes=downstream_max_bytes,
+        excluded_roots=(capture_root,),
+    )
     movers = (scope or {}).get("scope", {}).get("scopes", {}).get("original_small_cap_gap", [])
     census_path.parent.mkdir(parents=True, exist_ok=True)
     if movers:
-        census_path.write_text(json.dumps(movers, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        control_writer(census_path, (json.dumps(movers, sort_keys=True, indent=2) + "\n").encode())
     argument_list = [str(Path(plan["repository"]["root"]) / "scripts" / "ops09_pipeline.py"),
                      "--market-date", session["market_date"], "--output-root", str(capture_root),
                      "--source-config-hash", str(contract["source_config_sha256"] if contract else plan["source_identity"]["source_config_sha256"]),
@@ -722,7 +799,9 @@ def _run_capture(*, ledger: _ByteLedger, plan: dict[str, Any], session: dict[str
                  retained_capture_root: Path | None = None) -> dict[str, Any]:
     """Reserve capture plus all native output before starting the child."""
     phase = f"capture:{session['market_date']}"
-    ledger.admit(phase, CAPTURE_BYTES + NATIVE_RESERVED_BYTES)
+    existing_capture_bytes = _tree_bytes(session_root / "capture")
+    capture_reserve_bytes = max(0, CAPTURE_BYTES - existing_capture_bytes)
+    ledger.admit(phase, capture_reserve_bytes + NATIVE_RESERVED_BYTES)
     attempt_path = _attempt_state_path(session_root)
     attempt_state = {
         "schema_version": "dawnstrike.ops09.attempt.v1",
@@ -730,6 +809,7 @@ def _run_capture(*, ledger: _ByteLedger, plan: dict[str, Any], session: dict[str
         "accounting_status": "PENDING",
         "market_date": session["market_date"],
         "attempt_number": int(session.get("attempts") or 0),
+        "attempt_id": f"{session['market_date']}:{int(session.get('attempts') or 0)}",
         "started_at": datetime.now(UTC).isoformat(),
         "admitted_elapsed_seconds": float(timeout_seconds),
         "timeout_seconds": int(timeout_seconds),
@@ -740,7 +820,10 @@ def _run_capture(*, ledger: _ByteLedger, plan: dict[str, Any], session: dict[str
     result: dict[str, Any] | None = None
     downstream_max_bytes = max(
         0,
-        MAX_BYTES - ledger._actual_bytes() - CAPTURE_BYTES - NATIVE_RESERVED_BYTES,
+        MAX_BYTES
+        - ledger._actual_bytes()
+        - capture_reserve_bytes
+        - NATIVE_RESERVED_BYTES,
     )
     try:
         result = _run_capture_unbudgeted(
@@ -751,6 +834,7 @@ def _run_capture(*, ledger: _ByteLedger, plan: dict[str, Any], session: dict[str
             downstream_max_bytes=downstream_max_bytes,
             registration_context=registration_context,
             retained_capture_root=retained_capture_root,
+            capture_reserve_bytes=capture_reserve_bytes,
         )
     finally:
         elapsed = max(0.0, time.monotonic() - started_mono)
@@ -894,7 +978,16 @@ def _recover_attempt_accounting(
     attempt = _read_object(path, "OPS09 attempt state")
     if attempt.get("schema_version") != "dawnstrike.ops09.attempt.v1":
         raise Ops09Error("OPS09 attempt state schema is unsupported")
+    attempt_id = str(attempt.get("attempt_id") or "")
+    accounted_ids = session.setdefault("accounted_attempt_ids", [])
+    if not isinstance(accounted_ids, list):
+        raise Ops09Error("OPS09 accounted attempt identity set is invalid")
     if attempt.get("accounting_status") == "ACCOUNTED":
+        return
+    if attempt_id and attempt_id in accounted_ids:
+        attempt["accounting_status"] = "ACCOUNTED"
+        attempt["accounted_at"] = datetime.now(UTC).isoformat()
+        _atomic_json(path, attempt)
         return
     status = str(attempt.get("status") or "")
     if status == "RUNNING":
@@ -914,11 +1007,41 @@ def _recover_attempt_accounting(
     session["elapsed_seconds"] = round(min(MAX_WALL_SECONDS, prior + charge), 6)
     session["elapsed_recovery"] = recovery
     session["last_attempt_elapsed_seconds"] = round(charge, 6)
+    if attempt_id and attempt_id not in accounted_ids:
+        accounted_ids.append(attempt_id)
+    # The authoritative state carries both elapsed time and the charged ID.
+    # Persist it before the secondary attempt marker so a crash cannot lose a
+    # charge or cause a reconciled attempt to be charged twice.
+    _atomic_json(state_path, state)
     attempt["accounting_status"] = "ACCOUNTED"
     attempt["accounted_elapsed_seconds"] = round(charge, 6)
     attempt["accounted_at"] = datetime.now(UTC).isoformat()
     _atomic_json(path, attempt)
-    _atomic_json(state_path, state)
+
+
+def _account_attempt_elapsed(
+    *, state: dict[str, Any], session: dict[str, Any], attempt_state: dict[str, Any],
+    state_path: Path, attempt_path: Path, charge: float,
+) -> None:
+    """Atomically record elapsed time and attempt identity before marker."""
+    if charge < 0 or charge > MAX_WALL_SECONDS:
+        raise Ops09Error("OPS09 attempt elapsed charge is invalid")
+    attempt_id = str(attempt_state.get("attempt_id") or "")
+    if not attempt_id:
+        raise Ops09Error("OPS09 attempt identity is missing")
+    accounted_ids = session.setdefault("accounted_attempt_ids", [])
+    if not isinstance(accounted_ids, list):
+        raise Ops09Error("OPS09 accounted attempt identity set is invalid")
+    if attempt_id not in accounted_ids:
+        prior = float(session.get("elapsed_seconds") or 0.0)
+        session["elapsed_seconds"] = round(min(MAX_WALL_SECONDS, prior + charge), 6)
+        session["last_attempt_elapsed_seconds"] = round(charge, 6)
+        accounted_ids.append(attempt_id)
+        _atomic_json(state_path, state)
+    attempt_state["accounting_status"] = "ACCOUNTED"
+    attempt_state["accounted_elapsed_seconds"] = round(charge, 6)
+    attempt_state["accounted_at"] = datetime.now(UTC).isoformat()
+    _atomic_json(attempt_path, attempt_state)
 
 
 def _resume_ops09_unlocked(*, output_root: Path, input_root: Path, scope_root: Path, database_root: Path,
@@ -1070,19 +1193,16 @@ def _resume_ops09_unlocked(*, output_root: Path, input_root: Path, scope_root: P
         if attempt_elapsed < 0 or attempt_elapsed > MAX_WALL_SECONDS:
             raise Ops09Error("OPS09 native attempt elapsed evidence is invalid")
         if attempt_elapsed:
-            session["elapsed_seconds"] = round(min(
-                MAX_WALL_SECONDS,
-                float(session.get("elapsed_seconds") or 0.0) + attempt_elapsed,
-            ), 6)
-            session["last_attempt_elapsed_seconds"] = round(attempt_elapsed, 6)
             attempt_path = _attempt_state_path(session_root)
             if attempt_path.is_file():
                 attempt_state = _read_object(attempt_path, "OPS09 attempt state")
-                attempt_state["accounting_status"] = "ACCOUNTED"
-                attempt_state["accounted_elapsed_seconds"] = round(attempt_elapsed, 6)
-                attempt_state["accounted_at"] = datetime.now(UTC).isoformat()
-                _atomic_json(attempt_path, attempt_state)
-            _atomic_json(state_path, state)
+                _account_attempt_elapsed(
+                    state=state, session=session, attempt_state=attempt_state,
+                    state_path=state_path, attempt_path=attempt_path,
+                    charge=attempt_elapsed,
+                )
+            else:
+                raise Ops09Error("OPS09 attempt state disappeared before accounting")
         session.update({
             "capture": {k: v for k, v in capture.items() if k not in {"receipt"}},
             "request_contract_sha256": (

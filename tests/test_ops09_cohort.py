@@ -5,19 +5,21 @@ from pathlib import Path
 
 import pytest
 
+from intraday_scanner.observation.cohort import APPROVED_PYTHON
 from intraday_scanner.observation.ops09 import (
     CAPTURE_BYTES,
     DOWNSTREAM_BYTES,
     MAX_BYTES,
     NATIVE_RESERVED_BYTES,
-    _ByteLedger,
     Ops09Error,
+    SharedBoundedWriter,
+    _account_attempt_elapsed,
+    _ByteLedger,
     _sample_movers,
     prepare_ops09_cohort,
     resume_ops09_cohort,
     validate_ops09_scope,
 )
-from intraday_scanner.observation.cohort import APPROVED_PYTHON
 
 
 def _source_config(tmp_path: Path) -> tuple[Path, str]:
@@ -179,3 +181,41 @@ def test_byte_ledger_rejects_identity_reuse_across_database_root(tmp_path: Path)
     changed["database_root"] = str((tmp_path / "other-database").resolve())
     with pytest.raises(Ops09Error, match="identity changed"):
         _ByteLedger(output_root=output_root, database_root=tmp_path / "other-database", identity=changed)
+
+
+def test_shared_writer_accounts_multiple_roots_and_replacement_once(tmp_path: Path) -> None:
+    root = tmp_path / "session"
+    capture = root / "capture"
+    adapter = root / "ops06"
+    writer = SharedBoundedWriter(
+        roots=(root, adapter), max_bytes=64, excluded_roots=(capture,)
+    )
+    writer(adapter / "one.json", b"1234567890")
+    writer(adapter / "one.json", b"123")
+    writer(root / "control.json", b"abcd")
+    assert (adapter / "one.json").read_bytes() == b"123"
+    with pytest.raises(Ops09Error, match="shared byte budget"):
+        writer(adapter / "overflow.json", b"x" * 100)
+    assert not (adapter / "overflow.json").exists()
+
+
+def test_elapsed_and_attempt_identity_are_authoritative_before_marker(tmp_path: Path) -> None:
+    state_path = tmp_path / "cohort-state.json"
+    attempt_path = tmp_path / ".ops09-attempt.json"
+    session = {"elapsed_seconds": 4.0}
+    state = {"sessions": [session], "repository": {}}
+    attempt = {
+        "schema_version": "dawnstrike.ops09.attempt.v1",
+        "attempt_id": "2026-09-10:1",
+        "accounting_status": "PENDING",
+    }
+    _account_attempt_elapsed(
+        state=state, session=session, attempt_state=attempt,
+        state_path=state_path, attempt_path=attempt_path, charge=7.5,
+    )
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    assert persisted["sessions"][0]["elapsed_seconds"] == 11.5
+    assert persisted["sessions"][0]["accounted_attempt_ids"] == ["2026-09-10:1"]
+    assert session["elapsed_seconds"] == 11.5
+    assert session["accounted_attempt_ids"] == ["2026-09-10:1"]
+    assert attempt["accounting_status"] == "ACCOUNTED"

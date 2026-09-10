@@ -34,6 +34,15 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _publish(path: Path, data: bytes, write_bytes: Any | None) -> None:
+    """Use the caller's shared admission writer when one is supplied."""
+    if write_bytes is None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    else:
+        write_bytes(path, data)
+
+
 def _read_json(path: Path, label: str) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
@@ -196,6 +205,7 @@ def prepare(
     output_root: Path,
     market_date: str,
     persist_database: bool = True,
+    write_bytes: Any | None = None,
 ) -> dict[str, Any]:
     alpha = _read_json(alpha_cycle, "alpha cycle")
     handoff_value = _read_json(handoff, "universe handoff")
@@ -260,17 +270,22 @@ def prepare(
         "v6_decision_records": decisions,
     }
     decisions_path = output_root / "alpha_v6_decisions.actual.json"
-    decisions_path.write_text(
-        json.dumps(decisions_artifact, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    _publish(
+        decisions_path,
+        (json.dumps(decisions_artifact, indent=2, sort_keys=True) + "\n").encode(),
+        write_bytes,
     )
     contract_path = output_root / "universe-source-contract.json"
-    contract_path.write_text(
-        json.dumps(contract, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    _publish(
+        contract_path,
+        (json.dumps(contract, indent=2, sort_keys=True) + "\n").encode(),
+        write_bytes,
     )
     universe_path = output_root / "observational-universe.json"
-    universe_path.write_text(
-        json.dumps({"version": version, "members": normalized}, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+    _publish(
+        universe_path,
+        (json.dumps({"version": version, "members": normalized}, indent=2, sort_keys=True) + "\n").encode(),
+        write_bytes,
     )
     receipt = {
         "schema_version": "dawnstrike.r3.observational_registration.v1",
@@ -308,7 +323,11 @@ def prepare(
         "broker_execution_enabled": False,
     }
     receipt_path = output_root / "registration-receipt.json"
-    receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _publish(
+        receipt_path,
+        (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode(),
+        write_bytes,
+    )
     return receipt
 
 
@@ -363,6 +382,7 @@ def prepare_actual_observational_registration(
     *, source_root: Path, output_root: Path, market_date: str,
     entitlement: Path | None = None, source_config: Path | None = None,
     typed_census: Path | None = None,
+    write_bytes: Any | None = None,
 ) -> dict[str, Any]:
     """Create an authenticated, bounded date-local producer bundle.
 
@@ -380,7 +400,7 @@ def prepare_actual_observational_registration(
         source_db=paths["source_db"], alpha_cycle=paths["alpha_cycle"],
         handoff=paths["handoff"], snapshot=paths["snapshot"],
         entitlement=paths["entitlement"], output_root=output_root,
-        market_date=market_date, persist_database=False,
+        market_date=market_date, persist_database=False, write_bytes=write_bytes,
     )
     alpha = _read_json(paths["alpha_cycle"], "alpha cycle")
     handoff = _read_json(paths["handoff"], "universe handoff")
@@ -504,7 +524,7 @@ def prepare_actual_observational_registration(
     }
     output_root = output_root.resolve()
     scope_path = output_root / "scope.json"
-    scope_path.write_text(json.dumps(scope, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _publish(scope_path, (json.dumps(scope, indent=2, sort_keys=True) + "\n").encode(), write_bytes)
     receipt["source"]["decision_db"] = db_identity
     receipt["source"]["snapshot_semantics"] = db_identity["snapshot_semantics"]
     receipt["source"]["source_identity"] = source_identity
@@ -521,11 +541,15 @@ def prepare_actual_observational_registration(
     # receipt to avoid a circular receipt<->scope hash relationship.
     receipt["scope"] = {"path": str(scope_path)}
     receipt_path = output_root / "registration-receipt.json"
-    receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _publish(
+        receipt_path,
+        (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode(),
+        write_bytes,
+    )
     # Rewrite scope's registration hash now that receipt contains its final
     # source identity; hashes are content-bound and deterministic thereafter.
     scope["registration"]["receipt_sha256"] = _sha256(receipt_path)
-    scope_path.write_text(json.dumps(scope, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _publish(scope_path, (json.dumps(scope, indent=2, sort_keys=True) + "\n").encode(), write_bytes)
     return {"status": "READY", "paths": {k: str(v) for k, v in paths.items()},
             "receipt": receipt, "scope": scope, "scope_path": str(scope_path)}
 

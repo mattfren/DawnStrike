@@ -6,7 +6,6 @@ import argparse
 import hashlib
 import importlib.util
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -15,6 +14,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from intraday_scanner.observation.ops06_bars_adapter import adapt_ops05_to_r3  # noqa: E402
 from intraday_scanner.observation.ops09 import (  # noqa: E402
+    SharedBoundedWriter,
     _request_contract,
     _run_consumers,
     validate_ops09_scope,
@@ -24,73 +24,30 @@ from scripts.prepare_r3_observational_registration import (  # noqa: E402
 )
 
 
-class _BoundedWriter:
-    def __init__(self, root: Path, max_bytes: int) -> None:
-        self.root = root.resolve()
-        self.max_bytes = max_bytes
-        self.root.mkdir(parents=True, exist_ok=True)
-
-    def _tree_bytes(self) -> int:
-        return sum(
-            path.stat().st_size
-            for path in self.root.rglob("*")
-            if path.is_file() and not path.is_symlink()
-        )
-
-    def __call__(self, path: Path, data: bytes) -> None:
-        path = path.resolve()
-        if not path.is_relative_to(self.root):
-            raise RuntimeError(f"OPS09 downstream publication escaped account root: {path}")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        projected = self._tree_bytes() + len(data)
-        if projected > self.max_bytes:
-            raise RuntimeError(
-                f"OPS09 downstream byte budget rejects {path.name}: "
-                f"projected={projected}, cap={self.max_bytes}"
-            )
-        temporary.write_bytes(data)
-        temporary.replace(path)
-
-
 def _compact_consumer_value(value, *, depth: int = 0):
-    """Keep consumer truth/identity without copying the adapter dataset."""
-    if depth > 5:
-        return {"sha256": hashlib.sha256(repr(value).encode()).hexdigest()}
+    """Preserve unique consumer values; only duplicate persisted payloads may be referenced."""
     if isinstance(value, dict):
         result = {}
         for key, item in value.items():
             name = str(key)
             lowered = name.lower()
-            if isinstance(item, (dict, list)):
-                result[name] = _compact_consumer_value(item, depth=depth + 1)
-            elif isinstance(item, (str, int, float, bool)) or item is None:
-                if (
-                    lowered.endswith(
-                        ("status", "reason", "count", "counts", "id", "sha256", "version")
-                    )
-                    or lowered in {
-                        "eligibility", "identity", "model", "decision", "coverage",
-                        "source", "research_only", "broker_execution_enabled",
+            if lowered in {"observation_dataset", "dataset_rows", "raw_events", "adapter_dataset"}:
+                if isinstance(item, (dict, list)):
+                    raw = json.dumps(
+                        item, sort_keys=True, default=str, separators=(",", ":")
+                    ).encode()
+                    result[name] = {
+                        "reference_sha256": hashlib.sha256(raw).hexdigest(),
+                        "reference_semantics": "persisted_duplicate_payload",
+                        "item_count": len(item) if isinstance(item, (dict, list)) else None,
                     }
-                ):
-                    text = item if not isinstance(item, str) else item[:2048]
-                    result[name] = text
+                else:
+                    result[name] = item
+            else:
+                result[name] = _compact_consumer_value(item, depth=depth + 1)
         return result
     if isinstance(value, list):
-        if len(value) > 64:
-            raw = json.dumps(value, sort_keys=True, default=str, separators=(",", ":")).encode()
-            return {
-                "count": len(value),
-                "sha256": hashlib.sha256(raw).hexdigest(),
-                "sample": [
-                    _compact_consumer_value(row, depth=depth + 1)
-                    for row in value[:3]
-                ],
-            }
         return [_compact_consumer_value(row, depth=depth + 1) for row in value]
-    if isinstance(value, str):
-        return value[:2048]
     return value
 
 
@@ -142,6 +99,18 @@ def main() -> int:
     args = _parser().parse_args()
     actual_registration = None
     actual_scope = None
+    capture_root = args.output_root.resolve()
+    adapter_root = (args.adapter_output_root or (capture_root.parent / "ops06")).resolve()
+    registration_root = (
+        args.registration_output_root.resolve()
+        if args.registration_output_root is not None
+        else capture_root.parent / "actual-producer"
+    )
+    shared_writer = SharedBoundedWriter(
+        roots=(capture_root.parent, registration_root, adapter_root),
+        max_bytes=args.downstream_max_bytes,
+        excluded_roots=(capture_root,),
+    )
     request_contract_path = (
         args.request_contract_output.resolve()
         if args.request_contract_output else None
@@ -156,6 +125,7 @@ def main() -> int:
             entitlement=args.actual_entitlement.resolve() if args.actual_entitlement else None,
             source_config=args.source_config.resolve() if args.source_config else None,
             typed_census=args.actual_census.resolve() if args.actual_census else None,
+            write_bytes=shared_writer,
         )
         actual_scope = Path(actual_registration["scope_path"])
         if request_contract_path is None:
@@ -164,8 +134,9 @@ def main() -> int:
             generated_census = actual_scope.parent / "capture-census.json"
             scope_value = json.loads(actual_scope.read_text(encoding="utf-8"))
             movers = scope_value.get("scopes", {}).get("original_small_cap_gap", [])
-            generated_census.write_text(
-                json.dumps(movers, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+            shared_writer(
+                generated_census,
+                (json.dumps(movers, sort_keys=True, indent=2) + "\n").encode("utf-8"),
             )
             args.census = generated_census
         if args.decision_artifact is None:
@@ -182,10 +153,9 @@ def main() -> int:
             request = _request_contract(
                 plan=plan, session=session, scope=scope, scope_path=actual_scope
             )
-            request_contract_path.parent.mkdir(parents=True, exist_ok=True)
-            request_contract_path.write_text(
-                json.dumps(request, sort_keys=True, indent=2) + "\n",
-                encoding="utf-8",
+            shared_writer(
+                request_contract_path,
+                (json.dumps(request, sort_keys=True, indent=2) + "\n").encode("utf-8"),
             )
             args.capture_receipt_hash = request["request_contract_sha256"]
         if args.capture_receipt_hash is None:
@@ -205,9 +175,9 @@ def main() -> int:
                     "authenticated": True,
                 },
             }
-            request_contract_path.parent.mkdir(parents=True, exist_ok=True)
-            request_contract_path.write_text(
-                json.dumps(request, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+            shared_writer(
+                request_contract_path,
+                (json.dumps(request, sort_keys=True, indent=2) + "\n").encode("utf-8"),
             )
             args.capture_receipt_hash = hashlib.sha256(
                 request_contract_path.read_bytes()
@@ -259,16 +229,12 @@ def main() -> int:
         payload["decision_status"] = "MISSING_INPUT"
         print(json.dumps(payload, sort_keys=True))
         return 0
-    adapter_root = (
-        args.adapter_output_root or (args.output_root.resolve().parent / "ops06")
-    ).resolve()
-    bounded_writer = _BoundedWriter(adapter_root, args.downstream_max_bytes)
     adapted = adapt_ops05_to_r3(
         observation_root=capture_root,
         decision_artifact=args.decision_artifact.resolve(),
         output_root=adapter_root,
         as_of=args.as_of,
-        write_bytes=bounded_writer,
+        write_bytes=shared_writer,
         registration_context=args.registration_context,
     )
     if args.database_path is None:
@@ -310,7 +276,7 @@ def main() -> int:
         default=str,
     ).encode("utf-8") + b"\n"
     consumer_result_path = adapter_root / "consumer-results.json"
-    bounded_writer(consumer_result_path, consumer_result_bytes)
+    shared_writer(consumer_result_path, consumer_result_bytes)
     payload.update({
         "decision_status": "BOUND",
         "adapter_output_root": str(adapter_root),
@@ -319,7 +285,7 @@ def main() -> int:
         "consumer_results_path": str(consumer_result_path),
         "consumer_results_sha256": __import__("hashlib").sha256(consumer_result_bytes).hexdigest(),
         "downstream_account_root": str(adapter_root),
-        "downstream_existing_bytes": bounded_writer._tree_bytes(),
+        "downstream_existing_bytes": shared_writer._tree_bytes(),
         "downstream_max_bytes": args.downstream_max_bytes,
         "consumers": {
             "daily_status": consumers["daily"].get("status"),
