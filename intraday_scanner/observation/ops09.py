@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 import subprocess
 import time
 from datetime import UTC, datetime
@@ -186,7 +187,10 @@ def _sample_movers(rows: list[dict[str, Any]], *, seed: str = SAMPLE_SEED) -> di
         )
         for name in MOVER_STRATA
     }
-    quotas = {"selected": 2, "rejected": 4, "unselected": 4, "missing_input": 2}
+    # D042 starts each available stratum at three, then redistributes the
+    # remainder deterministically.  The resulting 2/4/4/2 is data-shaped for
+    # the Sep-9 census, not a future-session rule.
+    quotas = {name: 3 for name in MOVER_STRATA}
     chosen: list[dict[str, Any]] = []
     for name in MOVER_STRATA:
         ranked = sorted(
@@ -194,6 +198,7 @@ def _sample_movers(rows: list[dict[str, Any]], *, seed: str = SAMPLE_SEED) -> di
             key=lambda symbol: hashlib.sha256(f"{seed}:{name}:{symbol}".encode()).hexdigest(),
         )
         take = min(quotas[name], len(ranked))
+        quotas[name] = take
         probability = take / len(ranked) if ranked else 0.0
         chosen.extend(
             {
@@ -205,26 +210,36 @@ def _sample_movers(rows: list[dict[str, Any]], *, seed: str = SAMPLE_SEED) -> di
             for symbol in ranked[:take]
         )
     remaining = 12 - len(chosen)
-    if remaining > 0:
+    while remaining > 0:
+        progressed = False
         for name in MOVER_STRATA:
+            selected = {row["symbol"] for row in chosen}
             ranked = sorted(
-                set(by_stratum[name]) - {row["symbol"] for row in chosen},
+                set(by_stratum[name]) - selected,
                 key=lambda symbol: hashlib.sha256(f"{seed}:{name}:{symbol}".encode()).hexdigest(),
             )
-            for symbol in ranked[:remaining]:
-                chosen.append(
-                    {
-                        "symbol": symbol,
-                        "membership": name,
-                        "sampling_seed": seed,
-                        "inclusion_probability": min(1.0, quotas[name] / len(by_stratum[name]))
-                        if by_stratum[name]
-                        else 0.0,
-                    }
-                )
-            remaining = 12 - len(chosen)
+            if not ranked:
+                continue
+            symbol = ranked[0]
+            quotas[name] += 1
+            chosen.append(
+                {
+                    "symbol": symbol,
+                    "membership": name,
+                    "sampling_seed": seed,
+                    "inclusion_probability": min(1.0, quotas[name] / len(by_stratum[name])),
+                }
+            )
+            remaining -= 1
+            progressed = True
             if not remaining:
                 break
+        if not progressed:
+            break
+    for row in chosen:
+        row["inclusion_probability"] = min(
+            1.0, quotas[row["membership"]] / len(by_stratum[row["membership"]])
+        ) if by_stratum[row["membership"]] else 0.0
     return {
         "seed": seed,
         "max_candidates": 12,
@@ -471,7 +486,7 @@ def _validate_request_contract(
 def _run_capture_unbudgeted(*, plan: dict[str, Any], session: dict[str, Any], contract: dict[str, Any],
                  scope: dict[str, Any], scope_path: Path, session_root: Path, fixture: Path | None,
                  execute: bool, timeout_seconds: int, decision_artifact: Path | None,
-                 database_path: Path, as_of: str) -> dict[str, Any]:
+                 database_path: Path, as_of: str, downstream_max_bytes: int) -> dict[str, Any]:
     capture_root = session_root / "capture"
     census_path = session_root / "capture-census.json"
     _assert_budget(session_root.parent, CAPTURE_BYTES, "capture phase")
@@ -487,7 +502,11 @@ def _run_capture_unbudgeted(*, plan: dict[str, Any], session: dict[str, Any], co
                       "--database-path", str(database_path),
                       "--adapter-output-root", str(session_root / "ops06")]
     if decision_artifact is not None:
-        argument_list += ["--decision-artifact", str(decision_artifact), "--defer-consumers"]
+        argument_list += [
+            "--decision-artifact", str(decision_artifact),
+            "--downstream-max-bytes", str(downstream_max_bytes),
+            "--in-memory-consumer",
+        ]
     if fixture is not None:
         argument_list += ["--fixture", str(fixture)]
     elif execute:
@@ -579,24 +598,44 @@ def _run_capture(*, ledger: _ByteLedger, plan: dict[str, Any], session: dict[str
     """Reserve capture plus all native output before starting the child."""
     phase = f"capture:{session['market_date']}"
     ledger.admit(phase, CAPTURE_BYTES + NATIVE_RESERVED_BYTES)
+    downstream_max_bytes = max(
+        0,
+        MAX_BYTES - ledger._actual_bytes() - CAPTURE_BYTES - NATIVE_RESERVED_BYTES,
+    )
     try:
         return _run_capture_unbudgeted(
             plan=plan, session=session, contract=contract, scope=scope, scope_path=scope_path,
             session_root=session_root, fixture=fixture, execute=execute,
             timeout_seconds=timeout_seconds, decision_artifact=decision_artifact,
             database_path=database_path, as_of=as_of,
+            downstream_max_bytes=downstream_max_bytes,
         )
     finally:
         ledger.release(phase)
 
 
-def _run_consumers(*, adapted: dict[str, Any], database_path: Path, session: dict[str, Any], repo_sha: str) -> dict[str, Any]:
+def _run_consumers(
+    *, adapted: dict[str, Any], database_path: Path, session: dict[str, Any], repo_sha: str,
+    in_memory: bool = False,
+) -> dict[str, Any]:
     database_path.parent.mkdir(parents=True, exist_ok=True)
-    store = SQLiteScanStore(database_path)
+    connection: sqlite3.Connection | None = None
+    if in_memory:
+        connection = sqlite3.connect(":memory:")
+        connection.execute("PRAGMA temp_store=MEMORY")
+        connection.execute("PRAGMA journal_mode=MEMORY")
+        store = SQLiteScanStore(database_path, connection_factory=lambda: connection)
+    else:
+        store = SQLiteScanStore(database_path)
     store.initialize()
     daily = run_alpha_v6_daily_monitor(store, market_date=session["market_date"], observation_source=adapted)
     weekly = run_alpha_v6_weekly_training(store, code_sha=repo_sha, market_date=session["market_date"], observation_source=adapted)
-    return {"daily": daily, "weekly": weekly, "database_path": str(database_path.resolve()), "isolated": True}
+    if connection is not None:
+        connection.close()
+    return {
+        "daily": daily, "weekly": weekly, "database_path": str(database_path.resolve()),
+        "database_mode": "in_memory" if in_memory else "disk", "isolated": True,
+    }
 
 
 def _admitted_repository_identity(state: dict[str, Any], repo_root: Path) -> dict[str, str]:

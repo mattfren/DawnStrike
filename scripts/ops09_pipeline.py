@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -13,6 +14,30 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from intraday_scanner.observation.ops06_bars_adapter import adapt_ops05_to_r3  # noqa: E402
 from intraday_scanner.observation.ops09 import _run_consumers  # noqa: E402
+
+
+class _BoundedWriter:
+    def __init__(self, root: Path, max_bytes: int) -> None:
+        self.root = root.resolve()
+        self.max_bytes = max_bytes
+        self.baseline = self._tree_bytes()
+
+    def _tree_bytes(self) -> int:
+        return sum(path.stat().st_size for path in self.root.rglob("*") if path.is_file() and not path.is_symlink())
+
+    def __call__(self, path: Path, data: bytes) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        projected = self._tree_bytes() - self.baseline + len(data) + len(data)
+        if path.is_file():
+            projected += path.stat().st_size
+        if projected > self.max_bytes:
+            raise RuntimeError(
+                f"OPS09 downstream byte budget rejects {path.name}: "
+                f"projected={projected}, cap={self.max_bytes}"
+            )
+        temporary.write_bytes(data)
+        temporary.replace(path)
 
 
 def _ops05_main():
@@ -41,7 +66,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--repo-sha", required=True)
     parser.add_argument("--as-of", required=True)
     parser.add_argument("--max-bytes", type=int, default=64 * 1024 * 1024)
-    parser.add_argument("--defer-consumers", action="store_true")
+    parser.add_argument("--downstream-max-bytes", type=int, default=7 * 1024 * 1024)
+    parser.add_argument("--in-memory-consumer", action="store_true")
     return parser
 
 
@@ -75,17 +101,14 @@ def main() -> int:
         payload["decision_status"] = "MISSING_INPUT"
         print(json.dumps(payload, sort_keys=True))
         return 0
-    if args.defer_consumers:
-        payload["decision_status"] = "DEFERRED"
-        payload["decision_artifact"] = str(args.decision_artifact.resolve())
-        print(json.dumps(payload, sort_keys=True))
-        return 0
     adapter_root = (args.adapter_output_root or (args.output_root.resolve().parent / "ops06")).resolve()
+    bounded_writer = _BoundedWriter(args.output_root.resolve().parent, args.downstream_max_bytes)
     adapted = adapt_ops05_to_r3(
         observation_root=args.output_root.resolve(),
         decision_artifact=args.decision_artifact.resolve(),
         output_root=adapter_root,
         as_of=args.as_of,
+        write_bytes=bounded_writer,
     )
     if args.database_path is None:
         raise RuntimeError("OPS09 native pipeline requires an isolated database path")
@@ -94,6 +117,7 @@ def main() -> int:
         database_path=args.database_path.resolve(),
         session={"market_date": args.market_date},
         repo_sha=args.repo_sha,
+        in_memory=args.in_memory_consumer,
     )
     payload.update({
         "decision_status": "BOUND",

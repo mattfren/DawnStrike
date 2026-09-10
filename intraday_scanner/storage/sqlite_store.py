@@ -102,10 +102,17 @@ _CAPTURE_RUN_VOLATILE_FIELDS = {
 
 
 class SQLiteScanStore:
-    def __init__(self, db_path: str | Path, *, read_only: bool = False):
+    def __init__(
+        self,
+        db_path: str | Path,
+        *,
+        read_only: bool = False,
+        connection_factory: Any | None = None,
+    ):
         assert_test_database_isolated(db_path)
         self.db_path = Path(db_path)
         self.read_only = read_only
+        self._connection_factory = connection_factory
         # Store methods historically called initialize() defensively before
         # every operation.  Keep that compatibility, but do not replay the
         # full DDL/migration suite for every read/write.  The marker is checked
@@ -10113,6 +10120,8 @@ class SQLiteScanStore:
             raise StorageError(f"Could not load research outcome bridges: {exc}") from exc
 
     def _connect(self) -> sqlite3.Connection:
+        if self._connection_factory is not None:
+            return self._connection_factory()
         if self.read_only:
             return connect_read_only(self.db_path)
         return sqlite3.connect(self.db_path, timeout=30.0)

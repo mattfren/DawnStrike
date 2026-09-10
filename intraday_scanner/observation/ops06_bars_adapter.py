@@ -383,6 +383,7 @@ def adapt_ops05_to_r3(
     decision_artifact: str | Path,
     output_root: str | Path | None = None,
     as_of: str | None = None,
+    write_bytes: Any | None = None,
 ) -> dict[str, Any]:
     """Verify OPS05 bytes, emit R3-shaped artifacts, and run the existing consumer."""
     root = Path(observation_root).resolve()
@@ -423,12 +424,9 @@ def adapt_ops05_to_r3(
     manifest = _manifest(receipt, census, raw_hash, generation)
     events = _events(receipt, raw_rows, session_id)
     output.mkdir(parents=True, exist_ok=True)
-    (output / "universe-manifest.json").write_text(
-        json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8"
-    )
-    (output / "raw-events.jsonl").write_bytes(
-        b"".join((json.dumps(row, sort_keys=True) + "\n").encode() for row in events)
-    )
+    writer = write_bytes or (lambda path, data: path.write_bytes(data))
+    writer(output / "universe-manifest.json", (json.dumps(manifest, sort_keys=True, indent=2) + "\n").encode())
+    writer(output / "raw-events.jsonl", b"".join((json.dumps(row, sort_keys=True) + "\n").encode() for row in events))
     producer = {
         "schema_version": "dawnstrike.observation.producer_receipt.v1",
         "status": "READY",
@@ -442,9 +440,7 @@ def adapt_ops05_to_r3(
         "research_only": True,
         "broker_execution_enabled": False,
     }
-    (output / "producer-receipt.json").write_text(
-        json.dumps(producer, sort_keys=True, indent=2) + "\n", encoding="utf-8"
-    )
+    writer(output / "producer-receipt.json", (json.dumps(producer, sort_keys=True, indent=2) + "\n").encode())
     target_contract = {
         "target_id": "one_minute_bar_close_return_60m_gross",
         "horizon_minutes": 60,
@@ -483,9 +479,7 @@ def adapt_ops05_to_r3(
         "broker_execution_enabled": False,
     }
     packet["horizon_summary"] = horizons
-    (output / "observation-dataset.json").write_text(
-        json.dumps(packet, sort_keys=True, indent=2) + "\n", encoding="utf-8"
-    )
+    writer(output / "observation-dataset.json", (json.dumps(packet, sort_keys=True, indent=2) + "\n").encode())
     return {
         "status": "READY",
         "manifest": manifest,
