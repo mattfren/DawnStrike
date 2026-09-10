@@ -85,6 +85,30 @@ def test_sampling_retains_full_census_and_all_strata(tmp_path) -> None:
     assert all("sampled_for_bars" in row for row in rows)
 
 
+def test_sampling_allocates_the_fourth_missing_input_stratum() -> None:
+    census = [
+        *({"symbol": f"S{index:03d}", "membership": "selected"} for index in range(2)),
+        *({"symbol": f"R{index:03d}", "membership": "rejected"} for index in range(10)),
+        *({"symbol": f"U{index:03d}", "membership": "unselected"} for index in range(167)),
+        *({"symbol": f"M{index:03d}", "membership": "missing_input"} for index in range(2)),
+    ]
+    rows, receipt = select_movers(census)
+    assert len(rows) == 181
+    assert receipt["quotas"] == {
+        "selected": 2,
+        "rejected": 4,
+        "unselected": 4,
+        "missing_input": 2,
+    }
+    assert sum(row["sampled_for_bars"] for row in rows) == 12
+    assert {row["membership"] for row in rows if row["sampled_for_bars"]} == {
+        "selected",
+        "rejected",
+        "unselected",
+        "missing_input",
+    }
+
+
 def test_producer_writes_bounded_delayed_panel_and_empty_ca(tmp_path) -> None:
     census = _census()
     rows, sample = select_movers(census)
@@ -111,6 +135,8 @@ def test_producer_writes_bounded_delayed_panel_and_empty_ca(tmp_path) -> None:
     assert receipt["coverage"]["decision_eligible"] is False
     assert receipt["coverage"]["cross_close_censored"] is True
     assert receipt["corporate_actions"]["status"] == "EMPTY"
+    assert receipt["consumer_handoff"]["status"] == "ADAPTER_REQUIRED"
+    assert receipt["consumer_handoff"]["eligible_labels"] == 0
     assert (tmp_path / "raw-bars.jsonl").is_file()
     assert len((tmp_path / "universe-census.json").read_text().splitlines()) > 1
 
@@ -167,3 +193,37 @@ def test_wrong_feed_is_rejected_before_collection(tmp_path) -> None:
             source_config_hash="a" * 64,
             capture_receipt_hash="b" * 64,
         )
+
+
+def test_total_page_attempts_are_bounded_and_recorded(tmp_path) -> None:
+    census = _census(3)
+    full_time = "2026-09-09T13:30:00Z"
+    prior_time = "2026-09-08T19:59:00Z"
+
+    class Flaky(FakeProvider):
+        def __init__(self):
+            super().__init__(
+                [
+                    {"items": [_bar("SPY", full_time)]},
+                    {"items": [_bar("SPY", prior_time)]},
+                ]
+            )
+            self.failures = 2
+
+        def get_bars_page(self, symbols, start, end, config, *, page_token=None):
+            if self.failures:
+                self.failures -= 1
+                raise RuntimeError("temporary")
+            return super().get_bars_page(symbols, start, end, config, page_token=page_token)
+
+    receipt = produce_historical_bars(
+        market_date="2026-09-09",
+        census=census,
+        provider=Flaky(),
+        config=object(),
+        output_root=tmp_path,
+        source_config_hash="a" * 64,
+        capture_receipt_hash="b" * 64,
+    )
+    assert receipt["pages"][0]["attempts"] == 3
+    assert all(page["attempts"] <= 3 for page in receipt["pages"])

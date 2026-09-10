@@ -8,8 +8,12 @@ page provider so the source contract can be independently checked first.
 
 from __future__ import annotations
 
+import copy
+import ctypes
+import ctypes.wintypes
 import hashlib
 import json
+import os
 import random
 import time as wall_clock
 from collections.abc import Mapping, Sequence
@@ -151,26 +155,25 @@ def _parse_timestamp(value: Any, *, label: str) -> datetime:
 def _allocate_quotas(
     rows_by_membership: Mapping[str, list[dict[str, Any]]], limit: int
 ) -> dict[str, int]:
-    present = [key for key in ("selected", "rejected", "unselected") if rows_by_membership.get(key)]
+    order = ("selected", "rejected", "unselected", "missing_input")
+    present = [key for key in order if rows_by_membership.get(key)]
     target = min(limit, sum(len(rows_by_membership[key]) for key in present))
     quotas = {key: 0 for key in rows_by_membership}
-    if target >= len(present):
-        for key in present:
-            quotas[key] = 1
-        target -= len(present)
-    if target <= 0:
-        return quotas
-    weights = {key: len(rows_by_membership[key]) for key in present}
-    total = sum(weights.values())
-    fractions: list[tuple[float, str]] = []
-    for key in present:
-        raw = target * weights[key] / total
-        whole = int(raw)
-        quotas[key] += whole
-        fractions.append((raw - whole, key))
+    base = target // len(order) if order else 0
+    for key in order:
+        quotas[key] = min(len(rows_by_membership.get(key, [])), base)
     remaining = target - sum(quotas.values())
-    for _fraction, key in sorted(fractions, key=lambda item: (-item[0], item[1]))[:remaining]:
-        quotas[key] += 1
+    while remaining:
+        progressed = False
+        for key in order:
+            if quotas[key] < len(rows_by_membership.get(key, [])):
+                quotas[key] += 1
+                remaining -= 1
+                progressed = True
+                if not remaining:
+                    break
+        if not progressed:
+            break
     return quotas
 
 
@@ -185,9 +188,8 @@ def select_movers(
 
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
-    by_membership: dict[str, list[dict[str, Any]]] = {
-        key: [] for key in ("selected", "rejected", "unselected")
-    }
+    membership_order = ("selected", "rejected", "unselected", "missing_input")
+    by_membership: dict[str, list[dict[str, Any]]] = {key: [] for key in membership_order}
     for raw in census:
         row = dict(raw)
         symbol = str(row.get("symbol") or "").strip().upper()
@@ -195,7 +197,9 @@ def select_movers(
         if not symbol or symbol in seen:
             raise Ops05Error("original census must contain unique non-empty symbols")
         if membership not in by_membership:
-            raise Ops05Error("original census membership must be selected/rejected/unselected")
+            raise Ops05Error(
+                "original census membership must be selected/rejected/unselected/missing_input"
+            )
         seen.add(symbol)
         row["symbol"] = symbol
         row["membership"] = membership
@@ -207,7 +211,7 @@ def select_movers(
     quotas = _allocate_quotas(by_membership, MAX_MOVER_SYMBOLS)
     rng = random.Random(seed)
     selected: list[str] = []
-    for membership in ("selected", "rejected", "unselected"):
+    for membership in membership_order:
         pool = sorted(by_membership[membership], key=lambda row: row["symbol"])
         rng.shuffle(pool)
         chosen = sorted(pool[: quotas.get(membership, 0)], key=lambda row: row["symbol"])
@@ -272,25 +276,48 @@ def _fetch_pages(
     config: Any,
     *,
     page_counter: list[int],
+    event_counter: list[int],
+    byte_counter: list[int],
     started_at: float,
+    expected_endpoint: str,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     items: list[dict[str, Any]] = []
     page_receipts: list[dict[str, Any]] = []
     token: str | None = None
+    call_config = copy.copy(config)
+    if hasattr(call_config, "request_retries"):
+        call_config.request_retries = 1
     for page_number in range(MAX_PAGES):
         _check_runtime(started_at)
         if page_counter[0] >= MAX_PAGES:
             raise Ops05Error("provider page cap exceeded")
         page: IntradayPage | None = None
         last_error: Exception | None = None
+        attempts = 0
         for _attempt in range(MAX_RETRIES):
+            attempts += 1
             try:
-                page = getattr(provider, method)(symbols, start, end, config, page_token=token)
+                page = getattr(provider, method)(
+                    symbols, start, end, call_config, page_token=token
+                )
                 break
             except Exception as exc:  # provider errors become a receipt failure
                 last_error = exc
         if page is None:
             raise Ops05Error(f"{method} failed after {MAX_RETRIES} retries: {last_error}")
+        if (
+            page.provider != provider.provider_name
+            or page.feed != provider.feed
+            or page.endpoint != expected_endpoint
+        ):
+            raise Ops05Error("provider page identity does not match the declared request")
+        page_bytes = sum(len(_canonical_json(item)) for item in page.items)
+        byte_counter[0] += page_bytes
+        if byte_counter[0] > MAX_BYTES:
+            raise Ops05Error("raw provider payload exceeds the 64 MiB bound")
+        event_counter[0] += len(page.items)
+        if event_counter[0] > MAX_EVENTS:
+            raise Ops05Error("derived event cap exceeded")
         page_receipts.append(
             {
                 "page_number": page_number,
@@ -302,6 +329,8 @@ def _fetch_pages(
                 "request_id": page.request_id,
                 "cursor_in": token,
                 "cursor_out": page.next_page_token,
+                "attempts": attempts,
+                "observed_item_bytes": page_bytes,
             }
         )
         page_counter[0] += 1
@@ -315,22 +344,88 @@ def _fetch_pages(
 
 
 def _process_tree_rss_bytes() -> int | None:
-    try:
-        import psutil  # type: ignore[import-not-found]
-
-        process = psutil.Process()
-        return process.memory_info().rss + sum(
-            child.memory_info().rss for child in process.children(recursive=True)
-        )
-    except (ImportError, OSError):
+    if os.name != "nt":
         return None
+
+    class ProcessEntry(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", ctypes.wintypes.DWORD),
+            ("cntUsage", ctypes.wintypes.DWORD),
+            ("th32ProcessID", ctypes.wintypes.DWORD),
+            ("thDefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", ctypes.wintypes.DWORD),
+            ("cntThreads", ctypes.wintypes.DWORD),
+            ("th32ParentProcessID", ctypes.wintypes.DWORD),
+            ("pcPriClassBase", ctypes.wintypes.LONG),
+            ("dwFlags", ctypes.wintypes.DWORD),
+            ("szExeFile", ctypes.wintypes.WCHAR * 260),
+        ]
+
+    class ProcessMemoryCounters(ctypes.Structure):
+        _fields_ = [
+            ("cb", ctypes.wintypes.DWORD),
+            ("PageFaultCount", ctypes.wintypes.DWORD),
+            ("PeakWorkingSetSize", ctypes.c_size_t),
+            ("WorkingSetSize", ctypes.c_size_t),
+            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+            ("PagefileUsage", ctypes.c_size_t),
+            ("PeakPagefileUsage", ctypes.c_size_t),
+        ]
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    snapshot = kernel.CreateToolhelp32Snapshot(0x00000002, 0)
+    if snapshot == ctypes.wintypes.HANDLE(-1).value:
+        return None
+    try:
+        first = ProcessEntry()
+        first.dwSize = ctypes.sizeof(ProcessEntry)
+        parents: dict[int, int] = {}
+        if not kernel.Process32FirstW(snapshot, ctypes.byref(first)):
+            return None
+        while True:
+            parents[int(first.th32ProcessID)] = int(first.th32ParentProcessID)
+            if not kernel.Process32NextW(snapshot, ctypes.byref(first)):
+                break
+    finally:
+        kernel.CloseHandle(snapshot)
+    own_pid = os.getpid()
+    pids = {own_pid}
+    changed = True
+    while changed:
+        changed = False
+        for pid, parent in parents.items():
+            if parent in pids and pid not in pids:
+                pids.add(pid)
+                changed = True
+    total = 0
+    for pid in sorted(pids):
+        handle = kernel.OpenProcess(0x0410, False, pid)
+        if not handle:
+            return None
+        try:
+            counters = ProcessMemoryCounters()
+            counters.cb = ctypes.sizeof(ProcessMemoryCounters)
+            if not psapi.GetProcessMemoryInfo(
+                handle, ctypes.byref(counters), counters.cb
+            ):
+                return None
+            total += int(counters.WorkingSetSize)
+        finally:
+            kernel.CloseHandle(handle)
+    return total
 
 
 def _check_runtime(started_at: float) -> None:
     if wall_clock.monotonic() - started_at > MAX_WALL_SECONDS:
         raise Ops05Error("OPS05 wall-time cap exceeded")
     rss = _process_tree_rss_bytes()
-    if rss is not None and rss > MAX_RSS_BYTES:
+    if rss is None:
+        raise Ops05Error("process-tree RSS measurement unavailable")
+    if rss > MAX_RSS_BYTES:
         raise Ops05Error("OPS05 process-tree RSS cap exceeded")
 
 
@@ -362,10 +457,11 @@ def produce_historical_bars(
     root.mkdir(parents=True, exist_ok=True)
     started_at = wall_clock.monotonic()
     page_counter = [0]
+    event_counter = [0]
     bars: list[dict[str, Any]] = []
     boundary_events: list[dict[str, Any]] = []
     page_receipts: list[dict[str, Any]] = []
-    raw_bytes = 0
+    byte_counter = [0]
     seen: set[tuple[str, str]] = set()
     for window_name in ("full_session", "prior_close"):
         window = windows[window_name]
@@ -379,10 +475,12 @@ def produce_historical_bars(
             end,
             config,
             page_counter=page_counter,
+            event_counter=event_counter,
+            byte_counter=byte_counter,
             started_at=started_at,
+            expected_endpoint="bars",
         )
         page_receipts.extend([{**page, "window": window_name} for page in pages])
-        raw_bytes += sum(len(_canonical_json(item)) for item in items)
         for item in items:
             symbol = str(item.get("symbol") or item.get("S") or "").upper()
             if symbol not in symbols:
@@ -397,6 +495,8 @@ def produce_historical_bars(
                         "item": dict(item),
                     }
                 )
+                if len(bars) + len(boundary_events) > MAX_EVENTS:
+                    raise Ops05Error("derived event cap exceeded")
                 continue
             if timestamp < window.start or timestamp > window.end:
                 raise Ops05Error("provider returned an out-of-window event")
@@ -406,7 +506,7 @@ def produce_historical_bars(
                 continue
             seen.add(key)
             bars.append(event)
-            if len(bars) > MAX_EVENTS:
+            if len(bars) + len(boundary_events) > MAX_EVENTS:
                 raise Ops05Error("derived event cap exceeded")
     ca_start = windows["corporate_actions"].start.isoformat().replace("+00:00", "Z")
     ca_end = windows["corporate_actions"].end.isoformat().replace("+00:00", "Z")
@@ -418,13 +518,13 @@ def produce_historical_bars(
         ca_end,
         config,
         page_counter=page_counter,
+        event_counter=event_counter,
+        byte_counter=byte_counter,
         started_at=started_at,
+        expected_endpoint="corporate_actions",
     )
     page_receipts.extend([{**page, "window": "corporate_actions"} for page in ca_pages])
-    raw_bytes += sum(len(_canonical_json(item)) for item in ca_items)
-    if raw_bytes > MAX_BYTES:
-        raise Ops05Error("raw provider payload exceeds the 64 MiB bound")
-    if len(bars) + len(ca_items) > MAX_EVENTS:
+    if len(bars) + len(boundary_events) + len(ca_items) > MAX_EVENTS:
         raise Ops05Error("derived event cap exceeded")
     _check_runtime(started_at)
     for row in census_rows:
@@ -455,7 +555,7 @@ def produce_historical_bars(
             "bar_count": len(bars),
             "corporate_action_count": len(ca_items),
             "page_count": len(page_receipts),
-            "raw_payload_bytes_observed": raw_bytes,
+            "raw_payload_bytes_observed": byte_counter[0],
             "process_tree_rss_bytes_observed": _process_tree_rss_bytes(),
             "wall_seconds_observed": round(wall_clock.monotonic() - started_at, 6),
             "boundary_event_count": len(boundary_events),
@@ -482,23 +582,52 @@ def produce_historical_bars(
             "coverage_state": "HEALTHY_EMPTY_RESPONSE" if not ca_items else "CAPTURED",
             "items": ca_items,
         },
+        "consumer_handoff": {
+            "status": "ADAPTER_REQUIRED",
+            "consumer": "intraday_scanner.alpha.v6.observation_dataset.build_observation_dataset",
+            "raw_events_path": "raw-bars.jsonl",
+            "producer_receipt_path": "receipt.json",
+            "raw_event_shape": "ops05_bar_event_v1",
+            "alpha_v6_required_fields_missing": ["scope", "kind"],
+            "decision_identity_required": True,
+            "feature_availability_before_decision_required": True,
+            "label_availability_after_decision_required": True,
+            "reason": (
+                "OPS05 delayed-bars receipt is not producer_receipt.v1 and does not "
+                "assert a complete UniverseManifest or READY collection"
+            ),
+            "eligible_labels": 0,
+        },
         "raw_event_stream_sha256": _sha256(bars),
         "status": "CAPTURED" if bars else "EMPTY",
         "research_only": True,
         "broker_execution": "disabled",
     }
-    (root / "raw-bars.jsonl").write_text(
-        "\n".join(json.dumps(row, sort_keys=True) for row in bars) + ("\n" if bars else ""),
-        encoding="utf-8",
+    raw_bars_text = "\n".join(json.dumps(row, sort_keys=True) for row in bars) + (
+        "\n" if bars else ""
     )
-    (root / "boundary-events.jsonl").write_text(
-        "\n".join(json.dumps(row, sort_keys=True) for row in boundary_events)
-        + ("\n" if boundary_events else ""),
-        encoding="utf-8",
+    boundary_text = "\n".join(
+        json.dumps(row, sort_keys=True) for row in boundary_events
+    ) + ("\n" if boundary_events else "")
+    census_text = json.dumps(census_rows, sort_keys=True, indent=2) + "\n"
+    receipt["coverage"]["persisted_output_bytes"] = 0
+    receipt_text = json.dumps(receipt, sort_keys=True, indent=2) + "\n"
+    persisted_bytes = sum(
+        len(value.encode("utf-8"))
+        for value in (raw_bars_text, boundary_text, census_text, receipt_text)
     )
-    (root / "universe-census.json").write_text(
-        json.dumps(census_rows, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    receipt["coverage"]["persisted_output_bytes"] = persisted_bytes
+    receipt_text = json.dumps(receipt, sort_keys=True, indent=2) + "\n"
+    persisted_bytes = sum(
+        len(value.encode("utf-8"))
+        for value in (raw_bars_text, boundary_text, census_text, receipt_text)
     )
+    receipt["coverage"]["persisted_output_bytes"] = persisted_bytes
+    if persisted_bytes > MAX_BYTES:
+        raise Ops05Error("persisted output exceeds the 64 MiB bound")
+    (root / "raw-bars.jsonl").write_text(raw_bars_text, encoding="utf-8")
+    (root / "boundary-events.jsonl").write_text(boundary_text, encoding="utf-8")
+    (root / "universe-census.json").write_text(census_text, encoding="utf-8")
     (root / "receipt.json").write_text(
         json.dumps(receipt, sort_keys=True, indent=2) + "\n", encoding="utf-8"
     )
