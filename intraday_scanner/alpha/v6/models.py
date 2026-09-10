@@ -21,6 +21,8 @@ from intraday_scanner.alpha.outcome_semantics import (
 )
 from intraday_scanner.alpha.v6.contracts import LABEL_SCHEMA_VERSION, canonical_hash
 
+OBSERVATIONAL_EVIDENCE_CLASS = "observational_matured"
+
 MIN_RETURN_MODEL_LABELS = 100
 MIN_GRADIENT_BOOSTING_LABELS = 500
 MIN_GRADIENT_BOOSTING_DATES = 60
@@ -71,7 +73,9 @@ def model_eligibility(dataset_rows: list[dict[str, Any]]) -> ModelEligibility:
         else ()
     )
     if quarantine and any(
-        not has_authenticated_committed_fill_truth(row) for row in dataset_rows
+        not has_authenticated_committed_fill_truth(row)
+        and row.get("evidence_class") != OBSERVATIONAL_EVIDENCE_CLASS
+        for row in dataset_rows
     ):
         quarantine_reasons = (*quarantine_reasons, MISSING_COMMITTED_FILL_TRUTH)
     if labels < MIN_RETURN_MODEL_LABELS:
@@ -130,6 +134,12 @@ def current_training_rows(dataset_rows: list[dict[str, Any]]) -> list[dict[str, 
         decision = decision_value if isinstance(decision_value, dict) else None
         if decision is None:
             continue
+        if label.get("evidence_class") == OBSERVATIONAL_EVIDENCE_CLASS:
+            if _observational_training_row_valid(
+                row=row, label=label, decision=decision
+            ):
+                accepted.append(row)
+            continue
         if not (
             label.get("label_schema_version") == LABEL_SCHEMA_VERSION
             and label.get("eligibility_policy_version")
@@ -155,6 +165,42 @@ def current_training_rows(dataset_rows: list[dict[str, Any]]) -> list[dict[str, 
             continue
         accepted.append(row)
     return accepted
+
+
+def _observational_training_row_valid(
+    *, row: dict[str, Any], label: dict[str, Any], decision: dict[str, Any]
+) -> bool:
+    """Accept matured observation evidence for research training only.
+
+    This branch is intentionally disjoint from the FillTruth branch above:
+    observed paths may train a research shadow model, but they cannot satisfy
+    execution or broker-fill accounting requirements.
+    """
+
+    return bool(
+        label.get("label_schema_version") == LABEL_SCHEMA_VERSION
+        and label.get("eligibility_policy_version") == ELIGIBILITY_POLICY_VERSION
+        and str(label.get("label_id") or "").startswith("v6o-")
+        and label.get("label_family") == "observational_matured_return"
+        and label.get("evidence_class") == OBSERVATIONAL_EVIDENCE_CLASS
+        and label.get("fill_truth_bound") is False
+        and label.get("fill_truth_status") == "not_applicable_observation"
+        and label.get("learning_eligible") is True
+        and label.get("return_label_eligible") is True
+        and label.get("research_only") is True
+        and label.get("broker_execution_enabled") is False
+        and row.get("evidence_class") == OBSERVATIONAL_EVIDENCE_CLASS
+        and row.get("fill_truth_bound") is False
+        and row.get("fill_truth_status") == "not_applicable_observation"
+        and str(row.get("decision_id") or "")
+        == str(label.get("decision_id") or "")
+        == str(decision.get("decision_id") or "")
+        and _same_number(
+            row.get("target_observational_return_pct"), label.get("label_value")
+        )
+        and _chronology_valid(row=row, label=label, decision=decision)
+        and label.get("label_available_at")
+    )
 
 
 def _chronology_valid(

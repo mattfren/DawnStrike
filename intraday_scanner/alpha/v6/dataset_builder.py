@@ -24,6 +24,8 @@ from intraday_scanner.alpha.v6.models import evidence_lineage
 from intraday_scanner.alpha.outcome_semantics import typed_return_contract_valid
 from intraday_scanner.alpha.v6.validation import catalyst_ablation_plan
 
+OBSERVATIONAL_LABEL_FAMILY = "observational_matured_return"
+
 _RETURN_LABEL_FAMILIES = frozenset(
     {
         "simulated_fill_feasibility",
@@ -39,14 +41,16 @@ _RETURN_LABEL_FAMILIES = frozenset(
 
 
 def build_return_dataset(
-    *, decisions: list[dict[str, Any]], labels: list[dict[str, Any]]
+    *, decisions: list[dict[str, Any]], labels: list[dict[str, Any]],
+    observational_labels: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build a deterministic net-excess dataset, retaining exclusion counts."""
 
     decisions_by_id = {str(row.get("decision_id") or ""): row for row in decisions}
     grouped: dict[str, dict[str, Any]] = defaultdict(dict)
     exclusions: dict[str, int] = defaultdict(int)
-    for label in labels:
+    all_labels = [*labels, *(observational_labels or [])]
+    for label in all_labels:
         decision_id = str(label.get("decision_id") or "")
         decision = decisions_by_id.get(decision_id)
         fill_truth = (
@@ -92,6 +96,9 @@ def build_return_dataset(
             activation_value = _number(activation.get("label_value"))
             if activation_value in {0.0, 1.0}:
                 activation_rows.append({**common, "activation_label": activation_value})
+        observational_target = families.get(OBSERVATIONAL_LABEL_FAMILY)
+        if not target and observational_target:
+            target = observational_target
         if not target or target.get("learning_eligible") is not True:
             exclusions[str((target or {}).get("exclusion_reason") or "target_ineligible")] += 1
             continue
@@ -99,16 +106,25 @@ def build_return_dataset(
         if target_value is None:
             exclusions["target_missing"] += 1
             continue
-        rows.append(
-            {
-                **common,
-                "target_net_excess_return_pct": target_value,
-                "activation_label": _label_value(activation),
-                "tail_loss_label": _label_value(families.get("tail_loss_event")),
-                "source_bar_hash_sha256": target.get("source_bar_hash_sha256"),
-                "return_label_eligible": target.get("return_label_eligible") is not False,
-            }
-        )
+        row = {
+            **common,
+            "target_net_excess_return_pct": target_value,
+            "activation_label": _label_value(activation),
+            "tail_loss_label": _label_value(families.get("tail_loss_event")),
+            "source_bar_hash_sha256": target.get("source_bar_hash_sha256"),
+            "return_label_eligible": target.get("return_label_eligible") is not False,
+        }
+        if str(target.get("label_family") or "") == OBSERVATIONAL_LABEL_FAMILY:
+            row.update(
+                {
+                    "target_observational_return_pct": target_value,
+                    "evidence_class": "observational_matured",
+                    "fill_truth_status": "not_applicable_observation",
+                    "fill_truth_bound": False,
+                    "observational_label_id": target.get("label_id"),
+                }
+            )
+        rows.append(row)
     cutoff = max(
         (str(row["market_date"]) for row in [*rows, *activation_rows]),
         default=None,
@@ -140,6 +156,7 @@ def build_return_dataset(
         "ordered_label_hashes": ordered_label_hashes,
         "feature_schema_version": FEATURE_SCHEMA_VERSION,
         "target": "benchmark_relative_excess_return",
+        "observational_label_family": OBSERVATIONAL_LABEL_FAMILY,
         "training_cutoff": cutoff,
         "catalyst_ablation_plan": catalyst_ablation_plan(rows),
         "eligibility_counts": {
@@ -148,6 +165,9 @@ def build_return_dataset(
             ),
             "prospective_promotion_eligible": sum(
                 1 for row in rows if row.get("prospective_promotion_eligible") is True
+            ),
+            "observational_matured": sum(
+                1 for row in rows if row.get("evidence_class") == "observational_matured"
             ),
         },
     }
@@ -160,6 +180,12 @@ def build_return_dataset(
         "training_cutoff": cutoff,
         "row_count": len(rows),
         "activation_row_count": len(activation_rows),
+        "observational_row_count": sum(
+            1 for row in rows if row.get("evidence_class") == "observational_matured"
+        ),
+        "dataset_mode": "mixed_strict_and_observational" if any(
+            row.get("evidence_class") == "observational_matured" for row in rows
+        ) else "strict_fill_truth",
         "exclusion_counts": dict(sorted(exclusions.items())),
         "feature_schema_version": FEATURE_SCHEMA_VERSION,
         "dataset_hash_sha256": dataset_hash,
@@ -170,6 +196,7 @@ def build_return_dataset(
         "research_only": True,
         "broker_execution_enabled": False,
         "missing_truth_is_zero": False,
+        "observational_label_family": OBSERVATIONAL_LABEL_FAMILY,
         "catalyst_ablation_plan": catalyst_ablation_plan(rows),
         "eligibility_counts": {
             "research_training_eligible": sum(
@@ -177,6 +204,9 @@ def build_return_dataset(
             ),
             "prospective_promotion_eligible": sum(
                 1 for row in rows if row.get("prospective_promotion_eligible") is True
+            ),
+            "observational_matured": sum(
+                1 for row in rows if row.get("evidence_class") == "observational_matured"
             ),
         },
     }
@@ -198,6 +228,8 @@ def _current_label(label: dict[str, Any], *, decision: dict[str, Any]) -> bool:
     """Accept only labels projected from authenticated current return truth."""
 
     family = str(label.get("label_family") or "")
+    if family == OBSERVATIONAL_LABEL_FAMILY:
+        return _current_observational_label(label, decision=decision)
     if family in {"activation", "data_quality_failure"}:
         # These labels are diagnostic projections, not return observations.
         # Keep them visible even when the associated return is quarantined.
@@ -242,6 +274,29 @@ def _current_label(label: dict[str, Any], *, decision: dict[str, Any]) -> bool:
     return True
 
 
+def _current_observational_label(label: dict[str, Any], *, decision: dict[str, Any]) -> bool:
+    """Validate observational path truth without upgrading it to FillTruth."""
+
+    if not (
+        label.get("label_schema_version") == LABEL_SCHEMA_VERSION
+        and label.get("eligibility_policy_version") == ELIGIBILITY_POLICY_VERSION
+        and str(label.get("label_id") or "").startswith("v6o-")
+        and label.get("evidence_class") == "observational_matured"
+        and label.get("fill_truth_bound") is False
+        and label.get("fill_truth_status") == "not_applicable_observation"
+        and label.get("learning_eligible") is True
+        and str(label.get("decision_id") or "") == str(decision.get("decision_id") or "")
+        and label.get("research_only") is True
+        and label.get("broker_execution_enabled") is False
+        and _number(label.get("label_value")) is not None
+        and isinstance(label.get("maturity_status"), dict)
+        and all(value == "MATURE" for value in label["maturity_status"].values())
+        and label.get("label_available_at")
+    ):
+        return False
+    return point_in_time_valid(decision)
+
+
 def _diagnostic_label_valid(label: dict[str, Any]) -> bool:
     return bool(
         label.get("label_schema_version") == LABEL_SCHEMA_VERSION
@@ -263,7 +318,9 @@ def _dataset_row(
     feature_data = feature if isinstance(feature, dict) else {}
     feature_json = feature_data.get("feature_json")
     raw = feature_json if isinstance(feature_json, dict) else {}
-    target = families.get("benchmark_relative_excess_return") or {}
+    target = families.get("benchmark_relative_excess_return") or families.get(
+        OBSERVATIONAL_LABEL_FAMILY
+    ) or {}
     lineage = evidence_lineage(target)
     catalyst = _catalyst_features(raw)
     return {
