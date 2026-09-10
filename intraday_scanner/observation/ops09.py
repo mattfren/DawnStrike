@@ -1140,7 +1140,16 @@ def _resume_ops09_unlocked(*, output_root: Path, input_root: Path, scope_root: P
             _validate_request_contract(contract, plan=state, session=session, scope=scope, scope_path=scope_path)
         elif scope is not None:
             contract = _request_contract(plan=state, session=session, scope=scope, scope_path=scope_path)
-            _atomic_json(contract_path, contract)
+            # The REQUESTED contract is part of the same control/output roots
+            # as census and registration artifacts.  Account for its atomic
+            # temp+final write before the native producer is admitted; a
+            # later post-hoc byte check cannot protect this prewrite.
+            request_writer = SharedBoundedWriter(
+                roots=(session_root.parent, scope_path.parent, session_root / "ops06"),
+                max_bytes=DOWNSTREAM_BYTES,
+                excluded_roots=(session_root / "capture",),
+            )
+            request_writer(contract_path, (json.dumps(contract, sort_keys=True, indent=2) + "\n").encode())
         else:
             contract = None
         if not execute:
