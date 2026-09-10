@@ -440,6 +440,11 @@ def _run_capture(*, plan: dict[str, Any], session: dict[str, Any], contract: dic
             r"C:\Windows\System32\WindowsPowerShell\v1.0\Modules;"
             r"C:\Program Files\WindowsPowerShell\Modules"
         )
+        # Keep the observer's numerical dependency thread fan-out inside the
+        # native Job Object budget; this does not alter unrelated callers.
+        wrapper_environment["OPENBLAS_NUM_THREADS"] = "1"
+        wrapper_environment["OMP_NUM_THREADS"] = "1"
+        wrapper_environment["MKL_NUM_THREADS"] = "1"
         completed = subprocess.run(
             args,
             cwd=plan["repository"]["root"],
