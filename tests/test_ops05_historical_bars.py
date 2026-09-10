@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import json
+
 import pytest
 
 from intraday_scanner.observation.ops05_historical_bars import (
     PANEL_SYMBOLS,
+    TRUSTED_CAPTURE_STATE_ROOT,
     Ops05Error,
     build_windows,
     produce_historical_bars,
@@ -139,6 +143,75 @@ def test_producer_writes_bounded_delayed_panel_and_empty_ca(tmp_path) -> None:
     assert receipt["consumer_handoff"]["eligible_labels"] == 0
     assert (tmp_path / "raw-bars.jsonl").is_file()
     assert len((tmp_path / "universe-census.json").read_text().splitlines()) > 1
+
+
+def test_lower_byte_profile_is_recorded_and_higher_resume_is_rejected(tmp_path) -> None:
+    census = _census()
+    full_time = "2026-09-09T13:30:00Z"
+    prior_time = "2026-09-08T19:59:00Z"
+    symbols = list(PANEL_SYMBOLS) + select_movers(census)[1]["sampled_symbols"]
+    source_hash = hashlib.sha256(str(tmp_path).encode()).hexdigest()
+    capture_hash = hashlib.sha256((str(tmp_path) + "capture").encode()).hexdigest()
+    provider = FakeProvider(
+        [
+            {"items": [_bar(symbol, full_time) for symbol in symbols]},
+            {"items": [_bar(symbol, prior_time) for symbol in symbols]},
+        ]
+    )
+    receipt = produce_historical_bars(
+        market_date="2026-09-09",
+        census=census,
+        provider=provider,
+        config=object(),
+        output_root=tmp_path,
+        source_config_hash=source_hash,
+        capture_receipt_hash=capture_hash,
+        max_bytes=1024 * 1024,
+        resume_across_roots=True,
+    )
+    assert receipt["limits"]["max_bytes"] == 1024 * 1024
+    states = list(TRUSTED_CAPTURE_STATE_ROOT.rglob("state.json"))
+    assert any(json.loads(state.read_text()).get("max_bytes") == 1024 * 1024 for state in states)
+    with pytest.raises(Ops05Error, match="configured byte limit"):
+        produce_historical_bars(
+            market_date="2026-09-09",
+            census=census,
+            provider=provider,
+            config=object(),
+            output_root=tmp_path,
+            source_config_hash=source_hash,
+            capture_receipt_hash=capture_hash,
+            max_bytes=2 * 1024 * 1024,
+            resume_across_roots=True,
+        )
+
+
+def test_lower_byte_profile_fails_before_page_commit(tmp_path) -> None:
+    class Oversize(FakeProvider):
+        def __init__(self):
+            super().__init__([{"items": []}, {"items": []}])
+
+        def get_bars_page(self, symbols, start, end, config, *, page_token=None):
+            return IntradayPage(
+                provider="alpaca",
+                feed="sip",
+                endpoint="bars",
+                items=tuple(_bar("SPY", "2026-09-09T13:30:00Z") for _ in range(20000)),
+                next_page_token=None,
+                raw_payload_hash_sha256="c" * 64,
+            )
+
+    with pytest.raises(Ops05Error, match="configured byte bound"):
+        produce_historical_bars(
+            market_date="2026-09-09",
+            census=_census(),
+            provider=Oversize(),
+            config=object(),
+            output_root=tmp_path,
+            source_config_hash="a" * 64,
+            capture_receipt_hash="b" * 64,
+            max_bytes=1024 * 1024,
+        )
 
 
 def test_provider_inclusive_boundary_is_preserved_as_excluded_reference(tmp_path) -> None:

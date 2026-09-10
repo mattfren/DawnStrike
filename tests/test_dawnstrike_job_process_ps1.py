@@ -55,6 +55,7 @@ def _invoke_command(
     job_memory_limit_bytes: int | None = None,
     rss_limit_bytes: int | None = None,
     rss_sample_milliseconds: int | None = None,
+    output_capture_limit_bytes: int | None = None,
 ) -> str:
     guard_options = ""
     if job_memory_limit_bytes is not None:
@@ -63,6 +64,8 @@ def _invoke_command(
         guard_options += f" -ProcessTreeRssLimitBytes {rss_limit_bytes}"
     if rss_sample_milliseconds is not None:
         guard_options += f" -RssSampleMilliseconds {rss_sample_milliseconds}"
+    if output_capture_limit_bytes is not None:
+        guard_options += f" -OutputCaptureLimitBytes {output_capture_limit_bytes}"
     return (
         f". {_ps_literal(HELPER)}; "
         "$ErrorActionPreference = 'Stop'; "
@@ -86,6 +89,7 @@ def _failure_command(
     job_memory_limit_bytes: int | None = None,
     rss_limit_bytes: int | None = None,
     rss_sample_milliseconds: int | None = None,
+    output_capture_limit_bytes: int | None = None,
 ) -> str:
     invocation = _invoke_command(
         arguments,
@@ -95,6 +99,7 @@ def _failure_command(
         job_memory_limit_bytes=job_memory_limit_bytes,
         rss_limit_bytes=rss_limit_bytes,
         rss_sample_milliseconds=rss_sample_milliseconds,
+        output_capture_limit_bytes=output_capture_limit_bytes,
     ).rsplit("; $result | ConvertTo-Json -Compress", maxsplit=1)[0]
     return (
         invocation.replace("$result = Invoke-DawnstrikeJobProcess", "try { "
@@ -190,6 +195,54 @@ def test_job_runner_reports_native_memory_and_rss_guard_readback(tmp_path: Path)
     assert payload["ProcessTreeRssMeasurementAvailable"] is True
     assert payload["ProcessTreeRssSamples"] > 0
     assert payload["GuardFailure"] is None
+
+
+def test_observer_output_capture_cap_kills_before_unbounded_read(tmp_path: Path) -> None:
+    fixture = tmp_path / "output pressure.js"
+    fixture.write_text(
+        "process.stdout.write('x'.repeat(9 * 1024 * 1024));\n",
+        encoding="utf-8",
+    )
+    completed = _run_powershell(
+        _invoke_command(
+            [fixture],
+            label="output cap probe",
+            timeout_seconds=10,
+            job_memory_limit_bytes=268435456,
+            rss_limit_bytes=268435456,
+            rss_sample_milliseconds=100,
+            output_capture_limit_bytes=8 * 1024 * 1024,
+        )
+    )
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(completed.stdout)
+    assert payload["ActiveJobMembersAfterCleanup"] == 0
+    assert payload["OutputCaptureLimitBytes"] == 8 * 1024 * 1024
+    assert payload["OutputBytesObserved"] == 8 * 1024 * 1024
+    assert "output capture limit exceeded" in payload["OutputCaptureFailure"]
+
+
+def test_observer_output_capture_cap_preserves_normal_output(tmp_path: Path) -> None:
+    fixture = tmp_path / "bounded output.js"
+    fixture.write_text("process.stdout.write('normal-output');\n", encoding="utf-8")
+    completed = _run_powershell(
+        _invoke_command(
+            [fixture],
+            label="output positive probe",
+            timeout_seconds=5,
+            job_memory_limit_bytes=268435456,
+            rss_limit_bytes=268435456,
+            rss_sample_milliseconds=100,
+            output_capture_limit_bytes=8 * 1024 * 1024,
+        )
+    )
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(completed.stdout)
+    assert payload["ExitCode"] == 0
+    assert payload["ActiveJobMembersAfterCleanup"] == 0
+    assert payload["Stdout"] == "normal-output"
+    assert payload["OutputBytesObserved"] == len("normal-output")
+    assert payload["OutputCaptureFailure"] is None
 
 
 def test_job_runner_rss_supervisor_terminates_noncooperative_process(tmp_path: Path) -> None:

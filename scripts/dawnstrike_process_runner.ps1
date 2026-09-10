@@ -806,6 +806,7 @@ function Invoke-DawnstrikeNativeProcess {
         [Parameter()][ValidateRange(0, 268435456)][UInt64]$JobMemoryLimitBytes = 0,
         [Parameter()][ValidateRange(0, 268435456)][UInt64]$ProcessTreeRssLimitBytes = 0,
         [Parameter()][ValidateRange(0, 10000)][int]$RssSampleMilliseconds = 0,
+        [Parameter()][ValidateRange(0, 8388608)][UInt64]$OutputCaptureLimitBytes = 0,
         [Parameter()][switch]$NoSite,
         [Parameter()][switch]$SuppressConsoleReplay
     )
@@ -849,6 +850,9 @@ function Invoke-DawnstrikeNativeProcess {
     $processTreeRssSamples = $null
     $processTreeRssMeasurementAvailable = $false
     $guardFailure = $null
+    $outputCaptureFailure = $null
+    $outputCaptureLimitBytes = [UInt64]$OutputCaptureLimitBytes
+    $outputBytesObserved = [UInt64]0
 
     try {
         # Windows PowerShell promotes native stderr records to PowerShell error
@@ -911,7 +915,8 @@ function Invoke-DawnstrikeNativeProcess {
             -EnvironmentOverrides $effectiveEnvironmentOverrides `
             -JobMemoryLimitBytes $JobMemoryLimitBytes `
             -ProcessTreeRssLimitBytes $ProcessTreeRssLimitBytes `
-            -RssSampleMilliseconds $RssSampleMilliseconds
+            -RssSampleMilliseconds $RssSampleMilliseconds `
+            -OutputCaptureLimitBytes $OutputCaptureLimitBytes
         $exitCode = [int]$result.ExitCode
         $activeJobMembersAfterCleanup = [int]$result.ActiveJobMembersAfterCleanup
         $peakJobMemoryUsedBytes = [UInt64]$result.PeakJobMemoryUsedBytes
@@ -923,6 +928,11 @@ function Invoke-DawnstrikeNativeProcess {
         $processTreeRssSamples = [int]$result.ProcessTreeRssSamples
         $processTreeRssMeasurementAvailable = [bool]$result.ProcessTreeRssMeasurementAvailable
         $guardFailure = $result.GuardFailure
+        $outputCaptureFailure = $result.OutputCaptureFailure
+        $outputBytesObserved = [UInt64]$result.OutputBytesObserved
+        if ($outputCaptureFailure) {
+            $guardFailure = $outputCaptureFailure
+        }
         [System.IO.File]::WriteAllText($stdoutPath, [string]$result.Stdout, [System.Text.UTF8Encoding]::new($false))
         [System.IO.File]::WriteAllText($stderrPath, [string]$result.Stderr, [System.Text.UTF8Encoding]::new($false))
     }
@@ -994,6 +1004,9 @@ function Invoke-DawnstrikeNativeProcess {
         process_tree_rss_samples = $processTreeRssSamples
         process_tree_rss_measurement_available = $processTreeRssMeasurementAvailable
         resource_guard_failure = $guardFailure
+        output_capture_limit_bytes = $outputCaptureLimitBytes
+        output_bytes_observed = $outputBytesObserved
+        output_capture_failure = $outputCaptureFailure
         stdout_path = $stdoutPath
         stderr_path = $stderrPath
         stdout_sha256 = $stdoutHash

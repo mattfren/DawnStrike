@@ -13,7 +13,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from intraday_scanner.config import load_config
-from intraday_scanner.observation.ops05_historical_bars import produce_historical_bars
+from intraday_scanner.observation.ops05_historical_bars import MAX_BYTES, produce_historical_bars
 from intraday_scanner.providers.alpaca_provider import AlpacaProvider
 from intraday_scanner.providers.base import IntradayPage
 
@@ -66,6 +66,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--source-config-hash", required=True)
     parser.add_argument("--capture-receipt-hash", required=True)
+    parser.add_argument(
+        "--max-bytes",
+        type=int,
+        default=MAX_BYTES,
+        help="Cumulative persisted-byte ceiling; defaults to the existing 64 MiB cap.",
+    )
     parser.add_argument("--fixture", type=Path)
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
     parser.add_argument(
@@ -107,6 +113,7 @@ def main() -> int:
         output_root=args.output_root,
         source_config_hash=args.source_config_hash,
         capture_receipt_hash=args.capture_receipt_hash,
+        max_bytes=args.max_bytes,
         resume_across_roots=True,
     )
     print(
