@@ -304,6 +304,91 @@ def test_actual_execute_missing_scope_still_enters_child_without_reused_contract
     assert state["sessions"][0].get("request_contract_sha256") is None
 
 
+def test_requested_missing_fixture_fails_before_attempt_or_native(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_path, source_hash = _source_config(tmp_path)
+    out = tmp_path / "out"
+    plan = prepare_ops09_cohort(
+        output_root=out, input_root=tmp_path / "in", scope_root=tmp_path / "scope",
+        database_root=tmp_path / "db", repo_root=Path(__file__).parents[1],
+        source_config_hash=source_hash, source_config_path=source_path, python_path=APPROVED_PYTHON,
+        start_date="2026-09-10",
+    )
+    scope_path = Path(plan["sessions"][0]["scope_path"])
+    scope_path.parent.mkdir(parents=True)
+    shutil.copyfile(_scope(tmp_path, "2026-09-10"), scope_path)
+    monkeypatch.setattr(
+        ops09_module, "_run_capture", lambda **_: pytest.fail("native capture must not be called")
+    )
+    with pytest.raises(Ops09Error, match="required offline fixture is missing"):
+        resume_ops09_cohort(
+            output_root=out, input_root=tmp_path / "in", scope_root=tmp_path / "scope",
+            database_root=tmp_path / "db", repo_root=Path(__file__).parents[1],
+            execute=True, now=datetime(2026, 9, 10, 20, 1, tzinfo=timezone.utc),
+        )
+    state = json.loads((out / "cohort-state.json").read_text(encoding="utf-8"))
+    assert state["sessions"][0]["attempts"] == 0
+    assert state["sessions"][0]["status"] == "EXPECTED"
+    assert not (out / "2026-09-10" / ".ops09-attempt.json").exists()
+    assert not (out / "2026-09-10" / "request-contract.json").exists()
+
+
+def test_requested_fixture_root_missing_date_fails_before_attempt_or_native(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out, _ = _actual_plan(tmp_path)
+    monkeypatch.setattr(
+        ops09_module, "_run_capture", lambda **_: pytest.fail("native capture must not be called")
+    )
+    with pytest.raises(Ops09Error, match="required offline fixture is missing"):
+        resume_ops09_cohort(
+            output_root=out, input_root=tmp_path / "in", scope_root=tmp_path / "scope",
+            database_root=tmp_path / "db", repo_root=Path(__file__).parents[1],
+            execute=True, fixture_root=tmp_path / "missing-fixtures",
+            now=datetime(2026, 9, 10, 20, 1, tzinfo=timezone.utc),
+        )
+    state = json.loads((out / "cohort-state.json").read_text(encoding="utf-8"))
+    assert state["sessions"][0]["attempts"] == 0
+    assert state["sessions"][0]["status"] == "EXPECTED"
+    assert not (out / "2026-09-10" / ".ops09-attempt.json").exists()
+    assert not (out / "2026-09-10" / "request-contract.json").exists()
+
+
+def test_existing_fixture_routes_fixture_only_through_capture_seam(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_path, source_hash = _source_config(tmp_path)
+    out = tmp_path / "out"
+    plan = prepare_ops09_cohort(
+        output_root=out, input_root=tmp_path / "in", scope_root=tmp_path / "scope",
+        database_root=tmp_path / "db", repo_root=Path(__file__).parents[1],
+        source_config_hash=source_hash, source_config_path=source_path, python_path=APPROVED_PYTHON,
+        start_date="2026-09-10",
+    )
+    scope_path = Path(plan["sessions"][0]["scope_path"])
+    scope_path.parent.mkdir(parents=True)
+    shutil.copyfile(_scope(tmp_path, "2026-09-10"), scope_path)
+    fixture = tmp_path / "in" / "2026-09-10" / "fixture.json"
+    fixture.parent.mkdir(parents=True)
+    fixture.write_text(json.dumps({"bars": [{"items": []}], "corporate_actions": [{"items": []}]}), encoding="utf-8")
+    calls: list[Path | None] = []
+
+    def fake_capture(**kwargs: object) -> dict[str, object]:
+        calls.append(kwargs["fixture"])
+        return {"status": "PARTIAL", "attempt_elapsed_seconds": 0.0}
+
+    monkeypatch.setattr(ops09_module, "_run_capture", fake_capture)
+    state = resume_ops09_cohort(
+        output_root=out, input_root=tmp_path / "in", scope_root=tmp_path / "scope",
+        database_root=tmp_path / "db", repo_root=Path(__file__).parents[1],
+        execute=True, now=datetime(2026, 9, 10, 20, 1, tzinfo=timezone.utc),
+    )
+    assert calls == [fixture.resolve()]
+    assert state["sessions"][0]["attempts"] == 1
+    assert state["sessions"][0]["status"] == "PARTIAL"
+
+
 def test_byte_ledger_admits_native_capture_and_rejects_overcommitted_downstream(
     tmp_path: Path,
 ) -> None:
@@ -405,6 +490,27 @@ def test_shared_writer_accounts_retained_target_during_shrink(tmp_path: Path) ->
     multi_writer(multi, b"n" * 15)
     assert multi.read_bytes() == b"n" * 15
     assert other.read_bytes() == b"x" * 20
+
+
+def test_shared_writer_observes_old_and_temp_at_replace_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "boundary"
+    root.mkdir()
+    target = root / "target.json"
+    target.write_bytes(b"o" * 95)
+    observed: list[tuple[int, int]] = []
+    original_replace = Path.replace
+
+    def observe_replace(source: Path, destination: Path) -> Path:
+        if source.name.startswith(".target.json.") and source.name.endswith(".tmp"):
+            observed.append((destination.stat().st_size, source.stat().st_size))
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(Path, "replace", observe_replace)
+    SharedBoundedWriter(roots=(root,), max_bytes=105)(target, b"n" * 10)
+    assert observed == [(95, 10)]
+    assert target.read_bytes() == b"n" * 10
 
 
 def test_elapsed_and_attempt_identity_are_authoritative_before_marker(tmp_path: Path) -> None:

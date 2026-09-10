@@ -572,6 +572,42 @@ def _eligible(session: dict[str, Any], now: datetime) -> bool:
         raise Ops09Error("OPS09 session calendar boundary is invalid") from exc
 
 
+def _resolve_requested_fixture(
+    *, session: dict[str, Any], fixture_root: Path | None,
+) -> Path | None:
+    """Resolve a requested date fixture without turning absence into provider mode."""
+    declared = session.get("fixture_path")
+    if declared:
+        fixture = Path(str(declared)).resolve()
+    elif fixture_root is not None:
+        fixture = fixture_root.resolve() / str(session["market_date"]) / "fixture.json"
+    else:
+        return None
+    market_date = str(session["market_date"])
+    if not fixture.is_file():
+        raise Ops09Error(
+            f"OPS09 required offline fixture is missing for {market_date}: {fixture}"
+        )
+    if fixture.parent.name != market_date:
+        raise Ops09Error(
+            f"OPS09 offline fixture is not date-bound to {market_date}: {fixture}"
+        )
+    try:
+        value = json.loads(fixture.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise Ops09Error(f"OPS09 offline fixture is unreadable for {market_date}: {fixture}") from exc
+    if not isinstance(value, dict) or not isinstance(value.get("bars"), list) or not isinstance(value.get("corporate_actions"), list):
+        raise Ops09Error(
+            f"OPS09 offline fixture lacks date-bound bars/corporate_actions windows: {fixture}"
+        )
+    declared_date = value.get("market_date")
+    if declared_date is not None and str(declared_date) != market_date:
+        raise Ops09Error(
+            f"OPS09 offline fixture market date conflicts with {market_date}: {fixture}"
+        )
+    return fixture
+
+
 def _request_contract(*, plan: dict[str, Any], session: dict[str, Any], scope: dict[str, Any], scope_path: Path) -> dict[str, Any]:
     lineage = plan["source_identity"]
     contract = {
@@ -1110,6 +1146,11 @@ def _resume_ops09_unlocked(*, output_root: Path, input_root: Path, scope_root: P
             })
             _atomic_json(state_path, state)
             continue
+        fixture: Path | None = None
+        if execute:
+            # Resolve requested synthetic input before any request contract,
+            # attempt marker, or native dispatch can create output.
+            fixture = _resolve_requested_fixture(session=session, fixture_root=fixture_root)
         session_root = output_root / session["market_date"]
         session_root.mkdir(parents=True, exist_ok=True)
         _recover_attempt_accounting(
@@ -1178,10 +1219,6 @@ def _resume_ops09_unlocked(*, output_root: Path, input_root: Path, scope_root: P
         session["attempts"] = int(session.get("attempts") or 0) + 1
         session["status"] = "RUNNING"
         _atomic_json(state_path, state)
-        fixture = Path(str(session.get("fixture_path"))).resolve() if session.get("fixture_path") else (
-            (fixture_root.resolve() / session["market_date"] / "fixture.json") if fixture_root else None
-        )
-        if fixture is not None and not fixture.is_file(): fixture = None
         decision_path = Path(str(session.get("decision_artifact_path"))).resolve() if session.get("decision_artifact_path") else (
             (decision_root.resolve() / session["market_date"] / "decisions.json") if decision_root else None
         )
