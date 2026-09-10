@@ -88,6 +88,20 @@ def _registration_context(
         or _sha_bytes(receipt_path.read_bytes()) != receipt_sha
     ):
         raise Ops06AdapterError("observational registration receipt is not content-bound")
+    try:
+        registration_receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise Ops06AdapterError("observational registration receipt is unreadable") from exc
+    if (
+        not isinstance(registration_receipt, dict)
+        or registration_receipt.get("schema_version")
+        != "dawnstrike.r3.observational_registration.v1"
+        or registration_receipt.get("market_date") != market_date
+        or registration_receipt.get("versioned_universe_id")
+        != registration.get("versioned_universe_id")
+        or registration_receipt.get("production_registration_performed") is not False
+    ):
+        raise Ops06AdapterError("observational registration identity does not match its receipt")
     sources = context.get("source_artifacts") or {}
     if not isinstance(sources, dict) or not sources:
         raise Ops06AdapterError("observational source artifacts are missing")
@@ -687,6 +701,14 @@ def adapt_ops05_to_r3(
         "adapter_output_root": str(output),
         "adapter_packet": packet,
         "decision_artifact_path": str(Path(decision_artifact).resolve()),
+        "decision_artifact_sha256": _sha_bytes(Path(decision_artifact).read_bytes()),
+        "producer_identity": {
+            "manifest_sha256": producer["manifest_sha256"],
+            "capture_receipt_sha256": producer["capture_receipt_sha256"],
+            "raw_events_sha256": producer["raw_events_sha256"],
+            "source_config_sha256": producer["source_config_sha256"],
+            "observational_registration": dict(producer.get("observational_registration") or {}),
+        },
         "registration_context": registration,
     }
 

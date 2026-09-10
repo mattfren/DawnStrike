@@ -297,6 +297,30 @@ def run_alpha_v6_daily_monitor(
                 "broker_execution_enabled": False,
             }
         else:
+            registration = observation_source.get("registration_context")
+            manifest_registration = (
+                observation_source.get("manifest", {}).get("observational_registration")
+                if isinstance(observation_source.get("manifest"), dict)
+                else None
+            )
+            producer_registration = (
+                observation_source.get("producer_receipt", {}).get("observational_registration")
+                if isinstance(observation_source.get("producer_receipt"), dict)
+                else None
+            )
+            observational_universe_id = None
+            if (
+                isinstance(registration, dict)
+                and isinstance(manifest_registration, dict)
+                and isinstance(producer_registration, dict)
+                and registration.get("versioned_universe_id")
+                == manifest_registration.get("versioned_universe_id")
+                == producer_registration.get("versioned_universe_id")
+                and observation_source["manifest"].get("universe_generation_id")
+                == registration.get("versioned_universe_id")
+                and registration.get("production_registration_performed") is not True
+            ):
+                observational_universe_id = str(registration["versioned_universe_id"])
             observation_packet = build_observation_dataset(
                 manifest=observation_source["manifest"],
                 producer_receipt=observation_source["producer_receipt"],
@@ -305,6 +329,7 @@ def run_alpha_v6_daily_monitor(
                 as_of=observation_source.get("as_of"),
                 target_contract=observation_source.get("target_contract")
                 or (observation_source.get("adapter_packet") or {}).get("target_contract"),
+                observational_universe_id=observational_universe_id,
             )
             observation_packet["decision_artifact_path"] = observation_source.get(
                 "decision_artifact_path"
