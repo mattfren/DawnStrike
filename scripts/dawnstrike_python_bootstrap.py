@@ -939,6 +939,38 @@ def _append_governed_dependencies() -> tuple[Path, ...]:
     return tuple(sorted(dependency_paths, key=str))
 
 
+def _resolve_isolated_dependency_stage(raw_stage: str) -> tuple[tuple[Path, ...], Path]:
+    """Resolve one explicit observer-only dependency stage.
+
+    The stage is deliberately separate from the interpreter prefix.  It must
+    contain only the materialized ``Lib/site-packages`` tree and may not
+    overlap the protected interpreter installation.  No environment-variable
+    fallback is accepted here: callers must pass this path explicitly.
+    """
+
+    if not raw_stage or not raw_stage.strip():
+        _fail("isolated observer dependency stage is empty")
+    stage = Path(raw_stage).resolve(strict=True)
+    protected = Path(sysconfig.get_config_var("prefix") or sys.prefix).resolve(strict=True)
+    if stage == protected or stage in protected.parents or protected in stage.parents:
+        _fail("isolated observer dependency stage overlaps the protected interpreter prefix")
+    if _is_reparse(stage) or not stage.is_dir():
+        _fail("isolated observer dependency stage is not a regular directory")
+    site_packages = stage / "Lib" / "site-packages"
+    if _is_reparse(site_packages) or not site_packages.is_dir():
+        _fail("isolated observer dependency stage lacks a regular Lib/site-packages directory")
+    cursor = site_packages
+    while True:
+        if _is_reparse(cursor):
+            _fail("isolated observer dependency stage contains a reparse point")
+        if cursor == stage:
+            break
+        if stage not in cursor.parents:
+            _fail("isolated observer dependency stage escaped its root")
+        cursor = cursor.parent
+    return (site_packages,), site_packages
+
+
 def _locked_requirements(root: Path, release_bytes: dict[str, bytes]) -> dict[str, str]:
     """Read exact package pins from the repository's hash-locked manifest."""
 
@@ -1083,11 +1115,17 @@ def _assert_locked_dependencies(
     root: Path,
     dependency_paths: tuple[Path, ...],
     release_bytes: dict[str, bytes],
+    *,
+    dependency_prefix: Path | None = None,
 ) -> tuple[frozenset[str], frozenset[str], dict[str, tuple[bytes, int | None]]]:
-    """Require the actual interpreter environment to match requirements.lock."""
+    """Require one explicit dependency boundary to match requirements.lock."""
 
     requirements = _locked_requirements(root, release_bytes)
-    prefix = Path(sysconfig.get_config_var("prefix") or sys.prefix).resolve(strict=True)
+    prefix = (
+        dependency_prefix.resolve(strict=True)
+        if dependency_prefix is not None
+        else Path(sysconfig.get_config_var("prefix") or sys.prefix).resolve(strict=True)
+    )
     installed: dict[str, list[importlib.metadata.Distribution]] = {}
     owned_paths: set[str] = set()
     owned_hashes: dict[str, tuple[bytes, int | None]] = {}
@@ -1117,7 +1155,58 @@ def _assert_locked_dependencies(
     record_contract = hashlib.sha256("".join(record_contract_rows).encode()).hexdigest()
     if record_contract != _APPROVED_DISTRIBUTION_RECORD_SET_SHA256:
         _fail("installed dependency RECORD set is not the source-approved runtime contract")
+    _verify_dependency_payloads(prefix, dependency_paths, owned_paths, owned_hashes)
     return frozenset(allowed_top_level), frozenset(owned_paths), owned_hashes
+
+
+def _verify_dependency_payloads(
+    prefix: Path,
+    dependency_paths: tuple[Path, ...],
+    owned_paths: set[str],
+    owned_hashes: dict[str, tuple[bytes, int | None]],
+) -> None:
+    """Verify every staged RECORD payload before any dependency import."""
+
+    def verify(path: Path) -> None:
+        key = os.path.normcase(str(path))
+        if key not in owned_paths:
+            _fail("installed dependency stage contains an unowned payload")
+        if _is_reparse(path) or not path.is_file():
+            _fail("installed dependency stage contains a missing or unsafe payload")
+        contract = owned_hashes.get(key)
+        if contract is None:
+            return
+        expected, expected_size = contract
+        digest = hashlib.sha256()
+        size = 0
+        try:
+            with path.open("rb") as stream:
+                while True:
+                    chunk = stream.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    digest.update(chunk)
+        except OSError as exc:
+            _fail(f"installed dependency payload is unreadable: {exc}")
+        if expected_size is not None and size != expected_size:
+            _fail("installed dependency payload size changed")
+        if digest.digest() != expected:
+            _fail("installed dependency payload hash changed")
+
+    for dependency in dependency_paths:
+        if os.path.commonpath((str(dependency), str(prefix))) != str(prefix) and prefix not in dependency.parents:
+            _fail("installed dependency path escaped the approved prefix")
+        for path in dependency.rglob("*"):
+            if path.is_dir():
+                if _is_reparse(path):
+                    _fail("installed dependency directory contains a reparse point")
+                continue
+            verify(path)
+    for key in owned_paths:
+        path = Path(key)
+        if not path.exists():
+            _fail("installed dependency RECORD names a missing payload")
 
 
 class _LockedDependencyGuard(importlib.abc.MetaPathFinder):
@@ -1308,6 +1397,7 @@ def _parse_bootstrap_args(argv: list[str] | None) -> tuple[argparse.Namespace, l
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     parser.add_argument("--release-root", required=True)
     parser.add_argument("--expected-sha", required=True)
+    parser.add_argument("--dependency-stage-root")
     target = parser.add_mutually_exclusive_group(required=True)
     target.add_argument("--module")
     target.add_argument("--script")
@@ -1332,10 +1422,23 @@ def main(argv: list[str] | None = None) -> int:
     try:
         _install_verified_release_importer(root, source_guard.source_bytes)
         sys.path.insert(0, str(root))
-        dependency_paths = _append_governed_dependencies()
-        allowed_dependencies, owned_dependency_paths, owned_dependency_hashes = (
-            _assert_locked_dependencies(root, dependency_paths, source_guard.source_bytes)
-        )
+        if args.dependency_stage_root:
+            dependency_paths, dependency_prefix = _resolve_isolated_dependency_stage(
+                args.dependency_stage_root
+            )
+            allowed_dependencies, owned_dependency_paths, owned_dependency_hashes = (
+                _assert_locked_dependencies(
+                    root,
+                    dependency_paths,
+                    source_guard.source_bytes,
+                    dependency_prefix=dependency_prefix,
+                )
+            )
+        else:
+            dependency_paths = _append_governed_dependencies()
+            allowed_dependencies, owned_dependency_paths, owned_dependency_hashes = (
+                _assert_locked_dependencies(root, dependency_paths, source_guard.source_bytes)
+            )
         _install_verified_dependency_importers(
             dependency_paths,
             allowed_dependencies,
@@ -1368,7 +1471,14 @@ def main(argv: list[str] | None = None) -> int:
                     refreshed_owned_dependency_paths,
                     refreshed_owned_dependency_hashes,
                 ) = _assert_locked_dependencies(
-                    root, dependency_paths, refreshed_guard.source_bytes
+                    root,
+                    dependency_paths,
+                    refreshed_guard.source_bytes,
+                    **(
+                        {"dependency_prefix": dependency_prefix}
+                        if args.dependency_stage_root
+                        else {}
+                    ),
                 )
                 if (
                     refreshed_allowed_dependencies != allowed_dependencies
