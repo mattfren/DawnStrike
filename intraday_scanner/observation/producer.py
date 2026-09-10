@@ -8,12 +8,13 @@ import os
 from pathlib import Path
 from typing import Any
 
-from .contracts import SCOPES, canonical_json, parse_utc, sha256_json
-from .runner import validate_output_root
 from intraday_scanner.services.intraday_evidence_capture_service import (
     CaptureContractError,
     _validate_checkpoint_pages,
 )
+
+from .contracts import SCOPES, canonical_json, parse_utc, sha256_json
+from .runner import validate_output_root
 
 
 class ObservationProducerError(ValueError):
@@ -105,9 +106,7 @@ def _iter_page_items(
                         "capture page escapes the authenticated capture root"
                     ) from exc
                 page_value = _read_json(page_path, label="capture page")
-                if page_value.get("raw_payload_hash_sha256") != page.get(
-                    "raw_payload_hash_sha256"
-                ):
+                if page_value.get("raw_payload_hash_sha256") != page.get("raw_payload_hash_sha256"):
                     raise ObservationProducerError("capture page hash identity changed")
                 for key in (
                     "page_number",
@@ -147,9 +146,7 @@ def _iter_page_items(
                         "normalized_artifact_hash_sha256": endpoint_state.get(
                             "aggregate_normalized_hash"
                         ),
-                        "raw_artifact_hash_sha256": endpoint_state.get(
-                            "aggregate_raw_hash"
-                        ),
+                        "raw_artifact_hash_sha256": endpoint_state.get("aggregate_raw_hash"),
                         "symbol": str(symbol).upper(),
                     }
                 )
@@ -278,11 +275,7 @@ def build_observation_inputs(
     boundary_events_path = root / "boundary-events.jsonl"
     tmp_events_path = root / f".raw-events.{os.getpid()}.tmp"
     tmp_boundary_path = root / f".boundary-events.{os.getpid()}.tmp"
-    scope_by_symbol = {
-        entry["symbol"]: scope
-        for scope in SCOPES
-        for entry in entries[scope]
-    }
+    scope_by_symbol = {entry["symbol"]: scope for scope in SCOPES for entry in entries[scope]}
     seen_keys: set[str] = set()
     raw_hasher = hashlib.sha256()
     boundary_hasher = hashlib.sha256()
@@ -302,9 +295,10 @@ def build_observation_inputs(
     next_window_identity = f"{session_id}@{request_end.isoformat()}"
 
     try:
-        with tmp_events_path.open("wb") as events_file, tmp_boundary_path.open(
-            "wb"
-        ) as boundary_file:
+        with (
+            tmp_events_path.open("wb") as events_file,
+            tmp_boundary_path.open("wb") as boundary_file,
+        ):
             for row in page_items:
                 source_item_count += 1
                 item = row["item"]
@@ -356,14 +350,15 @@ def build_observation_inputs(
                     boundary_event_count += 1
                     event.update(
                         {
-                            "window_classification": "inclusive_provider_end_excluded_from_current_half_open",
+                            "window_classification": (
+                                "inclusive_provider_end_excluded_from_current_half_open"
+                            ),
                             "derived_window_semantics": DERIVED_WINDOW_SEMANTICS,
                             "next_window_identity": next_window_identity,
                         }
                     )
                     encoded = (
-                        json.dumps(event, sort_keys=True, separators=(",", ":")).encode()
-                        + b"\n"
+                        json.dumps(event, sort_keys=True, separators=(",", ":")).encode() + b"\n"
                     )
                     if boundary_byte_count + raw_byte_count + len(encoded) <= max_bytes:
                         boundary_file.write(encoded)
@@ -374,13 +369,11 @@ def build_observation_inputs(
                         truncated = True
                     continue
                 event["window_classification"] = "current_half_open"
-                encoded = (
-                    json.dumps(event, sort_keys=True, separators=(",", ":")).encode()
-                    + b"\n"
-                )
-                if raw_event_count >= max_events or raw_byte_count + boundary_byte_count + len(
-                    encoded
-                ) > max_bytes:
+                encoded = json.dumps(event, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+                if (
+                    raw_event_count >= max_events
+                    or raw_byte_count + boundary_byte_count + len(encoded) > max_bytes
+                ):
                     if reduction_mode == "none":
                         raise ObservationProducerError(
                             "producer output exceeds bounded event limits"
@@ -401,11 +394,12 @@ def build_observation_inputs(
         [item for item in page_artifacts if item.get("raw_artifact_hash_sha256")],
         key=canonical_json,
     )
-    expected_artifact_hash = hashlib.sha256(
-        canonical_json({"items": artifact_items})
-    ).hexdigest()
+    expected_artifact_hash = hashlib.sha256(canonical_json({"items": artifact_items})).hexdigest()
     artifact_identity = receipt.get("artifact_identity")
-    if isinstance(artifact_identity, dict) and artifact_identity.get("sha256") != expected_artifact_hash:
+    if (
+        isinstance(artifact_identity, dict)
+        and artifact_identity.get("sha256") != expected_artifact_hash
+    ):
         for temporary in (tmp_events_path, tmp_boundary_path):
             temporary.unlink(missing_ok=True)
         raise ObservationProducerError("capture artifact identity hash mismatch")
@@ -432,9 +426,7 @@ def build_observation_inputs(
     raw_events_sha256 = raw_hasher.hexdigest()
     boundary_events_sha256 = boundary_hasher.hexdigest()
     expectation_status = (
-        "INCOMPLETE"
-        if truncated or receipt.get("status") != "COMPLETE"
-        else "COMPLETE"
+        "INCOMPLETE" if truncated or receipt.get("status") != "COMPLETE" else "COMPLETE"
     )
     coverage_class = "BOUNDED_DERIVATIVE" if truncated else "FULL_DERIVED"
     manifest = {

@@ -21,8 +21,8 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from intraday_scanner.alpha.commit_bridge import _mint_authenticated_fill_truth
 from intraday_scanner.alpha.alert_gate import apply_alert_gate, validate_strategy_receipt_envelope
+from intraday_scanner.alpha.commit_bridge import _mint_authenticated_fill_truth
 from intraday_scanner.decisioning.contracts import canonical_json, parse_strategy_decision_receipt
 from intraday_scanner.performance.canonical_account_ledger import CanonicalAccountLedger
 from intraday_scanner.risk.policy import RiskInput, evaluate_risk
@@ -277,8 +277,15 @@ def authenticate_entry_intent(
             if not isinstance(position, Mapping):
                 raise ReceiptAuthenticationError("portfolio position metadata is malformed")
             for field in (
-                "symbol", "side", "quantity", "mark_price", "entry_price",
-                "stop_price", "sector", "theme", "price_observed_at",
+                "symbol",
+                "side",
+                "quantity",
+                "mark_price",
+                "entry_price",
+                "stop_price",
+                "sector",
+                "theme",
+                "price_observed_at",
             ):
                 if position.get(field) in (None, ""):
                     raise ReceiptAuthenticationError(
@@ -633,8 +640,15 @@ class CanonicalLedger(CanonicalAccountLedger):
         self.db.execute(
             "INSERT INTO r6_fake_fills VALUES (?,?,?,?,?,?,?,?,?)",
             (
-                fill.fill_id, fill.order_id, fill.client_order_id, fill.symbol,
-                fill.side, fill.quantity, str(fill.price), str(fill.fee), fill.market_date,
+                fill.fill_id,
+                fill.order_id,
+                fill.client_order_id,
+                fill.symbol,
+                fill.side,
+                fill.quantity,
+                str(fill.price),
+                str(fill.fee),
+                fill.market_date,
             ),
         )
         self.db.execute(
@@ -673,12 +687,14 @@ class CanonicalLedger(CanonicalAccountLedger):
     def _rebuild_canonical(self) -> None:
         """Reconcile raw fake events through the real account ledger consumer."""
 
-        fills = [dict(row) for row in self.db.execute(
-            "SELECT * FROM r6_fake_fills ORDER BY rowid"
-        ).fetchall()]
-        intents = [dict(row) for row in self.db.execute(
-            "SELECT * FROM r6_fake_intents ORDER BY rowid"
-        ).fetchall()]
+        fills = [
+            dict(row)
+            for row in self.db.execute("SELECT * FROM r6_fake_fills ORDER BY rowid").fetchall()
+        ]
+        intents = [
+            dict(row)
+            for row in self.db.execute("SELECT * FROM r6_fake_intents ORDER BY rowid").fetchall()
+        ]
         by_day: dict[str, list[dict[str, Any]]] = {}
         for fill in fills:
             by_day.setdefault(str(fill["market_date"]), []).append(fill)
@@ -694,26 +710,39 @@ class CanonicalLedger(CanonicalAccountLedger):
         positions: list[dict[str, Any]] = []
         sessions: list[dict[str, Any]] = []
         for day, day_fills in sorted(by_day.items()):
-            sessions.append({
-                "market_date": day,
-                "session_id": f"XNYS:{day}:regular",
-                "status": "CLOSED",
-            })
+            sessions.append(
+                {
+                    "market_date": day,
+                    "session_id": f"XNYS:{day}:regular",
+                    "status": "CLOSED",
+                }
+            )
             symbols = sorted({str(row["symbol"]) for row in day_fills})
             for symbol in symbols:
-                buys = [row for row in day_fills if row["symbol"] == symbol and row["side"] == "buy"]
-                sells = [row for row in day_fills if row["symbol"] == symbol and row["side"] == "sell"]
-                net = sum(int(row["quantity"]) for row in buys) - sum(int(row["quantity"]) for row in sells)
+                buys = [
+                    row for row in day_fills if row["symbol"] == symbol and row["side"] == "buy"
+                ]
+                sells = [
+                    row for row in day_fills if row["symbol"] == symbol and row["side"] == "sell"
+                ]
+                net = sum(int(row["quantity"]) for row in buys) - sum(
+                    int(row["quantity"]) for row in sells
+                )
                 if net > 0:
-                    positions.append({
-                        "position_id": f"r6-fake-position:{day}:{symbol}",
-                        "market_date": day,
-                        "status": "OPEN",
-                        "symbol": symbol,
-                        "quantity": net,
-                        "source_ref": FAKE_BROKER_ID,
-                    })
-                closed = min(sum(int(row["quantity"]) for row in buys), sum(int(row["quantity"]) for row in sells))
+                    positions.append(
+                        {
+                            "position_id": f"r6-fake-position:{day}:{symbol}",
+                            "market_date": day,
+                            "status": "OPEN",
+                            "symbol": symbol,
+                            "quantity": net,
+                            "source_ref": FAKE_BROKER_ID,
+                        }
+                    )
+                closed = min(
+                    sum(int(row["quantity"]) for row in buys),
+                    sum(int(row["quantity"]) for row in sells),
+                )
                 if not closed:
                     continue
                 buy_gross = sum(_money(row["price"]) * int(row["quantity"]) for row in buys)
@@ -751,12 +780,14 @@ class CanonicalLedger(CanonicalAccountLedger):
                     "fake_broker_id": FAKE_BROKER_ID,
                 }
                 raw_payload["receipt_hash_sha256"] = _hash(raw_payload)
-                trades.append({
-                    "trade_id": f"r6-fake-trade:{day}:{symbol}",
-                    "market_date": day,
-                    "source_ref": FAKE_BROKER_ID,
-                    "fill_truth": _mint_authenticated_fill_truth(raw_payload),
-                })
+                trades.append(
+                    {
+                        "trade_id": f"r6-fake-trade:{day}:{symbol}",
+                        "market_date": day,
+                        "source_ref": FAKE_BROKER_ID,
+                        "fill_truth": _mint_authenticated_fill_truth(raw_payload),
+                    }
+                )
         account = {
             "account_id": self.account_id,
             "opening_equity_cents": int(self.opening_cash * 100),
@@ -768,7 +799,9 @@ class CanonicalLedger(CanonicalAccountLedger):
             "broker_execution_enabled": False,
         }
         canonical = CanonicalAccountLedger(
-            self.path, account_id=self.account_id, code_sha=str(intent_payload.get("code_sha") or "unknown")
+            self.path,
+            account_id=self.account_id,
+            code_sha=str(intent_payload.get("code_sha") or "unknown"),
         )
         self._last_canonical_result = canonical.build_and_persist(
             account=account,

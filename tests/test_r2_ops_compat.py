@@ -116,9 +116,14 @@ def test_inclusive_provider_end_is_preserved_as_next_window_boundary(tmp_path: P
     assert result["status"] == "READY"
     assert result["source_boundary_count"] == 1
     raw = (tmp_path / "producer" / "raw-events.jsonl").read_text(encoding="utf-8")
-    boundary = json.loads((tmp_path / "producer" / "boundary-events.jsonl").read_text(encoding="utf-8"))
+    boundary = json.loads(
+        (tmp_path / "producer" / "boundary-events.jsonl").read_text(encoding="utf-8")
+    )
     assert raw.count("\n") == 1
-    assert boundary["window_classification"] == "inclusive_provider_end_excluded_from_current_half_open"
+    assert (
+        boundary["window_classification"]
+        == "inclusive_provider_end_excluded_from_current_half_open"
+    )
     assert boundary["next_window_identity"] == "XNYS:2026-01-02:regular@2026-01-02T11:00:00+00:00"
     assert result["provider_window_contract_id"] == "alpaca.stock.historical.v1"
 
