@@ -153,6 +153,20 @@ def test_incomplete_real_r2_receipt_stays_partial_and_noneligible() -> None:
     assert packet["coverage"][1]["status"] == "MISSING_INPUT"
 
 
+def test_forged_receipt_identity_is_rejected() -> None:
+    manifest, receipt, events, decision = _fixture()
+    receipt["source_config_sha256"] = "f" * 64
+    packet = build_observation_dataset(
+        manifest=manifest,
+        producer_receipt=receipt,
+        raw_events=events,
+        decisions=[decision],
+        as_of="2026-01-02T22:30:00+00:00",
+    )
+    assert packet["status"] == "INVALID_SCHEMA"
+    assert "receipt_source_config_sha256_mismatch" in packet["reason"]
+
+
 def test_future_or_malformed_event_is_quarantined() -> None:
     manifest, receipt, events, decision = _fixture()
     events[2]["available_at"] = "2026-01-02T11:00:00+00:00"
