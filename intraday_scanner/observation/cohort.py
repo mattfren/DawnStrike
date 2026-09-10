@@ -33,6 +33,7 @@ COHORT_SCHEMA = "dawnstrike.observation.cohort.v1"
 COHORT_STATE_SCHEMA = "dawnstrike.observation.cohort_state.v1"
 MAX_EXPECTED_SESSIONS = 10
 MAX_RETRIES = 3
+MAX_OFFLINE_PAGES = 10_000
 REFERENCE_PANEL = ("DIA", "IWM", "QQQ", "SPY", "TLT")
 MOVER_MEMBERSHIPS = ("selected", "rejected", "unselected")
 APPROVED_PYTHON = Path(r"C:\Program Files\Dawnstrike\Python313\python.exe")
@@ -332,14 +333,14 @@ def prepare_cohort(
     entitlement_receipt: Path | None = None,
     runtime_env: Path | None = None,
     python_path: Path = APPROVED_PYTHON,
-    max_pages: int = 1000,
+    max_pages: int = MAX_OFFLINE_PAGES,
     max_events: int = 10000,
     max_bytes: int = 64 * 1024 * 1024,
     max_rss_bytes: int = 256 * 1024 * 1024,
     max_wall_seconds: int = 1800,
 ) -> dict[str, Any]:
-    if max_pages < 1 or max_pages > 1000 or max_events < 1 or max_events > 10000:
-        raise CohortError("cohort request caps exceed the existing capture/observer bounds")
+    if max_pages < 1 or max_pages > MAX_OFFLINE_PAGES or max_events < 1 or max_events > 10000:
+        raise CohortError("cohort request caps exceed the existing offline observer bounds")
     if max_bytes < 1 or max_bytes > 64 * 1024 * 1024:
         raise CohortError("cohort byte cap exceeds the existing local bound")
     if max_rss_bytes < 1 or max_wall_seconds < 1:

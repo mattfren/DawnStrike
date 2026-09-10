@@ -26,7 +26,7 @@ def _parser() -> argparse.ArgumentParser:
     prepare.add_argument("--source-config-sha256", default="")
     prepare.add_argument("--entitlement-receipt", type=Path)
     prepare.add_argument("--runtime-env", type=Path)
-    prepare.add_argument("--max-pages", type=int, default=1000)
+    prepare.add_argument("--max-pages", type=int, default=10000)
     prepare.add_argument("--max-events", type=int, default=10000)
     prepare.add_argument("--max-bytes", type=int, default=64 * 1024 * 1024)
     prepare.add_argument("--max-rss-bytes", type=int, default=256 * 1024 * 1024)
