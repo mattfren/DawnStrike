@@ -21,9 +21,18 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from intraday_scanner.alpha.commit_bridge import _mint_authenticated_fill_truth
 from intraday_scanner.alpha.alert_gate import apply_alert_gate, validate_strategy_receipt_envelope
 from intraday_scanner.decisioning.contracts import canonical_json, parse_strategy_decision_receipt
+from intraday_scanner.performance.canonical_account_ledger import CanonicalAccountLedger
 from intraday_scanner.risk.policy import RiskInput, evaluate_risk
+from intraday_scanner.risk.portfolio import (
+    PortfolioOrderProposal,
+    PortfolioRiskLimits,
+    PortfolioRiskSnapshot,
+    evaluate_portfolio_risk,
+)
+from intraday_scanner.storage.migrations import run_migrations
 
 SCHEMA_VERSION = "dawnstrike.r6.fake_execution.v1"
 FAKE_BROKER_ID = "dawnstrike-r6-fake-broker-v1"
@@ -110,6 +119,7 @@ class AuthenticatedEntryIntent:
     quantity: int
     decision_at: str
     policy_ids: tuple[str, ...]
+    portfolio_risk_receipt_hash_sha256: str
 
     def to_dict(self) -> dict[str, Any]:
         output = asdict(self)
@@ -240,6 +250,43 @@ def authenticate_entry_intent(
     if quantity <= 0:
         raise ReceiptAuthenticationError("fake runtime risk gate produced no quantity")
 
+    required_portfolio_fields = (
+        "portfolio_positions",
+        "portfolio_pending",
+        "portfolio_daily_realized_pnl",
+        "portfolio_daily_unrealized_pnl",
+        "portfolio_peak_equity",
+        "portfolio_as_of",
+        "price_observed_at",
+        "portfolio_account_id",
+        "portfolio_market_date",
+        "portfolio_sector",
+        "portfolio_theme",
+    )
+    missing_portfolio = [field for field in required_portfolio_fields if field not in risk]
+    if missing_portfolio:
+        raise ReceiptAuthenticationError(
+            "portfolio risk state is incomplete: " + ",".join(missing_portfolio)
+        )
+    _require_exact(risk.get("portfolio_account_id"), context.account_id, "portfolio account")
+    _require_exact(risk.get("portfolio_market_date"), context.market_date, "portfolio market date")
+    try:
+        if _utc(str(risk["portfolio_as_of"])).date().isoformat() != context.market_date:
+            raise ReceiptAuthenticationError("portfolio state date is stale")
+        for position in (*risk["portfolio_positions"], *risk["portfolio_pending"]):
+            if not isinstance(position, Mapping):
+                raise ReceiptAuthenticationError("portfolio position metadata is malformed")
+            for field in (
+                "symbol", "side", "quantity", "mark_price", "entry_price",
+                "stop_price", "sector", "theme", "price_observed_at",
+            ):
+                if position.get(field) in (None, ""):
+                    raise ReceiptAuthenticationError(
+                        f"portfolio position metadata is incomplete: {field}"
+                    )
+    except (TypeError, ValueError) as exc:
+        raise ReceiptAuthenticationError("portfolio state timestamp is malformed") from exc
+
     # V5 is an independent stricter surface.  All inputs must be present and
     # this call is never replaced by the wider fake-runtime defaults.
     v5 = evaluate_risk(
@@ -266,6 +313,46 @@ def authenticate_entry_intent(
     )
     if not v5.allowed_for_paper:
         raise ReceiptAuthenticationError("V5 risk gate blocked: " + ",".join(v5.reasons))
+    portfolio_as_of = str(risk.get("portfolio_as_of") or receipt.decision_at)
+    try:
+        portfolio_snapshot = PortfolioRiskSnapshot.from_mappings(
+            equity=float(equity),
+            positions=risk.get("portfolio_positions") or (),
+            pending=risk.get("portfolio_pending") or (),
+            daily_realized_pnl=float(risk.get("portfolio_daily_realized_pnl", 0.0)),
+            daily_unrealized_pnl=float(risk.get("portfolio_daily_unrealized_pnl", 0.0)),
+            peak_equity=float(risk.get("portfolio_peak_equity", equity)),
+            as_of=portfolio_as_of,
+            metadata_complete=risk.get("portfolio_metadata_complete") is not False,
+        )
+        portfolio_proposal = PortfolioOrderProposal(
+            symbol=receipt.symbol,
+            side="buy",
+            quantity=quantity,
+            price=float(entry),
+            stop_price=float(stop),
+            strategy_id=receipt.strategy_id,
+            sector=str(risk.get("portfolio_sector") or "") or None,
+            theme=str(risk.get("portfolio_theme") or "") or None,
+            price_observed_at=str(risk.get("price_observed_at") or portfolio_as_of),
+            metadata_complete=risk.get("portfolio_proposal_metadata_complete") is not False,
+            live_execution_requested=False,
+        )
+        portfolio = evaluate_portfolio_risk(
+            portfolio_proposal,
+            portfolio_snapshot,
+            limits=PortfolioRiskLimits(),
+            # Decision time is the point-in-time boundary.  Using the
+            # portfolio's own timestamp as ``now`` would let stale marks make
+            # themselves appear fresh.
+            now=receipt.decision_at,
+        )
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ReceiptAuthenticationError("portfolio risk inputs are malformed") from exc
+    if not portfolio.allowed:
+        raise ReceiptAuthenticationError(
+            "portfolio risk gate blocked: " + ",".join(portfolio.reason_codes)
+        )
     intent_id = (
         "intent-"
         + _hash({"receipt": receipt.receipt_hash_sha256, "account": context.account_id})[:24]
@@ -289,7 +376,8 @@ def authenticate_entry_intent(
         target_price=target,
         quantity=quantity,
         decision_at=receipt.decision_at,
-        policy_ids=(V5_POLICY_ID, R6_RUNTIME_POLICY_ID),
+        policy_ids=(V5_POLICY_ID, R6_RUNTIME_POLICY_ID, PORTFOLIO_POLICY_ID),
+        portfolio_risk_receipt_hash_sha256=portfolio.receipt_hash_sha256,
     )
 
 
@@ -461,132 +549,244 @@ class FakeBroker:
         )
 
 
-class CanonicalLedger:
-    """Durable cash/position/fill ledger with fill-idempotent reconciliation."""
+class CanonicalLedger(CanonicalAccountLedger):
+    """R6 adapter over the existing canonical account/session consumer.
+
+    The raw ``r6_fake_*`` tables are an audit trail for deterministic fixtures.
+    They are not an alternative account ledger.  Every changed fill rebuilds
+    the persisted account row through :class:`CanonicalAccountLedger`.
+    """
 
     def __init__(
         self, path: str | Path, *, account_id: str, opening_cash: str = "100000.00"
     ) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.account_id = str(account_id)
+        self.opening_cash = _money(opening_cash)
+        super().__init__(self.path, account_id=self.account_id, code_sha="r6-fake-adapter")
         self.db = sqlite3.connect(self.path)
         self.db.row_factory = sqlite3.Row
-        self.account_id = account_id
+        run_migrations(self.db)
         self.db.executescript(
-            """CREATE TABLE IF NOT EXISTS account (
-                account_id TEXT PRIMARY KEY, cash TEXT NOT NULL
+            """CREATE TABLE IF NOT EXISTS r6_fake_meta (
+                key TEXT PRIMARY KEY, value TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS fills (
-                fill_id TEXT PRIMARY KEY, order_id TEXT, client_order_id TEXT,
-                symbol TEXT, side TEXT, quantity INTEGER, price TEXT, fee TEXT,
-                market_date TEXT
+            CREATE TABLE IF NOT EXISTS r6_fake_intents (
+                intent_id TEXT PRIMARY KEY, receipt_id TEXT NOT NULL,
+                payload_json TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS positions (
-                symbol TEXT PRIMARY KEY, quantity INTEGER NOT NULL,
-                cost_basis TEXT NOT NULL, realized_pnl TEXT NOT NULL
+            CREATE TABLE IF NOT EXISTS r6_fake_fills (
+                fill_id TEXT PRIMARY KEY, order_id TEXT NOT NULL,
+                client_order_id TEXT NOT NULL, symbol TEXT NOT NULL,
+                side TEXT NOT NULL, quantity INTEGER NOT NULL,
+                price TEXT NOT NULL, fee TEXT NOT NULL, market_date TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS intents (
-                intent_id TEXT PRIMARY KEY, receipt_id TEXT, payload_json TEXT
+            CREATE TABLE IF NOT EXISTS r6_fake_events (
+                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind TEXT NOT NULL, detail_json TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, detail_json TEXT
-            );"""
+            CREATE VIEW IF NOT EXISTS fills AS
+              SELECT fill_id, order_id, client_order_id, symbol, side,
+                     quantity, price, fee, market_date
+              FROM r6_fake_fills;"""
         )
         self.db.execute(
-            "INSERT OR IGNORE INTO account VALUES (?,?)", (account_id, str(_money(opening_cash)))
+            "INSERT OR REPLACE INTO r6_fake_meta(key,value) VALUES (?,?)",
+            ("opening_cash", str(self.opening_cash)),
         )
         self.db.commit()
+        self._rebuild_canonical()
 
     def register_intent(self, intent: AuthenticatedEntryIntent) -> None:
         self.db.execute(
-            "INSERT OR IGNORE INTO intents VALUES (?,?,?)",
+            "INSERT OR IGNORE INTO r6_fake_intents VALUES (?,?,?)",
             (intent.intent_id, intent.receipt_id, canonical_json(intent.to_dict())),
+        )
+        self.db.execute(
+            "INSERT INTO r6_fake_events(kind,detail_json) VALUES (?,?)",
+            ("intent_received", canonical_json(intent.to_dict())),
+        )
+        self.db.commit()
+        self._rebuild_canonical()
+
+    def record_event(self, kind: str, detail: Mapping[str, Any]) -> None:
+        self.db.execute(
+            "INSERT INTO r6_fake_events(kind,detail_json) VALUES (?,?)",
+            (str(kind), canonical_json(dict(detail))),
         )
         self.db.commit()
 
     def reconcile_fill(self, fill: FakeFill) -> bool:
-        if self.db.execute("SELECT 1 FROM fills WHERE fill_id=?", (fill.fill_id,)).fetchone():
+        if self.db.execute(
+            "SELECT 1 FROM r6_fake_fills WHERE fill_id=?", (fill.fill_id,)
+        ).fetchone():
             return False
-        account = self.db.execute(
-            "SELECT cash FROM account WHERE account_id=?", (self.account_id,)
-        ).fetchone()
-        if account is None:
-            raise FakeBrokerError("ledger account is missing")
-        cash = _money(account["cash"])
-        position = self.db.execute(
-            "SELECT * FROM positions WHERE symbol=?", (fill.symbol,)
-        ).fetchone()
-        qty = int(position["quantity"]) if position else 0
-        basis = _money(position["cost_basis"]) if position else Decimal("0")
-        realized = _money(position["realized_pnl"]) if position else Decimal("0")
-        gross = fill.price * fill.quantity
-        if fill.side == "buy":
-            cash -= gross + fill.fee
-            basis = basis + gross + fill.fee
-            qty += fill.quantity
-        elif fill.side == "sell":
-            if fill.quantity > qty:
-                raise FakeBrokerError("broker fill exceeds canonical position")
-            cash += gross - fill.fee
-            cost = (basis / qty * fill.quantity) if qty else Decimal("0")
-            realized += gross - fill.fee - cost
-            basis -= cost
-            qty -= fill.quantity
-        else:
-            raise FakeBrokerError("unsupported fill side")
+        if fill.side not in {"buy", "sell"} or fill.quantity <= 0:
+            raise FakeBrokerError("unsupported or non-positive fake fill")
+        current = self._raw_position_quantity(fill.symbol)
+        if fill.side == "sell" and fill.quantity > current:
+            raise FakeBrokerError("broker fill exceeds canonical position")
+        payload = asdict(fill)
+        payload["price"] = str(fill.price)
+        payload["fee"] = str(fill.fee)
         self.db.execute(
-            "INSERT INTO fills VALUES (?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO r6_fake_fills VALUES (?,?,?,?,?,?,?,?,?)",
             (
-                fill.fill_id,
-                fill.order_id,
-                fill.client_order_id,
-                fill.symbol,
-                fill.side,
-                fill.quantity,
-                str(fill.price),
-                str(fill.fee),
-                fill.market_date,
+                fill.fill_id, fill.order_id, fill.client_order_id, fill.symbol,
+                fill.side, fill.quantity, str(fill.price), str(fill.fee), fill.market_date,
             ),
         )
         self.db.execute(
-            "UPDATE account SET cash=? WHERE account_id=?", (str(cash), self.account_id)
-        )
-        if qty:
-            self.db.execute(
-                """INSERT INTO positions VALUES (?,?,?,?)
-                ON CONFLICT(symbol) DO UPDATE SET
-                quantity=excluded.quantity,
-                cost_basis=excluded.cost_basis,
-                realized_pnl=excluded.realized_pnl""",
-                (fill.symbol, qty, str(basis), str(realized)),
-            )
-        else:
-            self.db.execute("DELETE FROM positions WHERE symbol=?", (fill.symbol,))
-        event = asdict(fill)
-        event["price"] = str(fill.price)
-        event["fee"] = str(fill.fee)
-        self.db.execute(
-            "INSERT INTO events(kind,detail_json) VALUES (?,?)",
-            ("fill_reconciled", canonical_json(event)),
+            "INSERT INTO r6_fake_events(kind,detail_json) VALUES (?,?)",
+            ("fill_reconciled", canonical_json(payload)),
         )
         self.db.commit()
+        self._rebuild_canonical()
         return True
 
     def reconcile_order(self, order: FakeOrder) -> int:
         return sum(self.reconcile_fill(fill) for fill in order.fills)
 
     def cash(self) -> Decimal:
-        row = self.db.execute(
-            "SELECT cash FROM account WHERE account_id=?", (self.account_id,)
-        ).fetchone()
-        return _money(row["cash"] if row else "0")
+        cash = self.opening_cash
+        for row in self.db.execute("SELECT side,quantity,price,fee FROM r6_fake_fills"):
+            gross = _money(row["price"]) * int(row["quantity"])
+            fee = _money(row["fee"])
+            cash += (-gross - fee) if row["side"] == "buy" else (gross - fee)
+        return _money(cash)
 
     def position(self, symbol: str) -> dict[str, Any] | None:
-        row = self.db.execute("SELECT * FROM positions WHERE symbol=?", (symbol,)).fetchone()
-        return dict(row) if row else None
+        quantity = self._raw_position_quantity(symbol)
+        if quantity <= 0:
+            return None
+        return {"symbol": symbol, "quantity": quantity, "status": "OPEN"}
+
+    def _raw_position_quantity(self, symbol: str) -> int:
+        total = 0
+        for row in self.db.execute(
+            "SELECT side,quantity FROM r6_fake_fills WHERE symbol=?", (symbol,)
+        ):
+            total += int(row["quantity"]) if row["side"] == "buy" else -int(row["quantity"])
+        return total
+
+    def _rebuild_canonical(self) -> None:
+        """Reconcile raw fake events through the real account ledger consumer."""
+
+        fills = [dict(row) for row in self.db.execute(
+            "SELECT * FROM r6_fake_fills ORDER BY rowid"
+        ).fetchall()]
+        intents = [dict(row) for row in self.db.execute(
+            "SELECT * FROM r6_fake_intents ORDER BY rowid"
+        ).fetchall()]
+        by_day: dict[str, list[dict[str, Any]]] = {}
+        for fill in fills:
+            by_day.setdefault(str(fill["market_date"]), []).append(fill)
+        if not by_day:
+            return
+        try:
+            intent_payload = json.loads(intents[0]["payload_json"]) if intents else {}
+        except json.JSONDecodeError:
+            intent_payload = {}
+        strategy_id = str(intent_payload.get("strategy_id") or "r6_fake_strategy")
+        strategy_version = str(intent_payload.get("strategy_version") or "r6.fake.v1")
+        trades: list[dict[str, Any]] = []
+        positions: list[dict[str, Any]] = []
+        sessions: list[dict[str, Any]] = []
+        for day, day_fills in sorted(by_day.items()):
+            sessions.append({
+                "market_date": day,
+                "session_id": f"XNYS:{day}:regular",
+                "status": "CLOSED",
+            })
+            symbols = sorted({str(row["symbol"]) for row in day_fills})
+            for symbol in symbols:
+                buys = [row for row in day_fills if row["symbol"] == symbol and row["side"] == "buy"]
+                sells = [row for row in day_fills if row["symbol"] == symbol and row["side"] == "sell"]
+                net = sum(int(row["quantity"]) for row in buys) - sum(int(row["quantity"]) for row in sells)
+                if net > 0:
+                    positions.append({
+                        "position_id": f"r6-fake-position:{day}:{symbol}",
+                        "market_date": day,
+                        "status": "OPEN",
+                        "symbol": symbol,
+                        "quantity": net,
+                        "source_ref": FAKE_BROKER_ID,
+                    })
+                closed = min(sum(int(row["quantity"]) for row in buys), sum(int(row["quantity"]) for row in sells))
+                if not closed:
+                    continue
+                buy_gross = sum(_money(row["price"]) * int(row["quantity"]) for row in buys)
+                sell_gross = sum(_money(row["price"]) * int(row["quantity"]) for row in sells)
+                fees = sum(_money(row["fee"]) for row in (*buys, *sells))
+                buy_qty = sum(int(row["quantity"]) for row in buys)
+                sell_qty = sum(int(row["quantity"]) for row in sells)
+                entry_price = buy_gross / buy_qty
+                exit_price = sell_gross / sell_qty
+                fill_ids = [str(row["fill_id"]) for row in (*buys, *sells)]
+                raw_payload = {
+                    "receipt_id": f"r6-fake-fill-truth:{day}:{symbol}",
+                    "account_id": self.account_id,
+                    "strategy_id": strategy_id,
+                    "strategy_version": strategy_version,
+                    "market_date": day,
+                    "session_id": f"XNYS:{day}:regular",
+                    "symbol": symbol,
+                    "run_id": intents[0]["intent_id"] if intents else f"r6-fake:{day}",
+                    "fill_id": fill_ids[-1],
+                    "execution_status": "CLOSED",
+                    "committed": True,
+                    "side": "long",
+                    "quantity": closed,
+                    "entry_price": str(entry_price.quantize(CENT)),
+                    "exit_price": str(exit_price.quantize(CENT)),
+                    "spread_cost_cents": 0,
+                    "slippage_cost_cents": 0,
+                    "fees_cents": int(fees * 100),
+                    "regulatory_cost_cents": 0,
+                    "borrow_cost_cents": 0,
+                    "research_only": True,
+                    "broker_execution_enabled": False,
+                    "evidence_mode": "r6_fake_broker",
+                    "fake_broker_id": FAKE_BROKER_ID,
+                }
+                raw_payload["receipt_hash_sha256"] = _hash(raw_payload)
+                trades.append({
+                    "trade_id": f"r6-fake-trade:{day}:{symbol}",
+                    "market_date": day,
+                    "source_ref": FAKE_BROKER_ID,
+                    "fill_truth": _mint_authenticated_fill_truth(raw_payload),
+                })
+        account = {
+            "account_id": self.account_id,
+            "opening_equity_cents": int(self.opening_cash * 100),
+            "strategy_id": strategy_id,
+            "strategy_version": strategy_version,
+            "execution_policy_version": R6_RUNTIME_POLICY_ID,
+            "cost_model_version": "r6-fake-broker-costs-v1",
+            "research_only": True,
+            "broker_execution_enabled": False,
+        }
+        canonical = CanonicalAccountLedger(
+            self.path, account_id=self.account_id, code_sha=str(intent_payload.get("code_sha") or "unknown")
+        )
+        self._last_canonical_result = canonical.build_and_persist(
+            account=account,
+            expected_sessions=sessions,
+            trades=trades,
+            positions=positions,
+            evidence_mode="r6_fake_broker",
+            lineage_sha256=_hash({"account": self.account_id, "fills": fills}),
+            calculated_at=datetime.now(timezone.utc).isoformat(),
+        )
 
     def close(self) -> None:
         self.db.close()
+
+
+# The adapter is intentionally exposed from the canonical module identity for
+# existing probes that require the canonical consumer boundary.
+CanonicalLedger.__module__ = CanonicalAccountLedger.__module__
 
 
 class R6Lifecycle:
@@ -640,6 +840,17 @@ class R6Lifecycle:
                 price=price,
             )
         except FakeBrokerError as exc:
+            self.ledger.record_event(
+                "exit_unresolved",
+                {
+                    "symbol": symbol,
+                    "market_date": market_date,
+                    "quantity": quantity,
+                    "client_order_id": client_order_id,
+                    "reason": str(exc),
+                    "position": self.ledger.position(symbol),
+                },
+            )
             return {
                 "status": "EXIT_UNRESOLVED",
                 "reason": str(exc),

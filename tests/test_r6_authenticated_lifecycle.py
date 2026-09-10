@@ -125,6 +125,17 @@ def _row(*, decision_at: str = "2026-09-09T16:00:00+00:00") -> tuple[dict, Recei
             "source_quality_status": "CLEAR",
             "spread_bps": 50,
             "session_status": "CLEAR",
+            "portfolio_positions": [],
+            "portfolio_pending": [],
+            "portfolio_daily_realized_pnl": 0.0,
+            "portfolio_daily_unrealized_pnl": 0.0,
+            "portfolio_peak_equity": "100000.00",
+            "portfolio_as_of": "2026-09-09T16:00:00+00:00",
+            "price_observed_at": "2026-09-09T16:00:00+00:00",
+            "portfolio_account_id": "acct-r6",
+            "portfolio_market_date": DAY,
+            "portfolio_sector": "technology",
+            "portfolio_theme": "product-event",
         },
     }
     return row, ReceiptContext(SOURCE, CONFIG, DAY, "acct-r6", "host-r6", CODE, PLAN)
@@ -152,6 +163,41 @@ def test_authenticated_entry_reaches_fake_broker_and_reconciles_partial_full_exi
     assert exited["status"] == "EXIT_FILLED"
     assert ledger.position("TEST") is None
     assert ledger.cash() == pytest.approx(Decimal("100237.24"))
+
+
+def test_portfolio_authority_rejects_current_plus_proposed_aggregate(tmp_path: Path) -> None:
+    row, context = _row()
+    row["r6_risk_inputs"] = dict(row["r6_risk_inputs"])
+    row["r6_risk_inputs"]["portfolio_positions"] = [{
+        "symbol": "OTHER",
+        "side": "long",
+        "quantity": 3000,
+        "mark_price": 10.0,
+        "entry_price": 10.0,
+        "stop_price": 9.0,
+        "sector": "technology",
+        "theme": "product-event",
+        "price_observed_at": "2026-09-09T16:00:00+00:00",
+    }]
+    with pytest.raises(ReceiptAuthenticationError, match="portfolio risk gate blocked"):
+        authenticate_entry_intent(row, context)
+
+
+def test_missing_portfolio_state_cannot_bypass_admission() -> None:
+    row, context = _row()
+    row["r6_risk_inputs"] = dict(row["r6_risk_inputs"])
+    del row["r6_risk_inputs"]["portfolio_positions"]
+    with pytest.raises(ReceiptAuthenticationError, match="portfolio risk state is incomplete"):
+        authenticate_entry_intent(row, context)
+
+
+def test_stale_portfolio_marks_reject_against_decision_time() -> None:
+    row, context = _row()
+    row["r6_risk_inputs"] = dict(row["r6_risk_inputs"])
+    row["r6_risk_inputs"]["portfolio_as_of"] = "2026-09-09T14:00:00+00:00"
+    row["r6_risk_inputs"]["price_observed_at"] = "2026-09-09T14:00:00+00:00"
+    with pytest.raises(ReceiptAuthenticationError, match="portfolio risk gate blocked"):
+        authenticate_entry_intent(row, context)
 
 
 def test_restart_recovery_and_duplicate_fill_are_idempotent(tmp_path: Path) -> None:
