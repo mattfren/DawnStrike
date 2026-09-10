@@ -6,6 +6,11 @@ from pathlib import Path
 import pytest
 
 from intraday_scanner.observation.ops09 import (
+    CAPTURE_BYTES,
+    DOWNSTREAM_BYTES,
+    MAX_BYTES,
+    NATIVE_RESERVED_BYTES,
+    _ByteLedger,
     Ops09Error,
     _sample_movers,
     prepare_ops09_cohort,
@@ -122,3 +127,42 @@ def test_operator_stop_is_durable_and_stops_pending_sessions(tmp_path: Path) -> 
     )
     assert state["status"] == "STOPPED"
     assert all(row["status"] == "STOPPED" for row in state["sessions"])
+
+
+def test_byte_ledger_admits_native_capture_and_rejects_overcommitted_downstream(
+    tmp_path: Path,
+) -> None:
+    output_root = tmp_path / "output"
+    database_root = tmp_path / "database"
+    identity = {
+        "cohort_id": "cohort-test",
+        "output_root": str(output_root.resolve()),
+        "database_root": str(database_root.resolve()),
+        "repository": {"code_sha": "a" * 40, "tree_sha": "b" * 40, "root": "fixture"},
+    }
+    ledger = _ByteLedger(output_root=output_root, database_root=database_root, identity=identity)
+    ledger.admit("capture", CAPTURE_BYTES + NATIVE_RESERVED_BYTES)
+    with pytest.raises(Ops09Error, match="cumulative byte budget rejects downstream"):
+        ledger.admit("downstream", DOWNSTREAM_BYTES)
+    released = ledger.release("capture")
+    assert released["reserved_bytes"] == CAPTURE_BYTES + NATIVE_RESERVED_BYTES
+    ledger.admit("downstream", DOWNSTREAM_BYTES)
+    ledger.release("downstream")
+    payload = json.loads((output_root / ".ops09-byte-ledger.json").read_text(encoding="utf-8"))
+    assert payload["max_bytes"] == MAX_BYTES
+    assert payload["reservations"] == {}
+
+
+def test_byte_ledger_rejects_identity_reuse_across_database_root(tmp_path: Path) -> None:
+    output_root = tmp_path / "output"
+    identity = {
+        "cohort_id": "cohort-test",
+        "output_root": str(output_root.resolve()),
+        "database_root": str((tmp_path / "database").resolve()),
+        "repository": {"code_sha": "a" * 40, "tree_sha": "b" * 40, "root": "fixture"},
+    }
+    _ByteLedger(output_root=output_root, database_root=tmp_path / "database", identity=identity)
+    changed = dict(identity)
+    changed["database_root"] = str((tmp_path / "other-database").resolve())
+    with pytest.raises(Ops09Error, match="identity changed"):
+        _ByteLedger(output_root=output_root, database_root=tmp_path / "other-database", identity=changed)

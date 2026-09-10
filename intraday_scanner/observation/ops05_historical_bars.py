@@ -34,6 +34,7 @@ MAX_PAGES = 100
 MAX_RETRIES = 3
 MAX_EVENTS = 10_000
 MAX_BYTES = 64 * 1024 * 1024
+_MAX_SUPPORTED_BYTES = MAX_BYTES
 MAX_RSS_BYTES = 256 * 1024 * 1024
 MAX_WALL_SECONDS = 1_800
 WINDOW_SCHEMA = "dawnstrike.ops05.historical_window.v1"
@@ -1447,7 +1448,12 @@ def produce_historical_bars(
         raise Ops05Error("OPS05 requires the existing Alpaca SIP provider; no feed fallback")
     if len(source_config_hash) != 64 or len(capture_receipt_hash) != 64:
         raise Ops05Error("source and capture identities must be SHA-256 values")
-    if not 1 <= max_bytes <= MAX_BYTES:
+    # Tests and offline durability probes may temporarily lower the module
+    # budget.  Preserve the historical omitted-argument behavior while still
+    # rejecting explicit values above the fixed public maximum.
+    if max_bytes == _MAX_SUPPORTED_BYTES and MAX_BYTES != _MAX_SUPPORTED_BYTES:
+        max_bytes = MAX_BYTES
+    if not 1 <= max_bytes <= _MAX_SUPPORTED_BYTES:
         raise Ops05Error("OPS05 byte limit must be between 1 and 64 MiB")
     root = Path(output_root).resolve()
     root.mkdir(parents=True, exist_ok=True)
