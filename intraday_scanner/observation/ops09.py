@@ -85,6 +85,16 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
+def _assert_budget(root: Path, reserve: int, phase: str) -> None:
+    """Admit a bounded phase before it can create any child output."""
+    used = _tree_bytes(root)
+    if used + reserve > MAX_BYTES:
+        raise Ops09Error(
+            f"OPS09 cumulative byte budget rejects {phase}: used={used}, "
+            f"reserve={reserve}, cap={MAX_BYTES}"
+        )
+
+
 def _read_object(path: Path, label: str) -> dict[str, Any]:
     if path.is_symlink() or not path.is_file():
         raise Ops09Error(f"{label} is not a regular file: {path}")
@@ -251,11 +261,23 @@ def _repo_identity(repo_root: Path) -> dict[str, str]:
 def prepare_ops09_cohort(
     *, output_root: Path, input_root: Path, scope_root: Path, database_root: Path,
     repo_root: Path, start_date: str = "2026-09-10", source_config_hash: str = "",
+    source_config_path: Path | None = None,
     entitlement_receipt: Path | None = None, runtime_env: Path | None = None,
+    dependency_stage_root: Path | None = None, dependency_stage_receipt_path: Path | None = None,
     python_path: Path = APPROVED_PYTHON,
 ) -> dict[str, Any]:
     toolchain = _toolchain(python_path)
     identity = _repo_identity(repo_root.resolve())
+    if source_config_path is None or not source_config_path.is_file():
+        raise Ops09Error("OPS09 requires an authenticated source-config path and SHA-256")
+    source_config_path = source_config_path.resolve()
+    actual_source_config_hash = _sha_file(source_config_path)
+    if source_config_hash.lower() != actual_source_config_hash:
+        raise Ops09Error("OPS09 source-config hash does not match the bound file")
+    if dependency_stage_root is not None and not dependency_stage_root.is_dir():
+        raise Ops09Error("OPS09 dependency stage root is missing")
+    if dependency_stage_receipt_path is not None and not dependency_stage_receipt_path.is_file():
+        raise Ops09Error("OPS09 dependency stage receipt is missing")
     if database_root.resolve() == Path(r"C:\r\dawnstrike-state\shadow_real.sqlite").resolve():
         raise Ops09Error("OPS09 refuses the active shadow database")
     sessions = expected_market_sessions(start_date)
@@ -271,10 +293,14 @@ def prepare_ops09_cohort(
         "input_root": str(input_root), "scope_root": str(scope_root), "database_root": str(database_root),
         "repository": identity, "toolchain": toolchain,
         "source_identity": {
-            "provider": "alpaca", "feed": "sip", "source_config_sha256": source_config_hash.lower() or None,
+            "provider": "alpaca", "feed": "sip", "source_config_sha256": actual_source_config_hash,
+            "source_config_path": str(source_config_path),
             "entitlement_receipt_path": str(entitlement_receipt.resolve()) if entitlement_receipt else None,
             "entitlement_receipt_sha256": _sha_file(entitlement_receipt) if entitlement_receipt else None,
             "runtime_env_path": str(runtime_env.resolve()) if runtime_env else None,
+            "dependency_stage_root": str(dependency_stage_root.resolve()) if dependency_stage_root else None,
+            "dependency_stage_receipt_path": str(dependency_stage_receipt_path.resolve()) if dependency_stage_receipt_path else None,
+            "entitlement_status": "BOUND" if entitlement_receipt else "UNBOUND_OFFLINE_ONLY",
             "raw_retention_policy": "immutable request/page/receipt lineage; no active-state writes",
         },
         "caps": {"max_pages": MAX_PAGES, "max_attempts_total": MAX_ATTEMPTS, "max_events": MAX_EVENTS,
@@ -317,32 +343,83 @@ def _request_contract(*, plan: dict[str, Any], session: dict[str, Any], scope: d
         "sampled_movers": scope["sampling"]["rows"], "missing_input": scope["missing_input"],
         "research_only": True, "broker_execution_enabled": False,
         "legacy_capture_receipt_hash_alias": True,
+        "capture_receipt_hash_alias": {
+            "source_field": "request_contract_sha256",
+            "target_cli_argument": "--capture-receipt-hash",
+            "semantics": "legacy OPS05 argument alias; request and capture identities remain distinct",
+            "authenticated": True,
+        },
+        "allowed_request_parameters": {
+            "provider": "alpaca", "feed": "sip", "endpoints": ["bars", "corporate_actions"],
+            "window_names": ["full_session", "prior_close"], "execute": "offline_fixture_or_explicit_execute",
+        },
         "limits": plan["caps"], "repository": plan["repository"], "toolchain": plan["toolchain"],
     }
     contract["request_contract_sha256"] = _sha(contract)
     return contract
 
 
+def _validate_request_contract(
+    contract: dict[str, Any], *, plan: dict[str, Any], session: dict[str, Any], scope: dict[str, Any], scope_path: Path
+) -> None:
+    declared = contract.get("request_contract_sha256")
+    unsigned = dict(contract)
+    unsigned.pop("request_contract_sha256", None)
+    if not isinstance(declared, str) or _sha(unsigned) != declared:
+        raise Ops09Error("OPS09 immutable request contract hash is invalid")
+    if contract.get("status") != "REQUESTED" or contract.get("market_date") != session["market_date"]:
+        raise Ops09Error("OPS09 immutable request contract conflicts with resumed session")
+    if contract.get("session_id") != session["exchange_session_id"] or contract.get("scope_sha256") != scope["sha256"]:
+        raise Ops09Error("OPS09 immutable request contract session or scope identity changed")
+    if Path(str(contract.get("scope_path") or "")).resolve() != scope_path.resolve():
+        raise Ops09Error("OPS09 immutable request contract scope path changed")
+    lineage = plan["source_identity"]
+    if contract.get("source_config_sha256") != lineage.get("source_config_sha256"):
+        raise Ops09Error("OPS09 immutable request contract source-config identity changed")
+    source_path = Path(str(lineage.get("source_config_path") or ""))
+    if not source_path.is_file() or _sha_file(source_path) != str(lineage.get("source_config_sha256") or ""):
+        raise Ops09Error("OPS09 bound source-config is missing or changed")
+    if contract.get("repository") != plan.get("repository") or contract.get("toolchain") != plan.get("toolchain"):
+        raise Ops09Error("OPS09 immutable request contract runtime identity changed")
+    if contract.get("provider") != "alpaca" or contract.get("feed") != "sip" or contract.get("endpoints") != ["bars", "corporate_actions"]:
+        raise Ops09Error("OPS09 request parameters are outside the allowed provider scope")
+    alias = contract.get("capture_receipt_hash_alias")
+    if not isinstance(alias, dict) or alias.get("source_field") != "request_contract_sha256" or alias.get("target_cli_argument") != "--capture-receipt-hash" or alias.get("authenticated") is not True:
+        raise Ops09Error("OPS09 capture hash alias is not typed and authenticated")
+
+
 def _run_capture(*, plan: dict[str, Any], session: dict[str, Any], contract: dict[str, Any],
                  scope: dict[str, Any], scope_path: Path, session_root: Path, fixture: Path | None,
-                 execute: bool) -> dict[str, Any]:
+                 execute: bool, timeout_seconds: int) -> dict[str, Any]:
     capture_root = session_root / "capture"
     census_path = session_root / "capture-census.json"
+    _assert_budget(session_root.parent, CAPTURE_BYTES, "capture phase")
     movers = scope["scope"].get("scopes", {}).get("original_small_cap_gap", [])
+    census_path.parent.mkdir(parents=True, exist_ok=True)
     census_path.write_text(json.dumps(movers, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-    args = [str(plan["toolchain"]["path"]), str(Path(plan["repository"]["root"]) / "scripts" / "ops05_historical_bars.py"),
-            "--market-date", session["market_date"], "--census", str(census_path), "--output-root", str(capture_root),
-            "--source-config-hash", str(contract.get("source_config_sha256") or _sha_file(scope_path)),
-            "--capture-receipt-hash", contract["request_contract_sha256"]]
+    argument_list = [str(Path(plan["repository"]["root"]) / "scripts" / "ops05_historical_bars.py"),
+                     "--market-date", session["market_date"], "--census", str(census_path), "--output-root", str(capture_root),
+                     "--source-config-hash", str(contract["source_config_sha256"]),
+                     "--capture-receipt-hash", contract["request_contract_sha256"], "--resume-across-roots"]
     if fixture is not None:
-        args += ["--fixture", str(fixture)]
+        argument_list += ["--fixture", str(fixture)]
     elif execute:
-        args += ["--execute", "--env-file", str(plan["source_identity"].get("runtime_env_path") or ".env")]
+        argument_list += ["--execute", "--env-file", str(plan["source_identity"].get("runtime_env_path") or ".env")]
     else:
         return {"status": "READY", "request": contract, "reason": "execute not requested"}
+    wrapper = Path(plan["repository"]["root"]) / "scripts" / "run_ops05_under_job.ps1"
+    log_root = session_root / "native-wrapper"
+    args = ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(wrapper),
+            "-RepoRoot", str(plan["repository"]["root"]), "-LogRoot", str(log_root),
+            "-ExpectedSourceSha", str(plan["repository"]["code_sha"]),
+            "-ArgumentJson", json.dumps(argument_list, separators=(",", ":")), "-TimeoutSeconds", str(timeout_seconds)]
+    stage_root = plan["source_identity"].get("dependency_stage_root")
+    stage_receipt = plan["source_identity"].get("dependency_stage_receipt_path")
+    if stage_root and stage_receipt:
+        args += ["-DependencyStageRoot", str(stage_root), "-DependencyStageReceiptPath", str(stage_receipt)]
     try:
         completed = subprocess.run(args, cwd=plan["repository"]["root"], capture_output=True, text=True,
-                                   timeout=MAX_WALL_SECONDS, check=False)
+                                   timeout=max(1, timeout_seconds + 5), check=False)
     except subprocess.TimeoutExpired:
         return {"status": "DEGRADED", "reason": "capture_wall_timeout", "command": args}
     output = (completed.stdout or "").splitlines()
@@ -392,6 +469,11 @@ def _resume_ops09_unlocked(*, output_root: Path, input_root: Path, scope_root: P
     if state.get("database_root") != str(database_root.resolve()) or database_root.resolve() == Path(r"C:\r\dawnstrike-state\shadow_real.sqlite").resolve():
         raise Ops09Error("OPS09 database root is not isolated")
     now_utc = now or datetime.now(UTC)
+    if not state.get("cohort_started_at"):
+        state["cohort_started_at"] = now_utc.isoformat()
+        state["cohort_deadline_at"] = (now_utc.timestamp() + MAX_WALL_SECONDS)
+        _atomic_json(state_path, state)
+    deadline = float(state.get("cohort_deadline_at") or now_utc.timestamp())
     stop_path = output_root / ".cohort.stop"
     for index, session in enumerate(state["sessions"]):
         if stop_path.exists():
@@ -412,17 +494,31 @@ def _resume_ops09_unlocked(*, output_root: Path, input_root: Path, scope_root: P
             scope = validate_ops09_scope(scope_path, expected_date=session["market_date"])
         except Ops09Error as exc:
             session.update({"status": "DEGRADED", "reason": str(exc), "operator_intervention": "repair exact date-bound scope"}); continue
+        remaining = int(deadline - now_utc.timestamp())
+        if remaining < 1:
+            state["status"] = "DEGRADED"; state["reason"] = "cohort wall-time budget exhausted"
+            _atomic_json(state_path, state)
+            return state
         session_root = output_root / session["market_date"]; session_root.mkdir(parents=True, exist_ok=True)
+        if int(session.get("attempts") or 0) >= MAX_ATTEMPTS:
+            session.update({"status": "DEGRADED", "reason": "capture attempt budget exhausted", "decision_eligibility": "ZERO"})
+            continue
+        session["attempts"] = int(session.get("attempts") or 0) + 1
         session["status"] = "RUNNING"
         _atomic_json(state_path, state)
-        contract = _request_contract(plan=state, session=session, scope=scope, scope_path=scope_path)
-        _atomic_json(Path(session["request_contract_path"]), contract)
+        contract_path = Path(session["request_contract_path"])
+        if contract_path.is_file():
+            contract = _read_object(contract_path, "OPS09 request contract")
+            _validate_request_contract(contract, plan=state, session=session, scope=scope, scope_path=scope_path)
+        else:
+            contract = _request_contract(plan=state, session=session, scope=scope, scope_path=scope_path)
+            _atomic_json(contract_path, contract)
         if not execute:
             session.update({"status": "READY", "request_contract_sha256": contract["request_contract_sha256"], "scope": scope}); continue
         fixture = (fixture_root.resolve() / session["market_date"] / "fixture.json") if fixture_root else None
         if fixture is not None and not fixture.is_file(): fixture = None
         capture = _run_capture(plan=state, session=session, contract=contract, scope=scope, scope_path=scope_path,
-                               session_root=session_root, fixture=fixture, execute=execute)
+                               session_root=session_root, fixture=fixture, execute=execute, timeout_seconds=remaining)
         session.update({"capture": {k: v for k, v in capture.items() if k not in {"receipt"}},
                         "request_contract_sha256": contract["request_contract_sha256"]})
         if capture.get("status") != "CAPTURED":
@@ -431,6 +527,7 @@ def _resume_ops09_unlocked(*, output_root: Path, input_root: Path, scope_root: P
         if decision_path is None or not decision_path.is_file():
             session.update({"status": "PARTIAL", "decision_status": "MISSING_INPUT", "decision_eligibility": "ZERO", "reason": "raw capture retained; decision artifact missing"}); continue
         try:
+            _assert_budget(output_root, DOWNSTREAM_BYTES, "adapter and consumer phase")
             adapted = adapt_ops05_to_r3(observation_root=Path(capture["capture_root"]), decision_artifact=decision_path,
                                         output_root=session_root / "ops06", as_of=state["expected_sessions"][index]["end_utc"])
             consumers = _run_consumers(adapted=adapted, database_path=database_root / f"{session['market_date']}.sqlite",

@@ -15,6 +15,14 @@ from intraday_scanner.observation.ops09 import (
 from intraday_scanner.observation.cohort import APPROVED_PYTHON
 
 
+def _source_config(tmp_path: Path) -> tuple[Path, str]:
+    path = tmp_path / "source-config.json"
+    path.write_text('{"provider":"fixture","feed":"sip"}\n', encoding="utf-8")
+    import hashlib
+
+    return path, hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def _scope(tmp_path: Path, market_date: str = "2026-09-10", *, missing: bool = False) -> Path:
     marker = tmp_path / "producer.json"
     marker.write_text(json.dumps({"source": "fixture", "market_date": market_date}), encoding="utf-8")
@@ -85,10 +93,11 @@ def test_missing_input_is_explicit_panel_partial(tmp_path: Path) -> None:
 
 
 def test_prepare_freezes_ten_sessions_and_caps(tmp_path: Path) -> None:
+    source_path, source_hash = _source_config(tmp_path)
     plan = prepare_ops09_cohort(
         output_root=tmp_path / "out", input_root=tmp_path / "in", scope_root=tmp_path / "scope",
         database_root=tmp_path / "db", repo_root=Path(__file__).parents[1],
-        source_config_hash="a" * 64, python_path=APPROVED_PYTHON,
+        source_config_hash=source_hash, source_config_path=source_path, python_path=APPROVED_PYTHON,
     )
     assert len(plan["expected_sessions"]) == 10
     assert plan["caps"]["max_pages"] == 100
@@ -99,10 +108,11 @@ def test_prepare_freezes_ten_sessions_and_caps(tmp_path: Path) -> None:
 
 def test_operator_stop_is_durable_and_stops_pending_sessions(tmp_path: Path) -> None:
     out = tmp_path / "out"
+    source_path, source_hash = _source_config(tmp_path)
     prepare_ops09_cohort(
         output_root=out, input_root=tmp_path / "in", scope_root=tmp_path / "scope",
         database_root=tmp_path / "db", repo_root=Path(__file__).parents[1],
-        source_config_hash="a" * 64, python_path=APPROVED_PYTHON,
+        source_config_hash=source_hash, source_config_path=source_path, python_path=APPROVED_PYTHON,
     )
     (out / ".cohort.stop").write_text("operator test\n", encoding="utf-8")
     state = resume_ops09_cohort(
