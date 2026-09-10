@@ -8,6 +8,7 @@ active production state is never opened for writing.
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import sqlite3
@@ -132,6 +133,57 @@ def _members(handoff: dict[str, Any], market_date: str) -> list[dict[str, Any]]:
     if len({row["ticker"] for row in rows}) != len(rows):
         raise ValueError("handoff contains duplicate tickers")
     return rows
+
+
+def _validate_members_against_snapshot(
+    handoff: dict[str, Any], members: list[dict[str, Any]], snapshot: Path, market_date: str
+) -> str:
+    """Bind handoff members to the separate date-bound source rowset.
+
+    The handoff is an authenticated decision input, but it is not allowed to
+    define its own membership authority.  The existing alpha-cycle premarket
+    snapshot is the independent rowset for this date; its file hash and
+    canonical ticker/source rows are retained in the registration identity.
+    """
+    with snapshot.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    by_ticker: dict[str, dict[str, str]] = {}
+    for row in rows:
+        ticker = str(row.get("ticker") or "").strip().upper()
+        if not ticker or ticker in by_ticker:
+            raise ValueError("actual source snapshot has duplicate or empty members")
+        row_date = str(row.get("market_date") or "").strip()
+        if row_date and row_date != market_date:
+            raise ValueError("actual source snapshot has a cross-date member")
+        by_ticker[ticker] = row
+    if len(by_ticker) != len(members):
+        raise ValueError("actual handoff member count differs from source snapshot")
+    handoff_by_ticker = {
+        str(member.get("symbol") or "").strip().upper(): member
+        for member in handoff.get("members") or []
+        if isinstance(member, dict)
+    }
+    canonical_rows: list[dict[str, Any]] = []
+    for member in members:
+        ticker = str(member["ticker"]).upper()
+        source_row = by_ticker.get(ticker)
+        if source_row is None:
+            raise ValueError("actual handoff member is absent from source snapshot")
+        handoff_member = handoff_by_ticker.get(ticker) or {}
+        handoff_row = (handoff_member.get("member_lineage") or {}).get("source_row") or {}
+        expected_company = str(handoff_row.get("company") or "").strip()
+        actual_company = str(source_row.get("company") or "").strip()
+        if expected_company and actual_company and expected_company != actual_company:
+            raise ValueError("actual handoff member company differs from source snapshot")
+        canonical_rows.append({
+            "ticker": ticker,
+            "company": actual_company,
+            "source": str(source_row.get("source") or ""),
+            "source_timestamp": str(source_row.get("source_timestamp") or ""),
+            "as_of_timestamp": str(source_row.get("as_of_timestamp") or ""),
+            "extracted_at": str(source_row.get("extracted_at") or ""),
+        })
+    return canonical_hash(sorted(canonical_rows, key=lambda row: row["ticker"]))
 
 
 def prepare(
@@ -337,6 +389,9 @@ def prepare_actual_observational_registration(
         str(row.get("ticker") or "").upper(): row for row in decisions
     }
     members = _members(handoff, market_date)
+    member_source_rowset_sha256 = _validate_members_against_snapshot(
+        handoff, members, paths["snapshot"], market_date
+    )
     # Membership is derived from the source decision disposition only for
     # sampling metadata; the original decision action remains untouched.
     mover_rows: list[dict[str, Any]] = []
@@ -390,6 +445,11 @@ def prepare_actual_observational_registration(
     source_artifacts = {}
     for name, path in paths.items():
         source_artifacts[name] = {"path": str(path), "sha256": _sha256(path)}
+        if name == "snapshot":
+            source_artifacts[name].update({
+                "rowset_sha256": member_source_rowset_sha256,
+                "hash_semantics": "authenticated_member_source_rowset",
+            })
         if name == "source_db":
             source_artifacts[name].update({
                 "hash_semantics": "read_only_rowset_at_extraction_time",
@@ -411,6 +471,7 @@ def prepare_actual_observational_registration(
         "source_identity": (handoff.get("mover_source") or {}).get("source_identity"),
         "decision_rowset_sha256": db_identity["rowset_sha256"],
         "typed_census_sha256": _sha256(typed_census) if typed_census is not None else None,
+        "member_source_rowset_sha256": member_source_rowset_sha256,
     }
     scope = {
         "schema_version": "dawnstrike.observation.scope_declaration.v1",
@@ -455,6 +516,7 @@ def prepare_actual_observational_registration(
                 for name in ("selected", "rejected", "unselected", "missing_input")
             },
         }
+    receipt["source"]["member_source_rowset_sha256"] = member_source_rowset_sha256
     # The scope binds the receipt hash below.  Keep only the path in the
     # receipt to avoid a circular receipt<->scope hash relationship.
     receipt["scope"] = {"path": str(scope_path)}

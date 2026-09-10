@@ -8,6 +8,7 @@ It never turns delayed bars into timely features, quote truth, fills, or PnL.
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 import math
@@ -140,6 +141,34 @@ def _registration_context(
         or not source_identity.get("handoff_run_id")
     ):
         raise Ops06AdapterError("observational source identity is incomplete")
+    snapshot_item = sources.get("snapshot")
+    snapshot_path = Path(str((snapshot_item or {}).get("path") or ""))
+    expected_member_hash = str(source_identity.get("member_source_rowset_sha256") or "").lower()
+    if not snapshot_path.is_file() or not _HEX64.fullmatch(expected_member_hash):
+        raise Ops06AdapterError("observational member source row-set identity is missing")
+    with snapshot_path.open(newline="", encoding="utf-8") as handle:
+        snapshot_rows = list(csv.DictReader(handle))
+    snapshot_members: dict[str, dict[str, str]] = {}
+    for row in snapshot_rows:
+        symbol = str(row.get("ticker") or "").strip().upper()
+        if not symbol or symbol in snapshot_members:
+            raise Ops06AdapterError("observational member source row-set is malformed")
+        snapshot_members[symbol] = row
+    canonical_members = [
+        {
+            "ticker": symbol,
+            "company": str(row.get("company") or "").strip(),
+            "source": str(row.get("source") or ""),
+            "source_timestamp": str(row.get("source_timestamp") or ""),
+            "as_of_timestamp": str(row.get("as_of_timestamp") or ""),
+            "extracted_at": str(row.get("extracted_at") or ""),
+        }
+        for symbol, row in sorted(snapshot_members.items())
+    ]
+    if _sha_json(canonical_members) != expected_member_hash:
+        raise Ops06AdapterError("observational member source row-set hash is invalid")
+    if {str(row.get("symbol") or "").upper() for row in census_rows} != set(snapshot_members):
+        raise Ops06AdapterError("observational full census does not match member source row-set")
     return {
         "path": str(context_path),
         "sha256": _sha_bytes(context_path.read_bytes()),

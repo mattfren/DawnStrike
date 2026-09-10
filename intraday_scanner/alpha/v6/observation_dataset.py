@@ -98,12 +98,23 @@ def build_observation_dataset(
         by_symbol.setdefault(str(event["symbol"]).upper(), []).append(event)
     labels: list[dict[str, Any]] = []
     diagnostics: list[dict[str, Any]] = []
+    authenticated_registration = observational_universe_id is not None
     entry_by_symbol = {
-        entry.symbol: entry for entry in typed_manifest.entries if entry.membership == "selected"
+        entry.symbol: entry
+        for entry in typed_manifest.entries
+        if authenticated_registration or entry.membership == "selected"
     }
     for decision in decision_rows:
         ticker = str(decision.get("ticker") or "").upper()
         if ticker not in entry_by_symbol:
+            if authenticated_registration:
+                diagnostics.append(
+                    _diagnostic(
+                        decision,
+                        "MISSING_INPUT",
+                        "decision_symbol_not_in_registered_census",
+                    )
+                )
             continue
         # A decision from another market date/session is never allowed to be
         # joined to this manifest.  Keeping this check at the producer
@@ -169,6 +180,11 @@ def build_observation_dataset(
             close_identity=close_identity,
             target_contract=target_contract_value,
         )
+        result["diagnostic"]["registered_membership"] = entry_by_symbol[ticker].membership
+        result["diagnostic"]["trade_eligibility"] = False
+        if result.get("label") is not None:
+            result["label"]["registered_membership"] = entry_by_symbol[ticker].membership
+            result["label"]["trade_eligibility"] = False
         diagnostics.append(result["diagnostic"])
         if result.get("label") is not None:
             labels.append(result["label"])

@@ -57,9 +57,11 @@ class Ops09Error(ValueError):
 class _ByteLedger:
     """Durable, source-owned reservation ledger for one logical session."""
 
-    def __init__(self, *, output_root: Path, database_root: Path, identity: dict[str, Any]) -> None:
+    def __init__(self, *, output_root: Path, database_root: Path,
+                 identity: dict[str, Any], extra_roots: tuple[Path, ...] = ()) -> None:
         self.output_root = output_root.resolve()
         self.database_root = database_root.resolve()
+        self.extra_roots = tuple(path.resolve() for path in extra_roots)
         self.path = self.output_root / ".ops09-byte-ledger.json"
         self.identity = identity
         self.output_root.mkdir(parents=True, exist_ok=True)
@@ -78,7 +80,12 @@ class _ByteLedger:
             self._write()
 
     def _actual_bytes(self) -> int:
-        return _tree_bytes(self.output_root) + _tree_bytes(self.database_root)
+        roots = (self.output_root, self.database_root, *self.extra_roots)
+        unique: list[Path] = []
+        for root in roots:
+            if root not in unique:
+                unique.append(root)
+        return sum(_tree_bytes(root) for root in unique)
 
     def _write(self) -> None:
         payload = {
@@ -156,17 +163,20 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
 
 
 def _atomic_json_bounded(
-    path: Path, value: dict[str, Any], *, root: Path, baseline_bytes: int, max_bytes: int
+    path: Path, value: dict[str, Any], *, root: Path, max_bytes: int
 ) -> None:
     """Publish one exact receipt only when its temp+final peak fits the child cap."""
     data = json.dumps(value, sort_keys=True, indent=2, default=str).encode() + b"\n"
+    root = root.resolve()
+    path = path.resolve()
+    if not path.is_relative_to(root):
+        raise Ops09Error(f"OPS09 downstream publication escaped account root: {path}")
     current = _tree_bytes(root)
-    existing = path.stat().st_size if path.is_file() else 0
-    projected_delta = current - baseline_bytes + existing + len(data) + len(data)
-    if projected_delta > max_bytes:
+    projected_peak = current + len(data)
+    if projected_peak > max_bytes:
         raise Ops09Error(
             f"OPS09 downstream publication budget rejects {path.name}: "
-            f"projected={projected_delta}, cap={max_bytes}"
+            f"projected={projected_peak}, cap={max_bytes}"
         )
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -401,20 +411,9 @@ def prepare_ops09_cohort(
         raise Ops09Error("OPS09 refuses the active shadow database")
     if producer_mode not in {"fixture", "actual"}:
         raise Ops09Error("OPS09 producer mode must be fixture or actual")
-    actual_registration: dict[str, Any] | None = None
     if producer_mode == "actual":
         if actual_source_root is None:
             raise Ops09Error("OPS09 actual mode requires an existing source root")
-        from scripts.prepare_r3_observational_registration import (
-            prepare_actual_observational_registration,
-        )
-        actual_root = scope_root.resolve() / start_date / "actual-producer"
-        actual_registration = prepare_actual_observational_registration(
-            source_root=actual_source_root, output_root=actual_root,
-            market_date=start_date, entitlement=actual_entitlement,
-            source_config=source_config_path,
-            typed_census=actual_census_path,
-        )
         if entitlement_receipt is None:
             entitlement_receipt = actual_entitlement
     sessions = expected_market_sessions(start_date)
@@ -433,7 +432,10 @@ def prepare_ops09_cohort(
             "provider": "alpaca", "feed": "sip", "source_config_sha256": actual_source_config_hash,
             "source_config_path": str(source_config_path),
             "entitlement_receipt_path": str(entitlement_receipt.resolve()) if entitlement_receipt else None,
-            "entitlement_receipt_sha256": _sha_file(entitlement_receipt) if entitlement_receipt else None,
+            "entitlement_receipt_sha256": (
+                _sha_file(entitlement_receipt)
+                if entitlement_receipt and entitlement_receipt.is_file() else None
+            ),
             "runtime_env_path": str(runtime_env.resolve()) if runtime_env else None,
             "dependency_stage_root": str(dependency_stage_root.resolve()) if dependency_stage_root else None,
             "dependency_stage_receipt_path": str(dependency_stage_receipt_path.resolve()) if dependency_stage_receipt_path else None,
@@ -450,7 +452,7 @@ def prepare_ops09_cohort(
             {**session, "status": "EXPECTED", "attempts": 0,
              "scope_path": str(
                  (scope_root / session["market_date"] / "actual-producer" / "scope.json")
-                 if producer_mode == "actual" and session["market_date"] == start_date
+                 if producer_mode == "actual"
                  else (scope_root / session["market_date"] / "scope.json")
              ),
              "fixture_path": (
@@ -459,11 +461,11 @@ def prepare_ops09_cohort(
              ),
              "decision_artifact_path": (
                  str((scope_root / session["market_date"] / "actual-producer" / "alpha_v6_decisions.actual.json"))
-                 if producer_mode == "actual" and session["market_date"] == start_date else None
+                 if producer_mode == "actual" else None
              ),
              "registration_context_path": (
                  str(scope_root / session["market_date"] / "actual-producer" / "scope.json")
-                 if producer_mode == "actual" and session["market_date"] == start_date else None
+                 if producer_mode == "actual" else None
              ),
              "retained_capture_root": (
                  str(retained_capture_root.resolve())
@@ -476,12 +478,12 @@ def prepare_ops09_cohort(
     }
     plan["producer_mode"] = producer_mode
     plan["actual_source_root"] = str(actual_source_root.resolve()) if actual_source_root else None
+    plan["actual_entitlement_path"] = str(actual_entitlement.resolve()) if actual_entitlement else None
     plan["retained_capture_root"] = str(retained_capture_root.resolve()) if retained_capture_root else None
     plan["actual_census_path"] = str(actual_census_path.resolve()) if actual_census_path else None
-    plan["actual_registration"] = (
-        {"scope_path": actual_registration["scope_path"],
-         "status": actual_registration["status"]}
-        if actual_registration else None
+    plan["actual_registration"] = None
+    plan["actual_registration_contract"] = (
+        "child-native-per-date-source-discovery" if producer_mode == "actual" else None
     )
     _atomic_json(output_root / "cohort-plan.json", plan)
     _atomic_json(output_root / "cohort-state.json", {**plan, "schema_version": OPS09_STATE_SCHEMA})
@@ -580,8 +582,8 @@ def _validate_request_contract(
         raise Ops09Error("OPS09 capture hash alias is not typed and authenticated")
 
 
-def _run_capture_unbudgeted(*, plan: dict[str, Any], session: dict[str, Any], contract: dict[str, Any],
-                 scope: dict[str, Any], scope_path: Path, session_root: Path, fixture: Path | None,
+def _run_capture_unbudgeted(*, plan: dict[str, Any], session: dict[str, Any], contract: dict[str, Any] | None,
+                 scope: dict[str, Any] | None, scope_path: Path, session_root: Path, fixture: Path | None,
                  execute: bool, timeout_seconds: int, decision_artifact: Path | None,
                  database_path: Path, as_of: str, downstream_max_bytes: int,
                  registration_context: Path | None = None,
@@ -589,20 +591,38 @@ def _run_capture_unbudgeted(*, plan: dict[str, Any], session: dict[str, Any], co
     capture_root = session_root / "capture"
     census_path = session_root / "capture-census.json"
     _assert_budget(session_root.parent, CAPTURE_BYTES, "capture phase")
-    movers = scope["scope"].get("scopes", {}).get("original_small_cap_gap", [])
+    movers = (scope or {}).get("scope", {}).get("scopes", {}).get("original_small_cap_gap", [])
     census_path.parent.mkdir(parents=True, exist_ok=True)
-    census_path.write_text(json.dumps(movers, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    if movers:
+        census_path.write_text(json.dumps(movers, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     argument_list = [str(Path(plan["repository"]["root"]) / "scripts" / "ops09_pipeline.py"),
-                     "--market-date", session["market_date"], "--census", str(census_path), "--output-root", str(capture_root),
-                     "--source-config-hash", str(contract["source_config_sha256"]),
-                      "--capture-receipt-hash", contract["request_contract_sha256"],
+                     "--market-date", session["market_date"], "--output-root", str(capture_root),
+                     "--source-config-hash", str(contract["source_config_sha256"] if contract else plan["source_identity"]["source_config_sha256"]),
                       "--max-bytes", str(CAPTURE_BYTES),
                       "--repo-sha", str(plan["repository"]["code_sha"]), "--as-of", as_of,
                       "--database-path", str(database_path),
                       "--adapter-output-root", str(session_root / "ops06")]
-    if decision_artifact is not None:
+    if movers and plan.get("producer_mode") != "actual":
+        argument_list += ["--census", str(census_path)]
+    if contract is not None:
+        argument_list += ["--capture-receipt-hash", contract["request_contract_sha256"]]
+    if plan.get("producer_mode") == "actual":
         argument_list += [
-            "--decision-artifact", str(decision_artifact),
+            "--producer-mode", "actual",
+            "--actual-source-root", str(plan["actual_source_root"]),
+            "--source-config", str(plan["source_identity"]["source_config_path"]),
+            "--registration-output-root", str(scope_path.parent),
+            "--request-contract-output", str(session_root / "request-contract.json"),
+            "--cohort-plan", str(session_root.parent / "cohort-plan.json"),
+        ]
+        if plan.get("actual_entitlement_path"):
+            argument_list += ["--actual-entitlement", str(plan["actual_entitlement_path"])]
+        if plan.get("actual_census_path"):
+            argument_list += ["--actual-census", str(plan["actual_census_path"])]
+    if decision_artifact is not None or plan.get("producer_mode") == "actual":
+        decision_arg = decision_artifact or (scope_path.parent / "alpha_v6_decisions.actual.json")
+        argument_list += [
+            "--decision-artifact", str(decision_arg),
             "--downstream-max-bytes", str(downstream_max_bytes),
             "--in-memory-consumer",
         ]
@@ -614,7 +634,7 @@ def _run_capture_unbudgeted(*, plan: dict[str, Any], session: dict[str, Any], co
         argument_list += ["--fixture", str(fixture)]
     elif execute:
         argument_list += ["--execute", "--env-file", str(plan["source_identity"].get("runtime_env_path") or ".env")]
-    elif retained_capture_root is None:
+    elif retained_capture_root is None and plan.get("producer_mode") != "actual":
         return {"status": "READY", "request": contract, "reason": "execute not requested"}
     wrapper = Path(plan["repository"]["root"]) / "scripts" / "run_ops05_under_job.ps1"
     log_root = session_root / "native-wrapper"
@@ -695,7 +715,7 @@ def _run_capture_unbudgeted(*, plan: dict[str, Any], session: dict[str, Any], co
 
 
 def _run_capture(*, ledger: _ByteLedger, plan: dict[str, Any], session: dict[str, Any],
-                 contract: dict[str, Any], scope: dict[str, Any], scope_path: Path,
+                 contract: dict[str, Any] | None, scope: dict[str, Any] | None, scope_path: Path,
                  session_root: Path, fixture: Path | None, execute: bool, timeout_seconds: int,
                  decision_artifact: Path | None, database_path: Path, as_of: str,
                  registration_context: Path | None = None,
@@ -703,12 +723,27 @@ def _run_capture(*, ledger: _ByteLedger, plan: dict[str, Any], session: dict[str
     """Reserve capture plus all native output before starting the child."""
     phase = f"capture:{session['market_date']}"
     ledger.admit(phase, CAPTURE_BYTES + NATIVE_RESERVED_BYTES)
+    attempt_path = _attempt_state_path(session_root)
+    attempt_state = {
+        "schema_version": "dawnstrike.ops09.attempt.v1",
+        "status": "RUNNING",
+        "accounting_status": "PENDING",
+        "market_date": session["market_date"],
+        "attempt_number": int(session.get("attempts") or 0),
+        "started_at": datetime.now(UTC).isoformat(),
+        "admitted_elapsed_seconds": float(timeout_seconds),
+        "timeout_seconds": int(timeout_seconds),
+        "session_identity": ledger.identity,
+    }
+    _atomic_json(attempt_path, attempt_state)
+    started_mono = time.monotonic()
+    result: dict[str, Any] | None = None
     downstream_max_bytes = max(
         0,
         MAX_BYTES - ledger._actual_bytes() - CAPTURE_BYTES - NATIVE_RESERVED_BYTES,
     )
     try:
-        return _run_capture_unbudgeted(
+        result = _run_capture_unbudgeted(
             plan=plan, session=session, contract=contract, scope=scope, scope_path=scope_path,
             session_root=session_root, fixture=fixture, execute=execute,
             timeout_seconds=timeout_seconds, decision_artifact=decision_artifact,
@@ -718,7 +753,18 @@ def _run_capture(*, ledger: _ByteLedger, plan: dict[str, Any], session: dict[str
             retained_capture_root=retained_capture_root,
         )
     finally:
+        elapsed = max(0.0, time.monotonic() - started_mono)
+        attempt_state.update({
+            "status": "COMPLETED" if result is not None else "INTERRUPTED",
+            "actual_elapsed_seconds": round(elapsed, 6),
+            "finished_at": datetime.now(UTC).isoformat(),
+        })
+        _atomic_json(attempt_path, attempt_state)
         ledger.release(phase)
+    if result is not None:
+        result["attempt_elapsed_seconds"] = round(elapsed, 6)
+        result["attempt_state_path"] = str(attempt_path)
+    return result or {"status": "INTERRUPTED", "attempt_state_path": str(attempt_path)}
 
 
 def _run_consumers(
@@ -833,6 +879,48 @@ def _refresh_session_elapsed(
     return max(0, int(MAX_WALL_SECONDS - elapsed))
 
 
+def _attempt_state_path(session_root: Path) -> Path:
+    return session_root / ".ops09-attempt.json"
+
+
+def _recover_attempt_accounting(
+    *, state: dict[str, Any], session: dict[str, Any], session_root: Path,
+    state_path: Path,
+) -> None:
+    """Charge a completed or uncertain prior child before deriving a timeout."""
+    path = _attempt_state_path(session_root)
+    if not path.is_file():
+        return
+    attempt = _read_object(path, "OPS09 attempt state")
+    if attempt.get("schema_version") != "dawnstrike.ops09.attempt.v1":
+        raise Ops09Error("OPS09 attempt state schema is unsupported")
+    if attempt.get("accounting_status") == "ACCOUNTED":
+        return
+    status = str(attempt.get("status") or "")
+    if status == "RUNNING":
+        # A parent can die before its finally path.  No child receipt is
+        # evidence that the admitted interval was unused, so charge the full
+        # conservative timeout that was admitted before launch.
+        charge = float(attempt.get("admitted_elapsed_seconds") or MAX_WALL_SECONDS)
+        recovery = "conservative_admitted_charge_after_uncertain_parent_exit"
+    elif status in {"COMPLETED", "INTERRUPTED"}:
+        charge = float(attempt.get("actual_elapsed_seconds") or 0.0)
+        recovery = "durable_finally_elapsed_charge"
+    else:
+        raise Ops09Error("OPS09 attempt state is neither running nor terminal")
+    if charge < 0 or charge > MAX_WALL_SECONDS:
+        raise Ops09Error("OPS09 attempt elapsed charge is invalid")
+    prior = float(session.get("elapsed_seconds") or 0.0)
+    session["elapsed_seconds"] = round(min(MAX_WALL_SECONDS, prior + charge), 6)
+    session["elapsed_recovery"] = recovery
+    session["last_attempt_elapsed_seconds"] = round(charge, 6)
+    attempt["accounting_status"] = "ACCOUNTED"
+    attempt["accounted_elapsed_seconds"] = round(charge, 6)
+    attempt["accounted_at"] = datetime.now(UTC).isoformat()
+    _atomic_json(path, attempt)
+    _atomic_json(state_path, state)
+
+
 def _resume_ops09_unlocked(*, output_root: Path, input_root: Path, scope_root: Path, database_root: Path,
                            repo_root: Path, execute: bool = False, now: datetime | None = None,
                            fixture_root: Path | None = None, decision_root: Path | None = None) -> dict[str, Any]:
@@ -869,12 +957,23 @@ def _resume_ops09_unlocked(*, output_root: Path, input_root: Path, scope_root: P
         if not _eligible(session, now_utc):
             session.update({"status": "EXPECTED", "reason": "awaiting session close and delayed-source grace"}); continue
         scope_path = Path(session["scope_path"])
-        if not scope_path.is_file():
+        actual_source_pending = (
+            state.get("producer_mode") == "actual" and not scope_path.is_file()
+        )
+        if not scope_path.is_file() and not actual_source_pending:
             session.update({"status": "MISSED_SESSION", "reason": "date-bound scope missing", "missing_input": "original_scope"}); continue
         try:
-            scope = validate_ops09_scope(scope_path, expected_date=session["market_date"])
+            scope = (
+                None if actual_source_pending
+                else validate_ops09_scope(scope_path, expected_date=session["market_date"])
+            )
         except Ops09Error as exc:
             session.update({"status": "DEGRADED", "reason": str(exc), "operator_intervention": "repair exact date-bound scope"}); continue
+        session_root = output_root / session["market_date"]
+        session_root.mkdir(parents=True, exist_ok=True)
+        _recover_attempt_accounting(
+            state=state, session=session, session_root=session_root, state_path=state_path,
+        )
         remaining = _refresh_session_elapsed(
             state=state, session=session, now_utc=now_utc,
             state_path=state_path, invocation_started_mono=invocation_started_mono, phase="before_capture",
@@ -883,7 +982,6 @@ def _resume_ops09_unlocked(*, output_root: Path, input_root: Path, scope_root: P
             state["status"] = "DEGRADED"; state["reason"] = "cohort wall-time budget exhausted"
             _atomic_json(state_path, state)
             return state
-        session_root = output_root / session["market_date"]; session_root.mkdir(parents=True, exist_ok=True)
         database_path = database_root / f"{session['market_date']}.sqlite"
         # Each expected date owns an independent durable ledger.  A cohort-wide
         # ledger would allow an earlier date's output to consume a later date's
@@ -896,8 +994,16 @@ def _resume_ops09_unlocked(*, output_root: Path, input_root: Path, scope_root: P
                 "market_date": session["market_date"],
                 "output_root": str(session_root.resolve()),
                 "database_root": str(database_path.resolve()),
+                "account_roots": [
+                    str(session_root.resolve()),
+                    str(database_path.resolve()),
+                    *([str(scope_path.parent.resolve())] if state.get("producer_mode") == "actual" else []),
+                ],
                 "repository": identity,
             },
+            extra_roots=(
+                (scope_path.parent,) if state.get("producer_mode") == "actual" else ()
+            ),
         )
         if int(session.get("attempts") or 0) >= MAX_ATTEMPTS:
             session.update({"status": "DEGRADED", "reason": "capture attempt budget exhausted", "decision_eligibility": "ZERO"})
@@ -909,9 +1015,11 @@ def _resume_ops09_unlocked(*, output_root: Path, input_root: Path, scope_root: P
         if contract_path.is_file():
             contract = _read_object(contract_path, "OPS09 request contract")
             _validate_request_contract(contract, plan=state, session=session, scope=scope, scope_path=scope_path)
-        else:
+        elif scope is not None:
             contract = _request_contract(plan=state, session=session, scope=scope, scope_path=scope_path)
             _atomic_json(contract_path, contract)
+        else:
+            contract = None
         if not execute:
             session.update({"status": "READY", "request_contract_sha256": contract["request_contract_sha256"], "scope": scope}); continue
         fixture = Path(str(session.get("fixture_path"))).resolve() if session.get("fixture_path") else (
@@ -938,8 +1046,50 @@ def _resume_ops09_unlocked(*, output_root: Path, input_root: Path, scope_root: P
             registration_context=registration_context if registration_context is not None and registration_context.is_file() else None,
             retained_capture_root=retained_capture_root if retained_capture_root is not None and retained_capture_root.is_dir() else None,
         )
-        session.update({"capture": {k: v for k, v in capture.items() if k not in {"receipt"}},
-                        "request_contract_sha256": contract["request_contract_sha256"]})
+        if scope is None and capture.get("pipeline", {}).get("actual_registration"):
+            actual = capture["pipeline"]["actual_registration"]
+            returned_scope = Path(str(actual.get("scope_path") or scope_path)).resolve()
+            if returned_scope != scope_path.resolve() or not returned_scope.is_file():
+                session.update({"status": "DEGRADED", "reason": "actual producer returned an unexpected scope path"})
+                _atomic_json(state_path, state)
+                continue
+            try:
+                scope = validate_ops09_scope(returned_scope, expected_date=session["market_date"])
+            except Ops09Error as exc:
+                session.update({"status": "DEGRADED", "reason": str(exc), "operator_intervention": "repair actual producer scope"})
+                _atomic_json(state_path, state)
+                continue
+            contract_path = Path(str(actual.get("request_contract_path") or contract_path))
+            if not contract_path.is_file():
+                session.update({"status": "DEGRADED", "reason": "actual producer omitted REQUESTED contract"})
+                _atomic_json(state_path, state)
+                continue
+            contract = _read_object(contract_path, "OPS09 actual request contract")
+            session["request_contract_sha256"] = str(actual.get("request_contract_sha256") or "")
+        attempt_elapsed = float(capture.get("attempt_elapsed_seconds") or 0.0)
+        if attempt_elapsed < 0 or attempt_elapsed > MAX_WALL_SECONDS:
+            raise Ops09Error("OPS09 native attempt elapsed evidence is invalid")
+        if attempt_elapsed:
+            session["elapsed_seconds"] = round(min(
+                MAX_WALL_SECONDS,
+                float(session.get("elapsed_seconds") or 0.0) + attempt_elapsed,
+            ), 6)
+            session["last_attempt_elapsed_seconds"] = round(attempt_elapsed, 6)
+            attempt_path = _attempt_state_path(session_root)
+            if attempt_path.is_file():
+                attempt_state = _read_object(attempt_path, "OPS09 attempt state")
+                attempt_state["accounting_status"] = "ACCOUNTED"
+                attempt_state["accounted_elapsed_seconds"] = round(attempt_elapsed, 6)
+                attempt_state["accounted_at"] = datetime.now(UTC).isoformat()
+                _atomic_json(attempt_path, attempt_state)
+            _atomic_json(state_path, state)
+        session.update({
+            "capture": {k: v for k, v in capture.items() if k not in {"receipt"}},
+            "request_contract_sha256": (
+                contract.get("request_contract_sha256") if contract else
+                session.get("request_contract_sha256")
+            ),
+        })
         if capture.get("status") != "CAPTURED":
             session.update({"status": "PARTIAL" if capture.get("status") == "PARTIAL" else "DEGRADED", "decision_eligibility": "ZERO"}); continue
         if capture.get("pipeline", {}).get("decision_status") == "BOUND":
@@ -965,20 +1115,21 @@ def _resume_ops09_unlocked(*, output_root: Path, input_root: Path, scope_root: P
                 "total_bytes_cap": MAX_BYTES,
                 "ledger_scope": "single_market_date",
                 "database_mode": pipeline.get("consumers", {}).get("database_mode", "in_memory"),
-                "downstream_baseline_bytes": pipeline.get("downstream_baseline_bytes"),
+                "downstream_account_root": pipeline.get("downstream_account_root"),
+                "downstream_existing_bytes": pipeline.get("downstream_existing_bytes"),
                 "downstream_max_bytes": pipeline.get("downstream_max_bytes", DOWNSTREAM_BYTES),
             }
             if (session_bytes > MAX_BYTES or capture_tree_bytes > CAPTURE_BYTES
                     or downstream_tree_bytes > DOWNSTREAM_BYTES):
                 session.update({"status": "DEGRADED", "decision_eligibility": "ZERO",
                                 "reason": "session artifact budget exceeded"})
-            baseline = pipeline.get("downstream_baseline_bytes")
+            account_root = pipeline.get("downstream_account_root")
             downstream_cap = pipeline.get("downstream_max_bytes", DOWNSTREAM_BYTES)
-            if not isinstance(baseline, int) or not isinstance(downstream_cap, int):
+            if not isinstance(account_root, str) or not isinstance(downstream_cap, int):
                 raise Ops09Error("guarded child omitted bounded publication identity")
             _atomic_json_bounded(
-                session_root / "session-receipt.json", session,
-                root=session_root, baseline_bytes=baseline, max_bytes=downstream_cap,
+                Path(account_root) / "session-receipt.json", session,
+                root=Path(account_root), max_bytes=downstream_cap,
             )
             _atomic_json(state_path, state)
             continue
