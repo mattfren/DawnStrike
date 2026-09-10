@@ -24,30 +24,71 @@ from scripts.prepare_r3_observational_registration import (  # noqa: E402
 )
 
 
-def _compact_consumer_value(value, *, depth: int = 0):
-    """Preserve unique consumer values; only duplicate persisted payloads may be referenced."""
+_DUPLICATE_PAYLOAD_KEYS = frozenset(
+    {"observation_dataset", "dataset_rows", "raw_events", "adapter_dataset"}
+)
+
+
+def _canonical_consumer_bytes(value) -> bytes:
+    return json.dumps(value, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
+
+
+def _persist_consumer_payload(
+    *, value, writer: SharedBoundedWriter, payload_root: Path, cache: dict[str, Path]
+) -> dict:
+    """Persist and authenticate one compacted payload before returning its reference."""
+    raw = _canonical_consumer_bytes(value)
+    digest = hashlib.sha256(raw).hexdigest()
+    path = payload_root / f"{digest}.json"
+    existing = path.read_bytes() if path.is_file() else None
+    if existing is None:
+        writer(path, raw)
+        existing = path.read_bytes()
+    if existing != raw:
+        raise RuntimeError("OPS09 consumer payload reference content does not match its SHA-256")
+    cached = cache.get(digest)
+    if cached is not None:
+        if cached != path or cached.read_bytes() != raw:
+            raise RuntimeError("OPS09 consumer payload cache identity is not immutable")
+    cache[digest] = path
+    return {
+        "reference_path": str(path.resolve()),
+        "reference_sha256": digest,
+        "reference_semantics": "persisted_canonical_consumer_payload",
+        "byte_count": len(raw),
+        "item_count": len(value) if isinstance(value, (dict, list)) else None,
+    }
+
+
+def _compact_consumer_value(
+    value, *, writer: SharedBoundedWriter, payload_root: Path,
+    cache: dict[str, Path], depth: int = 0,
+):
+    """Preserve all unique values and persist only explicitly duplicated payload objects."""
     if isinstance(value, dict):
         result = {}
         for key, item in value.items():
             name = str(key)
             lowered = name.lower()
-            if lowered in {"observation_dataset", "dataset_rows", "raw_events", "adapter_dataset"}:
+            if lowered in _DUPLICATE_PAYLOAD_KEYS:
                 if isinstance(item, (dict, list)):
-                    raw = json.dumps(
-                        item, sort_keys=True, default=str, separators=(",", ":")
-                    ).encode()
-                    result[name] = {
-                        "reference_sha256": hashlib.sha256(raw).hexdigest(),
-                        "reference_semantics": "persisted_duplicate_payload",
-                        "item_count": len(item) if isinstance(item, (dict, list)) else None,
-                    }
+                    result[name] = _persist_consumer_payload(
+                        value=item, writer=writer, payload_root=payload_root, cache=cache,
+                    )
                 else:
                     result[name] = item
             else:
-                result[name] = _compact_consumer_value(item, depth=depth + 1)
+                result[name] = _compact_consumer_value(
+                    item, writer=writer, payload_root=payload_root, cache=cache, depth=depth + 1,
+                )
         return result
     if isinstance(value, list):
-        return [_compact_consumer_value(row, depth=depth + 1) for row in value]
+        return [
+            _compact_consumer_value(
+                row, writer=writer, payload_root=payload_root, cache=cache, depth=depth + 1,
+            )
+            for row in value
+        ]
     return value
 
 
@@ -246,10 +287,18 @@ def main() -> int:
         repo_sha=args.repo_sha,
         in_memory=args.in_memory_consumer,
     )
+    consumer_payload_root = adapter_root / "consumer-payloads"
+    consumer_payload_cache: dict[str, Path] = {}
     compact_consumers = {
         "database_mode": consumers["database_mode"],
-        "daily": _compact_consumer_value(consumers["daily"]),
-        "weekly": _compact_consumer_value(consumers["weekly"]),
+        "daily": _compact_consumer_value(
+            consumers["daily"], writer=shared_writer,
+            payload_root=consumer_payload_root, cache=consumer_payload_cache,
+        ),
+        "weekly": _compact_consumer_value(
+            consumers["weekly"], writer=shared_writer,
+            payload_root=consumer_payload_root, cache=consumer_payload_cache,
+        ),
     }
     consumer_result_bytes = json.dumps(
         {
@@ -260,7 +309,7 @@ def main() -> int:
             "weekly": compact_consumers["weekly"],
             "receipt_semantics": (
                 "compact_authenticated_consumer_summary_references_"
-                "persisted_adapter_dataset"
+                "persisted_canonical_consumer_payloads"
             ),
             "adapter_dataset_path": str((adapter_root / "observation-dataset.json").resolve()),
             "adapter_dataset_sha256": hashlib.sha256(

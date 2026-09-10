@@ -9,6 +9,7 @@ import pytest
 
 from intraday_scanner.observation import ops09 as ops09_module
 from intraday_scanner.observation.cohort import APPROVED_PYTHON
+from scripts.ops09_pipeline import _compact_consumer_value
 from intraday_scanner.observation.ops09 import (
     CAPTURE_BYTES,
     DOWNSTREAM_BYTES,
@@ -198,9 +199,83 @@ def test_actual_readiness_existing_scope_still_returns_ready_with_contract(tmp_p
     )
     session = state["sessions"][0]
     assert session["status"] == "READY"
-    assert session["attempts"] == 1
+    assert session["attempts"] == 0
     assert isinstance(session["request_contract_sha256"], str)
     assert Path(session["request_contract_path"]).is_file()
+
+
+def test_fixture_readiness_existing_scope_does_not_consume_attempt(tmp_path: Path) -> None:
+    source_path, source_hash = _source_config(tmp_path)
+    out = tmp_path / "out"
+    prepare_ops09_cohort(
+        output_root=out, input_root=tmp_path / "in", scope_root=tmp_path / "scope",
+        database_root=tmp_path / "db", repo_root=Path(__file__).parents[1],
+        source_config_hash=source_hash, source_config_path=source_path, python_path=APPROVED_PYTHON,
+        start_date="2026-09-10",
+    )
+    scope_path = tmp_path / "scope" / "2026-09-10" / "scope.json"
+    scope_path.parent.mkdir(parents=True)
+    shutil.copyfile(_scope(tmp_path, "2026-09-10"), scope_path)
+    state = resume_ops09_cohort(
+        output_root=out, input_root=tmp_path / "in", scope_root=tmp_path / "scope",
+        database_root=tmp_path / "db", repo_root=Path(__file__).parents[1],
+        execute=False, now=datetime(2026, 9, 10, 20, 1, tzinfo=timezone.utc),
+    )
+    assert state["sessions"][0]["status"] == "READY"
+    assert state["sessions"][0]["attempts"] == 0
+
+
+def test_consumer_payloads_are_canonical_reusable_and_lossless(tmp_path: Path) -> None:
+    root = tmp_path / "session"
+    adapter = root / "ops06"
+    writer = SharedBoundedWriter(roots=(root, adapter), max_bytes=1024 * 1024)
+    payload = {
+        "observation_dataset": {
+            "rows": [{"id": i, "nested": {"values": list(range(101))}} for i in range(2)],
+            "unique": {"deep": {"a": {"b": {"c": {"d": {"e": {"f": {"g": [1, 2, 3]}}}}}}}},
+        },
+        "unique_result": {"values": list(range(101))},
+    }
+    cache: dict[str, Path] = {}
+    daily = _compact_consumer_value(
+        payload, writer=writer, payload_root=adapter / "consumer-payloads", cache=cache,
+    )
+    weekly = _compact_consumer_value(
+        payload, writer=writer, payload_root=adapter / "consumer-payloads", cache=cache,
+    )
+    daily_ref = daily["observation_dataset"]
+    weekly_ref = weekly["observation_dataset"]
+    assert daily["unique_result"] == payload["unique_result"]
+    assert daily_ref == weekly_ref
+    path = Path(daily_ref["reference_path"])
+    assert path.read_bytes() == _canonical_json_bytes_for_test(payload["observation_dataset"])
+    assert __import__("hashlib").sha256(path.read_bytes()).hexdigest() == daily_ref["reference_sha256"]
+    retry = _compact_consumer_value(
+        payload, writer=writer, payload_root=adapter / "consumer-payloads", cache={},
+    )
+    assert retry["observation_dataset"] == daily_ref
+    path.write_bytes(b"tampered")
+    with pytest.raises(RuntimeError, match="does not match its SHA-256"):
+        _compact_consumer_value(
+            payload, writer=writer, payload_root=adapter / "consumer-payloads", cache={},
+        )
+
+
+def _canonical_json_bytes_for_test(value: object) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def test_consumer_canonical_payload_rejection_leaves_no_target(tmp_path: Path) -> None:
+    root = tmp_path / "session"
+    adapter = root / "ops06"
+    writer = SharedBoundedWriter(roots=(root, adapter), max_bytes=64)
+    payload = {"observation_dataset": {"values": list(range(100))}}
+    with pytest.raises(Ops09Error, match="shared byte budget"):
+        _compact_consumer_value(
+            payload, writer=writer, payload_root=adapter / "consumer-payloads", cache={},
+        )
+    payload_root = adapter / "consumer-payloads"
+    assert not list(payload_root.glob("*"))
 
 
 def test_actual_execute_missing_scope_still_enters_child_without_reused_contract(

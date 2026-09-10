@@ -1142,12 +1142,6 @@ def _resume_ops09_unlocked(*, output_root: Path, input_root: Path, scope_root: P
                 (scope_path.parent,) if state.get("producer_mode") == "actual" else ()
             ),
         )
-        if int(session.get("attempts") or 0) >= MAX_ATTEMPTS:
-            session.update({"status": "DEGRADED", "reason": "capture attempt budget exhausted", "decision_eligibility": "ZERO"})
-            continue
-        session["attempts"] = int(session.get("attempts") or 0) + 1
-        session["status"] = "RUNNING"
-        _atomic_json(state_path, state)
         contract_path = Path(session["request_contract_path"])
         if contract_path.is_file():
             contract = _read_object(contract_path, "OPS09 request contract")
@@ -1167,7 +1161,19 @@ def _resume_ops09_unlocked(*, output_root: Path, input_root: Path, scope_root: P
         else:
             contract = None
         if not execute:
-            session.update({"status": "READY", "request_contract_sha256": contract["request_contract_sha256"], "scope": scope}); continue
+            session.update({
+                "status": "READY",
+                "request_contract_sha256": contract.get("request_contract_sha256") if contract else None,
+                "scope": scope,
+            })
+            _atomic_json(state_path, state)
+            continue
+        if int(session.get("attempts") or 0) >= MAX_ATTEMPTS:
+            session.update({"status": "DEGRADED", "reason": "capture attempt budget exhausted", "decision_eligibility": "ZERO"})
+            continue
+        session["attempts"] = int(session.get("attempts") or 0) + 1
+        session["status"] = "RUNNING"
+        _atomic_json(state_path, state)
         fixture = Path(str(session.get("fixture_path"))).resolve() if session.get("fixture_path") else (
             (fixture_root.resolve() / session["market_date"] / "fixture.json") if fixture_root else None
         )
