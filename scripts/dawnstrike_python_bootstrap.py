@@ -1117,6 +1117,7 @@ def _assert_locked_dependencies(
     release_bytes: dict[str, bytes],
     *,
     dependency_prefix: Path | None = None,
+    dependency_inventory_root: Path | None = None,
 ) -> tuple[frozenset[str], frozenset[str], dict[str, tuple[bytes, int | None]]]:
     """Require one explicit dependency boundary to match requirements.lock."""
 
@@ -1155,7 +1156,13 @@ def _assert_locked_dependencies(
     record_contract = hashlib.sha256("".join(record_contract_rows).encode()).hexdigest()
     if record_contract != _APPROVED_DISTRIBUTION_RECORD_SET_SHA256:
         _fail("installed dependency RECORD set is not the source-approved runtime contract")
-    _verify_dependency_payloads(prefix, dependency_paths, owned_paths, owned_hashes)
+    _verify_dependency_payloads(
+        prefix,
+        dependency_paths,
+        owned_paths,
+        owned_hashes,
+        inventory_root=dependency_inventory_root,
+    )
     return frozenset(allowed_top_level), frozenset(owned_paths), owned_hashes
 
 
@@ -1164,6 +1171,8 @@ def _verify_dependency_payloads(
     dependency_paths: tuple[Path, ...],
     owned_paths: set[str],
     owned_hashes: dict[str, tuple[bytes, int | None]],
+    *,
+    inventory_root: Path | None = None,
 ) -> None:
     """Verify every staged RECORD payload before any dependency import."""
 
@@ -1194,8 +1203,17 @@ def _verify_dependency_payloads(
         if digest.digest() != expected:
             _fail("installed dependency payload hash changed")
 
-    for dependency in dependency_paths:
-        if os.path.commonpath((str(dependency), str(prefix))) != str(prefix) and prefix not in dependency.parents:
+    inventory_roots = list(dependency_paths)
+    if inventory_root is not None:
+        inventory_roots.append(inventory_root.resolve(strict=True))
+    seen_roots: set[str] = set()
+    for dependency in inventory_roots:
+        dependency = dependency.resolve(strict=True)
+        root_key = os.path.normcase(str(dependency))
+        if root_key in seen_roots:
+            continue
+        seen_roots.add(root_key)
+        if dependency != prefix and prefix not in dependency.parents and dependency not in prefix.parents:
             _fail("installed dependency path escaped the approved prefix")
         for path in dependency.rglob("*"):
             if path.is_dir():
@@ -1432,6 +1450,7 @@ def main(argv: list[str] | None = None) -> int:
                     dependency_paths,
                     source_guard.source_bytes,
                     dependency_prefix=dependency_prefix,
+                    dependency_inventory_root=Path(args.dependency_stage_root),
                 )
             )
         else:
@@ -1476,6 +1495,7 @@ def main(argv: list[str] | None = None) -> int:
                     refreshed_guard.source_bytes,
                     **(
                         {"dependency_prefix": dependency_prefix}
+                        | {"dependency_inventory_root": Path(args.dependency_stage_root)}
                         if args.dependency_stage_root
                         else {}
                     ),
