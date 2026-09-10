@@ -24,6 +24,7 @@ from intraday_scanner.alpha.outcome_semantics import account_equity_drawdown
 from intraday_scanner.alpha.v5_policy import DEFAULT_V5_POLICY, evaluate_v5_official_paper
 from intraday_scanner.performance.account_contract import account_session_return_pct
 from intraday_scanner.market_calendar import CALENDAR_ID, MARKET_TIMEZONE, REGULAR_CLOSE_ET, EARLY_CLOSE_ET, market_session
+from intraday_scanner.alpha.v6.contracts import is_valid_code_sha, is_valid_sha256
 
 getcontext().prec = 28
 
@@ -60,6 +61,10 @@ def _file_hash(path: Path) -> str | None:
         return None
 
 
+def _semantic_protocol_hash(protocol: Mapping[str, Any]) -> str:
+    return _hash({key: value for key, value in protocol.items() if key not in {"source_paths", "protocol_hash_sha256"}})
+
+
 def build_research_protocol(*, source_root: str | Path = ".") -> dict[str, Any]:
     """Return the immutable pre-outcome D027/D028/D029 protocol receipt."""
 
@@ -67,6 +72,8 @@ def build_research_protocol(*, source_root: str | Path = ".") -> dict[str, Any]:
     source_paths = {
         "v5_policy": root / "intraday_scanner" / "alpha" / "v5_policy.py",
         "execution_cost": root / "intraday_scanner" / "alpha" / "execution_cost.py",
+        "research_protocol": root / "intraday_scanner" / "research" / "r5_r7_protocol.py",
+        "v6_training": root / "intraday_scanner" / "alpha" / "v6" / "training.py",
         "learning_spec": root.parent / "dawnstrike-mission-audit-20260909" / "LEARNING_AND_DATA_SPEC.md",
     }
     scopes = {
@@ -178,7 +185,10 @@ def build_research_protocol(*, source_root: str | Path = ".") -> dict[str, Any]:
         "source_hashes": {name: _file_hash(path) for name, path in source_paths.items()},
         "source_paths": {name: str(path) for name, path in source_paths.items()},
     }
-    protocol_body["protocol_hash_sha256"] = _hash(protocol_body)
+    # Filesystem locations are provenance only.  The semantic protocol identity
+    # must remain stable when the same source content is evaluated from another
+    # clean worktree.
+    protocol_body["protocol_hash_sha256"] = _semantic_protocol_hash(protocol_body)
     return protocol_body
 
 
@@ -404,6 +414,9 @@ def bootstrap_paired_session_returns(
     protocol_hash: str | None = None,
     journal_hash: str | None = None,
     trial_hash: str | None = None,
+    protocol_artifact: Mapping[str, Any] | None = None,
+    journal_artifact: Mapping[str, Any] | None = None,
+    trial_artifact: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compute the preregistered fixed-block paired log-return interval.
 
@@ -416,14 +429,32 @@ def bootstrap_paired_session_returns(
         return {"status": "REJECTED", "reason": "frozen_bootstrap_parameters"}
     if sessions is None or challenger_returns is not None or baseline_returns is not None:
         return {"status": "REJECTED", "reason": "bound_session_journal_required"}
-    if not all(isinstance(value, str) and len(value) == 64 for value in (protocol_hash, journal_hash, trial_hash)):
+    if not all(is_valid_sha256(value) for value in (protocol_hash, journal_hash, trial_hash)):
         return {"status": "REJECTED", "reason": "protocol_journal_trial_identity_missing"}
+    if protocol_artifact is not None and _semantic_protocol_hash(protocol_artifact) != protocol_hash:
+        return {"status": "REJECTED", "reason": "protocol_artifact_hash_mismatch"}
+    if journal_artifact is not None and _hash(journal_artifact) != journal_hash:
+        return {"status": "REJECTED", "reason": "journal_artifact_hash_mismatch"}
+    if trial_artifact is not None and _hash(trial_artifact) != trial_hash:
+        return {"status": "REJECTED", "reason": "trial_artifact_hash_mismatch"}
     ordered = sorted((dict(row) for row in sessions), key=lambda row: str(row.get("market_date") or ""))
     required = ("session_id", "market_date", "challenger_return", "baseline_return", "eligible", "decision_at", "label_available_at", "journal_hash", "trial_hash")
     if any(any(row.get(key) in {None, ""} for key in required) for row in ordered):
         return {"status": "INVALID_INPUT", "reason": "session_denominator_or_lineage_missing"}
     if any(row.get("eligible") is not True or row.get("journal_hash") != journal_hash or row.get("trial_hash") != trial_hash for row in ordered):
         return {"status": "REJECTED", "reason": "session_lineage_or_eligibility_mismatch"}
+    session_ids = [str(row.get("session_id")) for row in ordered]
+    if isinstance(journal_artifact, Mapping) and isinstance(journal_artifact.get("sessions"), list):
+        artifact_session_ids = [str(item.get("session_id")) for item in journal_artifact["sessions"] if isinstance(item, Mapping)]
+        if artifact_session_ids != session_ids:
+            return {"status": "REJECTED", "reason": "journal_session_binding_mismatch"}
+    if isinstance(trial_artifact, Mapping):
+        artifact_trial_sessions = trial_artifact.get("session_ids")
+        if artifact_trial_sessions is not None and [str(value) for value in artifact_trial_sessions] != session_ids:
+            return {"status": "REJECTED", "reason": "trial_session_binding_mismatch"}
+        artifact_protocol = trial_artifact.get("protocol_hash_sha256")
+        if artifact_protocol is not None and artifact_protocol != protocol_hash:
+            return {"status": "REJECTED", "reason": "trial_protocol_binding_mismatch"}
     try:
         dates = [str(row["market_date"]) for row in ordered]
         if dates != sorted(set(dates)):
@@ -552,6 +583,105 @@ def compare_v5_baseline_challenger(
     }
 
 
+def _protocol_configuration_hash(protocol: Mapping[str, Any]) -> str:
+    """Hash the immutable policy/configuration content without path provenance."""
+
+    return _hash({
+        "scopes": protocol.get("scopes"),
+        "baseline": protocol.get("baseline"),
+        "wrapper": protocol.get("wrapper"),
+        "cost": protocol.get("cost"),
+        "preregistration": protocol.get("preregistration"),
+        "r7": protocol.get("r7"),
+        "source_hashes": protocol.get("source_hashes"),
+    })
+
+
+def _session_key(row: Mapping[str, Any]) -> str:
+    """Return the source session identity used to form the weekly cohort."""
+
+    explicit = str(row.get("session_id") or row.get("session_key") or "").strip()
+    if explicit:
+        return explicit
+    # Historical research rows predate a dedicated session_id field.  A
+    # normalized market date is still one complete exchange session and is
+    # retained as a visibly tagged compatibility identity.
+    market_date = str(row.get("market_date") or "").strip()[:10]
+    return f"MARKET_DATE:{market_date}" if market_date else ""
+
+
+def _cutoff_end_utc(market_date: str) -> datetime:
+    parsed = datetime.fromisoformat(str(market_date)[:10]).replace(tzinfo=ZoneInfo("UTC"))
+    return parsed + timedelta(days=1) - timedelta(microseconds=1)
+
+
+def _training_cohort(
+    ordered: Sequence[Mapping[str, Any]], *, training_session_count: int = 60,
+    validation_session_count: int = 20, shadow_session_count: int = 20,
+) -> dict[str, Any]:
+    """Select exact row IDs from the first chronological complete sessions."""
+
+    groups: dict[str, list[dict[str, Any]]] = {}
+    session_dates: dict[str, str] = {}
+    for raw in ordered:
+        row = dict(raw)
+        key = _session_key(row)
+        date_value = str(row.get("market_date") or "")[:10]
+        if not key or not date_value:
+            return {"status": "QUARANTINED", "reason": "session_identity_missing"}
+        groups.setdefault(key, []).append(row)
+        session_dates[key] = min(date_value, session_dates.get(key, date_value))
+    sessions = sorted(groups, key=lambda key: (session_dates[key], key))
+    required = training_session_count + validation_session_count + shadow_session_count
+    if len(sessions) < required:
+        return {"status": "WAITING", "reason": "insufficient_60_20_20_sessions", "session_count": len(sessions)}
+    training_sessions = sessions[:training_session_count]
+    validation_sessions = sessions[training_session_count:training_session_count + validation_session_count]
+    shadow_sessions = sessions[training_session_count + validation_session_count:required]
+    training_dates = sorted({session_dates[key] for key in training_sessions})
+    training_cutoff = training_dates[-1]
+    cutoff = _cutoff_end_utc(training_cutoff)
+    training_rows = [row for key in training_sessions for row in groups[key]]
+    training_rows.sort(key=lambda row: (str(row.get("market_date") or ""), str(row.get("decision_id") or "")))
+    late_ids: list[str] = []
+    for row in training_rows:
+        label_available = row.get("label_available_at")
+        if not label_available:
+            late_ids.append(str(row.get("decision_id") or ""))
+            continue
+        try:
+            decision_at = _parse_time(row.get("decision_at")).astimezone(ZoneInfo("UTC"))
+            label_at = _parse_time(label_available).astimezone(ZoneInfo("UTC"))
+            if decision_at > cutoff or label_at > cutoff:
+                late_ids.append(str(row.get("decision_id") or ""))
+        except ValueError:
+            late_ids.append(str(row.get("decision_id") or ""))
+    if late_ids:
+        return {"status": "QUARANTINED", "reason": "training_label_not_available_by_cutoff", "decision_ids": sorted(late_ids)}
+    decision_ids = [str(row.get("decision_id") or row.get("label_id") or "") for row in training_rows]
+    if any(not value for value in decision_ids) or len(decision_ids) != len(set(decision_ids)):
+        return {"status": "QUARANTINED", "reason": "training_decision_id_missing_or_duplicate"}
+    cohort_hash = _hash({
+        "session_ids": training_sessions,
+        "decision_ids": decision_ids,
+        "rows": training_rows,
+        "training_cutoff": training_cutoff,
+    })
+    return {
+        "status": "COMPLETE",
+        "training_sessions": training_sessions,
+        "validation_sessions": validation_sessions,
+        "shadow_sessions": shadow_sessions,
+        "training_dates": training_dates,
+        "validation_dates": sorted({session_dates[key] for key in validation_sessions}),
+        "shadow_dates": sorted({session_dates[key] for key in shadow_sessions}),
+        "training_cutoff": training_cutoff,
+        "training_rows": training_rows,
+        "training_decision_ids": decision_ids,
+        "training_cohort_hash_sha256": cohort_hash,
+    }
+
+
 def run_r7_weekly_controller(
     *, dataset: Mapping[str, Any], protocol: Mapping[str, Any], code_sha: str,
     prior_state: Mapping[str, Any] | None = None,
@@ -563,23 +693,46 @@ def run_r7_weekly_controller(
     from intraday_scanner.alpha.v6.training import train_shadow_challengers, walk_forward_challenger_predictions
 
     rows = [dict(row) for row in list(dataset.get("rows") or [])]
-    if str(dataset.get("dataset_hash_sha256") or "") == "" or not code_sha:
+    if not is_valid_sha256(dataset.get("dataset_hash_sha256")) or not is_valid_code_sha(code_sha):
         return {"status": "QUARANTINED", "reason": "dataset_or_code_identity_missing", "research_only": True}
+    if not is_valid_sha256(protocol.get("protocol_hash_sha256")) or _semantic_protocol_hash(protocol) != protocol.get("protocol_hash_sha256"):
+        return {"status": "QUARANTINED", "reason": "protocol_identity_invalid", "research_only": True, "broker_execution_enabled": False}
+    if not isinstance(protocol.get("source_hashes"), Mapping) or any(not is_valid_sha256(value) for value in protocol.get("source_hashes", {}).values()):
+        return {"status": "QUARANTINED", "reason": "protocol_source_identity_invalid", "research_only": True, "broker_execution_enabled": False}
     ordered = sorted(rows, key=lambda row: (str(row.get("market_date") or ""), str(row.get("decision_id") or "")))
-    dates = sorted({str(row.get("market_date") or "") for row in ordered})
-    if any(not row.get("decision_id") or not row.get("market_date") or not row.get("source_artifact_hash_sha256") for row in ordered):
+    dates = sorted({str(row.get("market_date") or "")[:10] for row in ordered})
+    if any(not row.get("decision_id") or not row.get("market_date") or not is_valid_sha256(row.get("source_artifact_hash_sha256")) for row in ordered):
         return {"status": "QUARANTINED", "reason": "row_lineage_missing", "research_only": True}
     if any(not _decision_chronology_valid(row) for row in ordered):
         return {"status": "QUARANTINED", "reason": "future_or_invalid_chronology", "research_only": True}
-    if len(dates) < 100:
-        return {"status": "RETAIN_WAITING_MARKET_EVIDENCE", "reason": "insufficient_60_20_20_sessions", "session_count": len(dates), "research_only": True, "broker_execution_enabled": False}
-    training_dates = dates[:60]
-    validation_dates = dates[60:80]
-    shadow_dates = dates[80:100]
-    training_cutoff = training_dates[-1]
-    receipt = train_shadow_challengers(dict(dataset), code_sha=code_sha)
-    model_id = "v6m-" + _hash({"dataset": dataset.get("dataset_hash_sha256"), "cutoff": training_cutoff, "code": code_sha})[:28]
-    predictions = walk_forward_challenger_predictions(dict(dataset), model_run_id=model_id)
+    cohort = _training_cohort(ordered)
+    if cohort.get("status") == "WAITING":
+        return {"status": "RETAIN_WAITING_MARKET_EVIDENCE", "reason": cohort.get("reason"), "session_count": len(set(_session_key(row) for row in ordered)), "research_only": True, "broker_execution_enabled": False}
+    if cohort.get("status") != "COMPLETE":
+        retained_status = "RETAIN_FROZEN_CHAMPION" if cohort.get("reason") == "training_label_not_available_by_cutoff" else "QUARANTINED"
+        return {"status": retained_status, "reason": cohort.get("reason", "training_cohort_invalid"), "decision_ids": cohort.get("decision_ids", []), "training_receipt": {"status": "NOT_TRAINED_INSUFFICIENT_LABELS", "artifact": None, "model_artifact_hash_sha256": None}, "research_only": True, "broker_execution_enabled": False}
+    training_rows = list(cohort["training_rows"])
+    training_ids = set(cohort["training_decision_ids"])
+    training_dataset = dict(dataset)
+    training_dataset["rows"] = training_rows
+    training_dataset["training_cutoff"] = cohort["training_cutoff"]
+    training_dataset["source_container_hash_sha256"] = dataset.get("dataset_hash_sha256")
+    training_dataset["dataset_hash_sha256"] = cohort["training_cohort_hash_sha256"]
+    training_dataset["activation_rows"] = [row for row in list(dataset.get("activation_rows") or []) if str(row.get("decision_id") or "") in training_ids]
+    receipt = train_shadow_challengers(training_dataset, code_sha=code_sha)
+    receipt["training_cohort"] = {
+        "session_ids": list(cohort["training_sessions"]),
+        "decision_ids": list(cohort["training_decision_ids"]),
+        "training_cutoff": cohort["training_cutoff"],
+        "cohort_hash_sha256": cohort["training_cohort_hash_sha256"],
+        "source_container_hash_sha256": dataset.get("dataset_hash_sha256"),
+    }
+    model_id = "v6m-" + _hash({"cohort": cohort["training_cohort_hash_sha256"], "cutoff": cohort["training_cutoff"], "code": code_sha})[:28]
+    predictions = walk_forward_challenger_predictions(dict(dataset), model_run_id=model_id, frozen_training_decision_ids=training_ids)
+    training_dates = cohort["training_dates"]
+    validation_dates = cohort["validation_dates"]
+    shadow_dates = cohort["shadow_dates"]
+    training_cutoff = cohort["training_cutoff"]
     calibration = calibration_report([row for row in predictions if "activation_probability" in row])
     split = max(20, len(dates) // 2)
     baseline_dates = dates[:split]
@@ -614,13 +767,40 @@ def run_r7_weekly_controller(
     breaches = [row for row in ordered if _number(row.get("diagnostic_value")) is not None and float(row["diagnostic_value"]) < 0.5]
     consecutive = len(breaches) >= 2 and str(breaches[-1].get("market_date")) > str(breaches[-2].get("market_date"))
     confirmation = {"status": "WAITING_MARKET_EVIDENCE", "common_complete_sessions": 0, "challenger_trade_count": 0, "baseline_trade_count": 0}
-    confirmation_rows = [row for row in ordered if row.get("paired_challenger_return") is not None and row.get("paired_baseline_return") is not None and row.get("journal_hash") and row.get("trial_hash") and row.get("protocol_hash_sha256") == protocol.get("protocol_hash_sha256")]
+    confirmation_candidates = [row for row in ordered if row.get("paired_challenger_return") is not None and row.get("paired_baseline_return") is not None and row.get("journal_hash") and row.get("trial_hash") and row.get("protocol_hash_sha256") == protocol.get("protocol_hash_sha256")]
+    # A session may contain several eligible feature rows.  The paired ledger
+    # denominator is one return per session; duplicate rows must agree before
+    # the session can enter the fixed-block bootstrap.
+    confirmation_by_session: dict[str, dict[str, Any]] = {}
+    confirmation_conflict = False
+    for row in confirmation_candidates:
+        key = _session_key(row)
+        prior = confirmation_by_session.get(key)
+        if prior is None:
+            confirmation_by_session[key] = row
+            continue
+        if any(prior.get(field) != row.get(field) for field in ("paired_challenger_return", "paired_baseline_return", "journal_hash", "trial_hash", "market_date")):
+            confirmation_conflict = True
+    confirmation_rows = list(confirmation_by_session.values()) if not confirmation_conflict else []
     if confirmation_rows:
         journal_hash = str(confirmation_rows[0]["journal_hash"])
         trial_hash = str(confirmation_rows[0]["trial_hash"])
         if all(row.get("journal_hash") == journal_hash and row.get("trial_hash") == trial_hash for row in confirmation_rows):
             bound_sessions = [{"session_id": row.get("session_id", row.get("decision_id")), "market_date": row.get("market_date"), "challenger_return": row.get("paired_challenger_return"), "baseline_return": row.get("paired_baseline_return"), "eligible": True, "decision_at": row.get("decision_at"), "label_available_at": row.get("label_available_at"), "journal_hash": journal_hash, "trial_hash": trial_hash} for row in confirmation_rows]
-            bootstrap = bootstrap_paired_session_returns(sessions=bound_sessions, protocol_hash=str(protocol.get("protocol_hash_sha256")), journal_hash=journal_hash, trial_hash=trial_hash)
+            journal_artifact = dataset.get("journal_artifact")
+            trial_artifact = dataset.get("trial_artifact")
+            if not isinstance(journal_artifact, Mapping) or not isinstance(trial_artifact, Mapping):
+                bootstrap = {"status": "REJECTED", "reason": "bound_confirmation_artifacts_missing"}
+            else:
+                bootstrap = bootstrap_paired_session_returns(
+                    sessions=bound_sessions,
+                    protocol_hash=str(protocol.get("protocol_hash_sha256")),
+                    journal_hash=journal_hash,
+                    trial_hash=trial_hash,
+                    protocol_artifact=protocol,
+                    journal_artifact=journal_artifact,
+                    trial_artifact=trial_artifact,
+                )
             confirmation = {"status": "COMPLETE" if len(bound_sessions) >= 60 and bootstrap.get("status") == "COMPLETE" else "WAITING_MARKET_EVIDENCE", "common_complete_sessions": len(bound_sessions), "challenger_trade_count": sum(1 for row in confirmation_rows if row.get("challenger_trade") is True), "baseline_trade_count": sum(1 for row in confirmation_rows if row.get("baseline_trade") is True), "bootstrap": bootstrap}
     prior = str((prior_state or {}).get("status") or "RETAIN_FROZEN_CHAMPION")
     if diagnostic.get("status", "").startswith("QUARANTINE") or consecutive:
@@ -631,13 +811,28 @@ def run_r7_weekly_controller(
         status = "OBSERVER_ONLY"
     else:
         status = "RETAIN_WAITING_MARKET_EVIDENCE"
+    source_hashes = dict(protocol.get("source_hashes") or {})
+    binding = {
+        "protocol_hash_sha256": protocol.get("protocol_hash_sha256"),
+        "dataset_hash_sha256": dataset.get("dataset_hash_sha256"),
+        "source_hashes": source_hashes,
+        "source_hash_sha256": _hash(source_hashes),
+        "configuration_hash_sha256": _protocol_configuration_hash(protocol),
+        "code_sha": code_sha,
+        "cost_model_version": protocol.get("cost", {}).get("cost_model_version", V5_COST_MODEL_VERSION),
+        "model_version": receipt.get("model_version"),
+        "model_artifact_hash_sha256": receipt.get("model_artifact_hash_sha256"),
+        "training_cohort_hash_sha256": cohort["training_cohort_hash_sha256"],
+        "training_decision_ids_hash_sha256": _hash(cohort["training_decision_ids"]),
+        "training_cutoff": training_cutoff,
+    }
     return {
-        "status": status, "schedule": {"training_dates": training_dates, "validation_dates": validation_dates, "shadow_dates": shadow_dates},
+        "status": status, "schedule": {"training_dates": training_dates, "validation_dates": validation_dates, "shadow_dates": shadow_dates, "training_session_ids": cohort["training_sessions"], "validation_session_ids": cohort["validation_sessions"], "shadow_session_ids": cohort["shadow_sessions"]},
         "model_run_id": model_id, "training_cutoff": training_cutoff, "training_receipt": receipt,
         "predictions": predictions, "calibration": calibration, "diagnostics": diagnostic,
         "diagnostic_dimensions": diagnostic_dimensions, "confirmation": confirmation,
         "phases": {"collect": len(ordered), "validate": len(ordered), "mature": sum(1 for row in ordered if row.get("label_available_at") and str(row.get("label_available_at"))[:10] <= training_cutoff), "diagnose": True, "propose": True, "train": receipt.get("status"), "validate_predictions": sum(1 for row in predictions if str(row.get("market_date") or "") in validation_dates), "shadow_predictions": sum(1 for row in predictions if str(row.get("market_date") or "") in shadow_dates), "paired_comparison": "DERIVED_FROM_BOUND_ROWS"},
-        "breach_count": len(breaches), "consecutive_breaches": consecutive, "rollback_target": "frozen_v5",
+        "breach_count": len(breaches), "consecutive_breaches": consecutive, "rollback_target": "frozen_v5", "binding": binding,
         "activation_time": datetime.now().astimezone().isoformat() if status in {"OBSERVER_ONLY", "OBSERVER_PROMOTED_ENGINEERING_ONLY"} else None,
         "trial_history": [{"trial_id": "fixed-d029-1", "dataset_hash": dataset.get("dataset_hash_sha256"), "status": status}],
         "research_only": True, "broker_execution_enabled": False, "economic_pass": False,
@@ -834,6 +1029,12 @@ def build_observer_controller(*, protocol: Mapping[str, Any], eligible_session_c
     return {
         "schema_version": "dawnstrike.r7.observer_controller.v1",
         "protocol_hash_sha256": protocol.get("protocol_hash_sha256"),
+        "protocol_binding": {
+            "protocol_hash_sha256": protocol.get("protocol_hash_sha256"),
+            "source_hashes": dict(protocol.get("source_hashes") or {}),
+            "configuration_hash_sha256": _protocol_configuration_hash(protocol),
+            "cost_model_version": protocol.get("baseline", {}).get("cost_model_version", V5_COST_MODEL_VERSION),
+        },
         "champion": "frozen_v5",
         "no_learning_comparator": "cash_no_learning",
         "challenger_scopes": list(SCOPE_IDS),
@@ -875,7 +1076,11 @@ def evaluate_controller_update(
         reasons.append("cost_model_version_missing")
     if candidate.get("cost_status") in {None, "UNKNOWN", "COST_UNKNOWN"}:
         reasons.append("unknown_cost")
-    if int(candidate.get("eligible_session_count", 0) or 0) < 60:
+    try:
+        eligible_count = int(candidate.get("eligible_session_count", 0) or 0)
+    except (TypeError, ValueError):
+        eligible_count = 0
+    if eligible_count < 60:
         reasons.append("insufficient_sessions")
     if candidate.get("future_inputs") is True:
         reasons.append("future_input")
@@ -885,6 +1090,61 @@ def evaluate_controller_update(
         reasons.append("safety_limits_changed")
     if candidate.get("broker_execution_enabled") is True:
         reasons.append("broker_promotion_forbidden")
+
+    binding = candidate.get("binding")
+    expected = controller.get("protocol_binding")
+    if not isinstance(binding, Mapping) or not isinstance(expected, Mapping):
+        reasons.append("bound_artifact_receipt_missing")
+    else:
+        if binding.get("protocol_hash_sha256") != expected.get("protocol_hash_sha256"):
+            reasons.append("bound_protocol_mismatch")
+        if binding.get("source_hashes") != expected.get("source_hashes"):
+            reasons.append("bound_source_hashes_mismatch")
+        if not isinstance(binding.get("source_hashes"), Mapping) or any(not is_valid_sha256(value) for value in binding.get("source_hashes", {}).values()):
+            reasons.append("bound_source_content_invalid")
+        if binding.get("configuration_hash_sha256") != expected.get("configuration_hash_sha256"):
+            reasons.append("bound_configuration_mismatch")
+        if binding.get("cost_model_version") != expected.get("cost_model_version"):
+            reasons.append("bound_cost_model_mismatch")
+        for field in ("dataset_hash_sha256", "source_hash_sha256", "configuration_hash_sha256", "model_artifact_hash_sha256", "training_cohort_hash_sha256", "training_decision_ids_hash_sha256"):
+            if not is_valid_sha256(binding.get(field)):
+                reasons.append(f"bound_{field}_invalid")
+        if not is_valid_code_sha(binding.get("code_sha")):
+            reasons.append("bound_code_sha_invalid")
+        if candidate.get("dataset_hash_sha256") != binding.get("dataset_hash_sha256"):
+            reasons.append("dataset_hash_unbound")
+        if candidate.get("source_hash_sha256") != binding.get("source_hash_sha256"):
+            reasons.append("source_hash_unbound")
+        if candidate.get("configuration_hash_sha256") != binding.get("configuration_hash_sha256"):
+            reasons.append("configuration_hash_unbound")
+        if candidate.get("code_sha") != binding.get("code_sha"):
+            reasons.append("code_sha_unbound")
+        if candidate.get("model_version") != binding.get("model_version"):
+            reasons.append("model_version_unbound")
+        if candidate.get("cost_model_version") != binding.get("cost_model_version"):
+            reasons.append("cost_model_unbound")
+        try:
+            if _parse_time(candidate.get("activation_time")) is None:
+                reasons.append("activation_time_invalid")
+        except ValueError:
+            reasons.append("activation_time_invalid")
+        receipt = candidate.get("training_receipt")
+        cohort = receipt.get("training_cohort") if isinstance(receipt, Mapping) else None
+        artifact = receipt.get("artifact") if isinstance(receipt, Mapping) else None
+        if not isinstance(receipt, Mapping) or not isinstance(cohort, Mapping) or not isinstance(artifact, Mapping):
+            reasons.append("training_receipt_unbound")
+        else:
+            if receipt.get("model_artifact_hash_sha256") != binding.get("model_artifact_hash_sha256") or _hash(artifact) != binding.get("model_artifact_hash_sha256"):
+                reasons.append("model_artifact_hash_mismatch")
+            if cohort.get("cohort_hash_sha256") != binding.get("training_cohort_hash_sha256"):
+                reasons.append("training_cohort_hash_mismatch")
+            ids = cohort.get("decision_ids")
+            if not isinstance(ids, list) or _hash(ids) != binding.get("training_decision_ids_hash_sha256"):
+                reasons.append("training_decision_ids_mismatch")
+            if receipt.get("dataset_hash_sha256") != binding.get("training_cohort_hash_sha256"):
+                reasons.append("training_input_hash_mismatch")
+            if receipt.get("code_sha") != binding.get("code_sha"):
+                reasons.append("training_code_sha_mismatch")
     return {
         "status": "RETAIN_FROZEN_CHAMPION" if reasons else "OBSERVER_ONLY_REVIEW_REQUIRED",
         "promotion_eligible": False,

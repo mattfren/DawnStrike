@@ -176,9 +176,16 @@ def train_shadow_challengers(
 
 
 def walk_forward_challenger_predictions(
-    dataset: dict[str, Any], *, model_run_id: str
+    dataset: dict[str, Any], *, model_run_id: str,
+    frozen_training_decision_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Generate only purged, date-forward predictions for persisted evaluation."""
+
+    if frozen_training_decision_ids is not None:
+        return _frozen_cohort_predictions(
+            dataset, model_run_id=model_run_id,
+            frozen_training_decision_ids=frozen_training_decision_ids,
+        )
 
     rows = current_training_rows(list(dataset.get("rows") or []))
     accepted_decision_ids = {str(row.get("decision_id") or "") for row in rows}
@@ -252,6 +259,65 @@ def walk_forward_challenger_predictions(
                 )[:28]
             )
             predictions.append(payload)
+    return predictions
+
+
+def _frozen_cohort_predictions(
+    dataset: dict[str, Any], *, model_run_id: str,
+    frozen_training_decision_ids: set[str],
+) -> list[dict[str, Any]]:
+    """Score later rows from one immutable weekly training cohort.
+
+    The validation and shadow labels remain available for evaluation, but they
+    are never passed to fitting, preprocessing, calibration, or model-family
+    eligibility.  This is the weekly controller path; walk-forward callers
+    without the explicit cohort argument retain their existing fold behavior.
+    """
+
+    raw_rows = [dict(row) for row in list(dataset.get("rows") or [])]
+    training_rows = [
+        row for row in raw_rows
+        if str(row.get("decision_id") or row.get("label_id") or "") in frozen_training_decision_ids
+    ]
+    eligibility = model_eligibility(training_rows)
+    if eligibility.status == "NOT_TRAINED_INSUFFICIENT_LABELS":
+        return []
+    activation_rows = [
+        row for row in list(dataset.get("activation_rows") or [])
+        if str(row.get("decision_id") or row.get("label_id") or "") in frozen_training_decision_ids
+    ]
+    suite = _fit_model_suite(
+        training_rows,
+        activation_rows=activation_rows,
+        allow_gradient_boosting=("controlled_gradient_boosting" in eligibility.allowed_families),
+    )
+    cutoff = max(str(row.get("market_date") or "")[:10] for row in training_rows)
+    predictions: list[dict[str, Any]] = []
+    for row in sorted(raw_rows, key=lambda item: (str(item.get("market_date") or ""), str(item.get("decision_id") or ""))):
+        decision_id = str(row.get("decision_id") or row.get("label_id") or "")
+        market_date = str(row.get("market_date") or "")[:10]
+        if not decision_id or decision_id in frozen_training_decision_ids or not market_date or market_date <= cutoff:
+            continue
+        prediction = _predict_suite(suite, row)
+        payload = {
+            "decision_id": row.get("decision_id"),
+            "model_run_id": model_run_id,
+            "fold_id": "frozen-weekly-training-cohort",
+            "market_date": row.get("market_date"),
+            "generated_at": utc_now(),
+            "status": prediction["status"],
+            "training_min_market_date": min(str(item.get("market_date") or "")[:10] for item in training_rows),
+            "training_max_market_date": cutoff,
+            "embargoed_dates": [],
+            "no_lookahead": cutoff < market_date,
+            "prediction": prediction,
+            "permitted_families": list(eligibility.allowed_families),
+            "evidence_lineage": _lineage_summary([row]),
+            "research_only": True,
+            "broker_execution_enabled": False,
+        }
+        payload["prediction_id"] = "v6p-" + canonical_hash({"decision_id": decision_id, "model_run_id": model_run_id, "fold_id": payload["fold_id"]})[:28]
+        predictions.append(payload)
     return predictions
 
 
