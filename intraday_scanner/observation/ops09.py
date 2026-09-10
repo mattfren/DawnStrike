@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -336,8 +337,11 @@ def _request_contract(*, plan: dict[str, Any], session: dict[str, Any], scope: d
         "session_id": session["exchange_session_id"], "calendar": session,
         "scope_path": str(scope_path.resolve()), "scope_sha256": scope["sha256"],
         "source_config_sha256": lineage.get("source_config_sha256"),
+        "source_config_path": lineage.get("source_config_path"),
         "entitlement_receipt_path": lineage.get("entitlement_receipt_path"),
         "entitlement_receipt_sha256": lineage.get("entitlement_receipt_sha256"),
+        "dependency_stage_root": lineage.get("dependency_stage_root"),
+        "dependency_stage_receipt_path": lineage.get("dependency_stage_receipt_path"),
         "provider": "alpaca", "feed": "sip", "endpoints": ["bars", "corporate_actions"],
         "reference_panel": list(REFERENCE_PANEL),
         "sampled_movers": scope["sampling"]["rows"], "missing_input": scope["missing_input"],
@@ -379,6 +383,12 @@ def _validate_request_contract(
     source_path = Path(str(lineage.get("source_config_path") or ""))
     if not source_path.is_file() or _sha_file(source_path) != str(lineage.get("source_config_sha256") or ""):
         raise Ops09Error("OPS09 bound source-config is missing or changed")
+    if contract.get("source_config_path") != lineage.get("source_config_path"):
+        raise Ops09Error("OPS09 immutable request contract source-config path changed")
+    if contract.get("dependency_stage_root") != lineage.get("dependency_stage_root"):
+        raise Ops09Error("OPS09 immutable request contract dependency stage changed")
+    if contract.get("dependency_stage_receipt_path") != lineage.get("dependency_stage_receipt_path"):
+        raise Ops09Error("OPS09 immutable request contract dependency receipt changed")
     if contract.get("repository") != plan.get("repository") or contract.get("toolchain") != plan.get("toolchain"):
         raise Ops09Error("OPS09 immutable request contract runtime identity changed")
     if contract.get("provider") != "alpaca" or contract.get("feed") != "sip" or contract.get("endpoints") != ["bars", "corporate_actions"]:
@@ -418,8 +428,20 @@ def _run_capture(*, plan: dict[str, Any], session: dict[str, Any], contract: dic
     if stage_root and stage_receipt:
         args += ["-DependencyStageRoot", str(stage_root), "-DependencyStageReceiptPath", str(stage_receipt)]
     try:
-        completed = subprocess.run(args, cwd=plan["repository"]["root"], capture_output=True, text=True,
-                                   timeout=max(1, timeout_seconds + 5), check=False)
+        wrapper_environment = os.environ.copy()
+        wrapper_environment["PSModulePath"] = (
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\Modules;"
+            r"C:\Program Files\WindowsPowerShell\Modules"
+        )
+        completed = subprocess.run(
+            args,
+            cwd=plan["repository"]["root"],
+            env=wrapper_environment,
+            capture_output=True,
+            text=True,
+            timeout=max(1, timeout_seconds + 5),
+            check=False,
+        )
     except subprocess.TimeoutExpired:
         return {"status": "DEGRADED", "reason": "capture_wall_timeout", "command": args}
     output = (completed.stdout or "").splitlines()
