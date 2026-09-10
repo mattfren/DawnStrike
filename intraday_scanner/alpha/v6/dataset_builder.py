@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping
 from typing import Any
 
 from intraday_scanner.alpha.canonical_return_truth import (
@@ -20,6 +21,7 @@ from intraday_scanner.alpha.v6.contracts import (
     utc_now,
 )
 from intraday_scanner.alpha.v6.models import evidence_lineage
+from intraday_scanner.alpha.outcome_semantics import typed_return_contract_valid
 from intraday_scanner.alpha.v6.validation import catalyst_ablation_plan
 
 _RETURN_LABEL_FAMILIES = frozenset(
@@ -47,17 +49,22 @@ def build_return_dataset(
     for label in labels:
         decision_id = str(label.get("decision_id") or "")
         decision = decisions_by_id.get(decision_id)
+        fill_truth = (
+            label.get("fill_truth")
+            or label.get("source_fill_truth")
+            or label
+        )
         if (
             decision is not None
             and str(label.get("label_family") or "") in _RETURN_LABEL_FAMILIES
-            and not has_authenticated_committed_fill_truth(label)
+            and not has_authenticated_committed_fill_truth(fill_truth)
         ):
             exclusions["committed_fill_truth_missing"] += 1
         if decision is None or not _current_label(label, decision=decision):
             if not (
                 decision is not None
                 and str(label.get("label_family") or "") in _RETURN_LABEL_FAMILIES
-                and not has_authenticated_committed_fill_truth(label)
+                and not has_authenticated_committed_fill_truth(fill_truth)
             ):
                 exclusions["legacy_or_incomplete_label_quarantined"] += 1
             continue
@@ -120,12 +127,12 @@ def build_return_dataset(
     )
     ordered_label_ids = [str(row.get("label_id") or "") for row in ordered_labels]
     ordered_label_hashes = [
-        str(row.get("label_payload_hash_sha256") or canonical_hash(row))
+        str(row.get("label_payload_hash_sha256") or canonical_hash(_json_safe(row)))
         for row in ordered_labels
     ]
     content = {
-        "rows": rows,
-        "activation_rows": activation_rows,
+        "rows": _json_safe(rows),
+        "activation_rows": _json_safe(activation_rows),
         "exclusions": dict(sorted(exclusions.items())),
         "schema_version": DATASET_SCHEMA_VERSION,
         "eligibility_policy_version": ELIGIBILITY_POLICY_VERSION,
@@ -175,6 +182,18 @@ def build_return_dataset(
     }
 
 
+def _json_safe(value: Any) -> Any:
+    """Serialize authenticated Mapping objects without replacing them in rows."""
+
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe(item) for item in value]
+    return value
+
+
 def _current_label(label: dict[str, Any], *, decision: dict[str, Any]) -> bool:
     """Accept only labels projected from authenticated current return truth."""
 
@@ -214,7 +233,12 @@ def _current_label(label: dict[str, Any], *, decision: dict[str, Any]) -> bool:
         "tail_loss_event",
         "rejected_candidate_regret",
     }:
-        return has_authenticated_committed_fill_truth(label)
+        return (
+            has_authenticated_committed_fill_truth(
+                label.get("fill_truth") or label.get("source_fill_truth") or label
+            )
+            and typed_return_contract_valid(label)
+        )
     return True
 
 
@@ -246,6 +270,7 @@ def _dataset_row(
         "decision_id": decision_id,
         "source_decision": decision,
         "source_label": target,
+        "source_fill_truth": target.get("fill_truth") or target.get("source_fill_truth"),
         "market_date": str(decision.get("market_date") or "")[:10],
         "ticker": decision.get("ticker"),
         "action": decision.get("action"),
