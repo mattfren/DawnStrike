@@ -109,8 +109,42 @@ def _plan(tmp_path: Path, repo: Path) -> CapturePlan:
     )
 
 
+def _clean_repo(tmp_path: Path) -> Path:
+    """Return an isolated, committed git repository for plan validation.
+
+    ``CapturePlan.validate`` refuses a candidate repo whose worktree is dirty,
+    and it counts untracked files (``--untracked-files=all``).  Pointing these
+    tests at the real checkout therefore made them depend on the tidiness of
+    whatever tree they ran in: locally clean, so they passed, while CI - which
+    leaves build and cache artifacts behind - failed them with "candidate
+    repository worktree is not clean" instead of the message under test.  The
+    cleanliness rule has its own test (test_plan_rejects_dirty_candidate_worktree);
+    everything else needs a repo that is clean by construction.
+    """
+
+    repo = tmp_path / "candidate_repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "test@example.com"],
+        check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "Test"],
+        check=True, capture_output=True,
+    )
+    (repo / "tracked.txt").write_text("clean\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "tracked.txt"], check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-m", "base"], check=True, capture_output=True,
+    )
+    return repo
+
+
 def test_plan_requires_delayed_sip_and_separate_external_roots(tmp_path: Path) -> None:
-    repo = Path(__file__).resolve().parents[1]
+    repo = _clean_repo(tmp_path)
     plan = _plan(tmp_path, repo)
     result = plan_as_dict(plan, now=datetime(2026, 8, 30, 12, tzinfo=UTC))
     assert result["status"] == "READY"
@@ -136,7 +170,7 @@ def test_plan_requires_delayed_sip_and_separate_external_roots(tmp_path: Path) -
 def test_plan_rejects_feed_substitution_and_non_alpaca_provider(
     tmp_path: Path, field: str, value: str, message: str
 ) -> None:
-    repo = Path(__file__).resolve().parents[1]
+    repo = _clean_repo(tmp_path)
     plan = _plan(tmp_path, repo)
     object.__setattr__(plan, field, value)
     with pytest.raises(CapturePlanError, match=message):
@@ -144,7 +178,7 @@ def test_plan_rejects_feed_substitution_and_non_alpaca_provider(
 
 
 def test_plan_rejects_active_state_output(tmp_path: Path) -> None:
-    repo = Path(__file__).resolve().parents[1]
+    repo = _clean_repo(tmp_path)
     plan = _plan(tmp_path, repo)
     object.__setattr__(plan, "output_root", Path(r"C:\r\dawnstrike-state\capture"))
     with pytest.raises(CapturePlanError, match="active state"):
@@ -152,7 +186,7 @@ def test_plan_rejects_active_state_output(tmp_path: Path) -> None:
 
 
 def test_plan_rejects_recent_window(tmp_path: Path) -> None:
-    repo = Path(__file__).resolve().parents[1]
+    repo = _clean_repo(tmp_path)
     plan = _plan(tmp_path, repo)
     session = plan.expected_session
     session.write_text(
@@ -195,7 +229,7 @@ def test_plan_rejects_dirty_candidate_worktree(tmp_path: Path) -> None:
 
 
 def test_plan_rejects_unproven_entitlement_receipt(tmp_path: Path) -> None:
-    repo = Path(__file__).resolve().parents[1]
+    repo = _clean_repo(tmp_path)
     plan = _plan(tmp_path, repo)
     plan.entitlement_receipt.write_text(
         json.dumps({"entitlement": "claimed", "proof_id": "forged"}),
