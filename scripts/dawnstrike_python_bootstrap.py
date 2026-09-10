@@ -1449,6 +1449,10 @@ def main(argv: list[str] | None = None) -> int:
             dependency_paths, dependency_prefix = _resolve_isolated_dependency_stage(
                 args.dependency_stage_root
             )
+            for dependency in dependency_paths:
+                text = str(dependency)
+                if text not in sys.path:
+                    sys.path.append(text)
             allowed_dependencies, owned_dependency_paths, owned_dependency_hashes = (
                 _assert_locked_dependencies(
                     root,
