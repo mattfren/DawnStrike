@@ -410,7 +410,7 @@ def _run_capture(*, plan: dict[str, Any], session: dict[str, Any], contract: dic
     argument_list = [str(Path(plan["repository"]["root"]) / "scripts" / "ops05_historical_bars.py"),
                      "--market-date", session["market_date"], "--census", str(census_path), "--output-root", str(capture_root),
                      "--source-config-hash", str(contract["source_config_sha256"]),
-                     "--capture-receipt-hash", contract["request_contract_sha256"], "--resume-across-roots"]
+                     "--capture-receipt-hash", contract["request_contract_sha256"]]
     if fixture is not None:
         argument_list += ["--fixture", str(fixture)]
     elif execute:
