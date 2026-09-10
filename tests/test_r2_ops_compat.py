@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -141,6 +143,131 @@ def test_provider_future_event_remains_fail_closed(tmp_path: Path) -> None:
             output_root=tmp_path / "producer",
             decision_deadline="2026-01-02T12:00:00Z",
         )
+
+
+def test_public_producer_cli_runs_stratified_panel_and_rejects_unknown_mode(
+    tmp_path: Path,
+) -> None:
+    symbols = ("DIA", "IWM", "QQQ", "SPY", "TLT")
+    capture_root = tmp_path / "capture"
+    state_symbols: dict[str, dict] = {}
+    for symbol in symbols:
+        page_path = capture_root / "pages" / symbol / "bars" / "page-000000.json"
+        page_path.parent.mkdir(parents=True, exist_ok=True)
+        page = {
+            "page_number": 0,
+            "cursor_in": None,
+            "cursor_out": None,
+            "provider": "alpaca",
+            "feed": "sip",
+            "endpoint": "bars",
+            "raw_payload_hash_sha256": "d" * 64,
+            "previous_page_hash_sha256": None,
+            "items": [
+                {"t": "2026-01-02T10:00:00Z", "c": 10},
+                {"t": "2026-01-02T11:00:00Z", "c": 11},
+            ],
+        }
+        page_path.write_text(json.dumps(page), encoding="utf-8")
+        artifact_hash = hashlib.sha256(canonical_json(page)).hexdigest()
+        state_symbols[symbol] = {
+            "bars": {
+                "pages": [
+                    {
+                        "page_path": str(page_path),
+                        "page_number": 0,
+                        "cursor_in": None,
+                        "cursor_out": None,
+                        "provider": "alpaca",
+                        "feed": "sip",
+                        "endpoint": "bars",
+                        "raw_payload_hash_sha256": "d" * 64,
+                        "raw_artifact_hash_sha256": artifact_hash,
+                        "previous_page_hash_sha256": None,
+                    }
+                ]
+            }
+        }
+    state_path = capture_root / "capture_run_state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "status": "COMPLETE",
+                "request": {
+                    "provider": "alpaca",
+                    "feed": "sip",
+                    "market_date": "2026-01-02",
+                    "exchange_session_id": "XNYS:2026-01-02:regular",
+                    "source_config_hash": "a" * 64,
+                    "code_sha": "c" * 40,
+                },
+                "symbols": state_symbols,
+            }
+        ),
+        encoding="utf-8",
+    )
+    receipt = {
+        "schema_version": "dawnstrike.intraday_capture_run.v1",
+        "run_id": "capture-r2-cli-stratified",
+        "status": "COMPLETE",
+        "provider": "alpaca",
+        "feed": "sip",
+        "symbols": list(symbols),
+        "market_date": "2026-01-02",
+        "session_id": "XNYS:2026-01-02:regular",
+        "source_config_hash": "a" * 64,
+        "code_sha": "c" * 40,
+        "state_path": str(state_path),
+        "request_start": "2026-01-02T10:00:00+00:00",
+        "request_end": "2026-01-02T11:00:00+00:00",
+        "completed_at": "2026-01-02T11:30:00+00:00",
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+    receipt["receipt_hash_sha256"] = hashlib.sha256(canonical_json(receipt)).hexdigest()
+    receipt_path = capture_root / "capture_run_receipt.json"
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    scope = {
+        "schema_version": "dawnstrike.observation.scope_declaration.v1",
+        "universe_generation_id": "generation-r2-cli-stratified",
+        "scopes": {
+            "original_small_cap_gap": [{"symbol": "ORIG", "membership": "selected"}],
+            "liquid_reference_panel": [
+                {"symbol": symbol, "membership": "selected"} for symbol in symbols
+            ],
+        },
+    }
+    scope_path = tmp_path / "scope.json"
+    scope_path.write_text(json.dumps(scope), encoding="utf-8")
+    script = Path(__file__).resolve().parents[1] / "scripts" / "build_observation_inputs.py"
+    command = [
+        sys.executable,
+        str(script),
+        "--capture-receipt",
+        str(receipt_path),
+        "--scope-declaration",
+        str(scope_path),
+        "--output-root",
+        str(tmp_path / "producer"),
+        "--decision-deadline",
+        "2026-01-02T12:00:00Z",
+        "--max-events",
+        "35",
+        "--reduction-mode",
+        "stratified_panel",
+    ]
+    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["status"] == "READY"
+    assert result["sampling_plan"]["present_selected_count"] == 10
+    rejected = subprocess.run(
+        [*command[:-1], "unsupported_mode"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert rejected.returncode == 2
 
 
 def test_stratified_panel_derivative_covers_each_symbol_and_bin(tmp_path: Path) -> None:
