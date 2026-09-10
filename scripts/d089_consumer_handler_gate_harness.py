@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 import scripts.ops09_pipeline as pipeline
+from intraday_scanner.observation import ops09 as consumer_module
 
 
 def main() -> int:
@@ -16,7 +17,7 @@ def main() -> int:
         raise SystemExit("usage: harness.py MARKER RELEASE pipeline-args...")
     marker = Path(sys.argv[1]).resolve()
     release = Path(sys.argv[2]).resolve()
-    original_monitor = pipeline.run_alpha_v6_daily_monitor
+    original_monitor = consumer_module.run_alpha_v6_daily_monitor
 
     def gated_monitor(store, *args, **kwargs):
         marker.parent.mkdir(parents=True, exist_ok=True)
@@ -41,7 +42,7 @@ def main() -> int:
             time.sleep(0.05)
         return original_monitor(store, *args, **kwargs)
 
-    pipeline.run_alpha_v6_daily_monitor = gated_monitor
+    consumer_module.run_alpha_v6_daily_monitor = gated_monitor
     pipeline_args = sys.argv[3:]
     sys.argv = ["scripts/ops09_pipeline.py", *pipeline_args]
     return int(pipeline.main() or 0)
