@@ -17,6 +17,7 @@ from intraday_scanner.alpha.fill_truth import (
 )
 from intraday_scanner.alpha.v6.contracts import LABEL_SCHEMA_VERSION, canonical_hash, utc_now
 from intraday_scanner.alpha.v6.models import evidence_lineage
+from intraday_scanner.alpha.outcome_semantics import typed_return_contract_valid
 
 _RETURN_FAMILIES = (
     "simulated_fill_feasibility",
@@ -57,6 +58,11 @@ def build_label_families(
     current_censored = classification == CURRENT_CENSORED_PATH
     current_path = current_return or current_not_triggered or current_censored
     activation_conclusive = conclusive or current_not_triggered
+    observed_at = str(outcome.get("observed_at") or utc_now())
+    typed_fields = {
+        **outcome,
+        "label_available_at": outcome.get("label_available_at") or observed_at,
+    }
     eligible_return = bool(
         outcome.get("learning_eligible") is True
         and source_hash
@@ -65,8 +71,8 @@ def build_label_families(
         and current_return
         and return_truth["eligible"]
         and fill_truth_present
+        and typed_return_contract_valid(typed_fields)
     )
-    observed_at = str(outcome.get("observed_at") or utc_now())
     base = {
         "decision_id": decision_id,
         "market_date": market_date,
@@ -97,6 +103,14 @@ def build_label_families(
             "committed" if fill_truth_present else "missing_committed_fill_truth"
         ),
         "fill_truth_bound": fill_truth_present,
+        "fill_truth": outcome.get("fill_truth") or outcome.get("source_fill_truth"),
+        "return_units": outcome.get("return_units") or outcome.get("return_unit"),
+        "holding_horizon_minutes": outcome.get("holding_horizon_minutes") or outcome.get("horizon_minutes"),
+        "return_denominator": outcome.get("return_denominator"),
+        "return_basis": outcome.get("return_basis"),
+        "cost_availability_status": outcome.get("cost_availability_status") or outcome.get("cost_status"),
+        "label_available_at": outcome.get("label_available_at") or observed_at,
+        "outcome_availability_status": outcome.get("outcome_availability_status") or outcome.get("availability_status"),
     }
     truth_lineage = _truth_lineage(outcome)
     base["truth_lineage_hash_sha256"] = canonical_hash(truth_lineage)

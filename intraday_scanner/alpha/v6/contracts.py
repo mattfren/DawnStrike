@@ -52,13 +52,15 @@ def point_in_time_valid(decision: dict[str, Any]) -> bool:
         return False
     if point_in_time.get("all_inputs_observed_at_or_before_decision") is not True:
         return False
-    if not _aware_timestamp_not_after(
+    feature_timestamp = (
         decision.get("feature_timestamp")
         or decision.get("features_observed_at")
         or point_in_time.get("feature_timestamp")
         or point_in_time.get("features_observed_at")
-        or point_in_time.get("latest_feature_timestamp"),
-        decision.get("decision_at"),
+        or point_in_time.get("latest_feature_timestamp")
+    )
+    if not feature_timestamp or not _aware_timestamp_not_after(
+        feature_timestamp, decision.get("decision_at")
     ):
         return False
     return bool(

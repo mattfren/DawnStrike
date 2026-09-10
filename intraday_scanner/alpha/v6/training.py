@@ -18,6 +18,7 @@ from intraday_scanner.alpha.v6.models import (
 )
 from intraday_scanner.alpha.v6.scoring import conservative_utility
 from intraday_scanner.alpha.v6.validation import expanding_purged_splits
+from intraday_scanner.alpha.v6.contracts import point_in_time_valid
 
 _MIN_BINARY_LABELS = 100
 _MIN_CONFORMAL_RESIDUALS = 20
@@ -274,6 +275,7 @@ def predict_from_frozen_model_run(
         or cutoff >= decision_date
         or not run_feature_schema
         or run_feature_schema != decision_feature_schema
+        or not point_in_time_valid(decision)
     ):
         return None
     feature_names = list(data.get("feature_names") or [])

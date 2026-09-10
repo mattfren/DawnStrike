@@ -15,6 +15,10 @@ from intraday_scanner.alpha.fill_truth import (
     has_authenticated_committed_fill_truth,
 )
 from intraday_scanner.alpha.path_replay import ELIGIBILITY_POLICY_VERSION
+from intraday_scanner.alpha.outcome_semantics import (
+    chronology_valid,
+    typed_return_contract_valid,
+)
 from intraday_scanner.alpha.v6.contracts import LABEL_SCHEMA_VERSION, canonical_hash
 
 MIN_RETURN_MODEL_LABELS = 100
@@ -142,8 +146,11 @@ def current_training_rows(dataset_rows: list[dict[str, Any]]) -> list[dict[str, 
                 row.get("target_net_excess_return_pct"),
                 label.get("label_value"),
             )
-            and has_authenticated_committed_fill_truth({**row, **label, **decision})
+            and has_authenticated_committed_fill_truth(
+                row.get("fill_truth") or row.get("source_fill_truth") or label
+            )
             and _chronology_valid(row=row, label=label, decision=decision)
+            and typed_return_contract_valid(label)
         ):
             continue
         accepted.append(row)
@@ -155,33 +162,7 @@ def _chronology_valid(
 ) -> bool:
     """Require aware decision, feature, and label availability timestamps."""
 
-    decision_at = _timestamp(decision.get("decision_at"))
-    if decision_at is None:
-        return False
-    point_in_time = decision.get("point_in_time")
-    point_in_time = point_in_time if isinstance(point_in_time, dict) else {}
-    feature_value = (
-        decision.get("feature_timestamp")
-        or decision.get("features_observed_at")
-        or point_in_time.get("feature_timestamp")
-        or point_in_time.get("features_observed_at")
-        or point_in_time.get("latest_feature_timestamp")
-    )
-    feature_at = _timestamp(feature_value)
-    if feature_at is None or feature_at > decision_at:
-        return False
-    available_value = next(
-        (
-            label.get(field)
-            for field in ("label_available_at", "available_at", "matured_at", "observed_at")
-            if label.get(field) not in {None, ""}
-        ),
-        None,
-    )
-    available_at = _timestamp(available_value)
-    if available_at is None or available_at <= decision_at:
-        return False
-    return True
+    return chronology_valid(decision=decision, label=label)
 
 
 def _timestamp(value: object) -> datetime | None:
