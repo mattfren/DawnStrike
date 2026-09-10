@@ -245,7 +245,13 @@ def _bar_value(item: Mapping[str, Any], key: str, short: str) -> Any:
     return item.get(short, item.get(key))
 
 
-def _normalize_bar(item: Mapping[str, Any], *, window: Window, source_hash: str) -> dict[str, Any]:
+def _normalize_bar(
+    item: Mapping[str, Any],
+    *,
+    window: Window,
+    source_hash: str,
+    source_identity: str,
+) -> dict[str, Any]:
     symbol = str(item.get("symbol") or item.get("S") or "").upper()
     event_time = _parse_timestamp(_bar_value(item, "timestamp", "t"), label="bar timestamp")
     payload = {
@@ -264,8 +270,15 @@ def _normalize_bar(item: Mapping[str, Any], *, window: Window, source_hash: str)
     return {
         "schema_version": "dawnstrike.ops05.bar.v1",
         "event_id": _sha256({"window": window.name, **payload}),
-        "source": "alpaca:sip",
+        "source": source_identity,
         "source_artifact_hash_sha256": source_hash,
+        "source_page_number": int(item["__ops05_page_number"]),
+        "source_page_row_index": int(item["__ops05_page_row_index"]),
+        "source_page_hash_sha256": str(item["__ops05_page_hash_sha256"]),
+        "source_window": window.name,
+        "source_payload_sha256": _sha256(
+            {key: value for key, value in item.items() if not key.startswith("__ops05_")}
+        ),
         "window": window.name,
         "session_id": window.session_id,
         "symbol": symbol,
@@ -321,7 +334,9 @@ def _fetch_pages(
             or page.endpoint != expected_endpoint
         ):
             raise Ops05Error("provider page identity does not match the declared request")
-        page_bytes = sum(len(_canonical_json(item)) for item in page.items)
+        page_items = [dict(item) for item in page.items]
+        computed_page_hash = _sha256(page_items)
+        page_bytes = sum(len(_canonical_json(item)) for item in page_items)
         byte_counter[0] += page_bytes
         if byte_counter[0] > MAX_BYTES:
             raise Ops05Error("raw provider payload exceeds the 64 MiB bound")
@@ -335,16 +350,28 @@ def _fetch_pages(
                 "provider": page.provider,
                 "feed": page.feed,
                 "item_count": len(page.items),
-                "raw_payload_hash_sha256": page.raw_payload_hash_sha256,
+                "raw_payload_hash_sha256": computed_page_hash,
+                "provider_raw_payload_hash_sha256": page.raw_payload_hash_sha256,
                 "request_id": page.request_id,
                 "cursor_in": token,
                 "cursor_out": page.next_page_token,
                 "attempts": attempts,
                 "observed_item_bytes": page_bytes,
+                "request_start": start,
+                "request_end": end,
+                "raw_payload_items": page_items,
             }
         )
         page_counter[0] += 1
-        items.extend(dict(item) for item in page.items)
+        items.extend(
+            {
+                **item,
+                "__ops05_page_number": page_number,
+                "__ops05_page_row_index": row_index,
+                "__ops05_page_hash_sha256": computed_page_hash,
+            }
+            for row_index, item in enumerate(page_items)
+        )
         if len(page_receipts) > MAX_PAGES:
             raise Ops05Error("provider page cap exceeded")
         if not page.next_page_token:
@@ -510,7 +537,12 @@ def produce_historical_bars(
                 continue
             if timestamp < window.start or timestamp > window.end:
                 raise Ops05Error("provider returned an out-of-window event")
-            event = _normalize_bar(item, window=window, source_hash=capture_receipt_hash)
+            event = _normalize_bar(
+                item,
+                window=window,
+                source_hash=capture_receipt_hash,
+                source_identity=f"{provider.provider_name}:{provider.feed}",
+            )
             key = (event["symbol"], event["event_time"])
             if key in seen:
                 continue
@@ -543,7 +575,7 @@ def produce_historical_bars(
             row["missingness"] = "no_bar_observed_in_bounded_windows"
     receipt = {
         "schema_version": RECEIPT_SCHEMA,
-        "producer_version": "ops05-bars-1",
+        "producer_version": "ops05-bars-2",
         "ingested_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "market_date": market_date,
         "windows": {key: value.as_dict() for key, value in windows.items()},
@@ -635,10 +667,50 @@ def produce_historical_bars(
     receipt["coverage"]["persisted_output_bytes"] = persisted_bytes
     if persisted_bytes > MAX_BYTES:
         raise Ops05Error("persisted output exceeds the 64 MiB bound")
+    binding = {
+        "schema_version": "dawnstrike.ops05.capture_binding.v1",
+        "market_date": market_date,
+        "provider": provider.provider_name,
+        "feed": provider.feed,
+        "source_config_sha256": source_config_hash,
+        "capture_receipt_sha256": capture_receipt_hash,
+        "raw_event_stream_sha256": receipt["raw_event_stream_sha256"],
+        "pages": [
+            {
+                key: page[key]
+                for key in (
+                    "window",
+                    "page_number",
+                    "endpoint",
+                    "provider",
+                    "feed",
+                    "item_count",
+                    "raw_payload_hash_sha256",
+                    "request_start",
+                    "request_end",
+                )
+            }
+            for page in page_receipts
+        ],
+    }
+    binding["binding_sha256"] = _sha256(binding)
+    binding_text = json.dumps(binding, sort_keys=True, indent=2) + "\n"
+    binding_bytes = len(binding_text.encode("utf-8"))
+    for _ in range(3):
+        receipt_text = json.dumps(receipt, sort_keys=True, indent=2) + "\n"
+        persisted_bytes = sum(
+            len(value.encode("utf-8"))
+            for value in (raw_bars_text, boundary_text, census_text, receipt_text)
+        ) + binding_bytes
+        receipt["coverage"]["persisted_output_bytes"] = persisted_bytes
+    receipt_text = json.dumps(receipt, sort_keys=True, indent=2) + "\n"
+    if persisted_bytes > MAX_BYTES:
+        raise Ops05Error("persisted capture binding exceeds the 64 MiB bound")
     (root / "raw-bars.jsonl").write_text(raw_bars_text, encoding="utf-8")
     (root / "boundary-events.jsonl").write_text(boundary_text, encoding="utf-8")
     (root / "universe-census.json").write_text(census_text, encoding="utf-8")
     (root / "receipt.json").write_text(
-        json.dumps(receipt, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+        receipt_text, encoding="utf-8"
     )
+    (root / "capture-binding.json").write_text(binding_text, encoding="utf-8")
     return receipt
