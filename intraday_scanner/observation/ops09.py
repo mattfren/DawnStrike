@@ -34,6 +34,7 @@ from intraday_scanner.services.alpha_v6_learning_service import (
     run_alpha_v6_daily_monitor,
     run_alpha_v6_weekly_training,
 )
+from intraday_scanner.alpha.v6.models import current_training_rows
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
 
 OPS09_SCHEMA = "dawnstrike.observation.ops09_cohort.v1"
@@ -651,7 +652,8 @@ def _run_consumers(
     try:
         store.initialize()
         daily = run_alpha_v6_daily_monitor(store, market_date=session["market_date"], observation_source=adapted)
-        weekly = run_alpha_v6_weekly_training(
+        weekly_gate = _weekly_observer_gate(store)
+        weekly = weekly_gate or run_alpha_v6_weekly_training(
             store, code_sha=repo_sha, market_date=session["market_date"], observation_source=adapted
         )
     finally:
@@ -660,6 +662,49 @@ def _run_consumers(
     return {
         "daily": daily, "weekly": weekly, "database_path": str(database_path.resolve()),
         "database_mode": "in_memory" if in_memory else "disk", "isolated": True,
+    }
+
+
+def _weekly_observer_gate(store: SQLiteScanStore) -> dict[str, Any] | None:
+    """Keep weekly fitting behind D029's exact past-session admission gate."""
+    datasets = store.load_alpha_v6_datasets(limit=1)
+    dataset = datasets[0] if datasets else None
+    rows = (
+        current_training_rows(list(dataset.get("rows") or []))
+        if isinstance(dataset, dict)
+        else []
+    )
+    dates = sorted({str(row.get("market_date") or "")[:10] for row in rows if row.get("market_date")})
+    if len(rows) < 100 or len(dates) >= 60:
+        return None
+    return {
+        "schema_version": "dawnstrike.ops09.weekly_observer_gate.v1",
+        "status": "NOT_TRAINED_INSUFFICIENT_SESSIONS",
+        "training": {
+            "status": "NOT_TRAINED_INSUFFICIENT_SESSIONS",
+            "eligibility": {
+                "eligible_label_count": len(rows),
+                "forward_date_count": len(dates),
+                "required_past_sessions": 60,
+                "exact_exclusions": ["d029_minimum_60_past_eligible_sessions"],
+                "research_only": True,
+                "broker_execution_enabled": False,
+            },
+            "artifact": None,
+            "automatic_promotion": False,
+            "model_refit_performed": False,
+        },
+        "model_refit_performed": False,
+        "automatic_promotion": False,
+        "research_only": True,
+        "broker_execution_enabled": False,
+        "observer_gate": {
+            "status": "BLOCKED_INSUFFICIENT_PAST_SESSIONS",
+            "eligible_rows": len(rows),
+            "eligible_sessions": len(dates),
+            "required_past_sessions": 60,
+            "handler_invoked": False,
+        },
     }
 
 
