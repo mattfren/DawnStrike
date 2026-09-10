@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 
+import pytest
+
 from intraday_scanner.cli import main
 from intraday_scanner.observation.ops05_historical_bars import (
     PANEL_SYMBOLS,
@@ -119,6 +121,8 @@ def test_ops05_archive_adapts_to_matured_label_only_horizons(tmp_path) -> None:
     assert packet["status"] == "READY"
     assert packet["labels"][0]["eligibility_state"] == "LABEL_ONLY_DELAYED_SOURCE"
     assert packet["labels"][0]["learning_eligible"] is False
+    first_event = json.loads((root / "r3-adapter" / "raw-events.jsonl").read_text().splitlines()[0])
+    assert first_event["source"] == "alpaca:sip"
     assert [row["status"] for row in packet["horizon_summary"][0]] == [
         "MATURED_DELAYED_LABEL",
         "MATURED_DELAYED_LABEL",
@@ -163,3 +167,29 @@ def test_ops05_raw_hash_swap_is_rejected(tmp_path) -> None:
         assert "raw event content does not match receipt" in str(exc)
     else:
         raise AssertionError("tampered OPS05 bytes were accepted")
+
+
+def test_same_length_page_body_swap_is_rejected(tmp_path) -> None:
+    root, decisions = _archive(tmp_path)
+    receipt_path = root / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["pages"][0]["raw_payload_items"][0]["c"] = 999.0
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    with pytest.raises(ValueError, match="page body does not match"):
+        adapt_ops05_to_r3(observation_root=root, decision_artifact=decisions)
+
+
+def test_recomputed_raw_stream_cannot_change_row_source_identity(tmp_path) -> None:
+    root, decisions = _archive(tmp_path)
+    raw_path = root / "raw-bars.jsonl"
+    rows = [json.loads(line) for line in raw_path.read_text(encoding="utf-8").splitlines()]
+    rows[0]["source_artifact_hash_sha256"] = "c" * 64
+    raw_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+    receipt_path = root / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["raw_event_stream_sha256"] = hashlib.sha256(
+        json.dumps(rows, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    with pytest.raises(ValueError, match="capture binding does not match receipt"):
+        adapt_ops05_to_r3(observation_root=root, decision_artifact=decisions)

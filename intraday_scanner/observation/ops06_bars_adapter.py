@@ -56,6 +56,158 @@ def _decisions(value: Any) -> list[dict[str, Any]]:
     return [dict(row) for row in value]
 
 
+def _capture_binding(root: Path, receipt: dict[str, Any]) -> dict[str, Any]:
+    path = root / "capture-binding.json"
+    if not path.is_file():
+        raise Ops06AdapterError(
+            "OPS05 capture binding is missing; legacy archive is UNVERIFIED_PROVENANCE"
+        )
+    try:
+        binding = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise Ops06AdapterError("OPS05 capture binding is unreadable") from exc
+    if not isinstance(binding, dict):
+        raise Ops06AdapterError("OPS05 capture binding must be an object")
+    declared = str(binding.get("binding_sha256") or "").lower()
+    unsigned = {key: value for key, value in binding.items() if key != "binding_sha256"}
+    if not _HEX64.fullmatch(declared) or _sha_json(unsigned) != declared:
+        raise Ops06AdapterError("OPS05 capture binding hash is invalid")
+    lineage = receipt.get("source_lineage") or {}
+    expected = {
+        "market_date": receipt.get("market_date"),
+        "provider": lineage.get("provider"),
+        "feed": lineage.get("feed"),
+        "source_config_sha256": lineage.get("source_config_sha256"),
+        "capture_receipt_sha256": lineage.get("capture_receipt_sha256"),
+        "raw_event_stream_sha256": receipt.get("raw_event_stream_sha256"),
+    }
+    if any(binding.get(key) != value for key, value in expected.items()):
+        raise Ops06AdapterError("OPS05 capture binding does not match receipt identity")
+    return binding
+
+
+def _page_contract(page: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: page.get(key)
+        for key in (
+            "window",
+            "page_number",
+            "endpoint",
+            "provider",
+            "feed",
+            "item_count",
+            "raw_payload_hash_sha256",
+            "request_start",
+            "request_end",
+        )
+    }
+
+
+def _validate_pages(
+    receipt: dict[str, Any], binding: dict[str, Any]
+) -> dict[tuple[str, int], dict[str, Any]]:
+    pages = receipt.get("pages")
+    if not isinstance(pages, list) or not pages:
+        raise Ops06AdapterError("OPS05 receipt has no page bodies")
+    binding_pages = binding.get("pages")
+    if binding_pages != [_page_contract(page) for page in pages]:
+        raise Ops06AdapterError("OPS05 capture binding page census changed")
+    result: dict[tuple[str, int], dict[str, Any]] = {}
+    windows = receipt.get("windows") or {}
+    for page in pages:
+        if not isinstance(page, dict):
+            raise Ops06AdapterError("OPS05 page receipt is invalid")
+        body = page.get("raw_payload_items")
+        if not isinstance(body, list):
+            raise Ops06AdapterError("OPS05 page body is missing")
+        page_hash = str(page.get("raw_payload_hash_sha256") or "").lower()
+        provider_hash = str(page.get("provider_raw_payload_hash_sha256") or "").lower()
+        if not _HEX64.fullmatch(page_hash) or not _HEX64.fullmatch(provider_hash):
+            raise Ops06AdapterError("OPS05 page body identity is invalid")
+        if _sha_json(body) != page_hash or page.get("item_count") != len(body):
+            raise Ops06AdapterError("OPS05 page body does not match its recorded hash")
+        window_name = str(page.get("window") or "")
+        window = windows.get(window_name)
+        if not isinstance(window, dict):
+            raise Ops06AdapterError("OPS05 page window is not declared")
+        if page.get("request_start") != window.get("start_utc"):
+            raise Ops06AdapterError("OPS05 page request start is not bound to its window")
+        if page.get("request_end") != window.get("end_utc"):
+            raise Ops06AdapterError("OPS05 page request end is not bound to its window")
+        provider = str(receipt["source_lineage"].get("provider") or "")
+        feed = str(receipt["source_lineage"].get("feed") or "")
+        if page.get("provider") != provider or page.get("feed") != feed:
+            raise Ops06AdapterError("OPS05 page source identity differs from receipt")
+        endpoint = str(page.get("endpoint") or "")
+        if endpoint not in {"bars", "corporate_actions"}:
+            raise Ops06AdapterError("OPS05 page endpoint is not supported")
+        number = page.get("page_number")
+        if not isinstance(number, int) or number < 0:
+            raise Ops06AdapterError("OPS05 page number is invalid")
+        key = (window_name, number)
+        if key in result:
+            raise Ops06AdapterError("OPS05 page identity is duplicated")
+        result[key] = page
+    return result
+
+
+def _raw_value(item: dict[str, Any], long_name: str, short_name: str) -> Any:
+    return item.get(short_name, item.get(long_name))
+
+
+def _validate_raw_rows(
+    receipt: dict[str, Any],
+    raw_rows: list[dict[str, Any]],
+    pages: dict[tuple[str, int], dict[str, Any]],
+    binding: dict[str, Any],
+) -> None:
+    lineage = receipt["source_lineage"]
+    expected_source = f"{lineage['provider']}:{lineage['feed']}"
+    capture = str(lineage["capture_receipt_sha256"]).lower()
+    for row in raw_rows:
+        if row.get("source") != expected_source:
+            raise Ops06AdapterError("OPS05 bar source identity is not receipt-bound")
+        if str(row.get("source_artifact_hash_sha256") or "").lower() != capture:
+            raise Ops06AdapterError("OPS05 bar source artifact is not capture-bound")
+        window = str(row.get("source_window") or "")
+        number = row.get("source_page_number")
+        index = row.get("source_page_row_index")
+        if not isinstance(number, int) or not isinstance(index, int):
+            raise Ops06AdapterError("OPS05 bar source row mapping is missing")
+        page = pages.get((window, number))
+        if page is None or page.get("endpoint") != "bars":
+            raise Ops06AdapterError("OPS05 bar source page is not receipt-bound")
+        body = page["raw_payload_items"]
+        if index < 0 or index >= len(body):
+            raise Ops06AdapterError("OPS05 bar source row offset is invalid")
+        source_item = body[index]
+        if not isinstance(source_item, dict):
+            raise Ops06AdapterError("OPS05 bar source payload is invalid")
+        if row.get("source_page_hash_sha256") != page.get("raw_payload_hash_sha256"):
+            raise Ops06AdapterError("OPS05 bar page hash binding is invalid")
+        if row.get("source_payload_sha256") != _sha_json(source_item):
+            raise Ops06AdapterError("OPS05 bar payload is not bound to its source row")
+        symbol = str(source_item.get("symbol") or source_item.get("S") or "").upper()
+        timestamp = _raw_value(source_item, "timestamp", "t")
+        payload = row.get("payload") or {}
+        if symbol != str(row.get("symbol") or "").upper() or _utc(timestamp) != _utc(
+            row.get("event_time")
+        ):
+            raise Ops06AdapterError("OPS05 normalized bar does not match source row")
+        for payload_key, long_name, short_name in (
+            ("open", "open", "o"),
+            ("high", "high", "h"),
+            ("low", "low", "l"),
+            ("close", "close", "c"),
+            ("volume", "volume", "v"),
+        ):
+            if payload.get(payload_key) != _raw_value(source_item, long_name, short_name):
+                raise Ops06AdapterError("OPS05 normalized payload does not match source row")
+    expected_stream = binding.get("raw_event_stream_sha256")
+    if expected_stream != receipt.get("raw_event_stream_sha256"):
+        raise Ops06AdapterError("OPS05 raw stream identity is not capture-bound")
+
+
 def _manifest(
     receipt: dict[str, Any], census: list[dict[str, Any]], raw_hash: str, generation: str
 ) -> dict[str, Any]:
@@ -105,8 +257,8 @@ def _manifest(
             "expected_entries": len(entries),
         },
         "source_lineage": {
-            "provider": receipt["source_lineage"]["provider"],
-            "feed": receipt["source_lineage"]["feed"],
+            "provider": str(receipt["source_lineage"]["provider"]),
+            "feed": str(receipt["source_lineage"]["feed"]),
             "capture_receipt_sha256": capture,
             "session_id": session_id,
             "source_config_sha256": source_config,
@@ -148,7 +300,9 @@ def _events(
                 "source_session_id": source_session_id,
                 "scope": "liquid_reference_panel" if symbol in panel else "original_small_cap_gap",
                 "symbol": symbol,
-                "source": "alpaca:sip",
+                "source": (
+                    f"{receipt['source_lineage']['provider']}:{receipt['source_lineage']['feed']}"
+                ),
                 "kind": "bars",
                 "event_time": event_time.isoformat(),
                 "available_at": available_at.isoformat(),
@@ -250,9 +404,9 @@ def adapt_ops05_to_r3(
     raw_rows = [json.loads(line) for line in raw_bytes.decode("utf-8").splitlines() if line.strip()]
     if _sha_json(raw_rows) != receipt.get("raw_event_stream_sha256"):
         raise Ops06AdapterError("OPS05 raw event content does not match receipt")
-    for page in receipt.get("pages", []):
-        if not _HEX64.fullmatch(str(page.get("raw_payload_hash_sha256") or "").lower()):
-            raise Ops06AdapterError("OPS05 page hash is invalid")
+    binding = _capture_binding(root, receipt)
+    page_map = _validate_pages(receipt, binding)
+    _validate_raw_rows(receipt, raw_rows, page_map, binding)
     census = json.loads(census_path.read_text(encoding="utf-8"))
     decisions = _decisions(json.loads(Path(decision_artifact).read_text(encoding="utf-8")))
     session_id = str(receipt["windows"]["full_session"]["session_id"])
