@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from intraday_scanner.observation.cohort import (  # noqa: E402
     APPROVED_PYTHON,
+    PRODUCER_REDUCTION_MODES,
     CohortError,
     prepare_cohort,
     resume_cohort,
@@ -31,6 +32,11 @@ def _parser() -> argparse.ArgumentParser:
     prepare.add_argument("--max-bytes", type=int, default=64 * 1024 * 1024)
     prepare.add_argument("--max-rss-bytes", type=int, default=256 * 1024 * 1024)
     prepare.add_argument("--max-wall-seconds", type=int, default=1800)
+    prepare.add_argument(
+        "--reduction-mode",
+        choices=PRODUCER_REDUCTION_MODES,
+        default="bounded_derivative",
+    )
 
     resume = subparsers.add_parser("resume")
     _common(resume)
@@ -72,6 +78,7 @@ def main() -> int:
                 max_bytes=args.max_bytes,
                 max_rss_bytes=args.max_rss_bytes,
                 max_wall_seconds=args.max_wall_seconds,
+                reduction_mode=args.reduction_mode,
             )
         else:
             value = resume_cohort(

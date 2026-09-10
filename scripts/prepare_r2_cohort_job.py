@@ -64,6 +64,9 @@ def build(*, plan: Path, output: Path, repo_root: Path, runner: Path) -> dict[st
         },
         "plan_path": str(plan.resolve()),
         "plan_sha256": _sha256(plan),
+        "producer_reduction_mode": str(
+            value.get("producer_reduction_mode") or "bounded_derivative"
+        ),
         "runner_path": str(runner.resolve()),
         "runner_sha256": _sha256(runner),
     }
