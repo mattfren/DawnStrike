@@ -189,6 +189,11 @@ def _observational_training_row_valid(
         and label.get("return_label_eligible") is True
         and label.get("research_only") is True
         and label.get("broker_execution_enabled") is False
+        and str(label.get("truth_lineage_hash_sha256") or "")
+        and isinstance(label.get("source_artifact_hashes"), list)
+        and bool(label.get("source_artifact_hashes"))
+        and isinstance(label.get("maturity_status"), dict)
+        and all(value == "MATURE" for value in label["maturity_status"].values())
         and row.get("evidence_class") == OBSERVATIONAL_EVIDENCE_CLASS
         and row.get("fill_truth_bound") is False
         and row.get("fill_truth_status") == "not_applicable_observation"

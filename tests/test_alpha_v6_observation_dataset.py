@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 
 from intraday_scanner.alpha.v6.dataset_builder import build_return_dataset
@@ -94,12 +96,24 @@ def _fixture() -> tuple[dict, dict, list[dict], dict]:
     return manifest, receipt, events, decision
 
 
-def test_actual_observation_consumer_builds_matured_non_fill_truth_dataset() -> None:
+def _authenticated_event_path(tmp_path, events: list[dict], receipt: dict):
+    raw = b"".join(
+        (json.dumps(event, sort_keys=True) + "\n").encode("utf-8")
+        for event in events
+    )
+    path = tmp_path / "authenticated-events.jsonl"
+    path.write_bytes(raw)
+    bound_receipt = {**receipt, "raw_events_sha256": hashlib.sha256(raw).hexdigest()}
+    return path, bound_receipt
+
+
+def test_actual_observation_consumer_builds_matured_non_fill_truth_dataset(tmp_path) -> None:
     manifest, receipt, events, decision = _fixture()
+    event_path, receipt = _authenticated_event_path(tmp_path, events, receipt)
     packet = build_observation_dataset(
         manifest=manifest,
         producer_receipt=receipt,
-        raw_events=events,
+        raw_events=event_path,
         decisions=[decision],
         as_of="2026-01-02T22:30:00+00:00",
     )
@@ -155,6 +169,7 @@ def test_future_or_malformed_event_is_quarantined() -> None:
 
 def test_daily_monitor_routes_observation_packet_to_dataset_consumer(tmp_path) -> None:
     manifest, receipt, events, decision = _fixture()
+    event_path, receipt = _authenticated_event_path(tmp_path, events, receipt)
     store = SQLiteScanStore(tmp_path / "r3.sqlite")
     store.initialize()
     result = run_alpha_v6_daily_monitor(
@@ -163,7 +178,7 @@ def test_daily_monitor_routes_observation_packet_to_dataset_consumer(tmp_path) -
         observation_source={
             "manifest": manifest,
             "producer_receipt": receipt,
-            "raw_events": events,
+            "raw_events": event_path,
             "decisions": [decision],
             "as_of": "2026-01-02T22:30:00+00:00",
         },

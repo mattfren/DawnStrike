@@ -290,7 +290,9 @@ def _receipt_identity_errors(
     errors = []
     for field, expected in (("session_id", manifest.session_id), ("manifest_sha256", manifest.manifest_sha256),
                             ("source_config_sha256", manifest.source_config_sha256)):
-        actual = receipt.get(field) or receipt.get("universe_manifest_sha256") if field == "manifest_sha256" else receipt.get(field)
+        actual = receipt.get(field)
+        if field == "manifest_sha256" and not actual:
+            actual = receipt.get("universe_manifest_sha256")
         if actual != expected:
             errors.append(f"receipt_{field}_mismatch")
     raw_hash = receipt.get("raw_events_sha256")
