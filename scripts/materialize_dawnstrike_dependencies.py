@@ -206,6 +206,14 @@ def materialize(source_prefix: Path, stage: Path, requirements_lock: Path) -> di
     for path in sorted(records, key=lambda item: os.path.normcase(str(item))):
         _write_stage_file(path, records[path], source, destination)
 
+    tree_digest = hashlib.sha256()
+    for path in sorted(destination.rglob("*"), key=lambda item: item.as_posix()):
+        if not path.is_file() or _is_reparse(path):
+            continue
+        relative = path.relative_to(destination).as_posix().encode("utf-8")
+        tree_digest.update(relative + b"\0")
+        tree_digest.update(hashlib.sha256(path.read_bytes()).digest())
+
     return {
         "schema_version": "dawnstrike.dependency_materialization.v1",
         "status": "PASS",
@@ -213,6 +221,8 @@ def materialize(source_prefix: Path, stage: Path, requirements_lock: Path) -> di
         "payload_count": len(payloads),
         "record_count": len(records),
         "record_set_sha256": record_set,
+        "stage_root": str(destination),
+        "stage_tree_sha256": tree_digest.hexdigest(),
         "research_only": True,
         "broker_execution_enabled": False,
     }
@@ -223,11 +233,19 @@ def main() -> int:
     parser.add_argument("--source-prefix", required=True)
     parser.add_argument("--stage-prefix", required=True)
     parser.add_argument("--requirements-lock", required=True)
+    parser.add_argument("--receipt-path")
     args = parser.parse_args()
     payload = materialize(
         Path(args.source_prefix), Path(args.stage_prefix), Path(args.requirements_lock)
     )
-    print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    if args.receipt_path:
+        receipt = Path(args.receipt_path).resolve()
+        if _is_reparse(receipt.parent):
+            _fail("dependency materialization receipt parent contains a reparse point")
+        receipt.parent.mkdir(parents=True, exist_ok=True)
+        receipt.write_text(encoded + "\n", encoding="utf-8")
+    print(encoded)
     return 0
 
 
