@@ -1131,7 +1131,7 @@ def test_explicit_observer_stage_requires_lib_site_packages(tmp_path: Path) -> N
     paths, prefix = bootstrap._resolve_isolated_dependency_stage(str(stage))
 
     assert paths == (stage / "Lib" / "site-packages",)
-    assert prefix == stage / "Lib" / "site-packages"
+    assert prefix == stage
 
 
 def test_explicit_observer_stage_verifies_payload_hash_before_import(tmp_path: Path) -> None:
