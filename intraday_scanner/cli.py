@@ -629,6 +629,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--decision-artifact", default=None,
         help="Alpha cycle alpha_v6_decisions.json emitted by the actual producer",
     )
+    alpha_v6_daily_monitor_parser.add_argument(
+        "--decision-db", default=None,
+        help="Read-only source DB for historical envelopes without decision records",
+    )
 
     daily_strategy_learning_parser = subparsers.add_parser(
         "strategy-learning-daily",
@@ -714,6 +718,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     alpha_v6_train_weekly_parser.add_argument("--recent-window", default=None)
     alpha_v6_train_weekly_parser.add_argument("--observation-root", default=None)
     alpha_v6_train_weekly_parser.add_argument("--decision-artifact", default=None)
+    alpha_v6_train_weekly_parser.add_argument("--decision-db", default=None)
 
     alpha_v6_register_experiment_parser = subparsers.add_parser(
         "alpha-v6-register-experiment",
@@ -2086,6 +2091,8 @@ def _run_alpha_v6_daily_monitor(args: argparse.Namespace) -> int:
         observation_source = load_observation_source_from_artifacts(
             observation_root=args.observation_root,
             decision_artifact=args.decision_artifact,
+            decision_db=args.decision_db,
+            market_date=args.market_date,
             as_of=None,
         )
     result = run_alpha_v6_daily_monitor(
@@ -4238,6 +4245,8 @@ def _run_alpha_v6_train_weekly(args: argparse.Namespace) -> int:
         observation_source = load_observation_source_from_artifacts(
             observation_root=args.observation_root,
             decision_artifact=args.decision_artifact,
+            decision_db=args.decision_db,
+            market_date=args.market_date,
             as_of=None,
         )
     result = run_alpha_v6_weekly_training(
