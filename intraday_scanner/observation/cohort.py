@@ -191,8 +191,8 @@ def validate_fresh_scope(path: Path, *, expected_date: str) -> dict[str, Any]:
         raise CohortError("daily scope must contain the two named scopes")
     movers = scopes["original_small_cap_gap"]
     panel = scopes["liquid_reference_panel"]
-    if not isinstance(movers, list) or len(movers) != 181:
-        raise CohortError("daily mover census must contain exactly 181 rows")
+    if not isinstance(movers, list) or not movers:
+        raise CohortError("daily mover census must contain a positive source count")
     if not isinstance(panel, list) or [row.get("symbol") for row in panel] != list(REFERENCE_PANEL):
         raise CohortError("daily reference panel must be DIA/IWM/QQQ/SPY/TLT")
     symbols: set[str] = set()
@@ -220,6 +220,25 @@ def validate_fresh_scope(path: Path, *, expected_date: str) -> dict[str, Any]:
         expected_hash = str(item.get("sha256") or "").lower()
         if not source_path.is_file() or _sha256_file(source_path) != expected_hash:
             raise CohortError(f"scope source artifact is missing or changed: {name}")
+    producer = value.get("producer_completeness")
+    if not isinstance(producer, dict):
+        raise CohortError("daily scope lacks producer completeness proof")
+    source_count = producer.get("source_count")
+    if (
+        producer.get("status") != "COMPLETE"
+        or producer.get("declared_count") != len(movers)
+        or producer.get("included_count") != len(movers)
+        or source_count != len(movers)
+        or producer.get("truncated") is not False
+        or producer.get("survivorship_filter") is not False
+        or producer.get("source_as_of") != expected_date
+    ):
+        raise CohortError(
+            "daily scope producer completeness does not prove the full date-bound source"
+        )
+    source_identity = value.get("source_identity")
+    if not isinstance(source_identity, dict) or source_identity.get("market_date") != expected_date:
+        raise CohortError("daily scope source identity is stale or missing")
     if value.get("scope_policy", {}).get("core_index_membership") != (
         "separate unavailable scope; never inferred here"
     ):
@@ -236,6 +255,8 @@ def validate_fresh_scope(path: Path, *, expected_date: str) -> dict[str, Any]:
         },
         "sampling": _sampling_plan(movers, seed=f"dawnstrike-ops02:{expected_date}"),
         "source_artifacts": sources,
+        "producer_completeness": producer,
+        "source_identity": source_identity,
     }
 
 
@@ -275,6 +296,29 @@ def _toolchain_identity(python_path: Path) -> dict[str, Any]:
         "approved": str(path).casefold() == str(APPROVED_PYTHON).casefold()
         and _sha256_file(path).lower() == APPROVED_PYTHON_SHA256,
     }
+
+
+def _capture_source_path(pointer_path: Path, *, expected_date: str) -> Path:
+    """Resolve a date-folder pointer to the existing retained receipt bytes."""
+
+    pointer = _read_json(pointer_path, label="capture source pointer")
+    if pointer.get("schema_version") != "dawnstrike.observation.capture_source_pointer.v1":
+        raise CohortError("capture source pointer schema is unsupported")
+    if pointer.get("market_date") != expected_date:
+        raise CohortError("capture source pointer is stale for this session")
+    receipt_path = Path(str(pointer.get("receipt_path") or ""))
+    if (
+        not receipt_path.is_file()
+        or _sha256_file(receipt_path) != str(pointer.get("receipt_sha256") or "").lower()
+    ):
+        raise CohortError("capture source receipt is missing or changed")
+    state_path = Path(str(pointer.get("state_path") or ""))
+    if (
+        not state_path.is_file()
+        or _sha256_file(state_path) != str(pointer.get("state_sha256") or "").lower()
+    ):
+        raise CohortError("capture source state is missing or changed")
+    return receipt_path.resolve()
 
 
 def prepare_cohort(
@@ -364,11 +408,11 @@ def prepare_cohort(
                 "status": "EXPECTED",
                 "attempts": 0,
                 "scope_path": str(scope_root / session["market_date"] / "scope.json"),
-                "capture_receipt_path": str(
-                    input_root / session["market_date"] / "capture_run_receipt.json"
+                "capture_source_pointer_path": str(
+                    input_root / session["market_date"] / "capture-source.json"
                 ),
                 "operator_intervention": (
-                    "fresh daily 181-mover scope and retained capture receipt required"
+                    "fresh daily date-bound mover scope and retained capture receipt required"
                 ),
             }
             for session in sessions
@@ -640,7 +684,17 @@ def resume_cohort(
                     )
                     continue
                 scope_path = Path(str(session["scope_path"]))
-                receipt_path = Path(str(session["capture_receipt_path"]))
+                pointer_path = Path(
+                    str(
+                        session.get("capture_source_pointer_path")
+                        or input_root / session["market_date"] / "capture-source.json"
+                    )
+                )
+                receipt_path = (
+                    _capture_source_path(pointer_path, expected_date=session["market_date"])
+                    if pointer_path.is_file()
+                    else input_root / session["market_date"] / "capture_run_receipt.json"
+                )
                 if not scope_path.is_file() or not receipt_path.is_file():
                     _record_session(
                         state,
@@ -834,7 +888,8 @@ def resume_cohort(
                     final_status, reason, coverage = _session_status(
                         capture=capture,
                         observer=observer,
-                        expected_symbol_count=186,
+                        expected_symbol_count=scope_identity["mover_count"]
+                        + scope_identity["reference_count"],
                         corporate_actions_proven=corporate_actions_proven,
                     )
                     result_payload.update(
