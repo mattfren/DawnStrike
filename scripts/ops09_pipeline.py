@@ -61,7 +61,7 @@ def main() -> int:
     old_argv = sys.argv
     try:
         sys.argv = ops05_args
-        exit_code = int(_ops05_main() or 0)
+        exit_code = int(_ops05_main()() or 0)
     finally:
         sys.argv = old_argv
     if exit_code != 0:
