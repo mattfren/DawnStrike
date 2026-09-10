@@ -445,22 +445,27 @@ def adapt_ops05_to_r3(
     (output / "producer-receipt.json").write_text(
         json.dumps(producer, sort_keys=True, indent=2) + "\n", encoding="utf-8"
     )
+    target_contract = {
+        "target_id": "one_minute_bar_close_return_60m_gross",
+        "horizon_minutes": 60,
+        "units": "percent",
+        "price_basis": "one_minute_bar_close_proxy",
+        "return_basis": "one_minute_bar_close_return_60m_gross",
+        "evidence_class": "observational_one_minute_bar_close_return_60m_gross",
+    }
     packet = build_observation_dataset(
         manifest=manifest,
         producer_receipt=producer,
         raw_events=output / "raw-events.jsonl",
         decisions=decisions,
         as_of=as_of,
+        target_contract=target_contract,
     )
     close_at = _utc(manifest["session_close_identity"]["close_at"])
     horizons = [_horizon_summary(decision, events, close_at) for decision in decisions]
     for label in packet.get("labels", []):
-        label["learning_eligible"] = False
-        label["return_label_eligible"] = False
-        label["eligibility_state"] = "LABEL_ONLY_DELAYED_SOURCE"
-        label["exclusion_reason"] = (
-            "delayed_historical_source_not_timely_feature_or_execution_truth"
-        )
+        label["eligibility_state"] = "OBSERVATIONAL_TARGET_ELIGIBLE"
+        label["target_contract"] = dict(target_contract)
         label["horizon_definitions"] = next(
             (row for row in horizons if row and row[0].get("horizon_minutes") is not None), []
         )
@@ -471,6 +476,7 @@ def adapt_ops05_to_r3(
         "full_census_count": len(census),
         "decision_count": len(decisions),
         "horizon_minutes": list(_HORIZONS),
+        "target_contract": target_contract,
         "timing_class": "delayed_historical_label_only",
         "feature_decision_eligible": False,
         "costs_included": False,
@@ -487,6 +493,7 @@ def adapt_ops05_to_r3(
         "raw_events": output / "raw-events.jsonl",
         "decisions": decisions,
         "as_of": as_of,
+        "target_contract": target_contract,
         "adapter_output_root": str(output),
         "adapter_packet": packet,
         "decision_artifact_path": str(Path(decision_artifact).resolve()),

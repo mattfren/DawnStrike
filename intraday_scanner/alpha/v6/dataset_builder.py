@@ -11,6 +11,7 @@ from intraday_scanner.alpha.canonical_return_truth import (
     classify_canonical_return_truth,
 )
 from intraday_scanner.alpha.fill_truth import has_authenticated_committed_fill_truth
+from intraday_scanner.alpha.outcome_semantics import typed_return_contract_valid
 from intraday_scanner.alpha.path_replay import ELIGIBILITY_POLICY_VERSION
 from intraday_scanner.alpha.v6.contracts import (
     DATASET_SCHEMA_VERSION,
@@ -21,10 +22,14 @@ from intraday_scanner.alpha.v6.contracts import (
     utc_now,
 )
 from intraday_scanner.alpha.v6.models import evidence_lineage
-from intraday_scanner.alpha.outcome_semantics import typed_return_contract_valid
 from intraday_scanner.alpha.v6.validation import catalyst_ablation_plan
 
 OBSERVATIONAL_LABEL_FAMILY = "observational_matured_return"
+OBSERVATIONAL_BAR_EVIDENCE_CLASS = "observational_one_minute_bar_close_return_60m_gross"
+OBSERVATIONAL_BAR_TARGET_ID = "one_minute_bar_close_return_60m_gross"
+_OBSERVATIONAL_EVIDENCE_CLASSES = frozenset(
+    {"observational_matured", OBSERVATIONAL_BAR_EVIDENCE_CLASS}
+)
 
 _RETURN_LABEL_FAMILIES = frozenset(
     {
@@ -118,10 +123,12 @@ def build_return_dataset(
             row.update(
                 {
                     "target_observational_return_pct": target_value,
-                    "evidence_class": "observational_matured",
+                    "evidence_class": target.get("evidence_class") or "observational_matured",
                     "fill_truth_status": "not_applicable_observation",
                     "fill_truth_bound": False,
                     "observational_label_id": target.get("label_id"),
+                    "observational_target_id": target.get("observational_target_id"),
+                    "observational_target_contract": target.get("target_contract"),
                 }
             )
         rows.append(row)
@@ -157,6 +164,13 @@ def build_return_dataset(
         "feature_schema_version": FEATURE_SCHEMA_VERSION,
         "target": "benchmark_relative_excess_return",
         "observational_label_family": OBSERVATIONAL_LABEL_FAMILY,
+        "observational_target_ids": sorted(
+            {
+                str(row.get("observational_target_id") or "")
+                for row in rows
+                if row.get("observational_target_id")
+            }
+        ),
         "training_cutoff": cutoff,
         "catalyst_ablation_plan": catalyst_ablation_plan(rows),
         "eligibility_counts": {
@@ -167,7 +181,7 @@ def build_return_dataset(
                 1 for row in rows if row.get("prospective_promotion_eligible") is True
             ),
             "observational_matured": sum(
-                1 for row in rows if row.get("evidence_class") == "observational_matured"
+                1 for row in rows if row.get("evidence_class") in _OBSERVATIONAL_EVIDENCE_CLASSES
             ),
         },
     }
@@ -181,10 +195,12 @@ def build_return_dataset(
         "row_count": len(rows),
         "activation_row_count": len(activation_rows),
         "observational_row_count": sum(
-            1 for row in rows if row.get("evidence_class") == "observational_matured"
+            1
+            for row in rows
+            if row.get("evidence_class") in _OBSERVATIONAL_EVIDENCE_CLASSES
         ),
         "dataset_mode": "mixed_strict_and_observational" if any(
-            row.get("evidence_class") == "observational_matured" for row in rows
+            row.get("evidence_class") in _OBSERVATIONAL_EVIDENCE_CLASSES for row in rows
         ) else "strict_fill_truth",
         "exclusion_counts": dict(sorted(exclusions.items())),
         "feature_schema_version": FEATURE_SCHEMA_VERSION,
@@ -197,6 +213,13 @@ def build_return_dataset(
         "broker_execution_enabled": False,
         "missing_truth_is_zero": False,
         "observational_label_family": OBSERVATIONAL_LABEL_FAMILY,
+        "observational_target_ids": sorted(
+            {
+                str(row.get("observational_target_id") or "")
+                for row in rows
+                if row.get("observational_target_id")
+            }
+        ),
         "catalyst_ablation_plan": catalyst_ablation_plan(rows),
         "eligibility_counts": {
             "research_training_eligible": sum(
@@ -206,7 +229,9 @@ def build_return_dataset(
                 1 for row in rows if row.get("prospective_promotion_eligible") is True
             ),
             "observational_matured": sum(
-                1 for row in rows if row.get("evidence_class") == "observational_matured"
+                1
+                for row in rows
+                if row.get("evidence_class") in _OBSERVATIONAL_EVIDENCE_CLASSES
             ),
         },
     }
@@ -277,11 +302,30 @@ def _current_label(label: dict[str, Any], *, decision: dict[str, Any]) -> bool:
 def _current_observational_label(label: dict[str, Any], *, decision: dict[str, Any]) -> bool:
     """Validate observational path truth without upgrading it to FillTruth."""
 
+    evidence_class = str(label.get("evidence_class") or "")
+    target_label = evidence_class == OBSERVATIONAL_BAR_EVIDENCE_CLASS
+    maturity = label.get("maturity_status")
+    maturity_valid = (
+        isinstance(maturity, dict)
+        and maturity.get("60") == "MATURE"
+        if target_label
+        else isinstance(maturity, dict) and all(value == "MATURE" for value in maturity.values())
+    )
+    target_valid = (
+        label.get("observational_target_id") == OBSERVATIONAL_BAR_TARGET_ID
+        and label.get("target_horizon_minutes") == 60
+        and label.get("return_basis") == OBSERVATIONAL_BAR_TARGET_ID
+        and label.get("return_units") == "percent"
+        and label.get("gross_return") is True
+        and label.get("costs_excluded") is True
+        if target_label
+        else True
+    )
     if not (
         label.get("label_schema_version") == LABEL_SCHEMA_VERSION
         and label.get("eligibility_policy_version") == ELIGIBILITY_POLICY_VERSION
         and str(label.get("label_id") or "").startswith("v6o-")
-        and label.get("evidence_class") == "observational_matured"
+        and evidence_class in _OBSERVATIONAL_EVIDENCE_CLASSES
         and label.get("fill_truth_bound") is False
         and label.get("fill_truth_status") == "not_applicable_observation"
         and label.get("horizon_unit") == "minutes"
@@ -291,8 +335,8 @@ def _current_observational_label(label: dict[str, Any], *, decision: dict[str, A
         and label.get("research_only") is True
         and label.get("broker_execution_enabled") is False
         and _number(label.get("label_value")) is not None
-        and isinstance(label.get("maturity_status"), dict)
-        and all(value == "MATURE" for value in label["maturity_status"].values())
+        and maturity_valid
+        and target_valid
         and label.get("label_available_at")
     ):
         return False

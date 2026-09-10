@@ -119,8 +119,8 @@ def test_ops05_archive_adapts_to_matured_label_only_horizons(tmp_path) -> None:
     packet = result["adapter_packet"]
     assert result["status"] == "READY"
     assert packet["status"] == "READY"
-    assert packet["labels"][0]["eligibility_state"] == "LABEL_ONLY_DELAYED_SOURCE"
-    assert packet["labels"][0]["learning_eligible"] is False
+    assert packet["labels"][0]["eligibility_state"] == "OBSERVATIONAL_TARGET_ELIGIBLE"
+    assert packet["labels"][0]["learning_eligible"] is True
     first_event = json.loads((root / "r3-adapter" / "raw-events.jsonl").read_text().splitlines()[0])
     assert first_event["source"] == "alpaca:sip"
     assert [row["status"] for row in packet["horizon_summary"][0]] == [

@@ -14,14 +14,19 @@ from intraday_scanner.alpha.fill_truth import (
     MISSING_COMMITTED_FILL_TRUTH,
     has_authenticated_committed_fill_truth,
 )
-from intraday_scanner.alpha.path_replay import ELIGIBILITY_POLICY_VERSION
 from intraday_scanner.alpha.outcome_semantics import (
     chronology_valid,
     typed_return_contract_valid,
 )
+from intraday_scanner.alpha.path_replay import ELIGIBILITY_POLICY_VERSION
 from intraday_scanner.alpha.v6.contracts import LABEL_SCHEMA_VERSION, canonical_hash
 
 OBSERVATIONAL_EVIDENCE_CLASS = "observational_matured"
+OBSERVATIONAL_BAR_EVIDENCE_CLASS = "observational_one_minute_bar_close_return_60m_gross"
+OBSERVATIONAL_BAR_TARGET_ID = "one_minute_bar_close_return_60m_gross"
+_OBSERVATIONAL_EVIDENCE_CLASSES = frozenset(
+    {OBSERVATIONAL_EVIDENCE_CLASS, OBSERVATIONAL_BAR_EVIDENCE_CLASS}
+)
 
 MIN_RETURN_MODEL_LABELS = 100
 MIN_GRADIENT_BOOSTING_LABELS = 500
@@ -74,7 +79,7 @@ def model_eligibility(dataset_rows: list[dict[str, Any]]) -> ModelEligibility:
     )
     if quarantine and any(
         not has_authenticated_committed_fill_truth(row)
-        and row.get("evidence_class") != OBSERVATIONAL_EVIDENCE_CLASS
+        and row.get("evidence_class") not in _OBSERVATIONAL_EVIDENCE_CLASSES
         for row in dataset_rows
     ):
         quarantine_reasons = (*quarantine_reasons, MISSING_COMMITTED_FILL_TRUTH)
@@ -134,7 +139,7 @@ def current_training_rows(dataset_rows: list[dict[str, Any]]) -> list[dict[str, 
         decision = decision_value if isinstance(decision_value, dict) else None
         if decision is None:
             continue
-        if label.get("evidence_class") == OBSERVATIONAL_EVIDENCE_CLASS:
+        if label.get("evidence_class") in _OBSERVATIONAL_EVIDENCE_CLASSES:
             if _observational_training_row_valid(
                 row=row, label=label, decision=decision
             ):
@@ -182,7 +187,7 @@ def _observational_training_row_valid(
         and label.get("eligibility_policy_version") == ELIGIBILITY_POLICY_VERSION
         and str(label.get("label_id") or "").startswith("v6o-")
         and label.get("label_family") == "observational_matured_return"
-        and label.get("evidence_class") == OBSERVATIONAL_EVIDENCE_CLASS
+        and label.get("evidence_class") in _OBSERVATIONAL_EVIDENCE_CLASSES
         and label.get("fill_truth_bound") is False
         and label.get("fill_truth_status") == "not_applicable_observation"
         and label.get("horizon_unit") == "minutes"
@@ -195,8 +200,19 @@ def _observational_training_row_valid(
         and isinstance(label.get("source_artifact_hashes"), list)
         and bool(label.get("source_artifact_hashes"))
         and isinstance(label.get("maturity_status"), dict)
-        and all(value == "MATURE" for value in label["maturity_status"].values())
-        and row.get("evidence_class") == OBSERVATIONAL_EVIDENCE_CLASS
+        and (
+            label.get("maturity_status", {}).get("60") == "MATURE"
+            if label.get("evidence_class") == OBSERVATIONAL_BAR_EVIDENCE_CLASS
+            else all(value == "MATURE" for value in label["maturity_status"].values())
+        )
+        and (
+            label.get("observational_target_id") == OBSERVATIONAL_BAR_TARGET_ID
+            and label.get("target_horizon_minutes") == 60
+            and label.get("return_basis") == OBSERVATIONAL_BAR_TARGET_ID
+            if label.get("evidence_class") == OBSERVATIONAL_BAR_EVIDENCE_CLASS
+            else True
+        )
+        and row.get("evidence_class") in _OBSERVATIONAL_EVIDENCE_CLASSES
         and row.get("fill_truth_bound") is False
         and row.get("fill_truth_status") == "not_applicable_observation"
         and str(row.get("decision_id") or "")

@@ -4,6 +4,8 @@ import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from intraday_scanner.alpha.v6.dataset_builder import build_return_dataset
 from intraday_scanner.alpha.v6.decision_ledger import build_candidate_decisions
 from intraday_scanner.alpha.v6.models import current_training_rows, model_eligibility
@@ -11,6 +13,15 @@ from intraday_scanner.alpha.v6.observation_dataset import build_observation_data
 from intraday_scanner.observation.contracts import UniverseManifest
 from intraday_scanner.services.alpha_v6_learning_service import run_alpha_v6_daily_monitor
 from intraday_scanner.storage.sqlite_store import SQLiteScanStore
+
+_BAR_TARGET = {
+    "target_id": "one_minute_bar_close_return_60m_gross",
+    "horizon_minutes": 60,
+    "units": "percent",
+    "price_basis": "one_minute_bar_close_proxy",
+    "return_basis": "one_minute_bar_close_return_60m_gross",
+    "evidence_class": "observational_one_minute_bar_close_return_60m_gross",
+}
 
 
 def _fixture() -> tuple[dict, dict, list[dict], dict]:
@@ -27,7 +38,11 @@ def _fixture() -> tuple[dict, dict, list[dict], dict]:
             "early_close": False,
             "calendar_version": "XNYS-2026-v1",
         },
-        "collection_expectation": {"status": "COMPLETE", "receipt_id": "receipt-1", "expected_entries": 2},
+        "collection_expectation": {
+            "status": "COMPLETE",
+            "receipt_id": "receipt-1",
+            "expected_entries": 2,
+        },
         "source_lineage": {
             "provider": "fixture-provider",
             "feed": "fixture-feed",
@@ -38,12 +53,22 @@ def _fixture() -> tuple[dict, dict, list[dict], dict]:
             "raw_events_path": "fixture-events.jsonl",
         },
         "scopes": {
-            "original_small_cap_gap": [{
-                "symbol": "AAA", "membership": "selected", "reason_codes": ["ranked"], "required_inputs": ["bars"]
-            }],
-            "liquid_reference_panel": [{
-                "symbol": "BBB", "membership": "missing_input", "reason_codes": ["no_entitlement"], "required_inputs": ["bars"]
-            }],
+            "original_small_cap_gap": [
+                {
+                    "symbol": "AAA",
+                    "membership": "selected",
+                    "reason_codes": ["ranked"],
+                    "required_inputs": ["bars"],
+                }
+            ],
+            "liquid_reference_panel": [
+                {
+                    "symbol": "BBB",
+                    "membership": "missing_input",
+                    "reason_codes": ["no_entitlement"],
+                    "required_inputs": ["bars"],
+                }
+            ],
         },
     }
     typed = UniverseManifest.from_mapping(manifest)
@@ -76,7 +101,10 @@ def _fixture() -> tuple[dict, dict, list[dict], dict]:
         "score_components": {},
         "uncertainty": {},
         "execution_assumptions": {},
-        "universe_membership": {"universe_id": "fixture-generation-1", "source_lineage_hash_sha256": "1" * 64},
+        "universe_membership": {
+            "universe_id": "fixture-generation-1",
+            "source_lineage_hash_sha256": "1" * 64,
+        },
         "point_in_time": {
             "all_inputs_observed_at_or_before_decision": True,
             "feature_timestamp": "2026-01-02T11:59:00+00:00",
@@ -140,6 +168,71 @@ def test_actual_observation_consumer_builds_matured_non_fill_truth_dataset(tmp_p
     assert len(training_rows) == 1
     assert training_rows[0]["evidence_class"] == "observational_matured"
     assert model_eligibility(dataset["rows"]).eligible_label_count == 1
+
+
+def test_explicit_bar_target_uses_exact_60m_price_and_censors_600() -> None:
+    manifest, receipt, events, decision = _fixture()
+    packet = build_observation_dataset(
+        manifest=manifest,
+        producer_receipt=receipt,
+        raw_events=events,
+        decisions=[decision],
+        as_of="2026-01-02T22:30:00+00:00",
+        target_contract=_BAR_TARGET,
+    )
+    label = packet["labels"][0]
+    assert packet["target_contract"]["target_id"] == _BAR_TARGET["target_id"]
+    assert label["evidence_class"] == _BAR_TARGET["evidence_class"]
+    assert label["label_value"] == 2.0
+    assert label["target_horizon_minutes"] == 60
+    assert label["target_price_offset_minutes"] == 60.0
+    assert label["maturity_status"]["600"] == "MATURE"
+
+
+def test_explicit_bar_target_does_not_fallback_from_missing_60_to_240() -> None:
+    manifest, receipt, events, decision = _fixture()
+    events = [row for row in events if row["event_time"] != "2026-01-02T13:00:00+00:00"]
+    packet = build_observation_dataset(
+        manifest=manifest,
+        producer_receipt=receipt,
+        raw_events=events,
+        decisions=[decision],
+        as_of="2026-01-02T22:30:00+00:00",
+        target_contract=_BAR_TARGET,
+    )
+    assert packet["row_count"] == 0
+    assert packet["diagnostics"][0]["reason"] == "target_60m_immature"
+
+
+def test_wrong_observational_target_contract_is_rejected() -> None:
+    manifest, receipt, events, decision = _fixture()
+    with pytest.raises(ValueError, match="unsupported observational target contract"):
+        build_observation_dataset(
+            manifest=manifest,
+            producer_receipt=receipt,
+            raw_events=events,
+            decisions=[decision],
+            target_contract={**_BAR_TARGET, "horizon_minutes": 240},
+        )
+
+
+def test_mixed_observational_target_identity_is_quarantined() -> None:
+    manifest, receipt, events, decision = _fixture()
+    packet = build_observation_dataset(
+        manifest=manifest,
+        producer_receipt=receipt,
+        raw_events=events,
+        decisions=[decision],
+        as_of="2026-01-02T22:30:00+00:00",
+        target_contract=_BAR_TARGET,
+    )
+    label = dict(packet["labels"][0])
+    label["observational_target_id"] = "policy_exit_net_account_return"
+    dataset = build_return_dataset(
+        decisions=[decision], labels=[], observational_labels=[label]
+    )
+    assert dataset["row_count"] == 0
+    assert sum(dataset["exclusion_counts"].values()) == 1
 
 
 def test_incomplete_real_r2_receipt_stays_partial_and_noneligible() -> None:
