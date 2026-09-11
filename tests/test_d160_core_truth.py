@@ -109,6 +109,31 @@ def test_malformed_required_counts_fail_closed_without_exception():
     assert result["core_snapshot_complete"] is False
 
 
+def test_empty_canonical_row_identity_is_not_a_unique_member():
+    core = {
+        "contract_status": "READY",
+        "contract_membership_count": 1,
+        "status": "READY",
+        "coverage_status": "COMPLETE",
+        "requested_count": 1,
+        "returned_count": 1,
+        "eligible_count": 1,
+        "fresh_count": 1,
+        "fresh_verified_count": 1,
+        "stale_count": 0,
+        "missing_count": 0,
+        "unknown_count": 0,
+        "unknown_freshness_count": 0,
+        "unverified_count": 0,
+        "duplicate_count": 0,
+        "failed_batch_count": 0,
+        "rows": [{"ticker": ""}],
+    }
+    result = _contract(core)
+    assert result["selection_outcome"] == "data_ineligible"
+    assert result["core_snapshot_complete"] is False
+
+
 def test_complete_current_core_preserves_valid_no_edge():
     core = {
         "contract_status": "READY",
