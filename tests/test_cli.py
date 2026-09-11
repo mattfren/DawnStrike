@@ -37,6 +37,19 @@ def test_cli_alpha_cycle_plumbs_explicit_release_sha(monkeypatch, capsys) -> Non
     assert json.loads(capsys.readouterr().out)["status"] == "fixture"
 
 
+def test_cli_alpha_cycle_plumbs_explicit_core_requirement(monkeypatch, capsys) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_alpha_cycle(**kwargs):
+        captured.update(kwargs)
+        return {"status": "fixture"}
+
+    monkeypatch.setattr(cli_module, "alpha_cycle", fake_alpha_cycle)
+    assert main(["alpha-cycle", "--core-universe-required"]) == 0
+    assert captured["core_universe_required"] is True
+    assert json.loads(capsys.readouterr().out)["status"] == "fixture"
+
+
 def test_cli_v6_weekly_training_plumbs_preregistered_attempt_identity(
     monkeypatch, capsys, tmp_path
 ) -> None:
