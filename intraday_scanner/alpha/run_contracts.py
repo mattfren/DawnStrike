@@ -374,8 +374,19 @@ def build_alpha_run_contract(
         for row in signals
         if _truthy(row.get("can_alert")) and not str(row.get("no_trade_reason") or "").strip()
     )
+    core_contract = dict(source_summary.get("core_universe") or {})
+    core_declared = bool(source_summary.get("core_universe_declared"))
+    core_status = str(
+        core_contract.get("contract_status")
+        or core_contract.get("status")
+        or source_summary.get("core_universe_status")
+        or ""
+    ).upper()
+    core_incomplete = core_declared and core_status not in {"", "READY", "SUCCESS", "OK"}
     if source_status not in {"success", "ok"}:
         outcome = SelectionOutcome.SOURCE_FAILED
+    elif core_incomplete:
+        outcome = SelectionOutcome.DATA_INELIGIBLE
     elif not combined_data_eligible:
         outcome = SelectionOutcome.DATA_INELIGIBLE
     elif official_selected_count:
@@ -387,6 +398,9 @@ def build_alpha_run_contract(
     else:
         outcome = SelectionOutcome.VALID_NO_EDGE
     primary_veto = (
+        "Declared core universe coverage is incomplete or unavailable"
+        if core_incomplete
+        else (
         str(
             slate.get("slate_shortfall_reason")
             or decision.get("primary_reason_code")
@@ -401,6 +415,7 @@ def build_alpha_run_contract(
             or diagnostics.get("primary_reason_code")
             or decision.get("reason")
             or ""
+        )
         )
     )
     return AlphaRunContract(

@@ -258,6 +258,7 @@ def format_alpha_watch(
     target_count: int | None = None,
     published_count: int | None = None,
     slate_shortfall_reason: str | None = None,
+    core_coverage_warning: str | None = None,
     max_chars: int = DEFAULT_MORNING_MAX_CHARS,
     contributor_receipt_verifier: AuthenticatedStrategyReceiptResolver | None = None,
 ) -> str:
@@ -406,6 +407,8 @@ def format_alpha_watch(
     ]
     if shortfall_reason:
         lines.append(f"Slate shortfall reason: {_truncate(shortfall_reason, 180)}")
+    if core_coverage_warning:
+        lines.append(f"Core coverage warning: {_truncate(core_coverage_warning, 180)}")
     lines.extend(
         [
             "",
@@ -488,6 +491,7 @@ def format_alpha_watch(
         ),
         f"Blocked rows: {len(blocked_signals)}"
         + (f" | {' | '.join(blocked_truth)}" if blocked_truth else ""),
+        *([f"Core coverage: {_truncate(core_coverage_warning, 180)}"] if core_coverage_warning else []),
         "No orders placed. Research only.",
     ]
     return _clip_preserving_suffix(
@@ -521,6 +525,7 @@ def format_alpha_no_trade(
     target_count: int | None = None,
     published_count: int | None = None,
     slate_shortfall_reason: str | None = None,
+    core_coverage_warning: str | None = None,
     max_chars: int = DEFAULT_ALERT_MAX_CHARS,
 ) -> str:
     # The immutable daily slate targets five distinct research names.  Show
@@ -551,6 +556,8 @@ def format_alpha_no_trade(
     ]
     if shortfall_reason:
         lines.append(f"Slate shortfall reason: {_truncate(shortfall_reason, 180)}")
+    if core_coverage_warning:
+        lines.append(f"INCOMPLETE DATA: {_truncate(core_coverage_warning, 180)}")
     lines.extend(
         [
             "",
@@ -614,6 +621,7 @@ def format_alpha_no_trade(
             + (", ".join(radar_symbols) if radar_symbols else "None")
         ),
         f"No-trade reason: {_truncate(str(reason), 180)}",
+        *([f"Core coverage: {_truncate(core_coverage_warning, 180)}"] if core_coverage_warning else []),
         "Radar outcomes are tracked after close. No orders placed. Research only.",
     ]
     return _clip_preserving_suffix(

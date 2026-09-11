@@ -518,6 +518,22 @@ def test_alpha_telegram_messages_are_secret_free():
     assert secret_token not in text + no_trade + summary
 
 
+def test_alpha_notifications_preserve_declared_core_gap_with_no_orders_suffix():
+    warning = "Declared core coverage is unavailable or incomplete: SPY snapshot missing"
+    watch = format_alpha_watch(
+        signals=[], edge_label="none", core_coverage_warning=warning, max_chars=420
+    )
+    no_trade = format_alpha_no_trade(
+        reason="No clean edge today.",
+        next_action="restore core coverage",
+        core_coverage_warning=warning,
+        max_chars=420,
+    )
+    for body in (watch, no_trade):
+        assert "Core coverage:" in body
+        assert "No orders placed. Research only." in body
+
+
 def test_manual_monitor_no_price_source_dedupes_without_spam(tmp_path):
     store = SQLiteScanStore(tmp_path / "alpha.sqlite")
     store.persist_alpha_signals([

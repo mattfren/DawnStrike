@@ -152,6 +152,20 @@ _LEGACY_PICK_COUNT_PATTERN = re.compile(
 )
 
 
+def _declared_core_coverage_warning(source_summary: dict[str, Any]) -> str:
+    """Return operator-facing truth when the explicitly requested core lane is incomplete."""
+    if not source_summary.get("core_universe_declared"):
+        return ""
+    core = dict(source_summary.get("core_universe") or {})
+    status = str(
+        core.get("contract_status") or core.get("status") or source_summary.get("core_universe_status") or ""
+    ).upper()
+    if status in {"", "READY", "SUCCESS", "OK"}:
+        return ""
+    detail = str(core.get("reason") or core.get("error") or "").strip()
+    return "Declared core coverage is unavailable or incomplete" + (f": {detail}" if detail else "")
+
+
 def _write_notification_preflight_receipt(
     *,
     root: str | Path,
@@ -347,6 +361,7 @@ def alpha_cycle(
     source_summary = dict(collection.get("source_summary") or {})
     source_summary["code_sha"] = resolved_code_sha
     source_summary["require_watcher_proof"] = True
+    source_summary["core_universe_declared"] = bool(core_universe_manifest)
     source_summary["core_universe"] = {
         "contract_status": core_universe.get("status"),
         "contract_membership_count": core_universe.get("membership_count", 0),
@@ -357,6 +372,7 @@ def alpha_cycle(
         "canonical_member_set_hash_sha256": core_universe.get("canonical_member_set_hash_sha256")
         or "",
     }
+    core_coverage_warning = _declared_core_coverage_warning(source_summary)
     mover_source_failed = collection.get("status") != "success"
     mover_snapshot_count = len(list(collection.get("rows") or [])) if not mover_source_failed else 0
     core_only_recovery = False
@@ -597,6 +613,7 @@ def alpha_cycle(
                     slate_shortfall_reason=str(
                         luna_research_slate.get("slate_shortfall_reason") or ""
                     ),
+                    core_coverage_warning=core_coverage_warning,
                     contributor_receipt_verifier=contributor_receipt_verifier,
                 )
                 if not official_no_trade
@@ -609,6 +626,7 @@ def alpha_cycle(
                     slate_shortfall_reason=str(
                         luna_research_slate.get("slate_shortfall_reason") or ""
                     ),
+                    core_coverage_warning=core_coverage_warning,
                 )
             )
         )
@@ -1436,6 +1454,7 @@ def alpha_cycle(
                 target_count=int(luna_research_slate.get("target_count") or 0),
                 published_count=int(luna_research_slate.get("published_count") or 0),
                 slate_shortfall_reason=str(luna_research_slate.get("slate_shortfall_reason") or ""),
+                core_coverage_warning=core_coverage_warning,
             )
         )
         hint = "alpha_no_trade"
@@ -1459,6 +1478,7 @@ def alpha_cycle(
                 target_count=int(luna_research_slate.get("target_count") or 0),
                 published_count=int(luna_research_slate.get("published_count") or 0),
                 slate_shortfall_reason=str(luna_research_slate.get("slate_shortfall_reason") or ""),
+                core_coverage_warning=core_coverage_warning,
                 contributor_receipt_verifier=contributor_receipt_verifier,
             )
         )

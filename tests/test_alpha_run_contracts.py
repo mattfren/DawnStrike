@@ -128,6 +128,25 @@ def test_run_contract_carries_exact_explicit_release_sha() -> None:
     assert contract.to_dict()["code_sha"] == "a" * 40
 
 
+def test_declared_incomplete_core_lane_cannot_be_valid_no_edge() -> None:
+    contract = build_alpha_run_contract(
+        scan_id="scan-core-gap",
+        generated_at="2026-08-28T12:00:00+00:00",
+        ranked_count=1,
+        signals=[{"ticker": "MOVER", "can_alert": False, "no_trade_reason": "watch only"}],
+        review={"decision": {"reason": "No clean edge."}, "watchlist": []},
+        source_summary={
+            "status": "success",
+            "core_universe_declared": True,
+            "core_universe": {"contract_status": "DATA_UNAVAILABLE"},
+        },
+        enrichment_summary={"status": "complete"},
+        notification_stats={},
+    )
+    assert contract.selection_outcome == "data_ineligible"
+    assert "Declared core universe" in contract.primary_veto
+
+
 def test_production_run_contract_rejects_sha_less_empty_frozen_slate() -> None:
     slate = build_ranked_research_slate(
         [],
