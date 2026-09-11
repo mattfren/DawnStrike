@@ -178,7 +178,8 @@ try {
             "--market-date", $MarketDate,
             "--as-of", $cycleObservedAt,
             "--code-sha", $releaseSha,
-            "--paper-ops-root", $paperOpsRoot
+            "--paper-ops-root", $paperOpsRoot,
+            "--core-universe-required"
         )
         if ($CoreUniverseManifest) { $alphaArguments += @("--core-universe-manifest", $CoreUniverseManifest) }
         $alphaCycle = Invoke-DawnstrikeNativeProcess `

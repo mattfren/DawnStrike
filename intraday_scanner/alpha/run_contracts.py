@@ -462,6 +462,8 @@ def build_alpha_run_contract(
         outcome = SelectionOutcome.DATA_INELIGIBLE
     elif official_selected_count:
         outcome = SelectionOutcome.WATCHLIST_READY
+    elif core_incomplete:
+        outcome = SelectionOutcome.DATA_INELIGIBLE
     elif signals and all(_truthy(row.get("fixture_only")) for row in signals):
         outcome = SelectionOutcome.REHEARSAL_COMPLETE
     elif _all_plan_inputs_ineligible(signals):
@@ -486,6 +488,7 @@ def build_alpha_run_contract(
             or diagnostics.get("primary_reason_code")
             or decision.get("reason")
             or ""
+        )
         )
     )
     return AlphaRunContract(
