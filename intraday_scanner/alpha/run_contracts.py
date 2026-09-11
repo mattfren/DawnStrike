@@ -91,7 +91,12 @@ def declared_core_coverage_truth(source_summary: dict[str, Any]) -> dict[str, An
         "complete": complete,
         "snapshot_complete": complete,
         "reason": reason,
-        "warning": "Declared core coverage is unavailable or incomplete" + (f": {reason}" if reason else ""),
+        "warning": (
+            "Declared core coverage is unavailable or incomplete"
+            + (f": {reason}" if reason else "")
+            if not complete
+            else ""
+        ),
     }
 
 

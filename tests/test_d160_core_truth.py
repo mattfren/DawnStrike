@@ -5,6 +5,7 @@ from intraday_scanner.alpha.run_contracts import (
     declared_core_coverage_truth,
 )
 from intraday_scanner.notifiers.telegram_formatter import format_alpha_no_trade
+from intraday_scanner.services.alpha_cycle_service import _declared_core_coverage_warning
 
 
 def _contract(core, *, declared=True, selected=False):
@@ -156,3 +157,35 @@ def test_warning_replaces_supplied_clean_edge_reason_everywhere():
     assert "No clean edge today." not in body
     assert "Core coverage incomplete; decision withheld." in body
     assert "No orders placed. Research only." in body
+
+
+def test_complete_declared_core_has_no_warning_or_incomplete_notification():
+    core = {
+        "contract_status": "READY",
+        "contract_membership_count": 2,
+        "status": "READY",
+        "coverage_status": "COMPLETE",
+        "requested_count": 2,
+        "returned_count": 2,
+        "eligible_count": 2,
+        "fresh_count": 2,
+        "fresh_verified_count": 2,
+        "stale_count": 0,
+        "missing_count": 0,
+        "unknown_count": 0,
+        "unknown_freshness_count": 0,
+        "unverified_count": 0,
+        "duplicate_count": 0,
+        "failed_batch_count": 0,
+        "rows": [{"ticker": "SPY"}, {"ticker": "QQQ"}],
+    }
+    source = {"core_universe_declared": True, "core_universe": core}
+    assert _declared_core_coverage_warning(source) == ""
+    body = format_alpha_no_trade(
+        reason="No clean edge today.",
+        next_action="wait",
+        core_coverage_warning=_declared_core_coverage_warning(source),
+        max_chars=4096,
+    )
+    assert "Incomplete core data" not in body
+    assert "No clean edge today." in body
