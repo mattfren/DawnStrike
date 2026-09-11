@@ -81,12 +81,18 @@ def declared_core_coverage_truth(source_summary: dict[str, Any]) -> dict[str, An
         elif count_value != 0:
             issues.append(f"{label} rows are present")
     rows = core.get("rows")
-    symbols = {
+    row_symbols = [
         str(row.get("ticker") or row.get("symbol") or "").strip().upper()
         for row in rows
         if isinstance(row, dict)
-    } if isinstance(rows, list) else set()
-    if not isinstance(rows, list) or len(rows) != requested or len(symbols) != requested:
+    ] if isinstance(rows, list) else []
+    symbols = set(row_symbols)
+    if (
+        not isinstance(rows, list)
+        or any(not symbol for symbol in row_symbols)
+        or len(rows) != requested
+        or len(symbols) != requested
+    ):
         issues.append("final snapshot rows are missing or duplicated")
     limitations = [str(item).strip() for item in core.get("limitations") or [] if str(item).strip()]
     if limitations:
