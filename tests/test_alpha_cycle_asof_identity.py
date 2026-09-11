@@ -34,6 +34,7 @@ def _run_source_failure(
     *,
     as_of: datetime,
     wall_clock: str,
+    core_universe_required: bool = False,
 ) -> tuple[dict[str, object], SQLiteScanStore]:
     monkeypatch.setattr(
         alpha_cycle_service,
@@ -62,6 +63,7 @@ def _run_source_failure(
         dry_run=True,
         as_of=as_of,
         code_sha=RELEASE_SHA,
+        core_universe_required=core_universe_required,
     )
     return result, SQLiteScanStore(db_path)
 
@@ -251,6 +253,27 @@ def test_source_failure_uses_utc_date_at_rollover_not_hostile_wall_clock(
     historical = store.load_historical_signals(scan_id=scan_id, limit=10)
     assert historical[0]["generated_at"] == cycle_timestamp
     assert historical[0]["market_date"] == cycle_date
+
+
+def test_declared_core_failure_notification_does_not_claim_clean_edge(
+    tmp_path, monkeypatch
+) -> None:
+    result, store = _run_source_failure(
+        tmp_path,
+        monkeypatch,
+        as_of=datetime(2026, 8, 26, 13, 0, tzinfo=timezone.utc),
+        wall_clock="2026-08-27T23:59:59+00:00",
+        core_universe_required=True,
+    )
+    notification = next(
+        item
+        for item in store.load_recent_notifications(limit=10)
+        if item["event_key"].endswith(":alpha_no_trade:console")
+    )
+    assert "INCOMPLETE DATA:" in notification["body"]
+    assert "Core coverage:" in notification["body"]
+    assert "No clean edge today." not in notification["body"]
+    assert "No orders placed. Research only." in notification["body"]
 
 
 def test_nonempty_frozen_source_retry_reuses_cohort_and_preserves_canonical_artifacts(

@@ -485,6 +485,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Governed JSON S&P 500/Nasdaq-100 manifest (absent remains DATA_UNAVAILABLE)",
     )
     alpha_morning_parser.add_argument(
+        "--core-universe-required", action="store_true",
+        help="Declare that this run requested core coverage even when its manifest is unavailable",
+    )
+    alpha_morning_parser.add_argument(
         "--paper-ops-root",
         default="data/v2_paper_ops_live",
         help="Read-only governed prior-session PaperOps root for strategy research lineage",
@@ -513,6 +517,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--core-universe-manifest",
         default=None,
         help="Governed JSON S&P 500/Nasdaq-100 manifest (absent remains DATA_UNAVAILABLE)",
+    )
+    alpha_cycle_parser.add_argument(
+        "--core-universe-required", action="store_true",
+        help="Declare that this run requested core coverage even when its manifest is unavailable",
     )
     alpha_cycle_parser.add_argument(
         "--paper-ops-root",
@@ -1996,6 +2004,7 @@ def _run_alpha_morning(args: argparse.Namespace) -> int:
         notify=args.notify,
         dry_run=args.dry_run,
         core_universe_manifest=args.core_universe_manifest,
+        core_universe_required=getattr(args, "core_universe_required", False),
         market_date=args.market_date,
         as_of=_optional_iso_datetime(args.as_of),
         paper_ops_root=getattr(args, "paper_ops_root", None),
@@ -2013,6 +2022,7 @@ def _run_alpha_cycle(args: argparse.Namespace) -> int:
         notify=args.notify,
         dry_run=args.dry_run,
         core_universe_manifest=args.core_universe_manifest,
+        core_universe_required=getattr(args, "core_universe_required", False),
         market_date=args.market_date,
         as_of=_optional_iso_datetime(args.as_of),
         paper_ops_root=getattr(args, "paper_ops_root", None),

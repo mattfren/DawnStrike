@@ -473,7 +473,7 @@ def format_alpha_watch(
                 "No additional blocked rows",
             )
         )
-    if not official_candidates and not research_watchlist:
+    if not official_candidates and not research_watchlist and not core_coverage_warning:
         lines.extend(["", "No clean edge today."])
     slate_symbols = [
         str(row.get("ticker") or "").strip().upper()
@@ -550,7 +550,11 @@ def format_alpha_no_trade(
     shortfall_reason = str(slate_shortfall_reason or "").strip()
     lines = [
         "📡 Dawnstrike Alpha Check",
-        "No clean edge today.",
+        (
+            "Incomplete core data; no clean-edge decision."
+            if core_coverage_warning
+            else "No clean edge today."
+        ),
         "",
         f"Research slate: {len(radar)} of {total} shown",
     ]

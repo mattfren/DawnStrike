@@ -376,21 +376,24 @@ def build_alpha_run_contract(
     )
     core_contract = dict(source_summary.get("core_universe") or {})
     core_declared = bool(source_summary.get("core_universe_declared"))
-    core_status = str(
-        core_contract.get("contract_status")
-        or core_contract.get("status")
-        or source_summary.get("core_universe_status")
-        or ""
+    core_snapshot_status = str(
+        core_contract.get("coverage_status") or core_contract.get("status") or ""
     ).upper()
-    core_incomplete = core_declared and core_status not in {"", "READY", "SUCCESS", "OK"}
+    core_membership_status = str(
+        core_contract.get("contract_status") or source_summary.get("core_universe_status") or ""
+    ).upper()
+    core_incomplete = core_declared and (
+        core_snapshot_status not in {"", "COMPLETE", "READY", "SUCCESS", "OK"}
+        or core_membership_status not in {"", "READY", "SUCCESS", "OK"}
+    )
     if source_status not in {"success", "ok"}:
         outcome = SelectionOutcome.SOURCE_FAILED
-    elif core_incomplete:
-        outcome = SelectionOutcome.DATA_INELIGIBLE
     elif not combined_data_eligible:
         outcome = SelectionOutcome.DATA_INELIGIBLE
     elif official_selected_count:
         outcome = SelectionOutcome.WATCHLIST_READY
+    elif core_incomplete:
+        outcome = SelectionOutcome.DATA_INELIGIBLE
     elif signals and all(_truthy(row.get("fixture_only")) for row in signals):
         outcome = SelectionOutcome.REHEARSAL_COMPLETE
     elif _all_plan_inputs_ineligible(signals):

@@ -157,10 +157,9 @@ def _declared_core_coverage_warning(source_summary: dict[str, Any]) -> str:
     if not source_summary.get("core_universe_declared"):
         return ""
     core = dict(source_summary.get("core_universe") or {})
-    status = str(
-        core.get("contract_status") or core.get("status") or source_summary.get("core_universe_status") or ""
-    ).upper()
-    if status in {"", "READY", "SUCCESS", "OK"}:
+    snapshot_status = str(core.get("coverage_status") or core.get("status") or "").upper()
+    membership_status = str(core.get("contract_status") or source_summary.get("core_universe_status") or "").upper()
+    if snapshot_status in {"", "COMPLETE", "READY", "SUCCESS", "OK"} and membership_status in {"", "READY", "SUCCESS", "OK"}:
         return ""
     detail = str(core.get("reason") or core.get("error") or "").strip()
     return "Declared core coverage is unavailable or incomplete" + (f": {detail}" if detail else "")
@@ -238,6 +237,7 @@ def alpha_morning(
     dry_run: bool = False,
     as_of: datetime | None = None,
     core_universe_manifest: str | Path | None = None,
+    core_universe_required: bool = False,
     market_date: str | None = None,
     paper_ops_root: str | Path | None = None,
     code_sha: str | None = None,
@@ -251,6 +251,7 @@ def alpha_morning(
         cycle_name="alpha_morning",
         as_of=as_of,
         core_universe_manifest=core_universe_manifest,
+        core_universe_required=core_universe_required,
         market_date=market_date,
         paper_ops_root=paper_ops_root,
         code_sha=code_sha,
@@ -267,6 +268,7 @@ def alpha_cycle(
     cycle_name: str = "alpha_cycle",
     as_of: datetime | None = None,
     core_universe_manifest: str | Path | None = None,
+    core_universe_required: bool = False,
     market_date: str | None = None,
     paper_ops_root: str | Path | None = None,
     code_sha: str | None = None,
@@ -361,7 +363,7 @@ def alpha_cycle(
     source_summary = dict(collection.get("source_summary") or {})
     source_summary["code_sha"] = resolved_code_sha
     source_summary["require_watcher_proof"] = True
-    source_summary["core_universe_declared"] = bool(core_universe_manifest)
+    source_summary["core_universe_declared"] = bool(core_universe_required or core_universe_manifest)
     source_summary["core_universe"] = {
         "contract_status": core_universe.get("status"),
         "contract_membership_count": core_universe.get("membership_count", 0),
@@ -875,6 +877,7 @@ def alpha_cycle(
         "canonical_member_set_hash_sha256": core_universe.get("canonical_member_set_hash_sha256")
         or "",
     }
+    core_coverage_warning = _declared_core_coverage_warning(source_summary)
     core_eligible_rows = (
         rank_core_universe_rows(core_discovery.get("rows") or [])
         if core_discovery_data_eligible(core_discovery)
