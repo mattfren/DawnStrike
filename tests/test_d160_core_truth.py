@@ -59,6 +59,56 @@ def test_ready_labels_do_not_override_inconsistent_counts():
     assert result["core_snapshot_complete"] is False
 
 
+def test_membership_and_requested_counts_share_one_unique_denominator():
+    core = {
+        "contract_status": "READY",
+        "contract_membership_count": 3,
+        "status": "READY",
+        "coverage_status": "COMPLETE",
+        "requested_count": 2,
+        "returned_count": 2,
+        "eligible_count": 2,
+        "fresh_count": 2,
+        "fresh_verified_count": 2,
+        "stale_count": 0,
+        "missing_count": 0,
+        "unknown_count": 0,
+        "unknown_freshness_count": 0,
+        "unverified_count": 0,
+        "duplicate_count": 0,
+        "failed_batch_count": 0,
+        "rows": [{"ticker": "SPY"}, {"ticker": "QQQ"}],
+    }
+    result = _contract(core)
+    assert result["selection_outcome"] == "data_ineligible"
+    assert result["core_snapshot_complete"] is False
+
+
+def test_malformed_required_counts_fail_closed_without_exception():
+    core = {
+        "contract_status": "READY",
+        "contract_membership_count": 2,
+        "status": "READY",
+        "coverage_status": "COMPLETE",
+        "requested_count": "2",
+        "returned_count": 2,
+        "eligible_count": 2,
+        "fresh_count": 2,
+        "fresh_verified_count": 2,
+        "stale_count": 0.0,
+        "missing_count": 0,
+        "unknown_count": 0,
+        "unknown_freshness_count": 0,
+        "unverified_count": 0,
+        "duplicate_count": 0,
+        "failed_batch_count": 0,
+        "rows": [{"ticker": "SPY"}, {"ticker": "QQQ"}],
+    }
+    result = _contract(core)
+    assert result["selection_outcome"] == "data_ineligible"
+    assert result["core_snapshot_complete"] is False
+
+
 def test_complete_current_core_preserves_valid_no_edge():
     core = {
         "contract_status": "READY",
@@ -70,6 +120,13 @@ def test_complete_current_core_preserves_valid_no_edge():
         "eligible_count": 2,
         "fresh_count": 2,
         "fresh_verified_count": 2,
+        "stale_count": 0,
+        "missing_count": 0,
+        "unknown_count": 0,
+        "unknown_freshness_count": 0,
+        "unverified_count": 0,
+        "duplicate_count": 0,
+        "failed_batch_count": 0,
         "rows": [{"ticker": "SPY"}, {"ticker": "QQQ"}],
     }
     result = _contract(core)

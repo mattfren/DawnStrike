@@ -42,26 +42,30 @@ def declared_core_coverage_truth(source_summary: dict[str, Any]) -> dict[str, An
     core = dict(source_summary.get("core_universe") or {})
     issues: list[str] = []
     membership_status = str(core.get("contract_status") or "").strip().upper()
-    membership_count = _nonnegative_int(core.get("contract_membership_count"))
+    membership_count = _strict_nonnegative_int(core.get("contract_membership_count"))
     if membership_status not in {"READY", "SUCCESS", "OK"}:
         issues.append("membership status is missing or incomplete")
-    if membership_count <= 0:
-        issues.append("membership count is missing or zero")
+    if membership_count is None or membership_count <= 0:
+        issues.append("membership count is missing, invalid, or zero")
     snapshot_status = str(core.get("status") or "").strip().upper()
     coverage_status = str(core.get("coverage_status") or "").strip().upper()
     if snapshot_status != "READY":
         issues.append("final snapshot status is missing or incomplete")
     if coverage_status != "COMPLETE":
         issues.append("final snapshot coverage is missing or incomplete")
-    requested = _nonnegative_int(core.get("requested_count"))
-    returned = _nonnegative_int(core.get("returned_count"))
-    eligible = _nonnegative_int(core.get("eligible_count"))
-    fresh = _nonnegative_int(core.get("fresh_count"))
-    fresh_verified = _nonnegative_int(core.get("fresh_verified_count"))
-    if requested <= 0:
-        issues.append("requested snapshot count is missing or zero")
-    if not (requested > 0 and returned == requested == eligible == fresh == fresh_verified):
-        issues.append("snapshot counts are incomplete or inconsistent")
+    requested = _strict_nonnegative_int(core.get("requested_count"))
+    returned = _strict_nonnegative_int(core.get("returned_count"))
+    eligible = _strict_nonnegative_int(core.get("eligible_count"))
+    fresh = _strict_nonnegative_int(core.get("fresh_count"))
+    fresh_verified = _strict_nonnegative_int(core.get("fresh_verified_count"))
+    if requested is None or requested <= 0:
+        issues.append("requested snapshot count is missing, invalid, or zero")
+    if None in {requested, returned, eligible, fresh, fresh_verified} or not (
+        requested > 0 and returned == requested == eligible == fresh == fresh_verified
+    ):
+        issues.append("snapshot counts are missing, invalid, or inconsistent")
+    if membership_count is not None and requested is not None and membership_count != requested:
+        issues.append("membership and requested snapshot counts differ")
     for count_field, label in (
         ("stale_count", "stale"),
         ("missing_count", "missing"),
@@ -71,7 +75,10 @@ def declared_core_coverage_truth(source_summary: dict[str, Any]) -> dict[str, An
         ("duplicate_count", "duplicate"),
         ("failed_batch_count", "failed batch"),
     ):
-        if _nonnegative_int(core.get(count_field)) != 0:
+        count_value = _strict_nonnegative_int(core.get(count_field))
+        if count_value is None:
+            issues.append(f"{label} count is missing or invalid")
+        elif count_value != 0:
             issues.append(f"{label} rows are present")
     rows = core.get("rows")
     symbols = {
@@ -92,7 +99,7 @@ def declared_core_coverage_truth(source_summary: dict[str, Any]) -> dict[str, An
         "snapshot_complete": complete,
         "reason": reason,
         "warning": (
-            "Declared core coverage is unavailable or incomplete"
+            "Declared core universe coverage is unavailable or incomplete"
             + (f": {reason}" if reason else "")
             if not complete
             else ""
@@ -100,11 +107,10 @@ def declared_core_coverage_truth(source_summary: dict[str, Any]) -> dict[str, An
     }
 
 
-def _nonnegative_int(value: Any) -> int:
-    try:
-        return max(int(value or 0), 0)
-    except (TypeError, ValueError):
-        return 0
+def _strict_nonnegative_int(value: Any) -> int | None:
+    if type(value) is not int or value < 0:
+        return None
+    return value
 
 
 @dataclass(frozen=True)
