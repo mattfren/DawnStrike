@@ -469,7 +469,9 @@ def format_alpha_watch(
         lines.append(
             "- "
             + _text(
-                source_summary.get("top_failure_reason"),
+                "Core coverage incomplete; decision withheld."
+                if core_coverage_warning
+                else source_summary.get("top_failure_reason"),
                 "No additional blocked rows",
             )
         )
@@ -548,6 +550,11 @@ def format_alpha_no_trade(
         else max(slate_published_count, len(radar))
     )
     shortfall_reason = str(slate_shortfall_reason or "").strip()
+    display_reason = (
+        "Core coverage incomplete; decision withheld."
+        if core_coverage_warning
+        else str(reason or "").strip()
+    )
     lines = [
         "📡 Dawnstrike Alpha Check",
         (
@@ -583,7 +590,7 @@ def format_alpha_no_trade(
     if not radar:
         lines.append(
             "- No safe/current Tier 1 research rows were available: "
-            + _truncate(_text(reason, "reason unavailable"), 120)
+            + _truncate(_text(display_reason, "reason unavailable"), 120)
         )
     for index, row in enumerate(radar, start=1):
         radar_target = row.get("radar_target") or row.get("target_1") or row.get("first_target")
@@ -610,7 +617,7 @@ def format_alpha_no_trade(
         [
             "",
             "NO TRADE / BLOCKED REASONS",
-            f"- {reason}",
+            f"- {display_reason}",
             f"Next: {next_action}",
         ]
     )
@@ -624,7 +631,7 @@ def format_alpha_no_trade(
             f"Slate symbols ({len(radar)}/{total}): "
             + (", ".join(radar_symbols) if radar_symbols else "None")
         ),
-        f"No-trade reason: {_truncate(str(reason), 180)}",
+        f"No-trade reason: {_truncate(display_reason, 180)}",
         *([f"Core coverage: {_truncate(core_coverage_warning, 180)}"] if core_coverage_warning else []),
         "Radar outcomes are tracked after close. No orders placed. Research only.",
     ]

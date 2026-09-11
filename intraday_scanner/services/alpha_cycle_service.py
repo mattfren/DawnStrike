@@ -29,7 +29,7 @@ from intraday_scanner.alpha.plan_constructor import (
 )
 from intraday_scanner.alpha.regime_detector import detect_regime
 from intraday_scanner.alpha.risk_governor import evaluate_risk
-from intraday_scanner.alpha.run_contracts import AlphaRunContract, build_alpha_run_contract
+from intraday_scanner.alpha.run_contracts import AlphaRunContract, build_alpha_run_contract, declared_core_coverage_truth
 from intraday_scanner.alpha.v5_policy import DEFAULT_V5_POLICY, alphaops_strategy_contract
 from intraday_scanner.alpha.v6.decision_ledger import build_candidate_decisions
 from intraday_scanner.config import load_config
@@ -154,15 +154,7 @@ _LEGACY_PICK_COUNT_PATTERN = re.compile(
 
 def _declared_core_coverage_warning(source_summary: dict[str, Any]) -> str:
     """Return operator-facing truth when the explicitly requested core lane is incomplete."""
-    if not source_summary.get("core_universe_declared"):
-        return ""
-    core = dict(source_summary.get("core_universe") or {})
-    snapshot_status = str(core.get("coverage_status") or core.get("status") or "").upper()
-    membership_status = str(core.get("contract_status") or source_summary.get("core_universe_status") or "").upper()
-    if snapshot_status in {"", "COMPLETE", "READY", "SUCCESS", "OK"} and membership_status in {"", "READY", "SUCCESS", "OK"}:
-        return ""
-    detail = str(core.get("reason") or core.get("error") or "").strip()
-    return "Declared core coverage is unavailable or incomplete" + (f": {detail}" if detail else "")
+    return str(declared_core_coverage_truth(source_summary).get("warning") or "")
 
 
 def _write_notification_preflight_receipt(
@@ -403,6 +395,21 @@ def alpha_cycle(
             observed_at=cycle_decision_at,
         )
         recovery_rows = rank_core_universe_rows(recovery.get("rows") or [])
+        source_summary["core_universe"] = {
+            **recovery,
+            "eligible_count": len(recovery_rows),
+            "contract_status": core_universe.get("status"),
+            "contract_membership_count": core_universe.get("membership_count", 0),
+            "contract_hash_sha256": core_universe.get("content_hash_sha256"),
+            "requested_market_date": core_universe.get("requested_market_date"),
+            "index_verdicts": core_universe.get("index_verdicts") or {},
+            "raw_artifact_hashes": core_universe.get("raw_artifact_hashes") or [],
+            "canonical_member_set_hash_sha256": core_universe.get(
+                "canonical_member_set_hash_sha256"
+            )
+            or "",
+        }
+        core_coverage_warning = _declared_core_coverage_warning(source_summary)
         if core_discovery_data_eligible(recovery) and recovery_rows:
             recovery_path = write_snapshot_rows(
                 recovery_rows, output_dir / "web_collect" / "core_recovery_snapshot.csv"
@@ -418,20 +425,6 @@ def alpha_cycle(
             source_summary["snapshot_path"] = str(recovery_path)
             core_only_recovery = True
             core_discovery_recovery = recovery
-            source_summary["core_universe"] = {
-                **recovery,
-                "eligible_count": len(recovery_rows),
-                "contract_status": core_universe.get("status"),
-                "contract_membership_count": core_universe.get("membership_count", 0),
-                "contract_hash_sha256": core_universe.get("content_hash_sha256"),
-                "requested_market_date": core_universe.get("requested_market_date"),
-                "index_verdicts": core_universe.get("index_verdicts") or {},
-                "raw_artifact_hashes": core_universe.get("raw_artifact_hashes") or [],
-                "canonical_member_set_hash_sha256": core_universe.get(
-                    "canonical_member_set_hash_sha256"
-                )
-                or "",
-            }
             collection = {
                 **collection,
                 "status": "success",

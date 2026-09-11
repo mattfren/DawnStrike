@@ -28,6 +28,80 @@ class SelectionOutcome(str, Enum):
     SOURCE_FAILED = "source_failed"
 
 
+def declared_core_coverage_truth(source_summary: dict[str, Any]) -> dict[str, Any]:
+    """Evaluate declared core truth from membership and final discovery facts."""
+    declared = bool(source_summary.get("core_universe_declared"))
+    if not declared:
+        return {
+            "declared": False,
+            "complete": True,
+            "snapshot_complete": False,
+            "reason": "",
+            "warning": "",
+        }
+    core = dict(source_summary.get("core_universe") or {})
+    issues: list[str] = []
+    membership_status = str(core.get("contract_status") or "").strip().upper()
+    membership_count = _nonnegative_int(core.get("contract_membership_count"))
+    if membership_status not in {"READY", "SUCCESS", "OK"}:
+        issues.append("membership status is missing or incomplete")
+    if membership_count <= 0:
+        issues.append("membership count is missing or zero")
+    snapshot_status = str(core.get("status") or "").strip().upper()
+    coverage_status = str(core.get("coverage_status") or "").strip().upper()
+    if snapshot_status != "READY":
+        issues.append("final snapshot status is missing or incomplete")
+    if coverage_status != "COMPLETE":
+        issues.append("final snapshot coverage is missing or incomplete")
+    requested = _nonnegative_int(core.get("requested_count"))
+    returned = _nonnegative_int(core.get("returned_count"))
+    eligible = _nonnegative_int(core.get("eligible_count"))
+    fresh = _nonnegative_int(core.get("fresh_count"))
+    fresh_verified = _nonnegative_int(core.get("fresh_verified_count"))
+    if requested <= 0:
+        issues.append("requested snapshot count is missing or zero")
+    if not (requested > 0 and returned == requested == eligible == fresh == fresh_verified):
+        issues.append("snapshot counts are incomplete or inconsistent")
+    for count_field, label in (
+        ("stale_count", "stale"),
+        ("missing_count", "missing"),
+        ("unknown_count", "unknown"),
+        ("unknown_freshness_count", "unknown freshness"),
+        ("unverified_count", "unverified"),
+        ("duplicate_count", "duplicate"),
+        ("failed_batch_count", "failed batch"),
+    ):
+        if _nonnegative_int(core.get(count_field)) != 0:
+            issues.append(f"{label} rows are present")
+    rows = core.get("rows")
+    symbols = {
+        str(row.get("ticker") or row.get("symbol") or "").strip().upper()
+        for row in rows
+        if isinstance(row, dict)
+    } if isinstance(rows, list) else set()
+    if not isinstance(rows, list) or len(rows) != requested or len(symbols) != requested:
+        issues.append("final snapshot rows are missing or duplicated")
+    limitations = [str(item).strip() for item in core.get("limitations") or [] if str(item).strip()]
+    if limitations:
+        issues.append("final snapshot carries limitations")
+    complete = not issues
+    reason = "; ".join(issues) or ""
+    return {
+        "declared": True,
+        "complete": complete,
+        "snapshot_complete": complete,
+        "reason": reason,
+        "warning": "Declared core coverage is unavailable or incomplete" + (f": {reason}" if reason else ""),
+    }
+
+
+def _nonnegative_int(value: Any) -> int:
+    try:
+        return max(int(value or 0), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 @dataclass(frozen=True)
 class AlphaRunContract:
     producer: str
@@ -374,18 +448,8 @@ def build_alpha_run_contract(
         for row in signals
         if _truthy(row.get("can_alert")) and not str(row.get("no_trade_reason") or "").strip()
     )
-    core_contract = dict(source_summary.get("core_universe") or {})
-    core_declared = bool(source_summary.get("core_universe_declared"))
-    core_snapshot_status = str(
-        core_contract.get("coverage_status") or core_contract.get("status") or ""
-    ).upper()
-    core_membership_status = str(
-        core_contract.get("contract_status") or source_summary.get("core_universe_status") or ""
-    ).upper()
-    core_incomplete = core_declared and (
-        core_snapshot_status not in {"", "COMPLETE", "READY", "SUCCESS", "OK"}
-        or core_membership_status not in {"", "READY", "SUCCESS", "OK"}
-    )
+    core_truth = declared_core_coverage_truth(source_summary)
+    core_incomplete = core_truth["declared"] and not core_truth["complete"]
     if source_status not in {"success", "ok"}:
         outcome = SelectionOutcome.SOURCE_FAILED
     elif not combined_data_eligible:
@@ -401,7 +465,7 @@ def build_alpha_run_contract(
     else:
         outcome = SelectionOutcome.VALID_NO_EDGE
     primary_veto = (
-        "Declared core universe coverage is incomplete or unavailable"
+        core_truth["warning"]
         if core_incomplete
         else (
         str(
@@ -499,11 +563,7 @@ def build_alpha_run_contract(
         core_snapshot_coverage_receipt_hashes=tuple(
             str(item) for item in core.get("coverage_receipt_hashes") or []
         ),
-        core_snapshot_complete=(
-            str(core.get("status") or "") == "READY"
-            and int(core.get("requested_count") or 0) > 0
-            and int(core.get("requested_count") or 0) == int(core.get("returned_count") or 0)
-        ),
+        core_snapshot_complete=bool(core_truth["snapshot_complete"]),
         core_index_verdicts=dict(core.get("index_verdicts") or {}),
         core_raw_artifact_hashes=tuple(str(item) for item in core.get("raw_artifact_hashes") or []),
         core_member_set_hash_sha256=str(core.get("canonical_member_set_hash_sha256") or ""),
