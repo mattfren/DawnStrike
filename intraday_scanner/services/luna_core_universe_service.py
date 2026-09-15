@@ -117,6 +117,45 @@ _NDX_CANONICAL_MEMBER_SET_HASH_SHA256 = (
     "c5e8bb1294642e0812f8a8d20f8c015548d41c64bfc6bef0aa0187994828a0ed"
 )
 
+# 2026-09-15 release root.  Kraft Heinz moved its primary listing from Nasdaq to
+# the NYSE with NYSE trading from 2026-09-14; removal from the Nasdaq-100 is
+# automatic on an exchange transfer, and no same-day replacement was added, so
+# the export went from 102 rows to 101.  The Aug-27 root correctly refused the
+# changed membership, which is what a governed root is for - accepting it
+# requires this new root rather than a relaxed check.
+#
+# Evidence that this is an index event and not a changed or substituted source:
+# eight of the ten decompressed members are byte-identical to the Aug-27
+# workbook.  Only xl/sharedStrings.xml and xl/worksheets/sheet1.xml differ, and
+# those are exactly the two members that carry the ticker list and cell values.
+# The static member hashes are therefore reused below rather than restated.
+NASDAQ_NDX_SOD_2026_09_15_URL = NASDAQ_NDX_SOD_URL_TEMPLATE.format(
+    month="09", day="15", year="2026"
+)
+_NDX_2026_09_15_CANONICAL_ZIP_MEMBER_HASHES = {
+    **_NDX_CANONICAL_STATIC_MEMBER_HASHES,
+    # pragma: allowlist nextline secret - deterministic trust-root hash
+    "docProps/core.xml": "79af568221e1a17b8e59f618591359eb00991d86542a1784e2cd7700ee223d1c",
+    # pragma: allowlist nextline secret - deterministic trust-root hash
+    "docProps/custom.xml": "18d57b34d4d3e2b37bc15406cd59124d2b461d905fe0775466e079611297c77b",
+    # pragma: allowlist nextline secret - deterministic trust-root hash
+    "xl/sharedStrings.xml": "9d1b1babceab5baeaf12b958827b1ad928fd80bcf0c9d08db0ec35ada14c9141",
+    # pragma: allowlist nextline secret - deterministic trust-root hash
+    "xl/worksheets/sheet1.xml": "fee51d0c1b85b5aedc33e658eab86b02a7cd53228830dfb530f2f61a559e24c2",
+}
+_NDX_2026_09_15_CANONICAL_ZIP_CONTENT_DIGEST_SHA256 = (
+    # pragma: allowlist nextline secret - deterministic trust-root hash
+    "b62b2bd42998f18925ce798fa7e9b0b9bde238ceee4128f0ea360a79fe460ad4"
+)
+_NDX_2026_09_15_CANONICAL_MEMBER_SET_HASH_SHA256 = (
+    # pragma: allowlist nextline secret - deterministic trust-root hash
+    "6d2e2362cb30d67f31e778da3f519aee1a85b05b2c345ec23886a6430fac0b9d"
+)
+_NDX_2026_09_15_CANONICAL_SYMBOL_SET_HASH_SHA256 = (
+    # pragma: allowlist nextline secret - deterministic trust-root hash
+    "1fc51855f0ababa944c0333c2d01185c8445edfab011fb5cebf2dc4cfa93cc80"
+)
+
 # State Street changes the daily holdings date and (usually) weights while
 # retaining this workbook package shape.  The proxy trust root therefore pins
 # the package structure and the canonical ticker set, rather than volatile ZIP
@@ -265,6 +304,43 @@ _TRUSTED_SOURCE_ROOTS: dict[str, dict[str, Any]] = {
         "official_index_authority": True,
         "source_scope": "Official Nasdaq-100 SOD Weightings export for 2026-08-27",
         "source_uri": NASDAQ_NDX_SOD_2026_08_27_URL,
+    },
+    # The Aug-27 root above is retained for historical research.  This is the
+    # current release root: same source, same transformer, same workbook
+    # structure, new membership after Kraft Heinz's 2026-09-14 exchange
+    # transfer.  It is a separate identity and effective date, as a source
+    # release must be.
+    "nasdaq-ndx-point-in-time-2026-09-15": {
+        "index": "Nasdaq-100",
+        "effective_date": "2026-09-15",
+        # As above: the raw ZIP SHA is not a stable trust root, because archive
+        # metadata changes between otherwise identical official downloads.
+        "raw_artifact_hashes": (),
+        "raw_artifact_byte_counts": (8391,),
+        "canonical_zip_member_names": _NDX_CANONICAL_ZIP_MEMBER_NAMES,
+        "canonical_zip_member_hashes": _NDX_2026_09_15_CANONICAL_ZIP_MEMBER_HASHES,
+        "canonical_static_member_hashes": _NDX_CANONICAL_STATIC_MEMBER_HASHES,
+        "canonical_content_digest_sha256": (
+            _NDX_2026_09_15_CANONICAL_ZIP_CONTENT_DIGEST_SHA256
+        ),
+        "canonical_member_set_hash_sha256": (
+            _NDX_2026_09_15_CANONICAL_MEMBER_SET_HASH_SHA256
+        ),
+        "allow_future_same_semantic_set_dates": True,
+        "source_uri_template": NASDAQ_NDX_SOD_URL_TEMPLATE,
+        "source_scope_template": "Official Nasdaq-100 SOD Weightings export for {market_date}",
+        "canonical_symbol_set_hash_sha256": (
+            _NDX_2026_09_15_CANONICAL_SYMBOL_SET_HASH_SHA256
+        ),
+        "transformation_id": "nasdaq-ndx-sod-weightings-parser-v1",
+        "lineage_builder_id": "nasdaq-ndx-sod-weightings-parser-v1",
+        "lineage_transformation_id": "official-sod-weightings-export-v1",
+        "lineage_schema_version": "dawnstrike.core_universe_lineage.v1",
+        "reconstitution_id": "ndx-sod-2026-09-15",
+        "membership_authority": "official_index_source",
+        "official_index_authority": True,
+        "source_scope": "Official Nasdaq-100 SOD Weightings export for 2026-09-15",
+        "source_uri": NASDAQ_NDX_SOD_2026_09_15_URL,
     },
 }
 

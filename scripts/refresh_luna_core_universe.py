@@ -40,7 +40,7 @@ from intraday_scanner.services.luna_core_universe_service import (
 )
 
 MAX_DOWNLOAD_BYTES = 2_000_000
-NDX_SOURCE_ID = "nasdaq-ndx-point-in-time-2026-08-27"
+NDX_SOURCE_ID = "nasdaq-ndx-point-in-time-2026-09-15"
 GENERATION_DIRECTORY = "luna_core_universe_generations"
 # The release root anchors trust, but is not a recurring-session gate.  A
 # requested later date is accepted only when the fresh official source still

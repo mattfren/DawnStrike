@@ -96,7 +96,7 @@ def _manifest(
     effective: str = "2026-08-27",
     observed: str = "2026-08-27T12:00:00Z",
     payload: bytes | None = None,
-    source_id: str = "nasdaq-ndx-point-in-time-2026-08-27",
+    source_id: str = refresh_script.NDX_SOURCE_ID,
 ) -> dict[str, object]:
     payload = payload or _ndx_xlsx(symbols)
     path = tmp_path / "ndx.xlsx"
@@ -155,7 +155,7 @@ def ndx_symbols() -> list[str]:
 def _install_test_root(monkeypatch: pytest.MonkeyPatch, digest: str) -> None:
     monkeypatch.setitem(
         core._TRUSTED_SOURCE_ROOTS,
-        "nasdaq-ndx-point-in-time-2026-08-27",
+        refresh_script.NDX_SOURCE_ID,
         {
             "index": "Nasdaq-100",
             "effective_date": "2026-08-27",
@@ -191,7 +191,7 @@ def _install_stable_test_root(
     )
     monkeypatch.setitem(
         core._TRUSTED_SOURCE_ROOTS,
-        "nasdaq-ndx-point-in-time-2026-08-27",
+        refresh_script.NDX_SOURCE_ID,
         {
             "index": "Nasdaq-100",
             "effective_date": "2026-08-27",
@@ -222,7 +222,7 @@ def _refresh_fixture(
 ) -> tuple[Path, bytes, bytes]:
     ndx_payload = _ndx_xlsx(ndx_symbols)
     _install_stable_test_root(monkeypatch, ndx_payload, ndx_symbols)
-    ndx_root = core._TRUSTED_SOURCE_ROOTS["nasdaq-ndx-point-in-time-2026-08-27"]
+    ndx_root = core._TRUSTED_SOURCE_ROOTS[refresh_script.NDX_SOURCE_ID]
     _ndx_parsed, ndx_attestation = core._parse_nasdaq_sod_weightings_xlsx_with_attestation(
         ndx_payload
     )
