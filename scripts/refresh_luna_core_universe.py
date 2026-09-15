@@ -272,7 +272,13 @@ def _ndx_manifest(
         "effective_date": market_date,
         "reconstitution_id": root["reconstitution_id"],
         "index_name": "Nasdaq-100",
-        "expected_count": 102,
+        # Derived from the attested set rather than a literal.  The export's row
+        # count moves with index events - KHC's removal on 2026-09-14 took it
+        # from 102 to 101 - and a hardcoded expectation turns that into a
+        # DATA_UNAVAILABLE core universe.  The governed band and the exact
+        # structural attestations in _parse_nasdaq_sod_weightings_xlsx_with_
+        # attestation are what refuse a malformed export.
+        "expected_count": len(records),
         "completeness_verdict": "COMPLETE",
         "members": records,
         "canonical_zip_member_names": attestation["member_names"],

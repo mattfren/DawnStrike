@@ -3235,6 +3235,26 @@ def _canonical_zip_content_digest(member_hashes: dict[str, str]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+# The Nasdaq-100 holds exactly 100 companies, but the SOD export lists one row
+# per security, so companies with a second listed share class add rows.  That
+# made the row count 102 for a long stretch, and the count was asserted as the
+# literal 102.
+#
+# On 2026-09-14 Kraft Heinz (KHC) left the index with no same-day replacement
+# and the export became 101 rows.  The literal rejected the whole workbook, so
+# the core universe refresh returned DATA_UNAVAILABLE and the S&P 500 and
+# Nasdaq-100 lanes went dark - for a routine index event, not a data defect.
+#
+# A band keeps the check meaningful (a truncated or duplicated export is still
+# refused) without re-breaking on every reconstitution.  The floor allows a
+# removal that has not yet been replaced; the ceiling allows several dual-class
+# constituents.  The real anti-tamper controls are unchanged and remain exact:
+# the canonical zip member names, the static member hashes, and the uniqueness
+# requirement below.
+NDX_MIN_MEMBER_ROWS = 99
+NDX_MAX_MEMBER_ROWS = 105
+
+
 def _parse_nasdaq_sod_weightings_xlsx_with_attestation(
     payload: bytes,
     *,
@@ -3327,8 +3347,13 @@ def _parse_nasdaq_sod_weightings_xlsx_with_attestation(
         if number > row_number
     ):
         raise ValueError("Nasdaq SOD rows continue after member block")
-    if len(symbols) != 102 or len(set(symbols)) != len(symbols):
-        raise ValueError("Nasdaq SOD membership count or uniqueness invalid")
+    if not NDX_MIN_MEMBER_ROWS <= len(symbols) <= NDX_MAX_MEMBER_ROWS:
+        raise ValueError(
+            "Nasdaq SOD membership count outside the governed band: "
+            f"{len(symbols)} not in [{NDX_MIN_MEMBER_ROWS}, {NDX_MAX_MEMBER_ROWS}]"
+        )
+    if len(set(symbols)) != len(symbols):
+        raise ValueError("Nasdaq SOD membership uniqueness invalid")
     attestation["member_set_hash_sha256"] = _canonical_member_hash(
         [
             {
@@ -3382,8 +3407,13 @@ def _replay_nasdaq_reconstitution(payloads: list[bytes]) -> tuple[list[str], str
         if notice_date <= effective:
             raise ValueError("Nasdaq notice effective dates are not increasing")
         effective = notice_date
-    if len(symbols) != 102 or len(set(symbols)) != len(symbols):
-        raise ValueError("Nasdaq replay membership count or uniqueness invalid")
+    if not NDX_MIN_MEMBER_ROWS <= len(symbols) <= NDX_MAX_MEMBER_ROWS:
+        raise ValueError(
+            "Nasdaq replay membership count outside the governed band: "
+            f"{len(symbols)} not in [{NDX_MIN_MEMBER_ROWS}, {NDX_MAX_MEMBER_ROWS}]"
+        )
+    if len(set(symbols)) != len(symbols):
+        raise ValueError("Nasdaq replay membership uniqueness invalid")
     return symbols, effective
 
 
