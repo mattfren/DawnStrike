@@ -16,6 +16,7 @@ import shutil
 import socket
 import sys
 import tempfile
+import time
 import uuid
 import zipfile
 from contextlib import contextmanager
@@ -79,18 +80,44 @@ def _source_url(root: dict[str, object], market_date: str) -> str:
     return str(root.get("source_uri") or "").strip()
 
 
+# A single transient network failure used to cost the whole trading day: on
+# 2026-09-17 one DNS miss at 08:00 ("getaddrinfo failed") returned
+# DATA_UNAVAILABLE, the morning omitted the core manifest, and the S&P 500 and
+# Nasdaq-100 lanes were dark until the next session - while the same URL served
+# HTTP 200 minutes later.
+#
+# These retries are deliberately small.  The refresh runs inside the morning
+# stage, which has a wall-clock budget, so the worst case here is bounded at
+# roughly 30s of timeout plus 9s of backoff per attempt sequence rather than
+# anything open-ended.  Only transport failures are retried; a bad HTTP status
+# or an oversized body is a fact about the source and is raised immediately.
+_FETCH_ATTEMPTS = 3
+_FETCH_BACKOFF_SECONDS = (3, 6)
+
+
 def _fetch(url: str) -> bytes:
     request = Request(url, headers={"User-Agent": "Dawnstrike/1 core-universe refresh"})
-    try:
-        with urlopen(request, timeout=30) as response:  # nosec B310 - fixed HTTPS roots below
-            if response.status != 200:
-                raise RuntimeError(f"source returned HTTP {response.status}")
-            payload = response.read(MAX_DOWNLOAD_BYTES + 1)
-    except (OSError, URLError) as exc:
-        raise RuntimeError(f"source download failed: {exc}") from exc
-    if len(payload) > MAX_DOWNLOAD_BYTES:
-        raise RuntimeError("source download exceeded bounded size")
-    return payload
+    last_error: Exception | None = None
+    for attempt in range(_FETCH_ATTEMPTS):
+        try:
+            with urlopen(request, timeout=30) as response:  # nosec B310 - fixed HTTPS roots below
+                if response.status != 200:
+                    # Not transient: the source answered, and answered wrongly.
+                    raise RuntimeError(f"source returned HTTP {response.status}")
+                payload = response.read(MAX_DOWNLOAD_BYTES + 1)
+        except (OSError, URLError) as exc:
+            last_error = exc
+            if attempt < _FETCH_ATTEMPTS - 1:
+                time.sleep(_FETCH_BACKOFF_SECONDS[attempt])
+                continue
+            raise RuntimeError(
+                f"source download failed after {_FETCH_ATTEMPTS} attempts: {exc}"
+            ) from exc
+        if len(payload) > MAX_DOWNLOAD_BYTES:
+            raise RuntimeError("source download exceeded bounded size")
+        return payload
+    # Unreachable: the loop either returns or raises.
+    raise RuntimeError(f"source download failed: {last_error}")
 
 
 def _read_json(path: Path) -> dict[str, object]:
