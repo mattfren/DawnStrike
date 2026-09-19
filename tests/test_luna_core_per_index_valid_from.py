@@ -408,6 +408,87 @@ def test_tampered_member_symbol_fails_the_hash_check() -> None:
         raise AssertionError("tampered member symbol must fail closed")
 
 
+def test_membership_claimed_without_index_validity_entry_fails_closed() -> None:
+    """DS-03b follow-up 1: a claimed index_memberships entry with no
+    matching index_validity fact must be rejected by name, not silently
+    filled in from the collapsed union-window valid_from/valid_to.
+
+    This simulates a hand-built/tampered contract where index_validity is
+    missing the Nasdaq-100 entry even though index_memberships still claims
+    it, and self-recomputes the canonical member hash the way an attacker
+    controlling only the merged core contract could (mirroring the
+    reviewer's tamper methodology for DS-03).
+    """
+    contract = copy.deepcopy(_manual_core_contract(spx_valid_from="2020-01-01", ndx_valid_from="2023-06-01"))
+    row = next(r for r in contract["members"] if r["symbol"] == "AAA")
+    del row["index_validity"]["Nasdaq-100"]
+
+    # Recompute the self-referential canonical hash over the now-fallback
+    # shape, exactly as an attacker who only controls the merged core
+    # contract (not the independently trusted source_artifacts) could.
+    def _fallback_records(members: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {
+                "symbol": m["symbol"],
+                "provider_symbol": m.get("provider_symbol"),
+                "asset_class": m.get("asset_class"),
+                "index": index,
+                "valid_from": (m.get("index_validity") or {})
+                .get(index, {})
+                .get("valid_from", m.get("valid_from")),
+                "valid_to": (m.get("index_validity") or {})
+                .get(index, {})
+                .get("valid_to", m.get("valid_to")),
+            }
+            for m in members
+            for index in (m.get("index_memberships") or [])
+        ]
+
+    contract["canonical_member_set_hash_sha256"] = core._canonical_member_hash(
+        _fallback_records(contract["members"])
+    )
+    unhashed = dict(contract)
+    for key in ("content_hash_sha256", "content_hash", "contract_id", "universe_id"):
+        unhashed.pop(key, None)
+    digest = hashlib.sha256(
+        json.dumps(unhashed, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    ).hexdigest()
+    contract["content_hash_sha256"] = digest
+    contract["content_hash"] = digest
+
+    try:
+        universe_handoff._validate_core_contract(contract, MARKET_DATE, allow_test_override=True)
+    except universe_handoff.UniverseHandoffError as exc:
+        assert "index_validity" in str(exc)
+    else:
+        raise AssertionError(
+            "a claimed index_memberships entry missing its index_validity fact "
+            "must fail closed, not silently fall back to the collapsed window"
+        )
+
+
+def test_core_members_marks_collapsed_dates_as_non_authoritative() -> None:
+    """DS-03b follow-up 2: `_core_members` output must make explicit,
+    machine-visible that its `valid_from`/`valid_to` are the collapsed
+    union window, not per-index truth -- so a future consumer keying
+    eligibility off a specific index cannot mistake it for that index's
+    own effective-date window (no current consumer does this; see
+    ds03b_receipt.md for the downstream-consumer search)."""
+    contract = _manual_core_contract(spx_valid_from="2020-01-01", ndx_valid_from="2023-06-01")
+    core_ready_indexes = universe_handoff._validate_core_contract(
+        contract, MARKET_DATE, allow_test_override=True
+    )
+    core_members = universe_handoff._core_members(contract, allowed_indexes=core_ready_indexes)
+    assert len(core_members) == 1
+    row = core_members[0]
+    assert row["valid_dates_scope"] == "collapsed_union_across_index_memberships"
+    # The collapsed field is still the earliest of the two per-index dates
+    # (pre-existing, unchanged behaviour) -- only its authoritativeness
+    # labeling is new here.
+    assert row["valid_from"] == "2020-01-01"
+    assert set(row["index_memberships"]) == {"S&P 500", "Nasdaq-100"}
+
+
 def test_wrong_member_set_fails_closed() -> None:
     contract = copy.deepcopy(_tamperable_healthy_contract())
     row = next(r for r in contract["members"] if r["symbol"] == "AAA")

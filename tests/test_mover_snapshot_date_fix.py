@@ -54,6 +54,13 @@ def _core_contract() -> dict[str, object]:
                 "index_memberships": ["Nasdaq-100", "S&P 500"],
                 "sources": ["fixture-core"],
                 "valid_from": MARKET_DATE,
+                # DS-03b: production always populates index_validity per
+                # claimed membership; this fixture predates that and must
+                # match, or the fail-closed check added in DS-03b rejects it.
+                "index_validity": {
+                    "S&P 500": {"valid_from": MARKET_DATE, "valid_to": None},
+                    "Nasdaq-100": {"valid_from": MARKET_DATE, "valid_to": None},
+                },
             }
         ],
     }
