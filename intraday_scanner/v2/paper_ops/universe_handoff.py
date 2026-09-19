@@ -691,8 +691,15 @@ def _validate_core_contract(
             .strip()
             .lower(),
             "index": str(index),
-            "valid_from": row.get("valid_from"),
-            "valid_to": row.get("valid_to"),
+            # Per-index validity, never the collapsed union window: a
+            # symbol's two index memberships can have different effective
+            # dates, and hashing must reflect each one's own fact.
+            "valid_from": (row.get("index_validity") or {})
+            .get(index, {})
+            .get("valid_from", row.get("valid_from")),
+            "valid_to": (row.get("index_validity") or {})
+            .get(index, {})
+            .get("valid_to", row.get("valid_to")),
         }
         for row in members
         if isinstance(row, dict)
@@ -962,8 +969,16 @@ def _validate_core_contract(
                     .strip()
                     .lower(),
                     "index": index,
-                    "valid_from": row.get("valid_from"),
-                    "valid_to": row.get("valid_to"),
+                    # Per-index validity, never the collapsed union window
+                    # (see the identical rationale above in
+                    # `canonical_records`): each per-index projection must
+                    # hash from its own effective-date fact.
+                    "valid_from": (row.get("index_validity") or {})
+                    .get(index, {})
+                    .get("valid_from", row.get("valid_from")),
+                    "valid_to": (row.get("index_validity") or {})
+                    .get(index, {})
+                    .get("valid_to", row.get("valid_to")),
                 }
                 for row in members
                 if isinstance(row, dict) and index in (row.get("index_memberships") or [])

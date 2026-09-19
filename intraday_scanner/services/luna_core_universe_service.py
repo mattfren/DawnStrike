@@ -383,6 +383,12 @@ def build_core_universe_contract(
     if (market_date or effective_date) and requested_date is None:
         errors.append("invalid_market_date")
     members: dict[str, dict[str, Any]] = {}
+    # Tracks, per merged symbol, whether ANY of its index memberships is
+    # open-ended (valid_to falsy).  Openness must dominate: once true for a
+    # symbol it stays true, so an open membership in one index can never be
+    # silently closed off by merging in a dated membership from another
+    # index.  See the valid_to merge below.
+    member_valid_to_open: dict[str, bool] = {}
     per_index: dict[str, set[str]] = {index: set() for index in CORE_INDEXES}
     expected: dict[str, int | None] = {index: None for index in CORE_INDEXES}
     expected_conflicts: set[str] = set()
@@ -662,10 +668,44 @@ def build_core_universe_contract(
             row["sources"] = sorted(
                 set(row["sources"]) | {value for value in (source_id, source_uri) if value}
             )
-            row["valid_from"] = max(
-                str(row.get("valid_from") or ""), str(item.get("valid_from") or "")
+            item_valid_from = item.get("valid_from")
+            item_valid_to = item.get("valid_to")
+            # `valid_from`/`valid_to` are per-(index, symbol) facts, not
+            # per-symbol facts: the same symbol can belong to two indexes
+            # with two different, equally true, effective windows.
+            # `index_validity` preserves each index's own window
+            # unambiguously and is the ONLY field hashing may read.
+            index_validity = row.setdefault("index_validity", {})
+            index_validity[item["index"]] = {
+                "valid_from": item_valid_from,
+                "valid_to": item_valid_to,
+            }
+            # The collapsed top-level valid_from/valid_to below are kept
+            # only for backward-compatible display/consumers that are not
+            # index-aware; they are NEVER used for hashing.  They are
+            # derived unambiguously as the union window across this
+            # symbol's memberships: valid_from is the earliest start, and
+            # valid_to is None (open) if ANY membership is open-ended,
+            # otherwise the latest end.  This guarantees an open-ended
+            # membership can never be truncated by merging in a dated one.
+            prior_valid_from = row.get("valid_from")
+            row["valid_from"] = (
+                str(item_valid_from)
+                if prior_valid_from is None
+                else min(str(prior_valid_from), str(item_valid_from))
             )
-            row["valid_to"] = max(str(row.get("valid_to") or ""), str(item.get("valid_to") or ""))
+            member_valid_to_open[symbol] = member_valid_to_open.get(symbol, False) or (
+                not item_valid_to
+            )
+            if member_valid_to_open[symbol]:
+                row["valid_to"] = None
+            else:
+                prior_valid_to = row.get("valid_to")
+                row["valid_to"] = (
+                    str(item_valid_to)
+                    if prior_valid_to is None
+                    else max(str(prior_valid_to), str(item_valid_to))
+                )
             if symbol in per_index[item["index"]]:
                 errors.append(f"duplicate_member_global:{item['index']}:{symbol}")
             per_index[item["index"]].add(symbol)
@@ -829,8 +869,15 @@ def build_core_universe_contract(
                 "provider_symbol": row.get("provider_symbol"),
                 "asset_class": row.get("asset_class"),
                 "index": index,
-                "valid_from": row.get("valid_from"),
-                "valid_to": row.get("valid_to"),
+                # Hash the per-index validity fact, never the collapsed
+                # union window: two indexes can legitimately disagree on
+                # this symbol's effective dates.
+                "valid_from": (row.get("index_validity") or {})
+                .get(index, {})
+                .get("valid_from", row.get("valid_from")),
+                "valid_to": (row.get("index_validity") or {})
+                .get(index, {})
+                .get("valid_to", row.get("valid_to")),
             }
             for row in contract["members"]
             for index in row["index_memberships"]
