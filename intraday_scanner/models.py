@@ -1288,4 +1288,18 @@ class ScanResult:
         ):
             if key in self.config:
                 summary[key] = self.config[key]
+        capability_report = self.config.get("capability_report")
+        if isinstance(capability_report, dict):
+            summary["capability_report"] = capability_report
+            # Structural prominence for an unintended gap: a capability
+            # disabled only because its key was never set is surfaced here
+            # even when nothing else in the summary changes, distinct from
+            # an operator's deliberate DISABLED_BY_OPERATOR choice, which is
+            # normal and stays out of this dict entirely.
+            summary["capability_config_gaps"] = {
+                name: report
+                for name, report in capability_report.items()
+                if isinstance(report, dict)
+                and report.get("status") == "DISABLED_MISSING_CONFIG"
+            }
         return summary

@@ -336,6 +336,10 @@ class ScannerConfig:
         data["output_dir"] = str(self.output_dir)
         data["database_path"] = str(self.database_path)
         data["intraday_evidence_root"] = str(self.intraday_evidence_root)
+        # Make the tri-state capability status (see config_schema.py) an
+        # actual, called-in-production part of the config an operator sees,
+        # not merely a dataclass field theirs to notice among fifty others.
+        data["capability_report"] = self.capability_report()
         return data
 
 
