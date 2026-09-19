@@ -7,7 +7,22 @@ from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Any
 
+from intraday_scanner.config_schema import (
+    CapabilityStatus,
+    ConfigKeySpec,
+    resolve_capability_bool,
+)
 from intraday_scanner.errors import ConfigError
+
+# Capability keys whose absence must never collapse silently into the same
+# ``False`` an operator's explicit "off" produces.  See config_schema.py.
+STRATEGY_EVIDENCE_ENABLED_SPEC = ConfigKeySpec(
+    name="DAWNSTRIKE_STRATEGY_EVIDENCE_ENABLED",
+    kind="bool",
+    required=False,
+    subsystem="strategy_decision_receipts",
+    default="false",
+)
 
 
 def _parse_env_file(path: Path) -> dict[str, str]:
@@ -111,6 +126,7 @@ class ScannerConfig:
     indeterminate_research_timeout_seconds: float = 60.0
     indeterminate_research_max_tool_calls: int = 3
     strategy_evidence_enabled: bool = False
+    strategy_evidence_status: str = CapabilityStatus.DISABLED_MISSING_CONFIG.value
     strategy_evidence_shadow_only: bool = True
     strategy_evidence_max_candidates: int = 12
     alpaca_api_key_id: str = ""
@@ -264,9 +280,36 @@ class ScannerConfig:
         unknown = sorted(set(clean) - allowed)
         if unknown:
             raise ConfigError(f"Unknown config override(s): {', '.join(unknown)}")
+        # An explicit override of a capability flag is, by construction, an
+        # explicit operator decision - never a missing key - so keep the
+        # observable status in lockstep instead of leaving a stale
+        # DISABLED_MISSING_CONFIG behind a now-True/False value.
+        if "strategy_evidence_enabled" in clean and "strategy_evidence_status" not in clean:
+            clean["strategy_evidence_status"] = (
+                CapabilityStatus.ENABLED.value
+                if clean["strategy_evidence_enabled"]
+                else CapabilityStatus.DISABLED_BY_OPERATOR.value
+            )
         updated = replace(self, **clean)
         updated.validate()
         return updated
+
+    def capability_report(self) -> dict[str, dict[str, Any]]:
+        """Observable status for every capability key, for health/config reports.
+
+        This is what closes the silent-default gap: a subsystem disabled
+        because its key was never set reports ``DISABLED_MISSING_CONFIG``
+        here, distinct from an operator's explicit ``DISABLED_BY_OPERATOR``,
+        instead of both looking identical to every downstream consumer.
+        """
+
+        return {
+            "strategy_decision_receipts": {
+                "key": STRATEGY_EVIDENCE_ENABLED_SPEC.name,
+                "enabled": self.strategy_evidence_enabled,
+                "status": self.strategy_evidence_status,
+            },
+        }
 
     def public_dict(self) -> dict[str, Any]:
         secret_fields = {
@@ -298,6 +341,9 @@ class ScannerConfig:
 
 def load_config(env_file: str | Path = ".env", **overrides: Any) -> ScannerConfig:
     env_values = _parse_env_file(Path(env_file))
+    _resolved_strategy_evidence = resolve_capability_bool(
+        STRATEGY_EVIDENCE_ENABLED_SPEC, env_values
+    )
     config = ScannerConfig(
         provider=_env("INTRADAY_PROVIDER", "csv", env_values).lower(),
         output_dir=Path(_env("INTRADAY_OUTPUT_DIR", "outputs/latest_scan", env_values)),
@@ -442,9 +488,8 @@ def load_config(env_file: str | Path = ".env", **overrides: Any) -> ScannerConfi
             "DAWNSTRIKE_INDETERMINATE_RESEARCH_MAX_TOOL_CALLS",
             _env("DAWNSTRIKE_INDETERMINATE_RESEARCH_MAX_TOOL_CALLS", "3", env_values),
         ),
-        strategy_evidence_enabled=_to_bool(
-            _env("DAWNSTRIKE_STRATEGY_EVIDENCE_ENABLED", "false", env_values)
-        ),
+        strategy_evidence_enabled=_resolved_strategy_evidence.value,
+        strategy_evidence_status=_resolved_strategy_evidence.status.value,
         strategy_evidence_shadow_only=_to_bool(
             _env("DAWNSTRIKE_STRATEGY_EVIDENCE_SHADOW_ONLY", "true", env_values)
         ),
