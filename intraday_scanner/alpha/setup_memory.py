@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from statistics import median
 from typing import Any
 
@@ -15,9 +16,7 @@ def build_setup_memory(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 
 
 def summarize_setup(key: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
-    raw_returns = [
-        _float(row.get("high_after_entry_return") or row.get("return_pct")) for row in rows
-    ]
+    raw_returns = [_return(row) for row in rows]
     returns = [value for value in raw_returns if value is not None]
     wins = [value for value in returns if value > 0]
     return {
@@ -32,6 +31,26 @@ def summarize_setup(key: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
         ),
         "outlier_dependency": _outlier_dependency(returns),
     }
+
+
+def _return(row: dict[str, Any]) -> float | None:
+    # Close-return-first: the previous `a or b` idiom silently dropped a
+    # legitimate observed 0.0 close/MFE return (falsy) and fell through to
+    # the next key, and also preferred MFE over the actual close return.
+    # Use explicit presence checks so 0.0 is preserved, and try the real
+    # close return before the MFE fallback keys.
+    for key in ("close_return_pct", "return_pct", "high_after_entry_return"):
+        value = row.get(key)
+        if value is None or value == "":
+            continue
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(parsed):
+            return None
+        return parsed
+    return None
 
 
 def _outlier_dependency(values: list[float]) -> float:

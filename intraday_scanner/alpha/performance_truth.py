@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from statistics import median
 from typing import Any
 
@@ -126,14 +127,20 @@ def _risk_flag_impact(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 
 
 def _return(row: dict[str, Any]) -> float | None:
-    for key in ("high_after_entry_return", "return_pct", "close_return_pct"):
+    # Close-return-first: prefer the actual realized close return over the
+    # best-post-entry-movement (MFE) keys, which only stand in when the
+    # close return was never captured.
+    for key in ("close_return_pct", "return_pct", "high_after_entry_return"):
         value = row.get(key)
         if value is None or value == "":
             continue
         try:
-            return float(value)
+            parsed = float(value)
         except (TypeError, ValueError):
             return None
+        if not math.isfinite(parsed):
+            return None
+        return parsed
     return None
 
 

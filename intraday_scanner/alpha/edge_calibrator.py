@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from statistics import median
 from typing import Any
 
@@ -108,19 +109,25 @@ def score_decile(value: Any) -> int:
 
 
 def _return(row: dict[str, Any]) -> float | None:
+    # Close-return-first: the actual realized return at close is the truth
+    # source. MFE keys (high_after_entry_return*) are a last-resort fallback
+    # for rows that predate close-return capture, not a preference over it.
     for key in (
+        "close_return_pct",
+        "return_pct",
         "high_after_entry_return",
         "high_after_entry_return_pct",
-        "return_pct",
-        "close_return_pct",
     ):
         value = row.get(key)
         if value is None or value == "":
             continue
         try:
-            return float(value)
+            parsed = float(value)
         except (TypeError, ValueError):
             return None
+        if not math.isfinite(parsed):
+            return None
+        return parsed
     return None
 
 
