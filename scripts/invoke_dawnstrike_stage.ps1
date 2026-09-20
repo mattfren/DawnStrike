@@ -76,6 +76,37 @@ function Enter-DawnstrikeDailyRunLock {
     }
 }
 
+function ConvertTo-DawnstrikeUtcDateTimeOffset {
+    # Windows PowerShell 5.1's ConvertFrom-Json leaves an ISO-8601 JSON
+    # string as [string]; PowerShell 7's ConvertFrom-Json silently
+    # coerces the same value straight to [DateTime]. Casting that
+    # [DateTime] back to [string] with the default, culture-formatted
+    # ToString() drops both the "Z" designator and sub-second precision,
+    # so re-parsing the resulting string lands in the machine's local
+    # offset instead of UTC -- misclassifying a live owner as dead.
+    # Normalise by branching on the actual runtime type instead of
+    # assuming a string, so both engines resolve to the identical UTC
+    # instant.
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][AllowNull()]$Value)
+
+    if ($Value -is [DateTime]) {
+        $dt = $Value
+        if ($dt.Kind -eq [System.DateTimeKind]::Unspecified) {
+            # Source values are always UTC ("...Z") ISO-8601 timestamps.
+            # An Unspecified Kind must be explicitly tagged UTC -- never
+            # assumed to already be local wall-clock time.
+            $dt = [DateTime]::SpecifyKind($dt, [System.DateTimeKind]::Utc)
+        }
+        return [DateTimeOffset]$dt.ToUniversalTime()
+    }
+    return [DateTimeOffset]::Parse(
+        [string]$Value,
+        [cultureinfo]::InvariantCulture,
+        [System.Globalization.DateTimeStyles]::RoundtripKind
+    ).ToUniversalTime()
+}
+
 function Test-DawnstrikeLockOwnerActive {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string]$LockPath)
@@ -94,10 +125,18 @@ function Test-DawnstrikeLockOwnerActive {
         if ($null -eq $ownerProcess) { return $false }
         $processStarted = [DateTimeOffset]$ownerProcess.StartTime.ToUniversalTime()
         $startedProperty = $payload.PSObject.Properties["process_started_at_utc"]
-        if ($null -ne $startedProperty -and -not [string]::IsNullOrWhiteSpace([string]$startedProperty.Value)) {
+        $startedHasValue = $false
+        if ($null -ne $startedProperty -and $null -ne $startedProperty.Value) {
+            if ($startedProperty.Value -is [DateTime]) {
+                $startedHasValue = $true
+            } elseif (-not [string]::IsNullOrWhiteSpace([string]$startedProperty.Value)) {
+                $startedHasValue = $true
+            }
+        }
+        if ($startedHasValue) {
             # A reused PID has a different creation time.  Compare exact
             # process start identity rather than mutable lock-file age.
-            $recordedStart = [DateTimeOffset]::Parse([string]$startedProperty.Value).ToUniversalTime()
+            $recordedStart = ConvertTo-DawnstrikeUtcDateTimeOffset -Value $startedProperty.Value
             return $processStarted.UtcDateTime.Ticks -eq $recordedStart.UtcDateTime.Ticks
         }
         # v2 locks (dawnstrike.daily_run_lock.v2) predate the exact
@@ -106,7 +145,7 @@ function Test-DawnstrikeLockOwnerActive {
         # live PID.  A process that started after acquired_at is a reused PID;
         # an unparseable acquired_at is ambiguous and therefore fail-closed.
         try {
-            $acquiredAt = [DateTimeOffset]::Parse([string]$payload.acquired_at).ToUniversalTime()
+            $acquiredAt = ConvertTo-DawnstrikeUtcDateTimeOffset -Value $payload.acquired_at
             return $processStarted.UtcDateTime.Ticks -le $acquiredAt.UtcDateTime.AddTicks([TimeSpan]::TicksPerSecond * 5).Ticks
         }
         catch {
