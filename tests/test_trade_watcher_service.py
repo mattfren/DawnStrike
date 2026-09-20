@@ -281,18 +281,24 @@ def test_trade_watcher_rejects_cross_scan_official_selection_join(tmp_path: Path
         ]
     )
 
-    with pytest.raises(SnapshotValidationError, match="scan identity mismatch"):
-        run_trade_watcher(
-            db_path=db_path,
-            source="csv",
-            market_date="2026-06-22",
-            requested_at="09:35",
-            minute_bars=_write_minute_bars(
-                tmp_path / "cross-scan-bars.csv",
-                [_bar("2026-06-22T09:34:00-04:00", 10.3)],
-            ),
-            dry_run=True,
-        )
+    # DS-07: an invalid cross-scan join is a new-entry gate failure. It must
+    # close the gate (no new intent) rather than raise, since there is no
+    # open position here to protect and a raise would (with an open
+    # position present) abort supervision entirely.
+    result = run_trade_watcher(
+        db_path=db_path,
+        source="csv",
+        market_date="2026-06-22",
+        requested_at="09:35",
+        minute_bars=_write_minute_bars(
+            tmp_path / "cross-scan-bars.csv",
+            [_bar("2026-06-22T09:34:00-04:00", 10.3)],
+        ),
+        dry_run=True,
+    )
+    assert result["new_entry_gate"]["status"] == "closed"
+    assert "scan identity mismatch" in result["new_entry_gate"]["reason"]
+    assert result["intents"] == []
 
 
 def test_trade_watcher_enters_once_and_persists_paper_fill(tmp_path: Path) -> None:
@@ -538,18 +544,395 @@ def test_trade_watcher_fails_closed_without_exact_session_selection(
         ]
     )
 
-    with pytest.raises(SnapshotValidationError, match="selection evidence is absent"):
-        run_trade_watcher(
-            db_path=db_path,
-            source="csv",
-            market_date="2026-06-22",
-            requested_at="09:35",
-            minute_bars=_write_minute_bars(
-                tmp_path / "bars.csv",
-                [_bar("2026-06-22T09:34:00-04:00", 10.3)],
-            ),
-            dry_run=True,
-        )
+    # DS-07: absent/invalid session-selection evidence is the *new-entry*
+    # gate.  It must close (no new intents) without raising, so that a
+    # broken/absent morning ranking run can never crash supervision of any
+    # already-open position (see the DS-07 coupling tests further below).
+    result = run_trade_watcher(
+        db_path=db_path,
+        source="csv",
+        market_date="2026-06-22",
+        requested_at="09:35",
+        minute_bars=_write_minute_bars(
+            tmp_path / "bars.csv",
+            [_bar("2026-06-22T09:34:00-04:00", 10.3)],
+        ),
+        dry_run=True,
+    )
+    assert result["new_entry_gate"]["status"] == "closed"
+    assert "selection evidence is absent" in result["new_entry_gate"]["reason"]
+    assert result["intents"] == []
+
+
+# --- DS-07: supervision/exit/reconciliation independence -------------------
+#
+# Controller requirement (v4 DS-07): open-order/position supervision, exits
+# and reconciliation must never depend on morning ranking, optional AI,
+# learning or unrelated universe success. A new-entry gate may close while
+# position protection remains active.  These tests inject a real upstream
+# failure (an unhandled ``SnapshotValidationError`` from the new-entry
+# selection path, or a broken optional stage) and assert protection of an
+# already-open position still runs to completion.
+
+
+def test_open_position_is_protected_when_morning_ranking_never_ran(
+    tmp_path: Path,
+) -> None:
+    """A position opened on day 1 must still be carried/protected on day 2
+    even if the day-2 morning ranking run produced *no* session selections
+    at all (e.g. the morning stage crashed or never executed).
+
+    Before the DS-07 fix, ``run_trade_watcher`` called ``_watch_signals``
+    unguarded; its ``SnapshotValidationError`` ("selection evidence is
+    absent") propagated out of the function before open-position repair,
+    carry-forward, exit decisioning, or lifecycle persistence ever ran -
+    silently leaving the open NOVA position unsupervised for the entire day.
+    """
+
+    db_path = tmp_path / "scanner.sqlite"
+    store = SQLiteScanStore(db_path)
+    _persist_signal(store)
+    run_trade_watcher(
+        db_path=db_path,
+        source="csv",
+        market_date="2026-06-22",
+        requested_at="09:35",
+        minute_bars=_write_minute_bars(
+            tmp_path / "entry-bars.csv",
+            [_bar("2026-06-22T09:34:00-04:00", 10.3)],
+        ),
+        dry_run=True,
+    )
+    assert store.load_paper_positions(signal_id="sig-NOVA")[0]["status"] == "OPEN"
+
+    # Day 2: deliberately persist NOTHING for the morning ranking stage -
+    # simulating a crashed/never-ran morning ranking run.
+    carried = run_trade_watcher(
+        db_path=db_path,
+        source="csv",
+        market_date="2026-06-23",
+        requested_at="09:35",
+        minute_bars=_write_minute_bars(
+            tmp_path / "carry-bars.csv",
+            [_bar("2026-06-23T09:34:00-04:00", 10.4)],
+        ),
+        dry_run=True,
+    )
+
+    assert carried["new_entry_gate"]["status"] == "closed"
+    assert "selection evidence is absent" in carried["new_entry_gate"]["reason"]
+    assert carried["prior_open_position_count"] == 1
+    assert carried["carried_open_position_count"] == 1
+    assert carried["states"][0]["state"] == "PAPER_OPEN"
+    assert store.load_paper_positions(signal_id="sig-NOVA")[0]["status"] == "OPEN"
+
+
+def test_open_position_is_protected_when_universe_membership_handoff_is_stale(
+    tmp_path: Path,
+) -> None:
+    """A day-2 selection produced under a stale/wrong strategy contract - the
+    signature of a universe/membership handoff that never advanced to the
+    current contract - must close the new-entry gate without aborting
+    protection of the day-1 open position.
+    """
+
+    db_path = tmp_path / "scanner.sqlite"
+    store = SQLiteScanStore(db_path)
+    _persist_signal(store)
+    run_trade_watcher(
+        db_path=db_path,
+        source="csv",
+        market_date="2026-06-22",
+        requested_at="09:35",
+        minute_bars=_write_minute_bars(
+            tmp_path / "entry-bars.csv",
+            [_bar("2026-06-22T09:34:00-04:00", 10.3)],
+        ),
+        dry_run=True,
+    )
+
+    # A stale-contract selection: the membership/universe handoff persisted a
+    # selection tagged with an old strategy contract instead of today's.
+    store.persist_signal_selections(
+        [
+            {
+                "selection_id": "selected-stale-contract",
+                "scan_id": "scan-stale",
+                "signal_id": "sig-STALE",
+                "ticker": "STALE",
+                "rank": 1,
+                "strategy_id": "alphaops_v4",
+                "strategy_version": "dawnstrike-alphaops-v3-retired",
+                "cohort": "official_telegram",
+                "decision": "clean_edge",
+                "selected_at": "2026-06-23T13:20:00+00:00",
+                "event_key": "alphaops:scan-stale:alpha_morning_watch",
+                "body_sha256": "stale-body-hash",
+            }
+        ]
+    )
+
+    carried = run_trade_watcher(
+        db_path=db_path,
+        source="csv",
+        market_date="2026-06-23",
+        requested_at="09:35",
+        minute_bars=_write_minute_bars(
+            tmp_path / "carry-bars.csv",
+            [_bar("2026-06-23T09:34:00-04:00", 10.4)],
+        ),
+        dry_run=True,
+    )
+
+    assert carried["new_entry_gate"]["status"] == "closed"
+    assert "wrong prospective strategy contract" in carried["new_entry_gate"]["reason"]
+    assert carried["carried_open_position_count"] == 1
+    assert store.load_paper_positions(signal_id="sig-NOVA")[0]["status"] == "OPEN"
+    # No new position/intent was opened for the stale-contract candidate.
+    assert not store.load_paper_positions(signal_id="sig-STALE")
+
+
+def test_open_position_is_protected_when_optional_scenario_ai_selection_is_invalid(
+    tmp_path: Path,
+) -> None:
+    """An invalid Scenario/AI-produced selection (simulating a misbehaving
+    optional AI enrichment stage) must close the new-entry gate without
+    aborting protection of the day-1 open position, even with
+    ``include_scenarios=True``.
+    """
+
+    db_path = tmp_path / "scanner.sqlite"
+    store = SQLiteScanStore(db_path)
+    _persist_signal(store)
+    run_trade_watcher(
+        db_path=db_path,
+        source="csv",
+        market_date="2026-06-22",
+        requested_at="09:35",
+        minute_bars=_write_minute_bars(
+            tmp_path / "entry-bars.csv",
+            [_bar("2026-06-22T09:34:00-04:00", 10.3)],
+        ),
+        dry_run=True,
+    )
+    _persist_no_trade_selection(store, "2026-06-23")
+
+    # The optional Scenario/AI stage produced a malformed decision (contract
+    # violation) instead of raising cleanly - exactly what an unavailable or
+    # misbehaving AI call looks like once it reaches persisted selections.
+    store.persist_signal_selections(
+        [
+            {
+                "selection_id": "scenario-selection-bad-ai",
+                "scan_id": "scenario:2026-06-23",
+                "signal_id": "scenario:bad-ai",
+                "ticker": "NOVA",
+                "strategy_id": SCENARIO_STRATEGY_ID,
+                "strategy_version": SCENARIO_POLICY_VERSION,
+                "cohort": SCENARIO_FORWARD_COHORT,
+                "decision": "hallucinated_decision",
+                "selected_at": "2026-06-23T13:20:00+00:00",
+                "event_key": "scenario:2026-06-23:bad-ai",
+                "body_sha256": "bad-ai-body-hash",
+            }
+        ]
+    )
+
+    carried = run_trade_watcher(
+        db_path=db_path,
+        source="csv",
+        market_date="2026-06-23",
+        requested_at="09:35",
+        minute_bars=_write_minute_bars(
+            tmp_path / "carry-bars.csv",
+            [_bar("2026-06-23T09:34:00-04:00", 10.4)],
+        ),
+        dry_run=True,
+        include_scenarios=True,
+    )
+
+    assert carried["new_entry_gate"]["status"] == "closed"
+    assert (
+        "bounded paper-lifecycle contract"
+        in carried["new_entry_gate"]["reason"]
+    )
+    assert carried["carried_open_position_count"] == 1
+    assert store.load_paper_positions(signal_id="sig-NOVA")[0]["status"] == "OPEN"
+
+
+def test_open_position_is_protected_when_learning_calibration_path_is_broken(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Learning/calibration is an end-of-day stage that ``run_trade_watcher``
+    never imports or calls.  This is a regression guard, not a red/green
+    pair: even with the learning module fully broken, supervision of an
+    open position must keep working.
+    """
+
+    import intraday_scanner.services.learning_service as learning_module
+
+    def _explode(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("learning/calibration path is broken")
+
+    for attr in dir(learning_module):
+        if attr.startswith("_"):
+            continue
+        value = getattr(learning_module, attr)
+        if callable(value):
+            monkeypatch.setattr(learning_module, attr, _explode, raising=False)
+
+    db_path = tmp_path / "scanner.sqlite"
+    store = SQLiteScanStore(db_path)
+    _persist_signal(store)
+    run_trade_watcher(
+        db_path=db_path,
+        source="csv",
+        market_date="2026-06-22",
+        requested_at="09:35",
+        minute_bars=_write_minute_bars(
+            tmp_path / "entry-bars.csv",
+            [_bar("2026-06-22T09:34:00-04:00", 10.3)],
+        ),
+        dry_run=True,
+    )
+    _persist_no_trade_selection(store, "2026-06-23")
+
+    carried = run_trade_watcher(
+        db_path=db_path,
+        source="csv",
+        market_date="2026-06-23",
+        requested_at="09:35",
+        minute_bars=_write_minute_bars(
+            tmp_path / "carry-bars.csv",
+            [_bar("2026-06-23T09:34:00-04:00", 10.4)],
+        ),
+        dry_run=True,
+    )
+
+    assert carried["new_entry_gate"]["status"] == "open"
+    assert carried["carried_open_position_count"] == 1
+    assert store.load_paper_positions(signal_id="sig-NOVA")[0]["status"] == "OPEN"
+
+
+def test_new_entry_gate_closed_does_not_block_exit_of_open_position(
+    tmp_path: Path,
+) -> None:
+    """The new-entry gate closing (contradictory same-day selection
+    evidence) must not prevent an already-open position from being exited
+    on a later watch cycle the same day.
+    """
+
+    db_path = tmp_path / "scanner.sqlite"
+    bars = _write_minute_bars(
+        tmp_path / "bars.csv",
+        [
+            _bar("2026-06-22T09:34:00-04:00", 10.3),
+            _bar("2026-06-22T09:39:00-04:00", 11.6),
+        ],
+    )
+    store = SQLiteScanStore(db_path)
+    _persist_signal(store)
+
+    entered = run_trade_watcher(
+        db_path=db_path,
+        source="csv",
+        market_date="2026-06-22",
+        requested_at="09:35",
+        minute_bars=bars,
+        dry_run=True,
+    )
+    assert entered["new_entry_gate"]["status"] == "open"
+    assert store.load_paper_positions(signal_id="sig-NOVA")[0]["status"] == "OPEN"
+
+    # Between cycles, a contradictory same-day selection lands (a morning
+    # ranking retry that produced both a no-trade and a live pick) - this is
+    # exactly the fail-closed condition the new-entry gate exists for.
+    store.persist_signal_selections(
+        [
+            {
+                "selection_id": "selected-no-trade-contradiction",
+                "scan_id": "scan-1",
+                "signal_id": "no_trade:2026-06-22",
+                "ticker": "NO_TRADE",
+                "rank": 0,
+                "strategy_id": "alphaops_v4",
+                "strategy_version": "dawnstrike-alphaops-v4",
+                "cohort": "official_telegram",
+                "decision": "no_trade",
+                "selected_at": "2026-06-22T13:25:00+00:00",
+                "event_key": "alphaops:scan-1:alpha_no_trade_retry",
+                "body_sha256": "no-trade-retry-body-hash",
+            }
+        ]
+    )
+
+    exit_run = run_trade_watcher(
+        db_path=db_path,
+        source="csv",
+        market_date="2026-06-22",
+        requested_at="09:40",
+        minute_bars=bars,
+        dry_run=True,
+    )
+
+    assert exit_run["new_entry_gate"]["status"] == "closed"
+    assert "contradictory" in exit_run["new_entry_gate"]["reason"]
+    intents = store.load_trade_intents(market_date="2026-06-22")
+    positions = store.load_paper_positions(market_date="2026-06-22")
+    assert {row["action"] for row in intents} == {"ENTER_LONG", "EXIT_LONG"}
+    assert positions[0]["status"] == "CLOSED"
+    assert positions[0]["realized_return_pct"] is not None
+
+
+def test_supervision_uses_a_single_durable_broker_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Even when the new-entry gate is closed, position protection must
+    still route every fill/position/intent side effect through exactly one
+    durable writer (``SQLiteScanStore.persist_trade_watcher_lifecycle``) -
+    DS-07 independence must not be achieved by adding a second writer.
+    """
+
+    db_path = tmp_path / "scanner.sqlite"
+    store = SQLiteScanStore(db_path)
+    _persist_signal(store)
+    run_trade_watcher(
+        db_path=db_path,
+        source="csv",
+        market_date="2026-06-22",
+        requested_at="09:35",
+        minute_bars=_write_minute_bars(
+            tmp_path / "entry-bars.csv",
+            [_bar("2026-06-22T09:34:00-04:00", 10.3)],
+        ),
+        dry_run=True,
+    )
+
+    calls: list[int] = []
+    original = SQLiteScanStore.persist_trade_watcher_lifecycle
+
+    def _counting(self: SQLiteScanStore, *args: object, **kwargs: object) -> object:
+        calls.append(1)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        SQLiteScanStore, "persist_trade_watcher_lifecycle", _counting
+    )
+
+    carried = run_trade_watcher(
+        db_path=db_path,
+        source="csv",
+        market_date="2026-06-23",
+        requested_at="09:35",
+        minute_bars=_write_minute_bars(
+            tmp_path / "carry-bars.csv",
+            [_bar("2026-06-23T09:34:00-04:00", 10.4)],
+        ),
+        dry_run=True,
+    )
+
+    assert carried["new_entry_gate"]["status"] == "closed"
+    assert len(calls) == 1
 
 
 def _scenario_binding_fixture() -> tuple[dict[str, object], dict[str, object]]:
@@ -951,15 +1334,19 @@ def test_trade_watcher_fails_closed_on_partially_persisted_selection(
         ]
     )
 
-    with pytest.raises(SnapshotValidationError, match="partially persisted"):
-        run_trade_watcher(
-            db_path=db_path,
-            source="csv",
-            market_date="2026-06-22",
-            requested_at="09:35",
-            minute_bars=tmp_path / "unused.csv",
-            dry_run=True,
-        )
+    # DS-07: partially persisted selection evidence is a new-entry gate
+    # failure; it must close the gate rather than raise.
+    result = run_trade_watcher(
+        db_path=db_path,
+        source="csv",
+        market_date="2026-06-22",
+        requested_at="09:35",
+        minute_bars=tmp_path / "unused.csv",
+        dry_run=True,
+    )
+    assert result["new_entry_gate"]["status"] == "closed"
+    assert "partially persisted" in result["new_entry_gate"]["reason"]
+    assert result["intents"] == []
 
 
 def test_notification_failure_retries_from_durable_intent_outbox(
