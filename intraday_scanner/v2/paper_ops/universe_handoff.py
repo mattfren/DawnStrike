@@ -43,6 +43,29 @@ class UniverseHandoffError(ValueError):
     """Raised when a Morning universe handoff cannot be trusted."""
 
 
+def _required_index_validity(row: dict[str, Any], index: str) -> dict[str, Any]:
+    """Return the per-index validity fact for ``index``, or fail closed.
+
+    The current schema (``luna_core_universe_service.py``) unconditionally
+    populates ``index_validity[index]`` for every index a merged row claims
+    membership in via ``index_memberships``.  There is no supported contract
+    shape where a claimed membership can lack its own validity fact, so a
+    missing entry here is never legitimate data -- it is either a malformed
+    producer or a tampered/hand-built contract.  Silently substituting the
+    collapsed union-window ``valid_from``/``valid_to`` in that case would
+    widen the trust surface for a case that cannot legitimately occur, so we
+    reject it by name instead (DS-03b follow-up 1).
+    """
+
+    validity = row.get("index_validity")
+    entry = validity.get(index) if isinstance(validity, dict) else None
+    if not isinstance(entry, dict):
+        raise UniverseHandoffError(
+            f"core universe member is missing index_validity for {index}"
+        )
+    return entry
+
+
 def build_universe_handoff(
     morning_root: str | Path,
     market_date: str | date,
@@ -691,8 +714,14 @@ def _validate_core_contract(
             .strip()
             .lower(),
             "index": str(index),
-            "valid_from": row.get("valid_from"),
-            "valid_to": row.get("valid_to"),
+            # Per-index validity, never the collapsed union window: a
+            # symbol's two index memberships can have different effective
+            # dates, and hashing must reflect each one's own fact.  A claimed
+            # membership with no matching index_validity entry is never
+            # legitimate data (see `_required_index_validity`), so this
+            # fails closed instead of substituting the collapsed fields.
+            "valid_from": _required_index_validity(row, index).get("valid_from"),
+            "valid_to": _required_index_validity(row, index).get("valid_to"),
         }
         for row in members
         if isinstance(row, dict)
@@ -962,8 +991,14 @@ def _validate_core_contract(
                     .strip()
                     .lower(),
                     "index": index,
-                    "valid_from": row.get("valid_from"),
-                    "valid_to": row.get("valid_to"),
+                    # Per-index validity, never the collapsed union window
+                    # (see the identical rationale above in
+                    # `canonical_records`): each per-index projection must
+                    # hash from its own effective-date fact.  Fails closed
+                    # via `_required_index_validity` when the claimed
+                    # membership has no matching validity entry.
+                    "valid_from": _required_index_validity(row, index).get("valid_from"),
+                    "valid_to": _required_index_validity(row, index).get("valid_to"),
                 }
                 for row in members
                 if isinstance(row, dict) and index in (row.get("index_memberships") or [])
@@ -1193,8 +1228,23 @@ def _core_members(
                 )
                 .strip()
                 .lower(),
+                # NOT per-index truth: this is the collapsed union window
+                # across every index in `index_memberships` below (earliest
+                # valid_from / open-if-any-open valid_to). A multi-index
+                # symbol with different per-index effective dates will show
+                # its earliest index's valid_from here for every index it
+                # belongs to. It legitimately gates row-level "is this
+                # symbol in the universe at all on this market date"
+                # inclusion (see `_validate_core_contract`'s market-date
+                # gate); it must never be read as a specific index's own
+                # effective-date window. Per-index truth lives in the core
+                # contract's `index_validity[index]`, which this handoff
+                # does not currently re-project per member (DS-03b
+                # follow-up 2: confirmed no current consumer relies on this
+                # field as per-index truth -- see ds03b_receipt.md).
                 "valid_from": raw.get("valid_from"),
                 "valid_to": raw.get("valid_to"),
+                "valid_dates_scope": "collapsed_union_across_index_memberships",
                 "lanes": ["core"],
                 "lane": "core",
                 "index_memberships": memberships,
