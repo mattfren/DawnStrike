@@ -110,18 +110,23 @@ class Id08InputError(ValueError):
 
 
 def decision_marks_for_session(close_time: str = SESSION_CLOSE_TIME) -> list[str]:
-    """Return the ordered `HH:00`/`HH:30` marks within RTH for a session.
+    """Return the ordered `HH:00`/`HH:30` DECISION marks within RTH for a session.
 
-    Regular-hours open is 09:30 (itself a `:30` mark) and the cadence runs
-    through the last `:00`/`:30` mark strictly before the session's actual
-    close. This is used for both the regular 16:00 close and an early close
-    (e.g. 13:00), so a half-day session naturally gets fewer marks rather
-    than being discarded by any bar-count rule.
+    AMENDMENT 2 (fidelity correction, 2026-09-19): the source paper states
+    explicitly that "the intraday momentum strategy we outline here takes
+    its first position at 10:00". 09:30 is therefore NEVER a decision or
+    entry mark -- it supplies ``Open[t,09:30]`` for the band anchor only
+    (see ``current_session_open`` in ``compute_bounds``/``decide_signal``).
+    The cadence runs 10:00, 10:30, ... through the last `:00`/`:30` mark
+    strictly before the session's actual close. This is used for both the
+    regular 16:00 close and an early close (e.g. 13:00), so a half-day
+    session naturally gets fewer marks rather than being discarded by any
+    bar-count rule.
     """
 
     close_h, close_m = (int(p) for p in close_time.split(":"))
     marks: list[str] = []
-    h, m = 9, 30
+    h, m = 10, 0
     while (h, m) < (close_h, close_m):
         marks.append(f"{h:02d}:{m:02d}")
         if m == 30:

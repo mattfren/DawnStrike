@@ -90,17 +90,35 @@ def test_half_day_marks_are_fewer_not_discarded():
     # window (US_MARKET_EARLY_CLOSES_2026 only has 2026-11-27 and
     # 2026-12-24, both after the window closes). This fixture exercises the
     # half-day code path synthetically since the real window cannot.
+    #
+    # AMENDMENT 2: 09:30 is never a decision mark (the source paper's first
+    # position is at 10:00); it only supplies Open[t,09:30] for the band
+    # anchor. It must NOT appear in this list.
     regular_marks = decision_marks_for_session("16:00")
     half_day_marks = decision_marks_for_session("13:00")
 
     assert half_day_marks == [
-        "09:30", "10:00", "10:30", "11:00", "11:30", "12:00", "12:30",
+        "10:00", "10:30", "11:00", "11:30", "12:00", "12:30",
     ]
+    assert "09:30" not in half_day_marks
+    assert "09:30" not in regular_marks
     assert len(half_day_marks) < len(regular_marks)
     # A half day is a real, smaller set of expected marks -- not zero, and
     # not derived from any raw 390-row bar count.
     assert half_day_marks[-1] < "13:00"
     assert all(m in regular_marks for m in half_day_marks)
+
+
+def test_first_decision_mark_is_ten_am_not_market_open():
+    # AMENDMENT 2 fidelity correction: source quote --
+    # "the intraday momentum strategy we outline here takes its first
+    # position at 10:00". Full session must have exactly 12 marks
+    # (10:00..15:30 by :30 steps), never 09:30.
+    marks = decision_marks_for_session("16:00")
+    assert marks[0] == "10:00"
+    assert marks[-1] == "15:30"
+    assert len(marks) == 12
+    assert "09:30" not in marks
 
 
 # ---------------------------------------------------------------------------

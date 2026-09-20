@@ -150,8 +150,36 @@ def main() -> int:
         )
     incomplete = [r for r in coverage_rows if r[2] != r[3]]
 
-    decisions_out = []
-    trades_out = []
+    decisions_out, trades_out = run_replay(session_order, eval_sessions, bars_by_session)
+
+    _write_decisions_csv(decisions_out)
+    _write_trades_csv(trades_out)
+    _write_results_md(
+        session_order, warmup_sessions, eval_sessions, coverage_rows, incomplete,
+        decisions_out, trades_out,
+    )
+    print(f"decisions: {len(decisions_out)}  trades: {len(trades_out)}")
+    return 0
+
+
+def run_replay(
+    session_order: list[str],
+    eval_sessions: list[str],
+    bars_by_session: dict[str, SessionBars],
+) -> tuple[list[dict], list[dict]]:
+    """Produce (decisions_out, trades_out) for ``eval_sessions``.
+
+    Pulled out of ``main()`` so it can be exercised directly by the
+    lookahead-harness test in tests/test_id08_noise_band.py: that test calls
+    this same function twice on the SAME real cached bars, once untouched
+    and once with a session's bar series truncated at a chosen fill bar, and
+    asserts every decision produced up to that point is byte-for-byte
+    unchanged. Behavior here is identical to what main() ran before this
+    function existed -- only the code location moved.
+    """
+
+    decisions_out: list[dict] = []
+    trades_out: list[dict] = []
 
     open_position: PositionSide = PositionSide.FLAT
     open_trade = None  # dict describing the currently open position
@@ -281,16 +309,25 @@ def main() -> int:
                     else:
                         open_trade["mfe_price"] = min(open_trade["mfe_price"], px)
 
-        # Safety net only: the EXIT_EOD branch inside the mark loop above
-        # already liquidates any open position at the last mark of a normal
-        # session. This should be unreachable except when the final fill bar
-        # itself was missing from the fetched data (a genuine data gap).
+        # This is NOT a data-gap fallback. resolve_action() only checks
+        # is_last_mark_of_session for a FLAT-position caller when the signal
+        # is itself FLAT; a LONG/SHORT signal at the very last decision mark
+        # of the session still returns ENTER_LONG/ENTER_SHORT (an ordinary
+        # entry), because the position was flat going in -- there is no open
+        # position for that same iteration's EXIT_EOD branch to close. So
+        # whenever a position is still open after the mark loop finishes, it
+        # was entered AT the session's final decision mark and has no next
+        # decision mark left at which the normal EXIT_EOD path could fire.
+        # This block liquidates that ordinary last-mark entry at the
+        # session's actual close. It is reachable on every ordinary session
+        # that enters a position on its final mark, not just on data gaps.
         if open_trade is not None:
             close_price = _session_close_price(current)
             if close_price is not None:
                 _close_trade(
                     open_trade, trades_out, session_date, marks[-1] if marks else "EOD",
-                    "session_close_fallback", close_price, close_price, "EOD_DATA_GAP_FALLBACK",
+                    "session_close_final_mark_entry", close_price, close_price,
+                    "EOD_FINAL_MARK_ENTRY_LIQUIDATION",
                 )
             else:
                 print(
@@ -300,14 +337,7 @@ def main() -> int:
             open_position = PositionSide.FLAT
             open_trade = None
 
-    _write_decisions_csv(decisions_out)
-    _write_trades_csv(trades_out)
-    _write_results_md(
-        session_order, warmup_sessions, eval_sessions, coverage_rows, incomplete,
-        decisions_out, trades_out,
-    )
-    print(f"decisions: {len(decisions_out)}  trades: {len(trades_out)}")
-    return 0
+    return decisions_out, trades_out
 
 
 def _session_close_price(bucket: SessionBars) -> float | None:
