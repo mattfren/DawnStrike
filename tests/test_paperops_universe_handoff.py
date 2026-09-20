@@ -789,7 +789,14 @@ def test_scheduled_powershell_path_requires_handoff_without_implicit_default_fal
     assert expected_sha_binding < eod.index('"strategy-learning-daily"')
 
 
-def test_eod_cross_release_handoff_failure_is_terminal_and_observable_before_writes() -> None:
+def test_eod_cross_release_handoff_failure_is_terminal_for_universe_dependent_stages_only() -> None:
+    """A universe handoff failure (a wrong/cross-release manifest) must still
+    fail closed for the stages that actually depend on that universe:
+    eod_outcome_capture (universe-dependent research) and paperops_forward
+    (new entries). It must NOT fail closed for paper_reconciliation, which
+    protects/accounts for positions that already exist and does not consume
+    the universe handoff at all (DS-08: EOD stage separation).
+    """
     eod = Path("scripts/run_alphaops_eod.ps1").read_text(encoding="utf-8")
     guard_start = eod.index("if ($handoffValidation.exit_code -ne 0)")
     first_mutating_capture = eod.index('"alpha-capture-outcomes"')
@@ -797,16 +804,51 @@ def test_eod_cross_release_handoff_failure_is_terminal_and_observable_before_wri
 
     assert '"--expected-code-sha", $releaseSha' in eod[:guard_start]
     assert '"--release-sha", $releaseSha' in failure_path
-    assert 'Name = "eod_outcome_capture"' in failure_path
-    assert 'Name = "paper_reconciliation"' in failure_path
-    assert 'Name = "alpha_learning"' in failure_path
-    assert 'Name = "paperops_forward"' in failure_path
-    assert 'Error = "eod_precondition_universe_handoff_invalid"' in failure_path
-    assert failure_path.count('Error = "blocked_by_eod_precondition"') == 3
+
+    # eod_outcome_capture is recorded FAILED immediately, before any
+    # mutating capture call -- still terminal and observable up front.
+    assert "-Name eod_outcome_capture" in failure_path
+    assert '-ErrorCode eod_precondition_universe_handoff_invalid' in failure_path
     assert "-Status FAILED" in failure_path
-    assert '"--status", "FAILED"' in failure_path
-    assert '"stage_failure_notification-$MarketDate"' in failure_path
-    assert "exit $handoffFailureExit" in failure_path
+
+    # The immediate guard must NOT pre-fail paper_reconciliation: that
+    # stage is a required protective/accounting stage and is attempted
+    # later regardless of universe validity, never blocked here.
+    assert "paper_reconciliation" not in failure_path
+    assert "blocked_by_eod_precondition" not in failure_path
+
+    # The guard no longer exits the whole run immediately; downstream
+    # stages (starting with the required reconciliation stage) still get
+    # a chance to execute and be recorded.
+    assert "exit $handoffFailureExit" not in failure_path
+    assert "Set-OverallFailure -ExitCode $handoffFailureExit" in failure_path
+
+    # paper_reconciliation's own gate: it is pre-failed only by a *genuine*
+    # eod-gate failure that happened with a valid universe handoff, never by
+    # universe invalidity alone.
+    reconcile_gate = eod.index("if ($universeHandoffValid -and $gateExit -ne 0)")
+    reconcile_call = eod.index('"alpha-paper-reconcile"', reconcile_gate)
+    assert reconcile_gate < reconcile_call
+
+    # alpha_learning stays explicitly blocked -- never forced to run --
+    # when the universe handoff is invalid, without gating reconciliation.
+    learning_guard = eod.index("if (-not $universeHandoffValid)")
+    learning_call = eod.index('"alpha-learn"', learning_guard)
+    assert learning_guard < learning_call
+    assert reconcile_call < learning_guard
+
+    # paperops_forward (new entries) stays blocked: paperExit starts from
+    # the handoff's own exit code, before the new-entry run-day call, and
+    # its FAILED record is tagged blocked_by_eod_precondition when the
+    # universe handoff -- not a genuine truth failure -- is the cause.
+    paper_seed = eod.index("$paperExit = $handoffValidation.exit_code")
+    run_day = eod.index('"run-day"', paper_seed)
+    assert paper_seed < run_day
+    assert 'if (-not $universeHandoffValid) { "blocked_by_eod_precondition" }' in eod
+
+    # The overall-failure notification still fires at the end of the run
+    # whenever any required stage failed, universe-caused or not.
+    assert '"stage_failure_notification-$MarketDate"' in eod[first_mutating_capture:]
 
 
 def _data_unavailable_core(root: Path, *, observed_at: object) -> None:
