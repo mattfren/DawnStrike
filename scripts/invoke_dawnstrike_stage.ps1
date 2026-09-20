@@ -136,8 +136,16 @@ function Test-DawnstrikeLockOwnerActive {
         if ($startedHasValue) {
             # A reused PID has a different creation time.  Compare exact
             # process start identity rather than mutable lock-file age.
-            $recordedStart = ConvertTo-DawnstrikeUtcDateTimeOffset -Value $startedProperty.Value
-            return $processStarted.UtcDateTime.Ticks -eq $recordedStart.UtcDateTime.Ticks
+            # An unparseable process_started_at_utc is ambiguous and
+            # therefore fail-closed: ownership cannot be established, so
+            # the live owner is treated as active rather than stolen.
+            try {
+                $recordedStart = ConvertTo-DawnstrikeUtcDateTimeOffset -Value $startedProperty.Value
+                return $processStarted.UtcDateTime.Ticks -eq $recordedStart.UtcDateTime.Ticks
+            }
+            catch {
+                return $true
+            }
         }
         # v2 locks (dawnstrike.daily_run_lock.v2) predate the exact
         # process-start field.  Retain the old
