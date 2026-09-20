@@ -157,24 +157,30 @@ try {
         ) `
         -LogRoot $logRoot `
         -LogName "paperops_universe_handoff_validate-$MarketDate"
+    # A universe handoff failure MUST keep blocking new entries (paperops_forward)
+    # and universe-dependent research (eod_outcome_capture). It MUST NOT prevent
+    # the required protective/accounting reconciliation of positions that already
+    # exist -- that stage is attempted below regardless of $universeHandoffValid.
+    # Optional learning may stay explicitly blocked on invalid inputs; it is never
+    # forced to run and never gates the protective stages. This flag decides, per
+    # stage below, whether universe validity gates that specific stage; it does not
+    # short-circuit the run, so every required/optional stage still gets a recorded
+    # outcome via the single Write-Stage writer.
+    $universeHandoffValid = $true
+    $handoffFailureExit = 0
     if ($handoffValidation.exit_code -ne 0) {
+        $universeHandoffValid = $false
         $handoffFailureExit = [int]$handoffValidation.exit_code
         if ($handoffFailureExit -eq 0) { $handoffFailureExit = 2 }
+        Set-OverallFailure -ExitCode $handoffFailureExit
         $preconditionStarted = (Get-Date).ToUniversalTime().ToString("o")
-        foreach ($failureStage in @(
-            @{ Name = "eod_outcome_capture"; Error = "eod_precondition_universe_handoff_invalid" },
-            @{ Name = "paper_reconciliation"; Error = "blocked_by_eod_precondition" },
-            @{ Name = "alpha_learning"; Error = "blocked_by_eod_precondition" },
-            @{ Name = "paperops_forward"; Error = "blocked_by_eod_precondition" }
-        )) {
-            Write-Stage `
-                -Name $failureStage.Name `
-                -Status FAILED `
-                -ExitCode $handoffFailureExit `
-                -StartedAt $preconditionStarted `
-                -ResultFile $universeHandoffPath `
-                -ErrorCode $failureStage.Error
-        }
+        Write-Stage `
+            -Name eod_outcome_capture `
+            -Status FAILED `
+            -ExitCode $handoffFailureExit `
+            -StartedAt $preconditionStarted `
+            -ResultFile $universeHandoffPath `
+            -ErrorCode eod_precondition_universe_handoff_invalid
         $terminalHeartbeat = Invoke-DawnstrikeNativeProcess `
             -FilePath "py.exe" `
             -ArgumentList @(
@@ -191,85 +197,92 @@ try {
         if ($terminalHeartbeat.exit_code -ne 0) {
             Write-Warning "Could not persist the terminal EOD precondition heartbeat."
         }
-        $failureNotification = Invoke-DawnstrikeNativeProcess `
-            -FilePath "py.exe" `
-            -ArgumentList @("scripts\send_stage_failure_notification.py", "--db-path", $dbPath, "--market-date", $MarketDate) `
-            -LogRoot $logRoot `
-            -LogName "stage_failure_notification-$MarketDate"
-        if ($failureNotification.exit_code -ne 0) {
-            Write-Warning "Required-stage precondition failure alert could not be recorded or sent."
-        }
-        exit $handoffFailureExit
     }
 
-    $captureRoot = Join-Path $outputRoot "alpha_outcomes\$MarketDate"
-    New-Item -ItemType Directory -Path $captureRoot -Force | Out-Null
-    $captureResult = Join-Path $captureRoot "alpha_outcome_capture.json"
-    $captureStarted = (Get-Date).ToUniversalTime().ToString("o")
-    $capture = Invoke-DawnstrikeNativeProcess `
-        -FilePath "py.exe" `
-        -ArgumentList @("-m", "intraday_scanner.cli", "alpha-capture-outcomes", "--db-path", $dbPath, "--market-date", $MarketDate, "--out-dir", $captureRoot, "--persist") `
-        -LogRoot $logRoot `
-        -LogName "alpha_outcomes-$MarketDate"
-    $captureExit = $capture.exit_code
-    $outcomeGapResult = Join-Path $captureRoot "outcome-gap.json"
-    $outcomeGap = Invoke-DawnstrikeNativeProcess `
-        -FilePath "py.exe" `
-        -ArgumentList @("-m", "intraday_scanner.cli", "outcome-gap", "--db-path", $dbPath, "--market-date", $MarketDate, "--out", $outcomeGapResult) `
-        -LogRoot $logRoot `
-        -LogName "alpha_outcome_gap-$MarketDate"
-    $gateResult = Join-Path $captureRoot "alpha_eod_gate.json"
-    $gate = Invoke-DawnstrikeNativeProcess `
-        -FilePath "py.exe" `
-        -ArgumentList @("-m", "intraday_scanner.cli", "alpha-eod-gate", "--db-path", $dbPath, "--market-date", $MarketDate, "--capture-exit-code", "$captureExit", "--capture-result", $captureResult, "--outcome-gap", $outcomeGapResult, "--out", $gateResult) `
-        -LogRoot $logRoot `
-        -LogName "alpha_eod_gate-$MarketDate"
-    $gateExit = $gate.exit_code
-    $officialOutcomesRequired = $true
-    if ($gateExit -eq 0 -and (Test-Path -LiteralPath $gateResult)) {
-        try {
-            $gatePayload = Get-Content -LiteralPath $gateResult -Raw | ConvertFrom-Json
-            $officialOutcomesRequired = [bool]$gatePayload.official_outcomes_required
+    if ($universeHandoffValid) {
+        $captureRoot = Join-Path $outputRoot "alpha_outcomes\$MarketDate"
+        New-Item -ItemType Directory -Path $captureRoot -Force | Out-Null
+        $captureResult = Join-Path $captureRoot "alpha_outcome_capture.json"
+        $captureStarted = (Get-Date).ToUniversalTime().ToString("o")
+        $capture = Invoke-DawnstrikeNativeProcess `
+            -FilePath "py.exe" `
+            -ArgumentList @("-m", "intraday_scanner.cli", "alpha-capture-outcomes", "--db-path", $dbPath, "--market-date", $MarketDate, "--out-dir", $captureRoot, "--persist") `
+            -LogRoot $logRoot `
+            -LogName "alpha_outcomes-$MarketDate"
+        $captureExit = $capture.exit_code
+        $outcomeGapResult = Join-Path $captureRoot "outcome-gap.json"
+        $outcomeGap = Invoke-DawnstrikeNativeProcess `
+            -FilePath "py.exe" `
+            -ArgumentList @("-m", "intraday_scanner.cli", "outcome-gap", "--db-path", $dbPath, "--market-date", $MarketDate, "--out", $outcomeGapResult) `
+            -LogRoot $logRoot `
+            -LogName "alpha_outcome_gap-$MarketDate"
+        $gateResult = Join-Path $captureRoot "alpha_eod_gate.json"
+        $gate = Invoke-DawnstrikeNativeProcess `
+            -FilePath "py.exe" `
+            -ArgumentList @("-m", "intraday_scanner.cli", "alpha-eod-gate", "--db-path", $dbPath, "--market-date", $MarketDate, "--capture-exit-code", "$captureExit", "--capture-result", $captureResult, "--outcome-gap", $outcomeGapResult, "--out", $gateResult) `
+            -LogRoot $logRoot `
+            -LogName "alpha_eod_gate-$MarketDate"
+        $gateExit = $gate.exit_code
+        $officialOutcomesRequired = $true
+        if ($gateExit -eq 0 -and (Test-Path -LiteralPath $gateResult)) {
+            try {
+                $gatePayload = Get-Content -LiteralPath $gateResult -Raw | ConvertFrom-Json
+                $officialOutcomesRequired = [bool]$gatePayload.official_outcomes_required
+            }
+            catch {
+                $gateExit = 2
+            }
         }
-        catch {
-            $gateExit = 2
+        if ($gateExit -ne 0) {
+            Set-OverallFailure -ExitCode $gateExit
+            Write-Stage `
+                -Name eod_outcome_capture `
+                -Status TERMINAL_MISSING `
+                -ExitCode $gateExit `
+                -StartedAt $captureStarted `
+                -ResultFile $gateResult `
+                -OutputFile $captureResult `
+                -ErrorCode outcome_capture_incomplete
         }
-    }
-    if ($gateExit -ne 0) {
-        Set-OverallFailure -ExitCode $gateExit
-        Write-Stage `
-            -Name eod_outcome_capture `
-            -Status TERMINAL_MISSING `
-            -ExitCode $gateExit `
-            -StartedAt $captureStarted `
-            -ResultFile $gateResult `
-            -OutputFile $captureResult `
-            -ErrorCode outcome_capture_incomplete
-    }
-    elseif (-not $officialOutcomesRequired) {
-        Write-Stage `
-            -Name eod_outcome_capture `
-            -Status SKIPPED_NOT_APPLICABLE `
-            -ExitCode 0 `
-            -StartedAt $captureStarted `
-            -ResultFile $gateResult `
-            -OutputFile $captureResult
+        elseif (-not $officialOutcomesRequired) {
+            Write-Stage `
+                -Name eod_outcome_capture `
+                -Status SKIPPED_NOT_APPLICABLE `
+                -ExitCode 0 `
+                -StartedAt $captureStarted `
+                -ResultFile $gateResult `
+                -OutputFile $captureResult
+        }
+        else {
+            Write-Stage `
+                -Name eod_outcome_capture `
+                -Status COMPLETE `
+                -ExitCode 0 `
+                -StartedAt $captureStarted `
+                -ResultFile $gateResult `
+                -OutputFile $captureResult
+        }
     }
     else {
-        Write-Stage `
-            -Name eod_outcome_capture `
-            -Status COMPLETE `
-            -ExitCode 0 `
-            -StartedAt $captureStarted `
-            -ResultFile $gateResult `
-            -OutputFile $captureResult
+        # eod_outcome_capture was already recorded as FAILED above (universe-
+        # dependent, blocking defensible). Feed a failed gate downstream so
+        # paperops_forward (new entries) stays blocked, while $officialOutcomesRequired
+        # defaults to true so the required reconciliation stage below still attempts.
+        $gateResult = $universeHandoffPath
+        $captureResult = $universeHandoffPath
+        $gateExit = $handoffFailureExit
+        $officialOutcomesRequired = $true
     }
 
     $reconcileRoot = Join-Path $outputRoot "strategy_reconciliation\$MarketDate"
     New-Item -ItemType Directory -Path $reconcileRoot -Force | Out-Null
     $reconcileResult = Join-Path $reconcileRoot "reconciliation.json"
     $reconcileStarted = (Get-Date).ToUniversalTime().ToString("o")
-    if ($gateExit -ne 0) {
+    # paper_reconciliation is a required accounting stage that protects existing
+    # positions; it is attempted even when the universe handoff is invalid, and is
+    # only pre-failed by a *genuine* gate failure (one that occurred with a valid
+    # universe handoff).
+    if ($universeHandoffValid -and $gateExit -ne 0) {
         $reconcileExit = $gateExit
     }
     elseif (-not $officialOutcomesRequired) {
@@ -310,7 +323,14 @@ try {
 
     $learnStarted = (Get-Date).ToUniversalTime().ToString("o")
     $alphaLearningRequired = $officialOutcomesRequired
-    if ($gateExit -ne 0) {
+    if (-not $universeHandoffValid) {
+        # Optional learning MAY stay explicitly blocked on invalid inputs. Do not
+        # fabricate a universe handoff and do not force any learning process to
+        # run; simply record the block. This never gates the protective
+        # reconciliation stage above, which already ran independently of this flag.
+        $learnExit = $handoffFailureExit
+    }
+    elseif ($gateExit -ne 0) {
         $learnExit = $gateExit
     }
     elseif (-not $alphaLearningRequired) {
@@ -330,79 +350,81 @@ try {
         Set-OverallFailure -ExitCode $learnExit
     }
 
-    $v6DailyMonitor = Invoke-DawnstrikeNativeProcess `
-        -FilePath "py.exe" `
-        -ArgumentList @("-m", "intraday_scanner.cli", "alpha-v6-daily-monitor", "--db-path", $dbPath, "--market-date", $MarketDate) `
-        -LogRoot $logRoot `
-        -LogName "alpha_v6_daily_monitor-$MarketDate"
-    if ($v6DailyMonitor.exit_code -ne 0) {
-        Set-OverallFailure -ExitCode $v6DailyMonitor.exit_code
-    }
-    $v6Attribution = Invoke-DawnstrikeNativeProcess `
-        -FilePath "py.exe" `
-        -ArgumentList @("-m", "intraday_scanner.cli", "alpha-v6-attribution", "--db-path", $dbPath) `
-        -LogRoot $logRoot `
-        -LogName "alpha_v6_attribution-$MarketDate"
-    if ($v6Attribution.exit_code -ne 0) {
-        Set-OverallFailure -ExitCode $v6Attribution.exit_code
-    }
-    $v6Research = Invoke-DawnstrikeNativeProcess `
-        -FilePath "py.exe" `
-        -ArgumentList @("-m", "intraday_scanner.cli", "alpha-v6-research-packet", "--db-path", $dbPath, "--code-sha", $releaseSha, "--out-dir", (Join-Path $outputRoot "alpha_v6_research")) `
-        -LogRoot $logRoot `
-        -LogName "alpha_v6_research-$MarketDate"
-    if ($v6Research.exit_code -ne 0) {
-        Set-OverallFailure -ExitCode $v6Research.exit_code
-    }
-    # Freeze the EOD evidence boundary to the actual invocation instant.  The
-    # service writes a reservation before analysis; reuse its cutoff/source on
-    # retries so a later retry cannot broaden the evidence window.
-    $strategyLearningRoot = Join-Path $outputRoot "strategy_learning"
-    $strategyLearningReservation = Join-Path (Join-Path $strategyLearningRoot $MarketDate) "daily_learning_invocation.json"
-    if (Test-Path -LiteralPath $strategyLearningReservation -PathType Leaf) {
-        try {
-            $reservation = Get-Content -LiteralPath $strategyLearningReservation -Raw | ConvertFrom-Json
-            if ($reservation.market_date -ne $MarketDate -or [string]::IsNullOrWhiteSpace([string]$reservation.cutoff) -or [string]::IsNullOrWhiteSpace([string]$reservation.source_identity)) {
-                throw "daily-learning invocation reservation identity conflict"
-            }
-            $strategyLearningCutoff = [string]$reservation.cutoff
-            $strategyLearningSource = [string]$reservation.source_identity
-        } catch {
-            throw "daily-learning invocation reservation invalid: $($_.Exception.Message)"
-        }
-    } else {
-        $strategyLearningInvocationUtc = (Get-Date).ToUniversalTime().ToString("o")
-        $strategyLearningCutoff = $strategyLearningInvocationUtc
-        $strategyLearningSource = "sqlite-query-only-reserved-snapshot:$dbPath;portfolio_performance.date<=${MarketDate};decision_receipts.cutoff<=$strategyLearningCutoff;lock=reserved;query_only=on"
-    }
-    $strategyLearning = Invoke-DawnstrikeNativeProcess `
-        -FilePath "py.exe" `
-        -ArgumentList @(
-            "-m", "intraday_scanner.cli", "strategy-learning-daily",
-            "--market-date", $MarketDate,
-            "--cutoff", $strategyLearningCutoff,
-            "--source-identity", $strategyLearningSource,
-            "--code-sha", $releaseSha,
-            "--out-dir", (Join-Path $outputRoot "strategy_learning"),
-            "--db-path", $dbPath,
-            "--paper-ops-root", $paperOpsRoot
-        ) `
-        -LogRoot $logRoot `
-        -LogName "strategy_learning_daily-$MarketDate"
-    if ($strategyLearning.exit_code -ne 0) {
-        Set-OverallFailure -ExitCode $strategyLearning.exit_code
-    }
     $learningStageExit = $learnExit
-    $learningErrorCode = if ($learnExit -ne 0) { "alpha_learning_failed" } else { "" }
-    foreach ($v6Result in @(
-        @{ Result = $v6DailyMonitor; Code = "alpha_v6_daily_monitor_failed" },
-        @{ Result = $v6Attribution; Code = "alpha_v6_attribution_failed" },
-        @{ Result = $v6Research; Code = "alpha_v6_research_packet_failed" },
-        @{ Result = $strategyLearning; Code = "strategy_learning_daily_failed" }
-    )) {
-        if ($learningStageExit -eq 0 -and $v6Result.Result.exit_code -ne 0) {
-            $learningStageExit = $v6Result.Result.exit_code
-            $learningErrorCode = $v6Result.Code
+    $learningErrorCode = if (-not $universeHandoffValid) { "blocked_by_eod_precondition" } elseif ($learnExit -ne 0) { "alpha_learning_failed" } else { "" }
+    if ($universeHandoffValid) {
+        $v6DailyMonitor = Invoke-DawnstrikeNativeProcess `
+            -FilePath "py.exe" `
+            -ArgumentList @("-m", "intraday_scanner.cli", "alpha-v6-daily-monitor", "--db-path", $dbPath, "--market-date", $MarketDate) `
+            -LogRoot $logRoot `
+            -LogName "alpha_v6_daily_monitor-$MarketDate"
+        if ($v6DailyMonitor.exit_code -ne 0) {
+            Set-OverallFailure -ExitCode $v6DailyMonitor.exit_code
+        }
+        $v6Attribution = Invoke-DawnstrikeNativeProcess `
+            -FilePath "py.exe" `
+            -ArgumentList @("-m", "intraday_scanner.cli", "alpha-v6-attribution", "--db-path", $dbPath) `
+            -LogRoot $logRoot `
+            -LogName "alpha_v6_attribution-$MarketDate"
+        if ($v6Attribution.exit_code -ne 0) {
+            Set-OverallFailure -ExitCode $v6Attribution.exit_code
+        }
+        $v6Research = Invoke-DawnstrikeNativeProcess `
+            -FilePath "py.exe" `
+            -ArgumentList @("-m", "intraday_scanner.cli", "alpha-v6-research-packet", "--db-path", $dbPath, "--code-sha", $releaseSha, "--out-dir", (Join-Path $outputRoot "alpha_v6_research")) `
+            -LogRoot $logRoot `
+            -LogName "alpha_v6_research-$MarketDate"
+        if ($v6Research.exit_code -ne 0) {
+            Set-OverallFailure -ExitCode $v6Research.exit_code
+        }
+        # Freeze the EOD evidence boundary to the actual invocation instant.  The
+        # service writes a reservation before analysis; reuse its cutoff/source on
+        # retries so a later retry cannot broaden the evidence window.
+        $strategyLearningRoot = Join-Path $outputRoot "strategy_learning"
+        $strategyLearningReservation = Join-Path (Join-Path $strategyLearningRoot $MarketDate) "daily_learning_invocation.json"
+        if (Test-Path -LiteralPath $strategyLearningReservation -PathType Leaf) {
+            try {
+                $reservation = Get-Content -LiteralPath $strategyLearningReservation -Raw | ConvertFrom-Json
+                if ($reservation.market_date -ne $MarketDate -or [string]::IsNullOrWhiteSpace([string]$reservation.cutoff) -or [string]::IsNullOrWhiteSpace([string]$reservation.source_identity)) {
+                    throw "daily-learning invocation reservation identity conflict"
+                }
+                $strategyLearningCutoff = [string]$reservation.cutoff
+                $strategyLearningSource = [string]$reservation.source_identity
+            } catch {
+                throw "daily-learning invocation reservation invalid: $($_.Exception.Message)"
+            }
+        } else {
+            $strategyLearningInvocationUtc = (Get-Date).ToUniversalTime().ToString("o")
+            $strategyLearningCutoff = $strategyLearningInvocationUtc
+            $strategyLearningSource = "sqlite-query-only-reserved-snapshot:$dbPath;portfolio_performance.date<=${MarketDate};decision_receipts.cutoff<=$strategyLearningCutoff;lock=reserved;query_only=on"
+        }
+        $strategyLearning = Invoke-DawnstrikeNativeProcess `
+            -FilePath "py.exe" `
+            -ArgumentList @(
+                "-m", "intraday_scanner.cli", "strategy-learning-daily",
+                "--market-date", $MarketDate,
+                "--cutoff", $strategyLearningCutoff,
+                "--source-identity", $strategyLearningSource,
+                "--code-sha", $releaseSha,
+                "--out-dir", (Join-Path $outputRoot "strategy_learning"),
+                "--db-path", $dbPath,
+                "--paper-ops-root", $paperOpsRoot
+            ) `
+            -LogRoot $logRoot `
+            -LogName "strategy_learning_daily-$MarketDate"
+        if ($strategyLearning.exit_code -ne 0) {
+            Set-OverallFailure -ExitCode $strategyLearning.exit_code
+        }
+        foreach ($v6Result in @(
+            @{ Result = $v6DailyMonitor; Code = "alpha_v6_daily_monitor_failed" },
+            @{ Result = $v6Attribution; Code = "alpha_v6_attribution_failed" },
+            @{ Result = $v6Research; Code = "alpha_v6_research_packet_failed" },
+            @{ Result = $strategyLearning; Code = "strategy_learning_daily_failed" }
+        )) {
+            if ($learningStageExit -eq 0 -and $v6Result.Result.exit_code -ne 0) {
+                $learningStageExit = $v6Result.Result.exit_code
+                $learningErrorCode = $v6Result.Code
+            }
         }
     }
     if ($learningStageExit -eq 0 -and -not $alphaLearningRequired) {
@@ -574,12 +596,13 @@ try {
             -StartedAt $paperStarted
     } else {
         Set-OverallFailure -ExitCode $paperExit
+        $paperErrorCode = if (-not $universeHandoffValid) { "blocked_by_eod_precondition" } else { "paperops_forward_truth_failed" }
         Write-Stage `
             -Name paperops_forward `
             -Status FAILED `
             -ExitCode $paperExit `
             -StartedAt $paperStarted `
-            -ErrorCode paperops_forward_truth_failed
+            -ErrorCode $paperErrorCode
     }
     if ($overallExit -ne 0) {
         $failureNotification = Invoke-DawnstrikeNativeProcess `
