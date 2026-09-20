@@ -176,13 +176,32 @@ def run_trade_watcher(
         market_date=resolved_day,
         strategy_id=None,
     )
-    session_signals = _watch_signals(
-        store,
-        market_date=resolved_day,
-        include_scenarios=include_scenarios,
-        contributor_receipt_verifier=contributor_receipt_verifier,
-        expected_code_sha=normalized_expected_code_sha,
-    )
+    # DS-07 supervision independence: sourcing NEW-entry candidates depends on
+    # upstream morning ranking, universe/membership handoff, and (when
+    # ``include_scenarios``) optional Scenario/AI selection evidence all
+    # having produced valid, exact session selections for today.  Any of
+    # those upstream failures must fail-closed for *new* entries only - it
+    # must never abort protection (open-position repair, carry-forward,
+    # exit decisions) or reconciliation for positions that are already open.
+    # ``_watch_signals`` is therefore isolated here: its
+    # ``SnapshotValidationError`` (the intentional new-entry gate) is caught
+    # and recorded, while everything below - which sources open positions
+    # from durable position/lifecycle state, not from session selections -
+    # continues to run in its own failure domain.
+    new_entry_gate_status = "open"
+    new_entry_gate_reason: str | None = None
+    try:
+        session_signals = _watch_signals(
+            store,
+            market_date=resolved_day,
+            include_scenarios=include_scenarios,
+            contributor_receipt_verifier=contributor_receipt_verifier,
+            expected_code_sha=normalized_expected_code_sha,
+        )
+    except SnapshotValidationError as exc:
+        session_signals = []
+        new_entry_gate_status = "closed"
+        new_entry_gate_reason = str(exc)
     existing_intents = store.load_trade_intents(limit=50_000)
     existing_intent_ids = {str(row.get("intent_id") or "") for row in existing_intents}
     positions = store.load_paper_positions(limit=50_000)
@@ -531,6 +550,10 @@ def run_trade_watcher(
         "paper_positions": paper_positions,
         "paper_fills": paper_fills,
         "live_execution_enabled": False,
+        "new_entry_gate": {
+            "status": new_entry_gate_status,
+            "reason": new_entry_gate_reason,
+        },
     }
 
 
@@ -1960,7 +1983,18 @@ def _intent(
         )
     price = _number(observation.get("price"))
     episode_id = str(signal.get("episode_id") or "").strip()
-    if not episode_id and _identity_fields_present(signal):
+    # DS-07: this identity-completeness gate is a NEW-entry safety check - it
+    # exists to stop an ambiguous half-identity row from ever opening a
+    # position.  It must never re-litigate identity for an EXIT of a
+    # position that is already open: exiting/protecting an existing paper
+    # position (including one reconstructed from durable position state by
+    # ``_signals_for_open_positions``, which carries a nominal ``direction``
+    # marker but no fresh episode identity) must not depend on that check.
+    if (
+        action in ENTRY_ACTIONS
+        and not episode_id
+        and _identity_fields_present(signal)
+    ):
         raise SnapshotValidationError(
             "identity-active paper watcher signal is missing its authenticated episode identity"
         )
