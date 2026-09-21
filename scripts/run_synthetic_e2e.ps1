@@ -1,28 +1,49 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("All", "Isolation", "ScenarioA", "ScenarioB", "ScenarioC", "ScenarioD")]
+    [ValidateSet(
+        "All", "Fast", "Isolation",
+        "ScenarioA", "ScenarioB", "ScenarioC", "ScenarioD", "ScenarioE", "ScenarioF",
+        "ScenarioG", "ScenarioH", "ScenarioI", "ScenarioJ", "ScenarioK", "ScenarioL"
+    )]
     [string]$Mode = "All"
 )
 
-# Runs the synthetic E2E rehearsal (isolation proofs + happy-path scenarios
-# A-D). No placeholder editing required: it locates the repo root from its
-# own path, uses the py launcher already installed on this machine, and
-# writes evidence under C:\r\dsos-00-v3\e2e\<run-id> (created fresh by the
-# harness itself on every run).
+# Runs the synthetic E2E rehearsal (isolation proofs + scenarios A-L). No
+# placeholder editing required: it locates the repo root from its own path,
+# uses the py launcher already installed on this machine, and writes
+# evidence under C:\r\dsos-00-v3\e2e\<run-id> (created fresh by the harness
+# itself on every run).
+#
+# "Fast" is the subset intended for routine future-change checks: it skips
+# the slow/heavy real-subprocess scenarios (H's kill-and-restart child
+# process, I's real EOD orchestration subprocess, J's competing OS-process
+# lock contenders) and runs everything else, which is still every in-process
+# isolation/economic/risk/fault-reason property this harness proves.
 
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
 
-$NodeSelector = switch ($Mode) {
-    "All"        { "tests/e2e/test_synthetic_rehearsal.py" }
-    "Isolation"  { "tests/e2e/test_synthetic_rehearsal.py::TestIsolationProofs" }
-    "ScenarioA"  { "tests/e2e/test_synthetic_rehearsal.py::TestScenarioA" }
-    "ScenarioB"  { "tests/e2e/test_synthetic_rehearsal.py::TestScenarioB" }
-    "ScenarioC"  { "tests/e2e/test_synthetic_rehearsal.py::TestScenarioC" }
-    "ScenarioD"  { "tests/e2e/test_synthetic_rehearsal.py::TestScenarioD" }
+$AllFile = "tests/e2e/test_synthetic_rehearsal.py"
+$PytestArgs = switch ($Mode) {
+    "All"        { @($AllFile) }
+    "Fast"       { @($AllFile, "-k", "not TestScenarioH and not TestScenarioI and not TestScenarioJ") }
+    "Isolation"  { @("$AllFile::TestIsolationProofs") }
+    "ScenarioA"  { @("$AllFile::TestScenarioA") }
+    "ScenarioB"  { @("$AllFile::TestScenarioB") }
+    "ScenarioC"  { @("$AllFile::TestScenarioC") }
+    "ScenarioD"  { @("$AllFile::TestScenarioD") }
+    "ScenarioE"  { @("$AllFile::TestScenarioE") }
+    "ScenarioF"  { @("$AllFile::TestScenarioF") }
+    "ScenarioG"  { @("$AllFile::TestScenarioG") }
+    "ScenarioH"  { @("$AllFile::TestScenarioH") }
+    "ScenarioI"  { @("$AllFile::TestScenarioI") }
+    "ScenarioJ"  { @("$AllFile::TestScenarioJ") }
+    "ScenarioK"  { @("$AllFile::TestScenarioK") }
+    "ScenarioL"  { @("$AllFile::TestScenarioL") }
 }
+$NodeSelector = $PytestArgs -join " "
 
 $PytestManifest = Join-Path $env:TEMP "dawnstrike_e2e_pytest_manifest_$([Guid]::NewGuid().ToString('N')).json"
 $env:DAWNSTRIKE_E2E_PYTEST_MANIFEST = $PytestManifest
@@ -37,7 +58,7 @@ if (-not $pyLauncher) {
     throw "The 'py' launcher was not found on PATH; install Python 3.13 or adjust this script."
 }
 
-& py -3.13 -m pytest $NodeSelector -v --maxfail=1
+& py -3.13 -m pytest @PytestArgs -v
 $exitCode = $LASTEXITCODE
 
 if (Test-Path -LiteralPath $PytestManifest) {

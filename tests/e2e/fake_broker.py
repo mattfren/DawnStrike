@@ -17,7 +17,9 @@ restart mid-test cannot erase what the broker already accepted.
 from __future__ import annotations
 
 import json
+import socket
 import threading
+import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -97,7 +99,33 @@ class BrokerState:
         self.orders_by_coid: dict[str, str] = {}  # client_order_id -> broker id
         self.clock = {"is_open": True, "next_open": None, "next_close": None}
         self.events: list[dict[str, Any]] = []
+        # Scenario H (lost acknowledgment + restart): armed per client_order_id.
+        # The order is genuinely committed to self.orders (a real broker would
+        # have accepted it) but the HTTP handler holds the connection open for
+        # `hang_seconds` and then drops it without ever writing a response -
+        # simulating an ack that never reached the caller. Cleared after one use.
+        self._ack_drop_armed: dict[str, float] = {}
+        # Scenario K: a symbol armed here has its next close_position() call
+        # rejected, simulating a broker refusal of the end-of-session exit.
+        # Consumed on first use so a later, legitimate close still works.
+        self._close_rejection_armed: set[str] = set()
         self._persist()
+
+    # -- scenario H: lost-acknowledgment control -------------------------
+
+    def arm_ack_drop(self, client_order_id: str, *, hang_seconds: float = 5.0) -> None:
+        with self._lock:
+            self._ack_drop_armed[client_order_id] = hang_seconds
+
+    def consume_ack_drop(self, client_order_id: str) -> float | None:
+        with self._lock:
+            return self._ack_drop_armed.pop(client_order_id, None)
+
+    # -- scenario K: rejected end-of-session exit -------------------------
+
+    def arm_close_rejection(self, symbol: str) -> None:
+        with self._lock:
+            self._close_rejection_armed.add(symbol)
 
     # -- persistence -----------------------------------------------------
 
@@ -188,6 +216,11 @@ class BrokerState:
 
     def close_position(self, symbol: str, *, fill_price: float) -> dict[str, Any]:
         with self._lock:
+            if symbol in self._close_rejection_armed:
+                self._close_rejection_armed.discard(symbol)
+                self._log("close_rejected_by_broker", symbol=symbol)
+                self._persist()
+                raise EmulatorError(f"broker rejects the close for {symbol}: risk hold in place")
             pos = self.positions.get(symbol)
             if pos is None:
                 raise EmulatorError(f"no open position for {symbol}")
@@ -234,27 +267,53 @@ class BrokerState:
             if oid is None:
                 raise EmulatorError(f"unknown client_order_id {client_order_id}")
             order = self.orders[oid]
-            if order.status in _TERMINAL and leg == "entry":
+            if order.status == "filled" and leg == "entry":
+                raise EmulatorError(f"order {client_order_id} already fully filled")
+            if order.status in _TERMINAL and order.status != "partially_filled" and leg == "entry":
                 raise EmulatorError(f"order {client_order_id} already terminal")
 
             if leg == "entry":
-                order.filled_qty = qty
-                order.filled_avg_price = price
-                order.status = "filled"
+                # Partial fills accumulate: each call is one more real fill
+                # event against the same resting order, never an overwrite.
+                remaining = order.qty - order.filled_qty
+                if qty > remaining + 1e-9:
+                    raise EmulatorError(
+                        f"fill qty {qty} exceeds remaining {remaining} on order {client_order_id}"
+                    )
+                prior_notional = order.filled_qty * (order.filled_avg_price or 0.0)
+                new_filled_qty = order.filled_qty + qty
+                order.filled_avg_price = (prior_notional + qty * price) / new_filled_qty
+                order.filled_qty = new_filled_qty
+                order.status = "filled" if abs(order.qty - new_filled_qty) < 1e-9 else "partially_filled"
                 self._apply_fill_economics(
                     symbol=order.symbol, side="buy", qty=qty, price=price, fee=fee
                 )
-                self.positions[order.symbol] = {
-                    "symbol": order.symbol,
-                    "qty": qty,
-                    "avg_entry_price": price,
-                    "market_value": qty * price,
-                    "unrealized_pl": 0.0,
-                }
+                pos = self.positions.get(order.symbol)
+                if pos is None:
+                    self.positions[order.symbol] = {
+                        "symbol": order.symbol,
+                        "qty": new_filled_qty,
+                        "avg_entry_price": price,
+                        "market_value": new_filled_qty * price,
+                        "unrealized_pl": 0.0,
+                    }
+                else:
+                    pos["qty"] = new_filled_qty
+                    pos["avg_entry_price"] = order.filled_avg_price
+                    pos["market_value"] = new_filled_qty * price
             elif leg in ("target", "stop"):
                 pos = self.positions.get(order.symbol)
                 if pos is None:
                     raise EmulatorError(f"no open position for {order.symbol} to exit")
+                # Protection must follow the ACTUALLY filled quantity, never
+                # the originally ordered quantity - a partial fill leaves a
+                # smaller resting position than the bracket was sized for.
+                actually_filled = pos["qty"]
+                if abs(qty - actually_filled) > 1e-9:
+                    raise EmulatorError(
+                        f"exit qty {qty} must equal the actually-filled position qty "
+                        f"{actually_filled} (order qty was {order.qty}), not a stale ordered size"
+                    )
                 del self.positions[order.symbol]
                 self._apply_fill_economics(
                     symbol=order.symbol, side="sell", qty=qty, price=price, fee=fee
@@ -275,14 +334,21 @@ class BrokerState:
                     order_leg["status"] = "filled" if order_leg["role"] == f"{leg}_loss" or (
                         leg == "target" and order_leg["role"] == "take_profit"
                     ) else "canceled"
+                # The resting entry order's bracket is now fully resolved,
+                # whatever fraction of it ever actually filled.
+                order.status = "filled"
+                result_order = exit_order
             else:
                 raise EmulatorError(f"unsupported leg {leg!r}")
+
+            if leg == "entry":
+                result_order = order
 
             self._log(
                 "fill", client_order_id=client_order_id, leg=leg, qty=qty, price=price, fee=fee
             )
             self._persist()
-            return order.to_payload()
+            return result_order.to_payload()
 
     def _apply_fill_economics(
         self, *, symbol: str, side: str, qty: float, price: float, fee: float = 0.0
@@ -356,7 +422,22 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             if parsed.path == "/v2/orders":
                 body = self._read_body()
-                self._send_json(self.state.submit_bracket_buy(body), status=200)
+                result = self.state.submit_bracket_buy(body)
+                coid = str(body.get("client_order_id") or "")
+                hang_seconds = self.state.consume_ack_drop(coid)
+                if hang_seconds is not None:
+                    # Scenario H: the order is genuinely committed above (a
+                    # real broker would have accepted it) - only the
+                    # acknowledgment is lost. Hold the connection open, then
+                    # close it without writing any response.
+                    time.sleep(hang_seconds)
+                    try:
+                        self.connection.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                    self.close_connection = True
+                    return
+                self._send_json(result, status=200)
             else:
                 self._send_json({"message": "not found"}, status=404)
         except EmulatorError as exc:
