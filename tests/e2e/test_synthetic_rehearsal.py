@@ -2806,10 +2806,18 @@ class TestScenarioM:
                 "control_policy.py's TrustAnchor",
             ],
             "not_exercised": [
-                "paperops_forward (v2 PaperOps new-entry day): "
-                "intraday_scanner.v2.paper_ops run-day --mode forward has no "
-                "--allow-fetch=false CLI switch and always attempts a live market-data fetch; "
-                "out of reach without network access, which is prohibited for this task",
+                "paperops_forward (v2 PaperOps new-entry day) reaching COMPLETE: observed "
+                "failing at preflight, before any fetch is attempted, with 'scheduled PaperOps "
+                "executable strategy fleet does not match the exact nine-strategy handoff' "
+                "(engine.py's _run_config_with_universe_handoff requires "
+                "_strategies_eligible_for_run(...) to return the exact same 9 non-baseline "
+                "strategy ids as the handoff declares, for THIS synthetic 2-symbol universe) - "
+                "so the live-market-data fetch this stage needs afterward "
+                "(intraday_scanner.v2.paper_ops run-day --mode forward has no --allow-fetch=false "
+                "CLI switch) was never even reached in this run. Building a synthetic universe "
+                "broad/realistic enough to make all 9 non-baseline strategies eligible was out "
+                "of scope for this task; even if it were, the live fetch immediately downstream "
+                "is out of reach without network access, which is prohibited for this task",
                 "strategy-learning-daily's PaperOps ledger input: requires a non-empty "
                 "ledger/paper_ledger.jsonl, which only paperops_forward (or historical days of "
                 "real production operation) ever populates; even the product's own offline "
