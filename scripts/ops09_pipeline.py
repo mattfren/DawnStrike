@@ -17,6 +17,7 @@ from intraday_scanner.observation.ops09 import (  # noqa: E402
     SharedBoundedWriter,
     _request_contract,
     _run_consumers,
+    validate_shared_capture_binding,
     validate_ops09_scope,
 )
 from scripts.prepare_r3_observational_registration import (  # noqa: E402
@@ -255,6 +256,10 @@ def main() -> int:
             sys.argv = old_argv
     if exit_code != 0:
         return exit_code
+    # OPS05's source-owned durable ledger is authenticated before any adapter
+    # or consumer write is admitted.  The index is a locator only; the helper
+    # verifies the state fingerprint, binding hash, and source/window lineage.
+    validate_shared_capture_binding(capture_root)
     payload = {"status": "CAPTURED", "capture_root": str(capture_root)}
     if actual_registration is not None:
         payload["actual_registration"] = {

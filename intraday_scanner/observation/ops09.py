@@ -48,20 +48,127 @@ NATIVE_RESERVED_BYTES = NATIVE_CAPTURE_BYTES + NATIVE_METADATA_BYTES
 DOWNSTREAM_BYTES = 7 * 1024 * 1024
 MAX_RSS_BYTES = 256 * 1024 * 1024
 MAX_WALL_SECONDS = 1_800
+OPS05_LEDGER_ROOT = Path(r"C:\r\dawnstrike-ops05-logical-captures")
 
 
 class Ops09Error(ValueError):
     """The OPS09 contract cannot safely continue."""
 
 
+def _safe_path(path: Path, *, root: Path) -> Path:
+    boundary = root.absolute()
+    lexical = path.absolute()
+    try:
+        lexical.relative_to(boundary)
+    except ValueError as exc:
+        raise Ops09Error("OPS09 shared capture ledger escaped its trusted root") from exc
+    current = lexical
+    while True:
+        try:
+            if current.is_symlink() or (current.exists() and current.stat().st_file_attributes & 0x400):
+                raise Ops09Error("OPS09 shared capture ledger has a reparse ancestor")
+        except OSError as exc:
+            raise Ops09Error("OPS09 shared capture ledger path cannot be inspected") from exc
+        if current == boundary:
+            break
+        parent = current.parent
+        if parent == current:
+            raise Ops09Error("OPS09 shared capture ledger escaped its trusted root")
+        current = parent
+    resolved = lexical.resolve()
+    try:
+        resolved.relative_to(boundary)
+    except ValueError as exc:
+        raise Ops09Error("OPS09 shared capture ledger escaped its trusted root") from exc
+    return resolved
+
+
+def _resolve_shared_capture_ledger(output_root: Path, capture_root: Path | None = None) -> tuple[Path, Path | None]:
+    """Resolve one source-indexed OPS05 ledger for this exact output root."""
+    index_path = OPS05_LEDGER_ROOT / "index.json"
+    if not index_path.is_file():
+        matches = []
+        state_path = (capture_root or output_root) / "capture-state.json"
+        if state_path.is_file():
+            state = _read_object(state_path, "OPS05 capture state")
+            if isinstance(state.get("identity"), dict):
+                matches = [_sha(state["identity"])]
+        if len(matches) != 1:
+            raise Ops09Error("OPS09 shared capture ledger binding is unavailable")
+        ledger = _safe_path(OPS05_LEDGER_ROOT / matches[0] / "shared", root=OPS05_LEDGER_ROOT)
+        if not (ledger / "state.json").is_file():
+            raise Ops09Error("OPS09 shared capture ledger state is absent")
+        state = _read_object(ledger / "state.json", "OPS05 shared capture state")
+        if _sha(state.get("identity")) != matches[0]:
+            raise Ops09Error("OPS09 shared capture ledger identity is not authenticated")
+        return ledger, None
+    try:
+        index = _read_object(index_path, "OPS05 capture identity index")
+    except (OSError, json.JSONDecodeError) as exc:
+        raise Ops09Error("OPS09 shared capture ledger index is unreadable") from exc
+    matches = []
+    for fingerprint, roots in (index.get("output_roots_by_fingerprint") or {}).items():
+        if not isinstance(roots, list):
+            continue
+        if str(output_root.resolve()) in {str(Path(item).resolve()) for item in roots}:
+            matches.append(str(fingerprint))
+    if len(matches) != 1 and capture_root is not None:
+        state_path = capture_root / "capture-state.json"
+        if state_path.is_file():
+            capture_state = _read_object(state_path, "OPS05 capture state")
+            identity = capture_state.get("identity")
+            if isinstance(identity, dict):
+                derived = _sha(identity)
+                if not matches or matches == [derived]:
+                    matches = [derived]
+    if len(matches) != 1:
+        raise Ops09Error("OPS09 shared capture ledger binding is missing or ambiguous")
+    fingerprint = matches[0]
+    ledger = _safe_path(OPS05_LEDGER_ROOT / fingerprint / "shared", root=OPS05_LEDGER_ROOT)
+    if not (ledger / "state.json").is_file():
+        raise Ops09Error("OPS09 shared capture ledger state is absent")
+    state = _read_object(ledger / "state.json", "OPS05 shared capture state")
+    if _sha(state.get("identity")) != fingerprint:
+        raise Ops09Error("OPS09 shared capture ledger identity is not authenticated")
+    return ledger, _safe_path(index_path, root=OPS05_LEDGER_ROOT)
+
+
+def validate_shared_capture_binding(output_root: Path) -> tuple[Path, Path]:
+    """Validate the source-owned shared ledger before downstream admission."""
+    capture_root = output_root.resolve()
+    receipt = _read_object(capture_root / "receipt.json", "OPS05 receipt")
+    binding = _read_object(capture_root / "capture-binding.json", "OPS05 capture binding")
+    declared = binding.pop("binding_sha256", None)
+    if declared != _sha(binding):
+        raise Ops09Error("OPS09 OPS05 capture binding hash is invalid")
+    ledger, index_path = _resolve_shared_capture_ledger(capture_root)
+    state = _read_object(ledger / "state.json", "OPS05 shared capture state")
+    identity = state.get("identity")
+    if not isinstance(identity, dict):
+        raise Ops09Error("OPS09 shared capture identity is unavailable")
+    lineage = receipt.get("source_lineage") or {}
+    if any(identity.get(key) != value for key, value in {
+        "market_date": receipt.get("market_date"),
+        "provider": lineage.get("provider"),
+        "feed": lineage.get("feed"),
+        "source_config_sha256": lineage.get("source_config_sha256"),
+        "capture_receipt_sha256": lineage.get("capture_receipt_sha256"),
+    }.items()):
+        raise Ops09Error("OPS09 source/window identity does not match shared capture")
+    return ledger, index_path
+
+
 class _ByteLedger:
     """Durable, source-owned reservation ledger for one logical session."""
 
     def __init__(self, *, output_root: Path, database_root: Path,
-                 identity: dict[str, Any], extra_roots: tuple[Path, ...] = ()) -> None:
+                 identity: dict[str, Any], extra_roots: tuple[Path, ...] = (),
+                 shared_ledger_root: Path | None = None) -> None:
         self.output_root = output_root.resolve()
         self.database_root = database_root.resolve()
         self.extra_roots = tuple(path.resolve() for path in extra_roots)
+        self.shared_ledger_root = shared_ledger_root.resolve() if shared_ledger_root else None
+        self.shared_ledger_index: Path | None = None
         self.path = self.output_root / ".ops09-byte-ledger.json"
         self.identity = identity
         self.output_root.mkdir(parents=True, exist_ok=True)
@@ -80,12 +187,48 @@ class _ByteLedger:
             self._write()
 
     def _actual_bytes(self) -> int:
-        roots = (self.output_root, self.database_root, *self.extra_roots)
-        unique: list[Path] = []
+        roots = (self.output_root, self.database_root, *self.extra_roots,
+                 *((self.shared_ledger_root, self.shared_ledger_index) if self.shared_ledger_root else ()))
+        # The index is optional for a durable partial capture.  Account each
+        # physical file once so a shared ledger nested below another root is
+        # not charged twice; the source-owned state remains the trust root.
+        seen: set[Path] = set()
+        total = 0
         for root in roots:
-            if root not in unique:
-                unique.append(root)
-        return sum(_tree_bytes(root) for root in unique)
+            if root is None:
+                continue
+            root = Path(root).resolve()
+            if not root.exists():
+                continue
+            paths = [root] if root.is_file() else root.rglob("*")
+            for path in paths:
+                if path.is_symlink() or not path.is_file():
+                    continue
+                resolved = path.resolve()
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                total += path.stat().st_size
+        return total
+
+    def bind_shared_ledger(self) -> None:
+        ledger, index_path = _resolve_shared_capture_ledger(
+            self.output_root, self.output_root / "capture"
+        )
+        shared_state = _read_object(ledger / "state.json", "OPS05 shared capture state")
+        shared_identity = shared_state.get("identity")
+        if not isinstance(shared_identity, dict):
+            raise Ops09Error("OPS09 shared capture identity is unavailable")
+        expected_keys = (
+            "market_date", "provider", "feed", "source_config_sha256",
+            "capture_receipt_sha256", "census_sha256", "windows",
+        )
+        for key in expected_keys:
+            expected = self.identity.get(key)
+            if expected is not None and shared_identity.get(key) != expected:
+                raise Ops09Error(f"OPS09 shared capture identity mismatch: {key}")
+        self.shared_ledger_root = ledger
+        self.shared_ledger_index = index_path
 
     def _write(self) -> None:
         payload = {
@@ -865,6 +1008,7 @@ def _run_capture(*, ledger: _ByteLedger, plan: dict[str, Any], session: dict[str
         - capture_reserve_bytes
         - NATIVE_RESERVED_BYTES,
     )
+    accounting_error: str | None = None
     try:
         result = _run_capture_unbudgeted(
             plan=plan, session=session, contract=contract, scope=scope, scope_path=scope_path,
@@ -876,6 +1020,10 @@ def _run_capture(*, ledger: _ByteLedger, plan: dict[str, Any], session: dict[str
             retained_capture_root=retained_capture_root,
             capture_reserve_bytes=capture_reserve_bytes,
         )
+    except Exception as exc:
+        attempt_state["primary_error"] = f"{type(exc).__name__}: {exc}"
+        _atomic_json(attempt_path, attempt_state)
+        raise
     finally:
         elapsed = max(0.0, time.monotonic() - started_mono)
         attempt_state.update({
@@ -884,11 +1032,30 @@ def _run_capture(*, ledger: _ByteLedger, plan: dict[str, Any], session: dict[str
             "finished_at": datetime.now(UTC).isoformat(),
         })
         _atomic_json(attempt_path, attempt_state)
-        ledger.release(phase)
+        # The actual producer discovers the authenticated OPS05 identity during
+        # the child run. Bind that exact indexed shared ledger before releasing
+        # the per-date reservation, including failed or partial captures.
+        try:
+            ledger.bind_shared_ledger()
+            ledger.release(phase)
+            attempt_state["accounting_status"] = "RELEASED"
+            _atomic_json(attempt_path, attempt_state)
+        except Exception as exc:
+            # Preserve the producer's primary failure and retain the
+            # accounting failure as a secondary, auditable condition.
+            accounting_error = f"{type(exc).__name__}: {exc}"
+            attempt_state["accounting_status"] = "SECONDARY_FAILURE"
+            attempt_state["accounting_error"] = accounting_error
+            _atomic_json(attempt_path, attempt_state)
     if result is not None:
         result["attempt_elapsed_seconds"] = round(elapsed, 6)
         result["attempt_state_path"] = str(attempt_path)
-    return result or {"status": "INTERRUPTED", "attempt_state_path": str(attempt_path)}
+        if accounting_error:
+            result["accounting_error"] = accounting_error
+    response = result or {"status": "INTERRUPTED", "attempt_state_path": str(attempt_path)}
+    if accounting_error:
+        response["accounting_error"] = accounting_error
+    return response
 
 
 def _run_consumers(

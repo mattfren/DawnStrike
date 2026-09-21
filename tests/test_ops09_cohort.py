@@ -154,10 +154,32 @@ def test_operator_stop_is_durable_and_stops_pending_sessions(tmp_path: Path) -> 
     state = resume_ops09_cohort(
         output_root=out, input_root=tmp_path / "in", scope_root=tmp_path / "scope",
         database_root=tmp_path / "db", repo_root=Path(__file__).parents[1],
-        now=None,
+        # Exercise the positive stop-control path before the first deadline;
+        # a wall-clock run after the dates have elapsed must retain history.
+        now=datetime(2026, 9, 10, 20, 1, tzinfo=timezone.utc),
     )
     assert state["status"] == "STOPPED"
     assert all(row["status"] == "STOPPED" for row in state["sessions"])
+
+
+def test_operator_stop_preserves_prior_missed_history(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    source_path, source_hash = _source_config(tmp_path)
+    prepare_ops09_cohort(
+        output_root=out, input_root=tmp_path / "in", scope_root=tmp_path / "scope",
+        database_root=tmp_path / "db", repo_root=Path(__file__).parents[1],
+        source_config_hash=source_hash, source_config_path=source_path,
+        python_path=APPROVED_PYTHON, start_date="2026-09-10",
+    )
+    (out / ".cohort.stop").write_text("operator test\n", encoding="utf-8")
+    state = resume_ops09_cohort(
+        output_root=out, input_root=tmp_path / "in", scope_root=tmp_path / "scope",
+        database_root=tmp_path / "db", repo_root=Path(__file__).parents[1],
+        now=datetime(2026, 9, 11, 20, 1, tzinfo=timezone.utc),
+    )
+    assert state["status"] == "STOPPED"
+    assert state["sessions"][0]["status"] == "MISSED_SESSION"
+    assert all(row["status"] == "STOPPED" for row in state["sessions"][1:])
 
 
 def test_actual_readiness_missing_first_and_later_scope_is_pending_without_attempts(tmp_path: Path) -> None:
@@ -426,6 +448,95 @@ def test_byte_ledger_rejects_identity_reuse_across_database_root(tmp_path: Path)
     changed["database_root"] = str((tmp_path / "other-database").resolve())
     with pytest.raises(Ops09Error, match="identity changed"):
         _ByteLedger(output_root=output_root, database_root=tmp_path / "other-database", identity=changed)
+
+
+def test_byte_ledger_binds_indexed_shared_capture_ledger_and_counts_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trusted = tmp_path / "trusted"
+    output_root = tmp_path / "output"
+    database_root = tmp_path / "database"
+    identity = {"market_date": "2026-09-14", "provider": "alpaca", "feed": "sip",
+                "source_config_sha256": "a" * 64, "capture_receipt_sha256": "b" * 64,
+                "census_sha256": "c" * 64, "windows": {}}
+    fingerprint = ops09_module._sha(identity)
+    shared = trusted / fingerprint / "shared"
+    (shared / "pages").mkdir(parents=True)
+    (shared / "state.json").write_text(json.dumps({"identity": identity}) + "\n", encoding="utf-8")
+    (shared / "pages" / "page.json").write_bytes(b"page")
+    (trusted / "index.json").write_text(
+        json.dumps({"output_roots_by_fingerprint": {fingerprint: [str(output_root.resolve())]}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(ops09_module, "OPS05_LEDGER_ROOT", trusted)
+    ledger = _ByteLedger(output_root=output_root, database_root=database_root,
+                         identity={"cohort_id": "cohort-test", "market_date": "2026-09-14",
+                                   "output_root": str(output_root.resolve()), "database_root": str(database_root.resolve())})
+    before = ledger._actual_bytes()
+    ledger.bind_shared_ledger()
+    assert ledger._actual_bytes() >= before + len(b"{}\n") + len(b"page")
+
+
+def test_byte_ledger_counts_authenticated_partial_capture_without_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trusted = tmp_path / "trusted"
+    output_root = tmp_path / "output"
+    database_root = tmp_path / "database"
+    identity = {"market_date": "2026-09-10", "provider": "fixture", "feed": "sip"}
+    fingerprint = ops09_module._sha(identity)
+    shared = trusted / fingerprint / "shared"
+    (shared / "pages").mkdir(parents=True)
+    (shared / "state.json").write_text(json.dumps({"identity": identity}) + "\n", encoding="utf-8")
+    (shared / "pages" / "partial.bin").write_bytes(b"durable-partial")
+    capture = output_root / "capture"
+    capture.mkdir(parents=True)
+    (capture / "capture-state.json").write_text(json.dumps({"identity": identity}), encoding="utf-8")
+    monkeypatch.setattr(ops09_module, "OPS05_LEDGER_ROOT", trusted)
+    ledger = _ByteLedger(output_root=output_root, database_root=database_root,
+                         identity={**identity, "output_root": str(output_root.resolve())})
+    ledger.bind_shared_ledger()
+    assert ledger.shared_ledger_index is None
+    assert ledger._actual_bytes() >= len(b"durable-partial")
+
+
+def test_byte_ledger_rejects_expected_identity_tamper_before_accounting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trusted = tmp_path / "trusted"
+    output_root = tmp_path / "output"
+    identity = {"market_date": "2026-09-10", "provider": "fixture", "feed": "sip"}
+    fingerprint = ops09_module._sha(identity)
+    shared = trusted / fingerprint / "shared"
+    shared.mkdir(parents=True)
+    (shared / "state.json").write_text(json.dumps({"identity": identity}) + "\n", encoding="utf-8")
+    capture = output_root / "capture"
+    capture.mkdir(parents=True)
+    (capture / "capture-state.json").write_text(json.dumps({"identity": identity}), encoding="utf-8")
+    monkeypatch.setattr(ops09_module, "OPS05_LEDGER_ROOT", trusted)
+    ledger = _ByteLedger(output_root=output_root, database_root=tmp_path / "database",
+                         identity={**identity, "provider": "tampered"})
+    with pytest.raises(Ops09Error, match="identity mismatch: provider"):
+        ledger.bind_shared_ledger()
+
+
+def test_byte_ledger_rejects_ambiguous_or_tampered_shared_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trusted = tmp_path / "trusted"
+    output_root = tmp_path / "output"
+    database_root = tmp_path / "database"
+    (trusted / "index.json").parent.mkdir(parents=True)
+    (trusted / "index.json").write_text(
+        json.dumps({"output_roots_by_fingerprint": {"a" * 64: [str(output_root.resolve())],
+                                                        "b" * 64: [str(output_root.resolve())]}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(ops09_module, "OPS05_LEDGER_ROOT", trusted)
+    ledger = _ByteLedger(output_root=output_root, database_root=database_root,
+                         identity={"output_root": str(output_root.resolve())})
+    with pytest.raises(Ops09Error, match="missing or ambiguous"):
+        ledger.bind_shared_ledger()
 
 
 def test_shared_writer_accounts_multiple_roots_and_replacement_once(tmp_path: Path) -> None:
