@@ -26,7 +26,7 @@ $RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
 
 $AllFile = "tests/e2e/test_synthetic_rehearsal.py"
-$PytestArgs = switch ($Mode) {
+$PytestArgs = @(switch ($Mode) {
     "All"        { @($AllFile) }
     "Fast"       { @($AllFile, "-k", "not TestScenarioH and not TestScenarioI and not TestScenarioJ") }
     "Isolation"  { @("$AllFile::TestIsolationProofs") }
@@ -42,7 +42,7 @@ $PytestArgs = switch ($Mode) {
     "ScenarioJ"  { @("$AllFile::TestScenarioJ") }
     "ScenarioK"  { @("$AllFile::TestScenarioK") }
     "ScenarioL"  { @("$AllFile::TestScenarioL") }
-}
+})
 $NodeSelector = $PytestArgs -join " "
 
 $PytestManifest = Join-Path $env:TEMP "dawnstrike_e2e_pytest_manifest_$([Guid]::NewGuid().ToString('N')).json"
