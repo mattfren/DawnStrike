@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from intraday_scanner.config_schema import (
+    POLICY_STATE_MAX_AGE_SECONDS,
     CapabilityStatus,
     ConfigKeySpec,
     OperatorRunState,
@@ -179,6 +180,16 @@ class ScannerConfig:
     # empty tuple is the real, current production state (both candidates
     # were rejected) - not a placeholder.
     eligible_policy_ids: tuple[str, ...] = ()
+    # Whether the policy-eligibility registry that populates
+    # ``eligible_policy_ids`` could itself be read this run, and how old its
+    # contents are. Defaults reflect the common case (registry present,
+    # readable, freshly read) so every existing caller/test that never sets
+    # these keeps its current behaviour untouched. See
+    # ``POLICY_STATE_MAX_AGE_SECONDS`` in config_schema.py for the staleness
+    # threshold applied to ``policy_state_age_seconds``.
+    policy_state_present: bool = True
+    policy_state_readable: bool = True
+    policy_state_age_seconds: float | None = None
     entries_enabled_override: bool | None = None
     release_sha: str = ""
     feed_name: str = "unknown"
@@ -212,16 +223,34 @@ class ScannerConfig:
 
         eligible_policy_count = len(self.eligible_policy_ids)
         has_errors = bool(self.operator_errors)
+        # Missing, unreadable/corrupt, or stale policy state all mean the
+        # same thing to an operator: we cannot currently trust
+        # eligible_policy_count, so it must not be read as either a genuine
+        # zero (NO_ELIGIBLE_POLICY) or a run fault (ERROR). Staleness uses
+        # the same age-vs-threshold shape as the feed-staleness check above,
+        # against the named POLICY_STATE_MAX_AGE_SECONDS constant.
+        policy_state_stale = (
+            self.policy_state_age_seconds is not None
+            and self.policy_state_age_seconds > POLICY_STATE_MAX_AGE_SECONDS
+        )
+        policy_state_unavailable = (
+            not self.policy_state_present
+            or not self.policy_state_readable
+            or policy_state_stale
+        )
         state = evaluate_operator_run_state(
             eligible_policy_count=eligible_policy_count,
             entries_enabled=entries_enabled,
             has_errors=has_errors,
+            policy_state_unavailable=policy_state_unavailable,
         )
 
         if state is OperatorRunState.NO_ELIGIBLE_POLICY:
             entry_reason = "no_eligible_policy"
         elif state is OperatorRunState.ENTRIES_DISABLED_BY_OPERATOR:
             entry_reason = "entries_disabled_by_operator"
+        elif state is OperatorRunState.POLICY_STATE_UNAVAILABLE:
+            entry_reason = "policy_state_unavailable"
         elif state is OperatorRunState.ERROR:
             entry_reason = "error"
         else:
