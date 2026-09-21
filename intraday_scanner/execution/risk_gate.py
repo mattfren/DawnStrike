@@ -33,7 +33,43 @@ DEFAULT_MAX_STALENESS_SECONDS = 900
 # timestamp that is meaningfully in the future. It is not a staleness
 # threshold and is intentionally not configurable via env, unlike
 # max_staleness_seconds.
+#
+# The grace only makes sense for a timestamp that marks the instant the data
+# was captured - clock skew is the only benign explanation for that kind of
+# stamp landing slightly in the future. It does NOT make sense for a bar-label
+# timestamp (e.g. an OHLC bar's own open/period time): a future bar label is
+# a data-integrity problem, not skew, and granting it 5s of slack would let a
+# mislabeled or forged bar slip past this control. So the grace is applied
+# conditionally, based on which payload field the age was actually derived
+# from - see CAPTURE_INSTANT_AGE_SOURCES below.
 FUTURE_OBSERVATION_TOLERANCE_SECONDS = 5.0
+
+# The payload fields paper_session._age_seconds() may draw an age from, and
+# their established provenance:
+#   - "timestamp" (alpha_cycle_service.cycle_decision_timestamp) and the
+#     alpha_signals DB row timestamp fallback are genuine wall-clock
+#     capture/decision instants -> clock-skew grace applies.
+#   - "observed_at" (premarket_enrichment_service._premarket_range_from_chart)
+#     is a bar's own open/period label, not a capture instant -> zero grace.
+#     This costs nothing operationally: _is_eligible_premarket_bar() requires
+#     timestamp + 60s <= requested_epoch before a bar is even considered, so
+#     in practice observed_at is always >=60s in the past and this control
+#     was never reachable via that path anyway. That guard lives in an
+#     unrelated service, though, so this control no longer depends on it to
+#     stay safe - it is safe by its own construction now.
+#   - "premarket_range_observed_at" has no producer anywhere in the codebase
+#     (vestigial/dead) and "as_of" has no established producer for this
+#     payload -> both are unknown provenance -> zero grace, fail closed.
+AGE_SOURCE_TIMESTAMP = "timestamp"
+AGE_SOURCE_ROW_TIMESTAMP = "row_timestamp"
+AGE_SOURCE_OBSERVED_AT = "observed_at"
+AGE_SOURCE_PREMARKET_RANGE_OBSERVED_AT = "premarket_range_observed_at"
+AGE_SOURCE_AS_OF = "as_of"
+AGE_SOURCE_UNKNOWN = "unknown"
+
+# Only these sources are established capture/decision instants. Everything
+# else - including "unknown" - gets zero future-dating grace.
+CAPTURE_INSTANT_AGE_SOURCES = frozenset({AGE_SOURCE_TIMESTAMP, AGE_SOURCE_ROW_TIMESTAMP})
 
 KILL_SWITCH_ENV = "DAWNSTRIKE_PAPER_KILL_SWITCH"
 ENTRIES_ENABLED_ENV = "DAWNSTRIKE_PAPER_ENTRIES_ENABLED"
@@ -119,6 +155,7 @@ def evaluate_entry(
     day_pnl_pct: float,
     data_age_seconds: float,
     settings: RiskSettings,
+    data_age_source: str = AGE_SOURCE_UNKNOWN,
 ) -> RiskDecision:
     """Approve or refuse one long paper entry, with a named reason either way.
 
@@ -135,13 +172,22 @@ def evaluate_entry(
     # with its own reason before the staleness check ever sees it. Checked
     # separately from (and before) stale_market_data so the two failure modes
     # stay distinguishable in the receipt.
-    if data_age_seconds < -FUTURE_OBSERVATION_TOLERANCE_SECONDS:
+    #
+    # The clock-skew grace applies ONLY when data_age_source is an established
+    # capture/decision instant (see CAPTURE_INSTANT_AGE_SOURCES above). Any
+    # other source - a bar-label field, an unknown-provenance field, or an
+    # absent/unrecognized source - gets zero grace: any future value rejects.
+    is_capture_instant = data_age_source in CAPTURE_INSTANT_AGE_SOURCES
+    tolerance = FUTURE_OBSERVATION_TOLERANCE_SECONDS if is_capture_instant else 0.0
+    if data_age_seconds < -tolerance:
         return RiskDecision(
             False,
             "future_market_data",
             detail={
                 "age_s": round(data_age_seconds, 1),
-                "tolerance_s": FUTURE_OBSERVATION_TOLERANCE_SECONDS,
+                "tolerance_s": tolerance,
+                "source": data_age_source,
+                "capture_instant": is_capture_instant,
             },
         )
 

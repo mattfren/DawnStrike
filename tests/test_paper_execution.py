@@ -27,7 +27,15 @@ from intraday_scanner.execution.paper_engine import (
     PaperExecutionStore,
     client_order_id,
 )
-from intraday_scanner.execution.risk_gate import RiskSettings, evaluate_entry
+from intraday_scanner.execution.risk_gate import (
+    AGE_SOURCE_OBSERVED_AT,
+    AGE_SOURCE_ROW_TIMESTAMP,
+    AGE_SOURCE_TIMESTAMP,
+    AGE_SOURCE_UNKNOWN,
+    FUTURE_OBSERVATION_TOLERANCE_SECONDS,
+    RiskSettings,
+    evaluate_entry,
+)
 
 PAPER_ACCOUNT = {
     "account_number": "PA3XXXXXXXZL",
@@ -167,21 +175,181 @@ def test_future_dated_observation_is_rejected_not_treated_as_fresh(monkeypatch):
     """A negative age must not slide through `age < max_staleness_seconds`."""
 
     _enable(monkeypatch)
-    d = _evaluate(monkeypatch, data_age_seconds=-90.0)
+    d = _evaluate(monkeypatch, data_age_seconds=-90.0, data_age_source=AGE_SOURCE_TIMESTAMP)
     assert not d.approved
     assert d.reason == "future_market_data"
     assert d.reason != "stale_market_data"
 
 
 def test_benign_clock_skew_within_tolerance_is_still_accepted(monkeypatch):
-    """A tiny negative age (ordinary clock drift) must not be over-rejected."""
-
-    from intraday_scanner.execution.risk_gate import FUTURE_OBSERVATION_TOLERANCE_SECONDS
+    """A tiny negative age on a capture-instant field (ordinary clock drift)
+    must not be over-rejected."""
 
     _enable(monkeypatch)
-    d = _evaluate(monkeypatch, data_age_seconds=-(FUTURE_OBSERVATION_TOLERANCE_SECONDS - 1.0))
+    d = _evaluate(
+        monkeypatch,
+        data_age_seconds=-(FUTURE_OBSERVATION_TOLERANCE_SECONDS - 1.0),
+        data_age_source=AGE_SOURCE_TIMESTAMP,
+    )
     assert d.approved
     assert d.reason == "approved"
+
+
+# --------------------------------------------------------------------------
+# future-dating grace is conditional on provenance (bar-label vs capture-instant)
+# --------------------------------------------------------------------------
+
+
+def test_future_dated_observed_at_within_tolerance_is_still_rejected(monkeypatch):
+    """observed_at is a bar label (premarket_enrichment_service), not a
+    capture instant - it gets zero grace even for a small future value that
+    a capture-instant field would absorb as benign clock skew."""
+
+    _enable(monkeypatch)
+    d = _evaluate(monkeypatch, data_age_seconds=-3.0, data_age_source=AGE_SOURCE_OBSERVED_AT)
+    assert not d.approved
+    assert d.reason == "future_market_data"
+    assert d.detail["source"] == AGE_SOURCE_OBSERVED_AT
+    assert d.detail["capture_instant"] is False
+    assert d.detail["tolerance_s"] == 0.0
+
+
+def test_future_dated_timestamp_within_tolerance_is_admitted(monkeypatch):
+    """timestamp (alpha_cycle_service.cycle_decision_timestamp) is a genuine
+    capture instant - a small future value is benign clock skew and is
+    admitted."""
+
+    _enable(monkeypatch)
+    d = _evaluate(monkeypatch, data_age_seconds=-3.0, data_age_source=AGE_SOURCE_TIMESTAMP)
+    assert d.approved
+    assert d.reason == "approved"
+
+
+def test_future_dated_timestamp_beyond_tolerance_still_rejects(monkeypatch):
+    _enable(monkeypatch)
+    d = _evaluate(
+        monkeypatch,
+        data_age_seconds=-(FUTURE_OBSERVATION_TOLERANCE_SECONDS + 1.0),
+        data_age_source=AGE_SOURCE_TIMESTAMP,
+    )
+    assert not d.approved
+    assert d.reason == "future_market_data"
+    assert d.detail["capture_instant"] is True
+
+
+@pytest.mark.parametrize(
+    "age_seconds,expect_approved",
+    [
+        (-(FUTURE_OBSERVATION_TOLERANCE_SECONDS - 0.1), True),  # -4.9: admit
+        (-FUTURE_OBSERVATION_TOLERANCE_SECONDS, True),  # -5.0: inclusive edge, admit
+        (-(FUTURE_OBSERVATION_TOLERANCE_SECONDS + 0.000001), False),  # -5.000001: reject
+    ],
+)
+def test_capture_instant_future_dating_boundary_is_unchanged(monkeypatch, age_seconds, expect_approved):
+    """The +/-5s boundary on a capture-instant source is the pre-existing
+    behaviour and must not shift."""
+
+    _enable(monkeypatch)
+    d = _evaluate(monkeypatch, data_age_seconds=age_seconds, data_age_source=AGE_SOURCE_TIMESTAMP)
+    assert d.approved is expect_approved
+    if not expect_approved:
+        assert d.reason == "future_market_data"
+
+
+def test_row_timestamp_fallback_is_also_a_capture_instant_source(monkeypatch):
+    """The DB-row timestamp fallback is the same alpha_signals cycle
+    timestamp as `timestamp` - also a capture instant, also gets grace."""
+
+    _enable(monkeypatch)
+    d = _evaluate(monkeypatch, data_age_seconds=-3.0, data_age_source=AGE_SOURCE_ROW_TIMESTAMP)
+    assert d.approved
+    assert d.reason == "approved"
+
+
+def test_unknown_age_source_gets_no_future_dating_grace(monkeypatch):
+    """An unrecognized or absent source is not assumed to be a capture
+    instant - fail closed, same as an unparseable timestamp."""
+
+    _enable(monkeypatch)
+    d = _evaluate(monkeypatch, data_age_seconds=-1.0, data_age_source=AGE_SOURCE_UNKNOWN)
+    assert not d.approved
+    assert d.reason == "future_market_data"
+
+
+# --------------------------------------------------------------------------
+# stale-boundary and malformed-timestamp behaviour, unchanged by the above
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "age_seconds,expect_approved",
+    [
+        (899.0, True),
+        (900.0, True),
+        (900.0000001, False),
+        (901.0, False),
+        (float("inf"), False),
+    ],
+)
+def test_stale_boundary_is_untouched(monkeypatch, age_seconds, expect_approved):
+    _enable(monkeypatch)
+    d = _evaluate(monkeypatch, data_age_seconds=age_seconds, data_age_source=AGE_SOURCE_TIMESTAMP)
+    assert d.approved is expect_approved
+    if not expect_approved:
+        assert d.reason == "stale_market_data"
+
+
+@pytest.mark.parametrize("raw", [None, "", "not-a-date", "banana", 12345, object(), {"x": 1}])
+def test_malformed_stamps_land_on_infinite_age_and_reject_without_raising(monkeypatch, raw):
+    from intraday_scanner.execution.paper_session import _age_seconds, UNKNOWN_AGE_SECONDS
+    from datetime import datetime, timezone
+
+    age, source = _age_seconds({"timestamp": raw}, None, datetime.now(timezone.utc))
+    assert age == UNKNOWN_AGE_SECONDS
+    assert source == AGE_SOURCE_UNKNOWN
+
+    _enable(monkeypatch)
+    d = _evaluate(monkeypatch, data_age_seconds=age, data_age_source=source)
+    assert not d.approved
+    assert d.reason == "stale_market_data"
+
+
+@pytest.mark.parametrize("suffix", ["Z", "+00:00", "-05:00", "+05:30"])
+def test_timezone_equivalence_still_holds_for_capture_instant_parsing(suffix):
+    from intraday_scanner.execution.paper_session import _age_seconds, _parse_stamp
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 9, 8, 14, 30, 0, tzinfo=timezone.utc)
+    stamp = {
+        "Z": "2026-09-08T14:29:50Z",
+        "+00:00": "2026-09-08T14:29:50+00:00",
+        "-05:00": "2026-09-08T09:29:50-05:00",
+        "+05:30": "2026-09-08T19:59:50+05:30",
+    }[suffix]
+    parsed = _parse_stamp(stamp)
+    assert parsed is not None
+    age, source = _age_seconds({"timestamp": stamp}, None, now)
+    assert age == pytest.approx(10.0, abs=1e-6)
+    assert source == AGE_SOURCE_TIMESTAMP
+
+
+def test_future_market_data_rejection_leaves_manage_positions_working(monkeypatch, tmp_path):
+    """An entry refused for future_market_data must not disturb the
+    independent exit path for a position already open."""
+
+    _enable(monkeypatch)
+    broker = FakeBroker()
+    broker.positions = [{"symbol": "TEST", "qty": "500"}]
+    engine, _ = _engine(tmp_path, broker)
+
+    plan = _plan(data_age_seconds=-3600.0, data_age_source=AGE_SOURCE_OBSERVED_AT)
+    result = engine.submit_entry(plan)
+    assert result["submitted"] is False
+    assert result["reason"] == "future_market_data"
+
+    out = engine.manage_positions(market_date="2026-09-08", force_exit=True)
+    assert broker.closed == ["TEST"]
+    assert out["actions"][0]["action"] == "time_exit_submitted"
 
 
 def test_sizing_never_uses_margin(monkeypatch):

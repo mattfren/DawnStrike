@@ -24,7 +24,12 @@ from intraday_scanner.execution.paper_broker import (
     PaperBrokerClient,
     PaperBrokerError,
 )
-from intraday_scanner.execution.risk_gate import RiskDecision, RiskSettings, evaluate_entry
+from intraday_scanner.execution.risk_gate import (
+    AGE_SOURCE_UNKNOWN,
+    RiskDecision,
+    RiskSettings,
+    evaluate_entry,
+)
 
 SCHEMA_VERSION = "dawnstrike.paper_execution.v1"
 
@@ -58,6 +63,7 @@ class EntryPlan:
     strategy_version: str
     signal_id: str = ""
     data_age_seconds: float = 0.0
+    data_age_source: str = AGE_SOURCE_UNKNOWN
 
 
 class PaperExecutionStore:
@@ -248,6 +254,7 @@ class PaperExecutionEngine:
             entries_today=self.store.entries_today(plan.market_date),
             day_pnl_pct=self.store.day_return_pct(plan.market_date),
             data_age_seconds=plan.data_age_seconds,
+            data_age_source=plan.data_age_source,
             settings=self.settings,
         )
         self.store.record_decision(plan, decision)

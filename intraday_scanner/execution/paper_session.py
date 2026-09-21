@@ -29,7 +29,16 @@ from intraday_scanner.execution.paper_engine import (
     PaperExecutionStore,
     utc_now,
 )
-from intraday_scanner.execution.risk_gate import RiskSettings, entries_enabled
+from intraday_scanner.execution.risk_gate import (
+    AGE_SOURCE_AS_OF,
+    AGE_SOURCE_OBSERVED_AT,
+    AGE_SOURCE_PREMARKET_RANGE_OBSERVED_AT,
+    AGE_SOURCE_ROW_TIMESTAMP,
+    AGE_SOURCE_TIMESTAMP,
+    AGE_SOURCE_UNKNOWN,
+    RiskSettings,
+    entries_enabled,
+)
 
 RECEIPT_SCHEMA = "dawnstrike.paper_execution_session.v1"
 
@@ -83,20 +92,39 @@ def _parse_stamp(value: Any) -> datetime | None:
     return seen.replace(tzinfo=timezone.utc) if seen.tzinfo is None else seen
 
 
-def _age_seconds(payload: dict[str, Any], row_ts: Any, now: datetime) -> float:
-    # Signed on purpose: a future-dated observation must surface as a negative
-    # age so the risk gate can reject it outright (see
-    # risk_gate.FUTURE_OBSERVATION_TOLERANCE_SECONDS). Clamping to 0.0 here
-    # used to make a future timestamp indistinguishable from perfectly fresh
-    # data, which let it sail through the `age < max_staleness_seconds` check.
-    for key in ("observed_at", "premarket_range_observed_at", "as_of", "timestamp"):
+# Payload keys _age_seconds() reads, in priority order, paired with the
+# risk_gate age-source label for each. "observed_at" and
+# "premarket_range_observed_at" and "as_of" are NOT capture instants (see
+# risk_gate.CAPTURE_INSTANT_AGE_SOURCES for the provenance behind this) -
+# only "timestamp" and the DB-row fallback are, so only those two get any
+# future-dating grace from the risk gate.
+_AGE_SOURCE_BY_KEY = {
+    "observed_at": AGE_SOURCE_OBSERVED_AT,
+    "premarket_range_observed_at": AGE_SOURCE_PREMARKET_RANGE_OBSERVED_AT,
+    "as_of": AGE_SOURCE_AS_OF,
+    "timestamp": AGE_SOURCE_TIMESTAMP,
+}
+
+
+def _age_seconds(payload: dict[str, Any], row_ts: Any, now: datetime) -> tuple[float, str]:
+    """Return (age_seconds, source) - source names which field the age came
+    from, so the risk gate can decide whether clock-skew grace applies.
+
+    Signed on purpose: a future-dated observation must surface as a negative
+    age so the risk gate can reject it outright (see
+    risk_gate.FUTURE_OBSERVATION_TOLERANCE_SECONDS). Clamping to 0.0 here used
+    to make a future timestamp indistinguishable from perfectly fresh data,
+    which let it sail through the `age < max_staleness_seconds` check.
+    """
+
+    for key, source in _AGE_SOURCE_BY_KEY.items():
         seen = _parse_stamp(payload.get(key)) if payload.get(key) else None
         if seen is not None:
-            return (now - seen).total_seconds()
+            return (now - seen).total_seconds(), source
     seen = _parse_stamp(row_ts) if row_ts else None
     if seen is not None:
-        return (now - seen).total_seconds()
-    return UNKNOWN_AGE_SECONDS
+        return (now - seen).total_seconds(), AGE_SOURCE_ROW_TIMESTAMP
+    return UNKNOWN_AGE_SECONDS, AGE_SOURCE_UNKNOWN
 
 
 def load_candidates(db_path: str | Path, market_date: str) -> list[dict[str, Any]]:
@@ -142,6 +170,7 @@ def _plan_from(candidate: dict[str, Any], market_date: str, now: datetime) -> En
     target = _num(payload.get("target_1")) or _num(payload.get("first_target"))
     if not (entry and stop and target):
         return None
+    age_seconds, age_source = _age_seconds(payload, candidate.get("timestamp"), now)
     return EntryPlan(
         symbol=candidate["ticker"],
         market_date=market_date,
@@ -150,7 +179,8 @@ def _plan_from(candidate: dict[str, Any], market_date: str, now: datetime) -> En
         target=target,
         strategy_version=str(payload.get("strategy_version") or "alphaops-v5"),
         signal_id=str(payload.get("signal_key") or candidate["ticker"]),
-        data_age_seconds=_age_seconds(payload, candidate.get("timestamp"), now),
+        data_age_seconds=age_seconds,
+        data_age_source=age_source,
     )
 
 
