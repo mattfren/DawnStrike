@@ -10,6 +10,8 @@ from typing import Any
 from intraday_scanner.config_schema import (
     CapabilityStatus,
     ConfigKeySpec,
+    OperatorRunState,
+    evaluate_operator_run_state,
     resolve_capability_bool,
 )
 from intraday_scanner.errors import ConfigError
@@ -167,6 +169,91 @@ class ScannerConfig:
     telegram_include_debug_fields: bool = False
     telegram_send_summary_on_no_data: bool = False
     telegram_send_outcome_reminder_on_no_picks: bool = False
+
+    # Operator-visibility fields for DS-OPVIEW-NO-ELIGIBLE-POLICY.  These are
+    # reporting-only: nothing here gates an order, flips a risk limit, or
+    # changes what the strategy search or risk gate decide. They only make
+    # the operating context an operator already relies on (elsewhere, in
+    # scattered logs) observable in one place.  ``eligible_policy_ids`` is
+    # populated by whatever calls the strategy search/promotion path; an
+    # empty tuple is the real, current production state (both candidates
+    # were rejected) - not a placeholder.
+    eligible_policy_ids: tuple[str, ...] = ()
+    entries_enabled_override: bool | None = None
+    release_sha: str = ""
+    feed_name: str = "unknown"
+    feed_age_seconds: float | None = None
+    feed_max_staleness_seconds: float = 900.0
+    last_evaluation_at: str | None = None
+    next_evaluation_at: str | None = None
+    owned_order_count: int = 0
+    owned_position_count: int = 0
+    reconciliation_status: str = "unknown"
+    operator_errors: tuple[str, ...] = ()
+
+    def operator_run_status(self) -> dict[str, Any]:
+        """Operator-visible run state and operating context.
+
+        Surfaced through :meth:`public_dict` (and from there,
+        ``ScanResult.summary()``), following the same "observable status,
+        never a silent default" precedent as :meth:`capability_report`.
+        Never reads or emits secrets: only counts, timestamps, and named
+        reasons.
+        """
+
+        if self.entries_enabled_override is not None:
+            entries_enabled = self.entries_enabled_override
+        else:
+            from intraday_scanner.execution.risk_gate import (
+                entries_enabled as _entries_enabled_from_env,
+            )
+
+            entries_enabled = _entries_enabled_from_env()
+
+        eligible_policy_count = len(self.eligible_policy_ids)
+        has_errors = bool(self.operator_errors)
+        state = evaluate_operator_run_state(
+            eligible_policy_count=eligible_policy_count,
+            entries_enabled=entries_enabled,
+            has_errors=has_errors,
+        )
+
+        if state is OperatorRunState.NO_ELIGIBLE_POLICY:
+            entry_reason = "no_eligible_policy"
+        elif state is OperatorRunState.ENTRIES_DISABLED_BY_OPERATOR:
+            entry_reason = "entries_disabled_by_operator"
+        elif state is OperatorRunState.ERROR:
+            entry_reason = "error"
+        else:
+            entry_reason = "entries_enabled"
+
+        feed_stale = (
+            self.feed_age_seconds is not None
+            and self.feed_age_seconds > self.feed_max_staleness_seconds
+        )
+
+        return {
+            "state": state.value,
+            "version": {"release_sha": self.release_sha},
+            "entry_mode": "ENABLED" if entries_enabled else "DISABLED",
+            "entry_reason": entry_reason,
+            "eligible_policy_count": eligible_policy_count,
+            "feed": {
+                "name": self.feed_name,
+                "age_seconds": self.feed_age_seconds,
+                "stale": feed_stale,
+            },
+            "evaluation": {
+                "last_evaluation_at": self.last_evaluation_at,
+                "next_evaluation_at": self.next_evaluation_at,
+            },
+            "owned": {
+                "order_count": self.owned_order_count,
+                "position_count": self.owned_position_count,
+            },
+            "reconciliation_status": self.reconciliation_status,
+            "errors": list(self.operator_errors),
+        }
 
     def validate(self) -> None:
         if self.provider not in {"csv", "alpaca"}:
@@ -340,6 +427,10 @@ class ScannerConfig:
         # actual, called-in-production part of the config an operator sees,
         # not merely a dataclass field theirs to notice among fifty others.
         data["capability_report"] = self.capability_report()
+        # Same precedent as capability_report: an operator-facing typed
+        # status, actually called in production (ScanResult.summary()),
+        # not merely a dataclass field left for someone to notice.
+        data["operator_run_status"] = self.operator_run_status()
         return data
 
 

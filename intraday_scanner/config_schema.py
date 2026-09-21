@@ -45,6 +45,49 @@ class CapabilityStatus(str, Enum):
     DISABLED_MISSING_CONFIG = "DISABLED_MISSING_CONFIG"
 
 
+class OperatorRunState(str, Enum):
+    """Why the strategy engine will or will not place a new entry today.
+
+    ``NO_ELIGIBLE_POLICY`` is deliberately distinct from
+    ``ENTRIES_DISABLED_BY_OPERATOR`` and from ``ERROR``: a strategy search
+    that rejected every candidate is a healthy system with nothing
+    qualified to trade, not an operator toggle and not a fault.  Collapsing
+    these into one value is exactly the gap this closes - an operator
+    looking at "no trades today" could otherwise not tell which of the
+    three it was.
+    """
+
+    POLICY_ACTIVE = "POLICY_ACTIVE"
+    NO_ELIGIBLE_POLICY = "NO_ELIGIBLE_POLICY"
+    ENTRIES_DISABLED_BY_OPERATOR = "ENTRIES_DISABLED_BY_OPERATOR"
+    ERROR = "ERROR"
+
+
+def evaluate_operator_run_state(
+    *,
+    eligible_policy_count: int,
+    entries_enabled: bool,
+    has_errors: bool,
+) -> OperatorRunState:
+    """Compute the run state from real inputs - never a hardcoded value.
+
+    Precedence: a reported error always wins (it means the other signals may
+    not be trustworthy). Otherwise, zero eligible policies means
+    ``NO_ELIGIBLE_POLICY`` regardless of the operator's entry toggle - even
+    a re-armed toggle cannot trade with nothing qualified. Only once a
+    policy is eligible does the operator's own entries switch decide
+    between ``POLICY_ACTIVE`` and ``ENTRIES_DISABLED_BY_OPERATOR``.
+    """
+
+    if has_errors:
+        return OperatorRunState.ERROR
+    if eligible_policy_count <= 0:
+        return OperatorRunState.NO_ELIGIBLE_POLICY
+    if not entries_enabled:
+        return OperatorRunState.ENTRIES_DISABLED_BY_OPERATOR
+    return OperatorRunState.POLICY_ACTIVE
+
+
 @dataclass(frozen=True)
 class ConfigKeySpec:
     """Declares one configuration key's contract.
