@@ -3,7 +3,7 @@ param(
     [ValidateSet(
         "All", "Fast", "Isolation",
         "ScenarioA", "ScenarioB", "ScenarioC", "ScenarioD", "ScenarioE", "ScenarioF",
-        "ScenarioG", "ScenarioH", "ScenarioI", "ScenarioJ", "ScenarioK", "ScenarioL"
+        "ScenarioG", "ScenarioH", "ScenarioI", "ScenarioJ", "ScenarioK", "ScenarioL", "ScenarioM"
     )]
     [string]$Mode = "All"
 )
@@ -17,7 +17,8 @@ param(
 # "Fast" is the subset intended for routine future-change checks: it skips
 # the slow/heavy real-subprocess scenarios (H's kill-and-restart child
 # process, I's real EOD orchestration subprocess, J's competing OS-process
-# lock contenders) and runs everything else, which is still every in-process
+# lock contenders, M's real EOD orchestration subprocess under a valid
+# universe) and runs everything else, which is still every in-process
 # isolation/economic/risk/fault-reason property this harness proves.
 
 $ErrorActionPreference = "Stop"
@@ -28,7 +29,7 @@ Set-Location $RepoRoot
 $AllFile = "tests/e2e/test_synthetic_rehearsal.py"
 $PytestArgs = @(switch ($Mode) {
     "All"        { @($AllFile) }
-    "Fast"       { @($AllFile, "-k", "not TestScenarioH and not TestScenarioI and not TestScenarioJ") }
+    "Fast"       { @($AllFile, "-k", "not TestScenarioH and not TestScenarioI and not TestScenarioJ and not TestScenarioM") }
     "Isolation"  { @("$AllFile::TestIsolationProofs") }
     "ScenarioA"  { @("$AllFile::TestScenarioA") }
     "ScenarioB"  { @("$AllFile::TestScenarioB") }
@@ -42,6 +43,7 @@ $PytestArgs = @(switch ($Mode) {
     "ScenarioJ"  { @("$AllFile::TestScenarioJ") }
     "ScenarioK"  { @("$AllFile::TestScenarioK") }
     "ScenarioL"  { @("$AllFile::TestScenarioL") }
+    "ScenarioM"  { @("$AllFile::TestScenarioM") }
 })
 $NodeSelector = $PytestArgs -join " "
 
