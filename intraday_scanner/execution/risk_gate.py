@@ -22,6 +22,19 @@ DEFAULT_MAX_ENTRIES_PER_DAY = 5
 DEFAULT_DAILY_LOSS_LIMIT_PCT = 2.0
 DEFAULT_MAX_STALENESS_SECONDS = 900
 
+# A negative data_age_seconds means the observation's timestamp is in the
+# future relative to the session clock. That is never legitimate market data
+# - it is either a broken feed or a spoofed input - so it is rejected outright
+# rather than being treated as "very fresh" (age < max_staleness_seconds would
+# otherwise pass it). This tolerance exists only to absorb benign clock skew
+# between the machine that stamped the observation and the session clock:
+# NTP-disciplined hosts typically stay within low single-digit seconds of each
+# other, so 5s comfortably covers ordinary drift while still catching any
+# timestamp that is meaningfully in the future. It is not a staleness
+# threshold and is intentionally not configurable via env, unlike
+# max_staleness_seconds.
+FUTURE_OBSERVATION_TOLERANCE_SECONDS = 5.0
+
 KILL_SWITCH_ENV = "DAWNSTRIKE_PAPER_KILL_SWITCH"
 ENTRIES_ENABLED_ENV = "DAWNSTRIKE_PAPER_ENTRIES_ENABLED"
 
@@ -117,6 +130,20 @@ def evaluate_entry(
         return RiskDecision(False, "kill_switch_engaged")
     if not entries_enabled():
         return RiskDecision(False, "entries_disabled")
+
+    # A future-dated observation is invalid input, not "fresh" data - reject it
+    # with its own reason before the staleness check ever sees it. Checked
+    # separately from (and before) stale_market_data so the two failure modes
+    # stay distinguishable in the receipt.
+    if data_age_seconds < -FUTURE_OBSERVATION_TOLERANCE_SECONDS:
+        return RiskDecision(
+            False,
+            "future_market_data",
+            detail={
+                "age_s": round(data_age_seconds, 1),
+                "tolerance_s": FUTURE_OBSERVATION_TOLERANCE_SECONDS,
+            },
+        )
 
     # Stale market data blocks NEW entries only. Managing existing positions is
     # deliberately not gated here - see PaperExecutionEngine.manage_positions.

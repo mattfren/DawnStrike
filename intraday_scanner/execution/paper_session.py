@@ -84,13 +84,18 @@ def _parse_stamp(value: Any) -> datetime | None:
 
 
 def _age_seconds(payload: dict[str, Any], row_ts: Any, now: datetime) -> float:
+    # Signed on purpose: a future-dated observation must surface as a negative
+    # age so the risk gate can reject it outright (see
+    # risk_gate.FUTURE_OBSERVATION_TOLERANCE_SECONDS). Clamping to 0.0 here
+    # used to make a future timestamp indistinguishable from perfectly fresh
+    # data, which let it sail through the `age < max_staleness_seconds` check.
     for key in ("observed_at", "premarket_range_observed_at", "as_of", "timestamp"):
         seen = _parse_stamp(payload.get(key)) if payload.get(key) else None
         if seen is not None:
-            return max(0.0, (now - seen).total_seconds())
+            return (now - seen).total_seconds()
     seen = _parse_stamp(row_ts) if row_ts else None
     if seen is not None:
-        return max(0.0, (now - seen).total_seconds())
+        return (now - seen).total_seconds()
     return UNKNOWN_AGE_SECONDS
 
 

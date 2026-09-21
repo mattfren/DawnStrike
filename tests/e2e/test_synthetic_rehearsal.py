@@ -1067,11 +1067,14 @@ class TestScenarioE:
         monkeypatch: pytest.MonkeyPatch,
         run_manifest: ev.RunManifest,
     ) -> None:
-        """Frozen expectation (written BEFORE running): a signal timestamped in
-        the future is invalid input - the session must never submit an entry
-        on its authority. This test records the REAL observed behavior either
-        way and fails loudly (rather than being silently deleted) if the real
-        code instead clamps the negative age to zero and treats it as fresh.
+        """Frozen expectation (written BEFORE the fix landed): a signal
+        timestamped in the future is invalid input - the session must never
+        submit an entry on its authority. This used to be xfail'd against a
+        real, reproduced defect (paper_session._age_seconds clamped a negative
+        age to 0.0 via max(0.0, delta), so a future timestamp read as
+        perfectly fresh and an entry was actually submitted). The clamp is
+        gone and the risk gate now rejects a future-dated observation outright
+        with its own reason - this asserts that fix holds.
         """
 
         scenario_id = "scenario_e_future_observation"
@@ -1108,25 +1111,12 @@ class TestScenarioE:
                 reason=action["reason"],
                 data_age_seconds=action["data_age_seconds"],
             )
-            if action["submitted"]:
-                ev_rec.outcome = {
-                    "DEFECT": "future-dated observed_at clamps to data_age_seconds=0 "
-                    "(_age_seconds uses max(0.0, now-seen)) and the entry was actually "
-                    "SUBMITTED on the strength of a future timestamp - this is a real "
-                    "application defect, not a harness issue.",
-                    "reason": action["reason"],
-                    "data_age_seconds": action["data_age_seconds"],
-                }
-                pytest.xfail(
-                    "APPLICATION DEFECT (not a harness bug): a future-dated "
-                    "observed_at is clamped to age=0 by paper_session._age_seconds "
-                    "(max(0.0, delta)) and is accepted as fresh, real data instead of "
-                    "being rejected with a distinct reason. entry was submitted="
-                    f"{action['submitted']} reason={action['reason']!r}."
-                )
-            else:
-                assert action["reason"] not in {"entries_disabled"}
-                ev_rec.outcome = {"reason": action["reason"], "orders_submitted": 0}
+            assert action["submitted"] is False, action
+            assert action["reason"] == "future_market_data", action
+            assert action["reason"] != "stale_market_data"
+            assert action["reason"] not in {"entries_disabled"}
+            assert server.state.orders == {}
+            ev_rec.outcome = {"reason": action["reason"], "orders_submitted": 0}
         finally:
             server.stop()
             ev_rec.write(run_sandbox.artifacts_dir)

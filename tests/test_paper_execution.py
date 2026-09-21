@@ -148,6 +148,7 @@ def test_kill_switch_beats_everything(monkeypatch, tmp_path):
     "over,expected",
     [
         ({"data_age_seconds": 5000.0}, "stale_market_data"),
+        ({"data_age_seconds": -3600.0}, "future_market_data"),
         ({"day_pnl_pct": -2.5}, "daily_loss_limit_reached"),
         ({"open_positions": 3}, "max_concurrent_positions"),
         ({"entries_today": 5}, "max_entries_per_day"),
@@ -160,6 +161,27 @@ def test_nonqualifying_setups_are_refused_for_the_right_reason(monkeypatch, over
     d = _evaluate(monkeypatch, **over)
     assert not d.approved
     assert d.reason == expected
+
+
+def test_future_dated_observation_is_rejected_not_treated_as_fresh(monkeypatch):
+    """A negative age must not slide through `age < max_staleness_seconds`."""
+
+    _enable(monkeypatch)
+    d = _evaluate(monkeypatch, data_age_seconds=-90.0)
+    assert not d.approved
+    assert d.reason == "future_market_data"
+    assert d.reason != "stale_market_data"
+
+
+def test_benign_clock_skew_within_tolerance_is_still_accepted(monkeypatch):
+    """A tiny negative age (ordinary clock drift) must not be over-rejected."""
+
+    from intraday_scanner.execution.risk_gate import FUTURE_OBSERVATION_TOLERANCE_SECONDS
+
+    _enable(monkeypatch)
+    d = _evaluate(monkeypatch, data_age_seconds=-(FUTURE_OBSERVATION_TOLERANCE_SECONDS - 1.0))
+    assert d.approved
+    assert d.reason == "approved"
 
 
 def test_sizing_never_uses_margin(monkeypatch):
