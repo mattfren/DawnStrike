@@ -1865,7 +1865,8 @@ class TestScenarioI:
         # even useful for anything else) has something legitimate to back up.
         source_db = state_root / "shadow_real.sqlite"
         conn = sqlite3.connect(source_db)
-        conn.execute("CREATE TABLE e2e_placeholder (id INTEGER PRIMARY KEY)")
+        conn.execute("CREATE TABLE schema_version (version INTEGER)")
+        conn.execute("INSERT INTO schema_version (version) VALUES (1)")
         conn.commit()
         conn.close()
 
