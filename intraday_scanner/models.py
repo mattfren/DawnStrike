@@ -1302,4 +1302,15 @@ class ScanResult:
                 if isinstance(report, dict)
                 and report.get("status") == "DISABLED_MISSING_CONFIG"
             }
+        operator_run_status = self.config.get("operator_run_status")
+        if isinstance(operator_run_status, dict):
+            summary["operator_run_status"] = operator_run_status
+            # Structural prominence, same reasoning as capability_config_gaps
+            # above: NO_ELIGIBLE_POLICY is the state an operator most needs
+            # to be able to find without reading the whole payload, and it
+            # must never be reachable by reading "no trades" as an error or
+            # as an operator's own toggle.
+            summary["no_eligible_policy"] = (
+                operator_run_status.get("state") == "NO_ELIGIBLE_POLICY"
+            )
         return summary

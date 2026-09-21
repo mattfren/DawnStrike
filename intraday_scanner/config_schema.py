@@ -45,6 +45,78 @@ class CapabilityStatus(str, Enum):
     DISABLED_MISSING_CONFIG = "DISABLED_MISSING_CONFIG"
 
 
+class OperatorRunState(str, Enum):
+    """Why the strategy engine will or will not place a new entry today.
+
+    ``NO_ELIGIBLE_POLICY`` is deliberately distinct from
+    ``ENTRIES_DISABLED_BY_OPERATOR`` and from ``ERROR``: a strategy search
+    that rejected every candidate is a healthy system with nothing
+    qualified to trade, not an operator toggle and not a fault.  Collapsing
+    these into one value is exactly the gap this closes - an operator
+    looking at "no trades today" could otherwise not tell which of the
+    three it was.
+    """
+
+    POLICY_ACTIVE = "POLICY_ACTIVE"
+    NO_ELIGIBLE_POLICY = "NO_ELIGIBLE_POLICY"
+    ENTRIES_DISABLED_BY_OPERATOR = "ENTRIES_DISABLED_BY_OPERATOR"
+    POLICY_STATE_UNAVAILABLE = "POLICY_STATE_UNAVAILABLE"
+    ERROR = "ERROR"
+
+
+# Freshness rule for the policy-eligibility state (mirrors the precedent set
+# by ``DISABLED_MISSING_CONFIG`` vs ``DISABLED_BY_OPERATOR`` above): the
+# strategy-eligibility registry that produces ``eligible_policy_ids`` must
+# have been refreshed within this many seconds of "now", or its contents are
+# no longer trustworthy enough to compute NO_ELIGIBLE_POLICY vs
+# POLICY_ACTIVE from. A named constant so the threshold is never a magic
+# number buried in a branch; see ``operator_run_status`` in config.py, the
+# single call site that measures age against it.
+POLICY_STATE_MAX_AGE_SECONDS = 900.0  # 15 minutes
+
+
+def evaluate_operator_run_state(
+    *,
+    eligible_policy_count: int,
+    entries_enabled: bool,
+    has_errors: bool,
+    policy_state_unavailable: bool = False,
+) -> OperatorRunState:
+    """Compute the run state from real inputs - never a hardcoded value.
+
+    Precedence: a reported error always wins (it means the other signals may
+    not be trustworthy - this is ``has_errors``, a genuine runtime/data
+    failure such as a provider exception or a reconciliation mismatch).
+
+    Next, ``policy_state_unavailable`` - the policy-eligibility registry
+    itself is missing, unreadable/corrupt, or stale (older than
+    ``POLICY_STATE_MAX_AGE_SECONDS``, see above) - produces
+    ``POLICY_STATE_UNAVAILABLE``. This is deliberately checked *before*
+    ``eligible_policy_count``: if we cannot read the registry we do not
+    know whether zero is the real count or an artifact of the read failure,
+    so it must never be reported as the healthy "we looked and nothing
+    qualified" state (``NO_ELIGIBLE_POLICY``), and it is not a fault in the
+    run itself, so it must never be reported as ``ERROR`` either. An
+    operator needs to be able to tell "I don't know" from "it broke".
+
+    Otherwise, zero eligible policies means ``NO_ELIGIBLE_POLICY``
+    regardless of the operator's entry toggle - even a re-armed toggle
+    cannot trade with nothing qualified. Only once a policy is eligible
+    does the operator's own entries switch decide between
+    ``POLICY_ACTIVE`` and ``ENTRIES_DISABLED_BY_OPERATOR``.
+    """
+
+    if has_errors:
+        return OperatorRunState.ERROR
+    if policy_state_unavailable:
+        return OperatorRunState.POLICY_STATE_UNAVAILABLE
+    if eligible_policy_count <= 0:
+        return OperatorRunState.NO_ELIGIBLE_POLICY
+    if not entries_enabled:
+        return OperatorRunState.ENTRIES_DISABLED_BY_OPERATOR
+    return OperatorRunState.POLICY_ACTIVE
+
+
 @dataclass(frozen=True)
 class ConfigKeySpec:
     """Declares one configuration key's contract.
