@@ -1580,7 +1580,6 @@ class TestScenarioG:
 # reconcile by order identity before any retry - never a second order.
 # ===========================================================================
 
-MARKET_DATE_H = "2026-09-21"
 _REPO_ROOT = sandbox_mod.WORKTREE_ROOT
 _E2E_DIR = Path(__file__).resolve().parent
 
@@ -1627,6 +1626,11 @@ class TestScenarioH:
             from datetime import datetime as _dt, timezone as _tz
 
             now_iso = _dt.now(_tz.utc).isoformat()
+            # The market date must come from the same clock reading as the
+            # signal timestamp: load_candidates() keeps rows whose date part
+            # equals market_date, so a pinned date made this scenario pass
+            # only on the one day it was written.
+            market_date_h = now_iso[:10]
             payload = _signal_payload(observed_at=now_iso, signal_key="SYNH1")
             _make_signals_db(
                 db_path,
@@ -1634,7 +1638,7 @@ class TestScenarioH:
             )
             store_path = scenario_dir / "paper_execution.sqlite"
             coid = ds_paper_engine.client_order_id(
-                symbol="SYNH1", market_date=MARKET_DATE_H, strategy_version="e2e-control-v1"
+                symbol="SYNH1", market_date=market_date_h, strategy_version="e2e-control-v1"
             )
             # Frozen expectation: the emulator will ACCEPT this order (a real
             # broker would too) but hold the HTTP response open for
@@ -1649,7 +1653,7 @@ class TestScenarioH:
                 argv=[
                     "paper-session",
                     "--db-path", str(db_path),
-                    "--market-date", MARKET_DATE_H,
+                    "--market-date", market_date_h,
                     "--store-path", str(store_path),
                     "--receipt", str(scenario_dir / "receipt_1.json"),
                 ],
@@ -1679,7 +1683,7 @@ class TestScenarioH:
                 argv=[
                     "paper-session",
                     "--db-path", str(db_path),
-                    "--market-date", MARKET_DATE_H,
+                    "--market-date", market_date_h,
                     "--store-path", str(store_path),
                     "--receipt", str(scenario_dir / "receipt_2.json"),
                 ],
@@ -1705,7 +1709,7 @@ class TestScenarioH:
                 argv=[
                     "paper-session",
                     "--db-path", str(db_path),
-                    "--market-date", MARKET_DATE_H,
+                    "--market-date", market_date_h,
                     "--store-path", str(store_path),
                     "--receipt", str(scenario_dir / "receipt_3.json"),
                 ],
