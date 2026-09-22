@@ -250,6 +250,39 @@ _TRUSTED_SOURCE_ROOTS: dict[str, dict[str, Any]] = {
         ),
         "source_uri": STATE_STREET_SPY_HOLDINGS_URL,
     },
+    # The Aug-24 root above is retained for historical research only.  This is
+    # the current release root: same source and transformer, same workbook
+    # structure, new membership after the routine 2026-09 rebalance (ADDED:
+    # BE, ILMN, P; REMOVED: BLDR, TAP, TTD; count held at 503).  It is a
+    # separate identity and effective date, as a source release must be.
+    "state-street-spy-holdings-proxy-2026-09-22": {
+        "index": "S&P 500",
+        "effective_date": "2026-09-21",
+        # Daily downloads change their raw bytes and embedded as-of date.  The
+        # source is accepted only after the strict package/schema and canonical
+        # ticker-set checks below; raw ZIP bytes are retained in each active
+        # generation for audit but are not a reusable trust root.
+        "raw_artifact_hashes": (),
+        "canonical_zip_member_names": _SPY_CANONICAL_ZIP_MEMBER_NAMES,
+        "canonical_static_member_hashes": _SPY_CANONICAL_STATIC_MEMBER_HASHES,
+        "canonical_symbol_set_hash_sha256": (
+            # pragma: allowlist nextline secret - deterministic trust-root hash
+            "d80deb8af1de5b17af7db50a5b634d0903585642f4c426db660767fe5a867e7e"
+        ),
+        "allow_future_same_semantic_set_dates": True,
+        "maximum_source_age_days": 4,
+        "transformation_id": "state-street-spy-holdings-parser-v1",
+        "lineage_builder_id": "state-street-spy-holdings-parser-v1",
+        "lineage_transformation_id": "exclude-cash-and-contra-holdings-v1",
+        "lineage_schema_version": "dawnstrike.core_universe_lineage.v1",
+        "reconstitution_id": "spy-holdings-2026-09-22",
+        "membership_authority": "tracker_holdings_proxy",
+        "official_index_authority": False,
+        "source_scope": (
+            "SPY tracker holdings used as an explicitly labeled S&P 500 membership proxy"
+        ),
+        "source_uri": STATE_STREET_SPY_HOLDINGS_URL,
+    },
     "nasdaq-ndx-point-in-time-2026-07-07": {
         "index": "Nasdaq-100",
         "effective_date": "2026-07-07",
