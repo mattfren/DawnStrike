@@ -80,6 +80,34 @@ def _source_url(root: dict[str, object], market_date: str) -> str:
     return str(root.get("source_uri") or "").strip()
 
 
+def _current_spy_source_id(market_date: str) -> str:
+    """Select the governed S&P 500 trust root current as of ``market_date``.
+
+    The prior generation's manifest names the source_id it was minted under;
+    that is historical evidence of what was attested then, not a live
+    selector for what to attest today.  A source release (a new dated root)
+    is only ever added deliberately, in committed and reviewed code - so
+    picking the newest root whose ``effective_date`` is not after the
+    requested market date cannot admit anything that was not already
+    governed.  If no such root exists the refresh fails closed rather than
+    falling back to a stale or unmatched root.
+    """
+
+    eligible = [
+        (str(root.get("effective_date") or ""), source_id)
+        for source_id, root in _TRUSTED_SOURCE_ROOTS.items()
+        if str(root.get("index") or "") == "S&P 500"
+        and str(root.get("effective_date") or "")
+        and str(root.get("effective_date") or "") <= market_date
+    ]
+    if not eligible:
+        raise RuntimeError(
+            f"no governed S&P 500 trust root is effective on or before {market_date}"
+        )
+    eligible.sort()
+    return eligible[-1][1]
+
+
 # A single transient network failure used to cost the whole trading day: on
 # 2026-09-17 one DNS miss at 08:00 ("getaddrinfo failed") returned
 # DATA_UNAVAILABLE, the morning omitted the core manifest, and the S&P 500 and
@@ -692,15 +720,17 @@ def _refresh_locked(
     ndx_root = _TRUSTED_SOURCE_ROOTS[NDX_SOURCE_ID]
     ndx_url = _source_url(ndx_root, market_date)
     payload = ndx_artifact.read_bytes() if ndx_artifact else _fetch(ndx_url)
-    spy_source_id = str(proxy_children[0].get("source_id") or "").strip()
-    if not spy_source_id:
-        raise RuntimeError("SPY proxy source_id missing")
-    spy_url = str(proxy_children[0].get("source_uri") or "").strip()
+    # The prior generation's manifest (``proxy_children[0]``) is required
+    # above as proof a governed SPY tracker lineage already exists, but its
+    # named source_id is historical evidence, not a live selector: a stale
+    # pointer must never keep pinning today's refresh to an old root once a
+    # newer, committed root has been added.  The trust root to attest against
+    # is always the current one selected from _TRUSTED_SOURCE_ROOTS itself.
+    spy_source_id = _current_spy_source_id(market_date)
+    spy_root = _TRUSTED_SOURCE_ROOTS[spy_source_id]
+    spy_url = str(spy_root.get("source_uri") or "").strip()
     if not spy_url:
-        root = _TRUSTED_SOURCE_ROOTS.get(spy_source_id)
-        spy_url = str(root.get("source_uri") or "") if root else ""
-    if not spy_url:
-        raise RuntimeError("SPY proxy source_uri missing")
+        raise RuntimeError("SPY trust root source_uri missing")
     spy_payload = (
         spy_artifact.read_bytes() if spy_artifact else _fetch(STATE_STREET_SPY_HOLDINGS_URL)
     )
