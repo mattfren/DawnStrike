@@ -41,7 +41,10 @@ PRODUCTION_ROOTS: tuple[Path, ...] = (
     Path(r"C:\r\dawnstrike-audit-20260907"),
 )
 
-WORKTREE_ROOT = Path(r"C:\r\ds-e2e-20260921")
+# The checkout under test - derived, never pinned. A hardcoded path made every
+# subprocess scenario silently execute scripts from a different tree whenever the
+# suite ran anywhere but the one folder it was written in.
+WORKTREE_ROOT = Path(__file__).resolve().parents[2]
 
 
 class SandboxViolation(RuntimeError):
