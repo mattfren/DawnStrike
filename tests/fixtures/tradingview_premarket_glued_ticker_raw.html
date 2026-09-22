@@ -1,0 +1,69 @@
+<!doctype html>
+<html>
+  <body>
+    <!--
+      Trimmed, verbatim reproduction of the real markup captured at
+      C:\r\dawnstrike-state\outputs\alpha_cycle\2026-09-22\web_collect\tradingview_premarket\raw_source.html
+      (data-rowkey="AMEX:TOPS" and data-rowkey="NASDAQ:QTTB"). Unlike the
+      skeleton-placeholder bug, here the logo <img> has loaded (no
+      placeholder text at all), but the ticker link (<a class="...
+      tickerName...">TOPS</a>) and the company-description link (<a
+      class="...tickerDescription...">TOP Ships, Inc.</a>) are adjacent
+      siblings with NO whitespace text node between them in the source.
+      Cell-text extraction that just concatenates handle_data() output
+      therefore glues them together with no delimiter: "TOPS" + "TOP
+      Ships, Inc." -> "TOPSTOP Ships, Inc.". Because the company name
+      happens to start with letters that overlap the ticker, this
+      previously confused the downstream ticker/company split heuristic
+      into returning "TOPST" instead of "TOPS".
+    -->
+    <table>
+      <tr>
+        <th>Symbol</th>
+        <th>Pre-Mkt Chg %</th>
+        <th>Pre-Mkt Price</th>
+        <th>Pre-Mkt Vol</th>
+        <th>Pre-Mkt Gap %</th>
+      </tr>
+      <tr class="row-KELY08jD listRow" data-rowkey="AMEX:TOPS" tabindex="-1">
+        <td class="cell-gfYX44Hu left-gfYX44Hu cell-fixed-gRRvTZHP onscroll-shadow">
+          <span class="tickerCell-t7nCkzMw">
+            <span></span>
+            <img class="logo-VCNKubWq xsmall-VCNKubWq tickerLogo-t7nCkzMw wrapper-hct2yJvK skeleton-VCNKubWq" crossorigin="" src="https://s3-symbol-logo.tradingview.com/top-ships.svg" alt=""/><a class="apply-common-tooltip tickerNameBox-t7nCkzMw tickerName-t7nCkzMw" title="TOPS - TOP Ships, Inc." tabindex="-1" href="/symbols/AMEX-TOPS/" target="_blank">TOPS</a><a class="apply-overflow-tooltip tickerDescription-WjYk5eOQ interactiveTickerDescription-WjYk5eOQ" data-overflow-tooltip-text="TOPS - TOP Ships, Inc." tabindex="-1" href="/symbols/AMEX-TOPS/" target="_blank">TOP Ships, Inc.</a>
+            <div class="marksContainer-UiZ1dogR"><span class="dataMode-hemod8Gc"></span></div>
+          </span>
+        </td>
+        <td class="cell-gfYX44Hu right-gfYX44Hu"><span class="positive-zZRMXAIr">+86.63%</span></td>
+        <td class="cell-gfYX44Hu right-gfYX44Hu">1.3400<span class="currency-_W710Gzb"> USD</span></td>
+        <td class="cell-gfYX44Hu right-gfYX44Hu">43.04 M</td>
+        <td class="cell-gfYX44Hu right-gfYX44Hu"><span class="positive-zZRMXAIr">+76.88%</span></td>
+      </tr>
+      <tr class="row-KELY08jD listRow" data-rowkey="NASDAQ:QTTB" tabindex="-1">
+        <td class="cell-gfYX44Hu left-gfYX44Hu cell-fixed-gRRvTZHP onscroll-shadow">
+          <span class="tickerCell-t7nCkzMw">
+            <span></span>
+            <img class="logo-VCNKubWq xsmall-VCNKubWq tickerLogo-t7nCkzMw wrapper-hct2yJvK skeleton-VCNKubWq" crossorigin="" src="https://s3-symbol-logo.tradingview.com/q32-bio.svg" alt=""/><a class="apply-common-tooltip tickerNameBox-t7nCkzMw tickerName-t7nCkzMw" title="QTTB - Q32 Bio Inc." tabindex="-1" href="/symbols/NASDAQ-QTTB/" target="_blank">QTTB</a><a class="apply-overflow-tooltip tickerDescription-WjYk5eOQ interactiveTickerDescription-WjYk5eOQ" data-overflow-tooltip-text="QTTB - Q32 Bio Inc." tabindex="-1" href="/symbols/NASDAQ-QTTB/" target="_blank">Q32 Bio Inc.</a>
+            <div class="marksContainer-UiZ1dogR"><span class="dataMode-hemod8Gc"></span></div>
+          </span>
+        </td>
+        <td class="cell-gfYX44Hu right-gfYX44Hu"><span class="positive-zZRMXAIr">+5.06%</span></td>
+        <td class="cell-gfYX44Hu right-gfYX44Hu">11.00<span class="currency-_W710Gzb"> USD</span></td>
+        <td class="cell-gfYX44Hu right-gfYX44Hu">1.65 K</td>
+        <td class="cell-gfYX44Hu right-gfYX44Hu"><span class="positive-zZRMXAIr">+3.63%</span></td>
+      </tr>
+      <tr class="row-KELY08jD listRow" data-rowkey="NASDAQ:USGO" tabindex="-1">
+        <td class="cell-gfYX44Hu left-gfYX44Hu cell-fixed-gRRvTZHP onscroll-shadow">
+          <span class="tickerCell-t7nCkzMw">
+            <span></span>
+            <img class="logo-VCNKubWq xsmall-VCNKubWq tickerLogo-t7nCkzMw wrapper-hct2yJvK skeleton-VCNKubWq" crossorigin="" src="https://s3-symbol-logo.tradingview.com/us-goldmining.svg" alt=""/><a class="apply-common-tooltip tickerNameBox-t7nCkzMw tickerName-t7nCkzMw" title="USGO - U.S. GoldMining Inc." tabindex="-1" href="/symbols/NASDAQ-USGO/" target="_blank">USGO</a><a class="apply-overflow-tooltip tickerDescription-WjYk5eOQ interactiveTickerDescription-WjYk5eOQ" data-overflow-tooltip-text="USGO - U.S. GoldMining Inc." tabindex="-1" href="/symbols/NASDAQ-USGO/" target="_blank">U.S. GoldMining Inc.</a>
+            <div class="marksContainer-UiZ1dogR"><span class="dataMode-hemod8Gc"></span></div>
+          </span>
+        </td>
+        <td class="cell-gfYX44Hu right-gfYX44Hu"><span class="positive-zZRMXAIr">+5.20%</span></td>
+        <td class="cell-gfYX44Hu right-gfYX44Hu">7.49<span class="currency-_W710Gzb"> USD</span></td>
+        <td class="cell-gfYX44Hu right-gfYX44Hu">800</td>
+        <td class="cell-gfYX44Hu right-gfYX44Hu"><span class="positive-zZRMXAIr">+5.20%</span></td>
+      </tr>
+    </table>
+  </body>
+</html>

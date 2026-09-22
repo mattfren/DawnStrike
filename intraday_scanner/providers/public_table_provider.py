@@ -836,9 +836,15 @@ class _TableParser(HTMLParser):
         self._cell = ""
         self._row: list[str] = []
         self._table: list[list[str]] = []
+        # Stack of skeleton/placeholder <span> elements currently open. Sites
+        # such as TradingView render a loading placeholder span containing
+        # only the ticker's first letter (class name includes "skeleton")
+        # immediately before the real ticker link text. If that placeholder
+        # text is folded into the cell text it duplicates the leading
+        # letter (e.g. "AEHL" -> "AAEHL"), so its text must be excluded.
+        self._skeleton_span_stack: list[bool] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        _ = attrs
         if tag == "table":
             self._in_table = True
             self._table = []
@@ -847,15 +853,36 @@ class _TableParser(HTMLParser):
         elif tag in {"td", "th"} and self._in_table:
             self._in_cell = True
             self._cell = ""
+        if tag == "span":
+            class_value = next((value or "" for key, value in attrs if key == "class"), "")
+            self._skeleton_span_stack.append("skeleton" in class_value)
+        # Sibling inline elements (e.g. the ticker link and the separate
+        # company-description link) are often adjacent in the markup with
+        # no whitespace text node between them at all, so their text would
+        # otherwise be glued together with no delimiter (e.g. ticker "TOPS"
+        # + company "TOP Ships, Inc." -> "TOPSTOP Ships, Inc."). Insert a
+        # boundary space at every element edge; trailing/leading/duplicate
+        # whitespace is collapsed by " ".join(cell.split()) when the cell
+        # closes, so this is safe for values that already contain real
+        # inter-element spacing (e.g. "6.07<span> USD</span>").
+        if self._in_cell:
+            self._cell += " "
 
     def handle_data(self, data: str) -> None:
         if self._in_cell:
+            if any(self._skeleton_span_stack):
+                return
             self._cell += data
 
     def handle_endtag(self, tag: str) -> None:
+        if tag == "span" and self._skeleton_span_stack:
+            self._skeleton_span_stack.pop()
+        if self._in_cell:
+            self._cell += " "
         if tag in {"td", "th"} and self._in_cell:
             self._row.append(" ".join(self._cell.split()))
             self._in_cell = False
+            self._skeleton_span_stack = []
         elif tag == "tr" and self._in_table and self._row:
             self._table.append(self._row)
         elif tag == "table" and self._in_table:
