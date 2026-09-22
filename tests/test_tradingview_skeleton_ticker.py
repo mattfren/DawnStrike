@@ -106,3 +106,28 @@ def test_non_skeleton_span_text_is_still_captured() -> None:
     tables = extract_html_tables(html)
     row = tables[0].rows[0]
     assert row["symbol"] == "VVOS extra text"
+
+
+def test_imcc_row_resolves_despite_combined_skeleton_and_glue_defects() -> None:
+    """IMCC's raw markup combines BOTH defects: a skeleton placeholder "I"
+    AND a zero-space boundary between the ticker link and the company link
+    ("IIMCCIM Cannabis Corp." before either fix). Verifies both fixes
+    compose correctly to recover ticker "IMCC".
+    """
+    html = _load_fixture()
+    table = select_best_table(extract_html_tables(html))
+    assert table is not None
+
+    rows, warnings = normalize_public_table_rows(
+        table,
+        source_name="tradingview_premarket",
+        source_url="https://www.tradingview.com/markets/stocks-usa/market-movers-pre-market-gainers/",
+    )
+
+    tickers = [row["ticker"] for row in rows]
+    assert "IMCC" in tickers, (tickers, warnings)
+    assert "I" not in tickers, (tickers, warnings)
+    assert "IIMCC" not in tickers, (tickers, warnings)
+
+    imcc_row = next(row for row in rows if row["ticker"] == "IMCC")
+    assert imcc_row["company"] == "IM Cannabis Corp."

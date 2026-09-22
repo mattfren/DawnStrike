@@ -856,6 +856,17 @@ class _TableParser(HTMLParser):
         if tag == "span":
             class_value = next((value or "" for key, value in attrs if key == "class"), "")
             self._skeleton_span_stack.append("skeleton" in class_value)
+        # Sibling inline elements (e.g. the ticker link and the separate
+        # company-description link) are often adjacent in the markup with
+        # no whitespace text node between them at all, so their text would
+        # otherwise be glued together with no delimiter (e.g. ticker "TOPS"
+        # + company "TOP Ships, Inc." -> "TOPSTOP Ships, Inc."). Insert a
+        # boundary space at every element edge; trailing/leading/duplicate
+        # whitespace is collapsed by " ".join(cell.split()) when the cell
+        # closes, so this is safe for values that already contain real
+        # inter-element spacing (e.g. "6.07<span> USD</span>").
+        if self._in_cell:
+            self._cell += " "
 
     def handle_data(self, data: str) -> None:
         if self._in_cell:
@@ -866,6 +877,8 @@ class _TableParser(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         if tag == "span" and self._skeleton_span_stack:
             self._skeleton_span_stack.pop()
+        if self._in_cell:
+            self._cell += " "
         if tag in {"td", "th"} and self._in_cell:
             self._row.append(" ".join(self._cell.split()))
             self._in_cell = False
