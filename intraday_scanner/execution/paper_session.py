@@ -14,10 +14,12 @@ import json
 import sqlite3
 import time
 from collections import Counter
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from intraday_scanner.execution import paper_pilot
 from intraday_scanner.execution.paper_broker import (
     LiveTradingRefused,
     PaperBrokerClient,
@@ -209,6 +211,88 @@ def _screen(candidate: dict[str, Any]) -> str | None:
     return None
 
 
+def _run_pilot_entries(
+    pilot_candidates: list[dict[str, Any]],
+    *,
+    engine: PaperExecutionEngine,
+    market_date: str,
+    now: datetime,
+    market_open: bool,
+    closing_soon: bool,
+    over_budget: Any,
+    funnel: Counter[str],
+    receipt: dict[str, Any],
+    quote_fetcher: paper_pilot.QuoteFetcher | None,
+) -> None:
+    """Paper-pilot entries for gate-rejected candidates. See paper_pilot.py.
+
+    Every pilot entry still goes through engine.submit_entry -> risk gate, with
+    the live quote as its observation, and carries the pilot label.
+    """
+
+    eligible: list[tuple[dict[str, Any], EntryPlan]] = []
+    for candidate in pilot_candidates:
+        plan = _plan_from(candidate, market_date, now)
+        if plan is None:
+            funnel["pilot_plan_incomplete"] += 1
+            continue
+        refusal = paper_pilot.plan_refusal(plan.entry, plan.stop, plan.target)
+        if refusal:
+            funnel[refusal] += 1
+            continue
+        eligible.append((candidate, plan))
+    funnel["pilot_eligible"] += len(eligible)
+    if not eligible:
+        return
+    if not market_open:
+        funnel["pilot_market_closed"] += len(eligible)
+        return
+    if closing_soon:
+        funnel["pilot_too_close_to_the_bell"] += len(eligible)
+        return
+    if over_budget():
+        funnel["session_budget_exhausted"] += len(eligible)
+        return
+
+    fetch = quote_fetcher or paper_pilot.fetch_live_quotes
+    quotes = fetch([plan.symbol for _, plan in eligible])
+    quoted_at = datetime.now(timezone.utc)
+    for _candidate, plan in eligible:
+        if over_budget():
+            funnel["session_budget_exhausted"] += 1
+            continue
+        quote = quotes.get(plan.symbol)
+        refusal = paper_pilot.live_refusal(stop=plan.stop, target=plan.target, quote=quote)
+        if refusal:
+            funnel[refusal] += 1
+            continue
+        # The live quote, not the morning row, is the observation the risk
+        # gate judges for staleness: a trade timestamp is a capture instant.
+        pilot_plan = replace(
+            plan,
+            strategy_version=paper_pilot.PILOT_STRATEGY_VERSION,
+            data_age_seconds=(quoted_at - quote.as_of).total_seconds(),
+            data_age_source=AGE_SOURCE_TIMESTAMP,
+        )
+        result = engine.submit_entry(pilot_plan)
+        funnel[f"pilot_entry_{result['reason']}"] += 1
+        receipt["actions"].append(
+            {
+                "symbol": pilot_plan.symbol,
+                "eligibility": "PILOT",
+                "pilot_rule": paper_pilot.PILOT_RULE_ID,
+                "submitted": result["submitted"],
+                "reason": result["reason"],
+                "entry": pilot_plan.entry,
+                "stop": pilot_plan.stop,
+                "target": pilot_plan.target,
+                "live_price": quote.price,
+                "live_spread_pct": round(quote.spread_pct, 3),
+                "data_age_seconds": round(pilot_plan.data_age_seconds, 1),
+            }
+        )
+
+
 def run_paper_session(
     *,
     db_path: str | Path,
@@ -218,6 +302,7 @@ def run_paper_session(
     force_exit: bool = False,
     settings: RiskSettings | None = None,
     client: PaperBrokerClient | None = None,
+    quote_fetcher: paper_pilot.QuoteFetcher | None = None,
 ) -> dict[str, Any]:
     """Run reconcile, then entries, then management for one session.
 
@@ -270,6 +355,10 @@ def run_paper_session(
     market_open = bool(receipt["preflight"].get("market_open"))
     _remaining = minutes_to_close(receipt["preflight"], now)
     closing_soon = _remaining is not None and _remaining <= FLATTEN_MINUTES_BEFORE_CLOSE
+    pilot_on = paper_pilot.pilot_enabled()
+    receipt["pilot_enabled"] = pilot_on
+    receipt["pilot_rule"] = paper_pilot.PILOT_RULE_ID if pilot_on else None
+    pilot_candidates: list[dict[str, Any]] = []
     for candidate in candidates:
         if over_budget():
             funnel["session_budget_exhausted"] += 1
@@ -277,6 +366,12 @@ def run_paper_session(
         refusal = _screen(candidate)
         if refusal:
             funnel[refusal] += 1
+            if pilot_on:
+                pilot_refusal = paper_pilot.payload_refusal(candidate["payload"])
+                if pilot_refusal:
+                    funnel[pilot_refusal] += 1
+                else:
+                    pilot_candidates.append(candidate)
             continue
         funnel["gate_approved"] += 1
         plan = _plan_from(candidate, market_date, now)
@@ -306,6 +401,20 @@ def run_paper_session(
                     else round(plan.data_age_seconds, 1)
                 ),
             }
+        )
+
+    if pilot_candidates:
+        _run_pilot_entries(
+            pilot_candidates,
+            engine=engine,
+            market_date=market_date,
+            now=now,
+            market_open=market_open,
+            closing_soon=closing_soon,
+            over_budget=over_budget,
+            funnel=funnel,
+            receipt=receipt,
+            quote_fetcher=quote_fetcher,
         )
 
     # Management runs regardless of the entry outcome, and regardless of whether

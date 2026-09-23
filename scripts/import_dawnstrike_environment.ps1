@@ -43,6 +43,7 @@ function Import-DawnstrikeEnvironment {
         # these would leave the corresponding control unreachable.
         "DAWNSTRIKE_PAPER_EXECUTION_ENABLED",
         "DAWNSTRIKE_PAPER_ENTRIES_ENABLED",
+        "DAWNSTRIKE_PAPER_PILOT_ENABLED",
         "DAWNSTRIKE_PAPER_KILL_SWITCH",
         "DAWNSTRIKE_PAPER_KILL_SWITCH_ENGAGED",
         "DAWNSTRIKE_PAPER_RISK_PCT",
