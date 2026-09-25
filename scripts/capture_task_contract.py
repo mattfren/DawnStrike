@@ -232,13 +232,19 @@ def validate_prepared(
 ) -> dict[str, Any]:
     """Validate the durable PREPARED capture-rebind recovery record."""
 
-    _reject_sensitive_keys(payload)
+    _reject_sensitive_keys({key: value for key, value in payload.items() if key != "lock_token"})
     expected = {
         "schema_version",
         "status",
         "task_name",
+        "operation",
         "candidate_sha",
         "candidate_tree",
+        "origin_identity",
+        "origin_identity_sha256",
+        "state_root_sha256",
+        "lock_token",
+        "lock_file_sha256",
         "activation_id",
         "activation_receipt_name",
         "activation_receipt_sha256",
@@ -273,8 +279,17 @@ def validate_prepared(
         payload.get("schema_version") != CAPTURE_TASK_PREPARED_SCHEMA
         or payload.get("status") != "PREPARED"
         or payload.get("task_name") != CAPTURE_TASK_NAME
+        or payload.get("operation") != "capture_task_rebind"
     ):
         raise CaptureTaskContractError("capture-task PREPARED record is invalid")
+    if payload.get("origin_identity") != "github.com/mattfren/dawnstrike":
+        raise CaptureTaskContractError("capture-task PREPARED origin identity is invalid")
+    if payload.get("origin_identity_sha256") != hashlib.sha256(
+        str(payload.get("origin_identity")).encode()
+    ).hexdigest():
+        raise CaptureTaskContractError("capture-task PREPARED origin hash is invalid")
+    if not re.fullmatch(r"[0-9a-f]{32}", str(payload.get("lock_token") or "")):
+        raise CaptureTaskContractError("capture-task PREPARED lock token is invalid")
     for field in ("candidate_sha", "candidate_tree", "previous_candidate_sha"):
         if not _GIT_SHA.fullmatch(str(payload.get(field) or "")):
             raise CaptureTaskContractError(f"capture-task PREPARED {field} is invalid")
@@ -290,6 +305,8 @@ def validate_prepared(
         raise CaptureTaskContractError("capture-task PREPARED activation receipt name is invalid")
     for field in (
         "activation_receipt_sha256",
+        "state_root_sha256",
+        "lock_file_sha256",
         "xml_before_sha256",
         "action_before_sha256",
         "definition_before_sha256",

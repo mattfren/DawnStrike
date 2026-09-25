@@ -86,6 +86,12 @@ _ACTIVATION_RECEIPT_KEYS = frozenset(
     {
         "schema_version",
         "status",
+        "operation",
+        "origin_identity",
+        "origin_identity_sha256",
+        "state_root_sha256",
+        "operation_lock_token",
+        "operation_lock_file_sha256",
         "activation_id",
         "market_date",
         "candidate_sha",
@@ -123,6 +129,12 @@ _ROLLBACK_RECEIPT_KEYS = frozenset(
     {
         "schema_version",
         "status",
+        "operation",
+        "origin_identity",
+        "origin_identity_sha256",
+        "state_root_sha256",
+        "operation_lock_token",
+        "operation_lock_file_sha256",
         "activation_id",
         "market_date",
         "candidate_sha",
@@ -284,7 +296,9 @@ def validate_evidence(
 ) -> dict[str, Any]:
     """Validate one CI or independent SOL evidence object."""
 
-    _reject_sensitive_keys(payload)
+    _reject_sensitive_keys(
+        {key: value for key, value in payload.items() if key != "operation_lock_token"}
+    )
     schema = payload.get("schema_version")
     if schema == CI_SCHEMA:
         _require_exact_keys(payload, _CI_KEYS, "CI evidence")
@@ -439,7 +453,9 @@ def seal_receipt(payload: Mapping[str, Any], output_path: str | Path) -> dict[st
 def validate_receipt(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Validate a self-hashed private activation/rollback receipt."""
 
-    _reject_sensitive_keys(payload)
+    _reject_sensitive_keys(
+        {key: value for key, value in payload.items() if key != "operation_lock_token"}
+    )
     schema = payload.get("schema_version")
     if schema not in {ACTIVATION_SCHEMA, ROLLBACK_SCHEMA}:
         raise ActivationContractError("unsupported runtime receipt schema")
@@ -456,6 +472,16 @@ def validate_receipt(payload: Mapping[str, Any]) -> dict[str, Any]:
     _require_exact_keys(payload, expected_keys, "runtime receipt")
     if payload.get("receipt_sha256") != self_hash(payload, "receipt_sha256"):
         raise ActivationContractError("runtime receipt self-hash mismatch")
+    expected_operation = "runtime_activation" if schema == ACTIVATION_SCHEMA else "runtime_rollback"
+    if payload.get("operation") != expected_operation:
+        raise ActivationContractError("runtime receipt operation is invalid")
+    origin_identity = payload.get("origin_identity")
+    if origin_identity != "github.com/mattfren/dawnstrike" or payload.get(
+        "origin_identity_sha256"
+    ) != hashlib.sha256(str(origin_identity).encode()).hexdigest():
+        raise ActivationContractError("runtime receipt origin identity is invalid")
+    if not re.fullmatch(r"[0-9a-f]{32}", str(payload.get("operation_lock_token") or "")):
+        raise ActivationContractError("runtime receipt lock token is invalid")
     if not _ACTIVATION_ID.fullmatch(str(payload.get("activation_id") or "")):
         raise ActivationContractError("runtime receipt activation id is invalid")
     if not _GIT_SHA.fullmatch(str(payload.get("candidate_sha") or "")):
@@ -484,6 +510,8 @@ def validate_receipt(payload: Mapping[str, Any]) -> dict[str, Any]:
         "task_action_contract_sha256",
         "runtime_origin_sha256",
         "scheduler_backup_manifest_sha256",
+        "state_root_sha256",
+        "operation_lock_file_sha256",
     ):
         if not _SHA256.fullmatch(str(payload.get(field) or "")):
             raise ActivationContractError(f"runtime receipt {field} is invalid")

@@ -11,7 +11,9 @@ param(
     [ValidateRange(1, 120)][int]$BackupRetention = 30,
     [ValidateRange(30, 1800)][int]$ProcessTimeoutSeconds = 300,
     [pscredential]$RunAsCredential,
-    [switch]$PreflightOnly
+    [switch]$PreflightOnly,
+    [switch]$InjectCrashAfterPrepared,
+    [switch]$InjectCrashAfterComplete
 )
 
 $ErrorActionPreference = "Stop"
@@ -1759,7 +1761,9 @@ function Invoke-DawnstrikeRuntimeActivation {
         [Parameter(Mandatory = $true)][int]$BackupRetention,
         [Parameter(Mandatory = $true)][int]$ProcessTimeoutSeconds,
         [pscredential]$RunAsCredential,
-        [switch]$PreflightOnly
+        [switch]$PreflightOnly,
+        [switch]$InjectCrashAfterPrepared,
+        [switch]$InjectCrashAfterComplete
     )
 
     $candidate = Resolve-DawnstrikeActivationRoot $CandidateRoot "CandidateRoot"
@@ -1924,6 +1928,26 @@ function Invoke-DawnstrikeRuntimeActivation {
                         -PythonPath $pythonPath `
                         -TimeoutSeconds $ProcessTimeoutSeconds `
                         -RequireRollbackCheckout
+                    $staleActivationPath = Join-Path $state "locks\dawnstrike-runtime-activation.lock"
+                    if (Test-Path -LiteralPath $staleActivationPath -PathType Leaf) {
+                        $stateIdentity = Get-DawnstrikeSha256Text ([IO.Path]::GetFullPath($state).TrimEnd('\').ToLowerInvariant())
+                        if (
+                            [string]$receipt.operation -ne "runtime_activation" -or
+                            [string]$receipt.origin_identity -ne "github.com/mattfren/dawnstrike" -or
+                            [string]$receipt.origin_identity_sha256 -ne (Get-DawnstrikeSha256Text ([string]$receipt.origin_identity)) -or
+                            [string]$receipt.state_root_sha256 -ne $stateIdentity
+                        ) { throw "Complete activation receipt cannot adopt the stale runtime lock." }
+                        $lockInterpreter = Get-DawnstrikeApprovedLockInterpreter
+                        $recoveredLock = Adopt-DawnstrikeGovernedRuntimeLock -StateRoot $state `
+                            -ExpectedToken ([string]$receipt.operation_lock_token) `
+                            -ExpectedFileSha256 ([string]$receipt.operation_lock_file_sha256) `
+                            -ExpectedOperation runtime_activation -CandidateSha $ExpectedSha `
+                            -CandidateTree ([string]$candidateContract.tree) `
+                            -OriginIdentity ([string]$receipt.origin_identity) `
+                            -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256 `
+                            -RecoveryOperation runtime_activation
+                        Exit-DawnstrikeGovernedRuntimeLock $recoveredLock
+                    }
                     return $receipt
                 }
             }
@@ -2302,6 +2326,12 @@ function Invoke-DawnstrikeRuntimeActivation {
             $receiptPayload = [ordered]@{
                 schema_version = "dawnstrike.runtime_activation_receipt.v1"
                 status = "PREPARED"
+                operation = "runtime_activation"
+                origin_identity = $lockOrigin
+                origin_identity_sha256 = Get-DawnstrikeSha256Text $lockOrigin
+                state_root_sha256 = Get-DawnstrikeSha256Text ([IO.Path]::GetFullPath($state).TrimEnd('\').ToLowerInvariant())
+                operation_lock_token = [string]$activationLock.token
+                operation_lock_file_sha256 = [string]$activationLock.bytes_sha256
                 activation_id = $activationId
                 market_date = $MarketDate
                 candidate_sha = $ExpectedSha
@@ -2378,6 +2408,7 @@ function Invoke-DawnstrikeRuntimeActivation {
             finally {
                 if (Test-Path -LiteralPath $inputReceipt -PathType Leaf) { Remove-Item -LiteralPath $inputReceipt -Force }
             }
+            if ($InjectCrashAfterPrepared) { exit 137 }
 
             $runtimeFinalCheck = Get-DawnstrikeGitContract $gitPath $runtime $ProcessTimeoutSeconds $runtimeContract.head
             if ($runtimeFinalCheck.tree -ne $runtimeContract.tree) {
@@ -2494,6 +2525,7 @@ function Invoke-DawnstrikeRuntimeActivation {
             finally {
                 if (Test-Path -LiteralPath $inputReceipt -PathType Leaf) { Remove-Item -LiteralPath $inputReceipt -Force }
             }
+            if ($InjectCrashAfterComplete) { exit 137 }
             return $complete
         }
         catch {
@@ -2615,6 +2647,8 @@ if ($MyInvocation.InvocationName -ne '.') {
         -BackupRetention $BackupRetention `
         -ProcessTimeoutSeconds $ProcessTimeoutSeconds `
         -RunAsCredential $RunAsCredential `
-        -PreflightOnly:$PreflightOnly
+        -PreflightOnly:$PreflightOnly `
+        -InjectCrashAfterPrepared:$InjectCrashAfterPrepared `
+        -InjectCrashAfterComplete:$InjectCrashAfterComplete
     $result | ConvertTo-Json -Depth 12
 }

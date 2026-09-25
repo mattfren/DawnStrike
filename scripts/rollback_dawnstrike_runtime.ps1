@@ -6,7 +6,8 @@ param(
     [string]$StateRoot = "C:\r\dawnstrike-state",
     [string]$BackupRoot = "C:\r\dawnstrike-state-backups",
     [ValidateRange(30, 1800)][int]$ProcessTimeoutSeconds = 300,
-    [pscredential]$RunAsCredential
+    [pscredential]$RunAsCredential,
+    [switch]$InjectCrashAfterRolledBack
 )
 
 $ErrorActionPreference = "Stop"
@@ -209,7 +210,8 @@ function Invoke-DawnstrikeRuntimeRollback {
         [Parameter(Mandatory = $true)][string]$StateRoot,
         [Parameter(Mandatory = $true)][string]$BackupRoot,
         [Parameter(Mandatory = $true)][int]$ProcessTimeoutSeconds,
-        [pscredential]$RunAsCredential
+        [pscredential]$RunAsCredential,
+        [switch]$InjectCrashAfterRolledBack
     )
 
     $contract = Resolve-DawnstrikeActivationRoot $ContractRoot "ContractRoot"
@@ -304,6 +306,28 @@ function Invoke-DawnstrikeRuntimeRollback {
     Assert-DawnstrikeNoReparseComponents $rollbackReceiptRoot "Rollback receipt root"
     Assert-DawnstrikeNoReparseComponents $rollbackReceipt "Rollback receipt"
     Assert-DawnstrikeSameVolume @($runtime, $rollbackStage, $rollbackRoot)
+    $activationLock = $null
+    $lockInterpreter = Get-DawnstrikeApprovedLockInterpreter
+    $existingLockPath = Join-Path $state "locks\dawnstrike-runtime-activation.lock"
+    if (Test-Path -LiteralPath $existingLockPath -PathType Leaf) {
+        $recoveryReceipt = if (Test-Path -LiteralPath $rollbackReceipt -PathType Leaf) {
+            Invoke-DawnstrikeContractCli $pythonPath $contract @("verify-receipt", "--receipt", $rollbackReceipt, "--expected-status", "ROLLED_BACK") "Rollback lock recovery receipt" $ProcessTimeoutSeconds
+        } else { $activation }
+        $stateIdentity = Get-DawnstrikeSha256Text ([IO.Path]::GetFullPath($state).TrimEnd('\').ToLowerInvariant())
+        if (
+            [string]$recoveryReceipt.origin_identity -ne "github.com/mattfren/dawnstrike" -or
+            [string]$recoveryReceipt.origin_identity_sha256 -ne (Get-DawnstrikeSha256Text ([string]$recoveryReceipt.origin_identity)) -or
+            [string]$recoveryReceipt.state_root_sha256 -ne $stateIdentity
+        ) { throw "Runtime rollback stale-lock receipt identity is invalid." }
+        $activationLock = Adopt-DawnstrikeGovernedRuntimeLock -StateRoot $state `
+            -ExpectedToken ([string]$recoveryReceipt.operation_lock_token) `
+            -ExpectedFileSha256 ([string]$recoveryReceipt.operation_lock_file_sha256) `
+            -ExpectedOperation ([string]$recoveryReceipt.operation) `
+            -CandidateSha $candidateSha -CandidateTree ([string]$activation.candidate_tree) `
+            -OriginIdentity ([string]$recoveryReceipt.origin_identity) `
+            -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256 `
+            -RecoveryOperation runtime_rollback
+    }
 
     if (Test-Path -LiteralPath $rollbackReceipt -PathType Leaf) {
         Assert-DawnstrikeNoReparseComponents $rollbackReceipt "Existing rollback receipt"
@@ -350,6 +374,7 @@ function Invoke-DawnstrikeRuntimeRollback {
             -GitPath $gitPath `
             -PythonPath $pythonPath `
             -TimeoutSeconds $ProcessTimeoutSeconds
+        if ($null -ne $activationLock) { Exit-DawnstrikeGovernedRuntimeLock $activationLock; $activationLock = $null }
         return $existing
     }
     if (-not (Test-Path -LiteralPath $rollbackBundle -PathType Leaf)) {
@@ -505,7 +530,6 @@ function Invoke-DawnstrikeRuntimeRollback {
         }
     }
 
-    $activationLock = $null
     $dailyLock = $null
     $candidateMoved = $false
     $previousInstalled = $false
@@ -515,10 +539,11 @@ function Invoke-DawnstrikeRuntimeRollback {
     $preserveLocks = $false
     try {
         $lockOrigin = Convert-DawnstrikeCanonicalOriginIdentity $origin
-        $lockInterpreter = Get-DawnstrikeApprovedLockInterpreter
-        $activationLock = Enter-DawnstrikeGovernedRuntimeLock -StateRoot $state -Operation runtime_rollback `
-            -CandidateSha $candidateSha -CandidateTree ([string]$activation.candidate_tree) `
-            -OriginIdentity $lockOrigin -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
+        if ($null -eq $activationLock) {
+            $activationLock = Enter-DawnstrikeGovernedRuntimeLock -StateRoot $state -Operation runtime_rollback `
+                -CandidateSha $candidateSha -CandidateTree ([string]$activation.candidate_tree) `
+                -OriginIdentity $lockOrigin -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
+        }
         Assert-DawnstrikeNoDailyLocks $state
         $dailyLock = Enter-DawnstrikeDailyRunLock -StateRoot $state -MarketDate $marketDate -Owner "runtime_rollback"
         if (-not $dailyLock.acquired) {
@@ -641,6 +666,12 @@ function Invoke-DawnstrikeRuntimeRollback {
         $payload = [ordered]@{
             schema_version = "dawnstrike.runtime_rollback_receipt.v1"
             status = "ROLLED_BACK"
+            operation = "runtime_rollback"
+            origin_identity = $lockOrigin
+            origin_identity_sha256 = Get-DawnstrikeSha256Text $lockOrigin
+            state_root_sha256 = Get-DawnstrikeSha256Text ([IO.Path]::GetFullPath($state).TrimEnd('\').ToLowerInvariant())
+            operation_lock_token = [string]$activationLock.token
+            operation_lock_file_sha256 = [string]$activationLock.bytes_sha256
             activation_id = $activationId
             market_date = $marketDate
             candidate_sha = $candidateSha
@@ -702,7 +733,9 @@ function Invoke-DawnstrikeRuntimeRollback {
         $input = Join-Path $rollbackReceiptRoot ".$activationId.input.json"
         Write-DawnstrikeActivationJson $payload $input
         try {
-            return Invoke-DawnstrikeContractCli $pythonPath $contract @("seal-receipt", "--input", $input, "--output", $rollbackReceipt) "Rollback receipt sealing" $ProcessTimeoutSeconds
+            $sealedRollback = Invoke-DawnstrikeContractCli $pythonPath $contract @("seal-receipt", "--input", $input, "--output", $rollbackReceipt) "Rollback receipt sealing" $ProcessTimeoutSeconds
+            if ($InjectCrashAfterRolledBack) { exit 137 }
+            return $sealedRollback
         }
         finally {
             if (Test-Path -LiteralPath $input -PathType Leaf) { Remove-Item -LiteralPath $input -Force }
@@ -819,6 +852,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         -StateRoot $StateRoot `
         -BackupRoot $BackupRoot `
         -ProcessTimeoutSeconds $ProcessTimeoutSeconds `
-        -RunAsCredential $RunAsCredential
+        -RunAsCredential $RunAsCredential `
+        -InjectCrashAfterRolledBack:$InjectCrashAfterRolledBack
     $result | ConvertTo-Json -Depth 12
 }

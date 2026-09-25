@@ -14,6 +14,7 @@ param(
     [switch]$Enable,
     [switch]$InjectFailureAfterMutation,
     [Alias("InjectHardCrashAfterEnable")][switch]$InjectCrashAfterEnable,
+    [switch]$InjectCrashAfterComplete,
     [ValidateRange(30, 1800)][int]$ProcessTimeoutSeconds = 300
 )
 
@@ -825,6 +826,33 @@ $failurePath = Join-Path $state ("receipts\capture-task\capture-task-rebind-" + 
 Assert-DawnstrikeNoReparseComponents $preparedPath "Capture-task prepared record"
 Assert-DawnstrikeNoReparseComponents $failurePath "Capture-task failure record"
 $original = Get-DawnstrikeCaptureOriginalFromActivationBackup $state $activationReceipt.payload
+$lockOrigin = Convert-DawnstrikeCanonicalOriginIdentity $origin
+$lockInterpreter = Get-DawnstrikeApprovedLockInterpreter
+$rebindLock = $null
+$existingLockPath = Join-Path $state "locks\dawnstrike-runtime-activation.lock"
+if (Test-Path -LiteralPath $existingLockPath -PathType Leaf) {
+    if (-not (Test-Path -LiteralPath $preparedPath -PathType Leaf)) {
+        throw "A stale runtime lock exists without an exact capture-task PREPARED recovery record."
+    }
+    $stalePrepared = Get-DawnstrikeCapturePreparedRecord `
+        -PythonPath $python -ContractPath $captureContract -PreparedPath $preparedPath `
+        -CandidateSha $CandidateSha -CandidateTree ([string]$runtimeContract.tree) `
+        -TimeoutSeconds $ProcessTimeoutSeconds
+    $stateIdentity = Get-DawnstrikeSha256Text ([IO.Path]::GetFullPath($state).TrimEnd('\').ToLowerInvariant())
+    if (
+        [string]$stalePrepared.operation -ne "capture_task_rebind" -or
+        [string]$stalePrepared.origin_identity -ne $lockOrigin -or
+        [string]$stalePrepared.origin_identity_sha256 -ne (Get-DawnstrikeSha256Text $lockOrigin) -or
+        [string]$stalePrepared.state_root_sha256 -ne $stateIdentity
+    ) { throw "Capture-task PREPARED lock recovery identity is invalid." }
+    $rebindLock = Adopt-DawnstrikeGovernedRuntimeLock -StateRoot $state `
+        -ExpectedToken ([string]$stalePrepared.lock_token) `
+        -ExpectedFileSha256 ([string]$stalePrepared.lock_file_sha256) `
+        -ExpectedOperation capture_task_rebind -CandidateSha $CandidateSha `
+        -CandidateTree ([string]$runtimeContract.tree) -OriginIdentity $lockOrigin `
+        -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256 `
+        -RecoveryOperation capture_task_rebind
+}
 
 if (Test-Path -LiteralPath $receiptFull -PathType Leaf) {
     $existingReceipt = Invoke-DawnstrikeActivationProcess $python @(
@@ -852,17 +880,18 @@ if (Test-Path -LiteralPath $receiptFull -PathType Leaf) {
             -EntitlementReceipt $EntitlementReceipt -EntitlementReceiptSha256 $EntitlementReceiptSha256 `
             -SourceConfig $SourceConfig -SourceConfigSha256 $SourceConfigSha256 | Out-Null
         if (Test-Path -LiteralPath $preparedPath -PathType Leaf) { Remove-DawnstrikeCapturePrepared $preparedPath }
+        if ($null -ne $rebindLock) { Exit-DawnstrikeGovernedRuntimeLock $rebindLock; $rebindLock = $null }
         Write-Output ([string]$existingReceipt.Stdout).Trim()
         return
     }
     throw "Existing capture-task receipt does not match the current task, activation, or supplied input bindings; rebind is ambiguous."
 }
 
-$lockOrigin = Convert-DawnstrikeCanonicalOriginIdentity $origin
-$lockInterpreter = Get-DawnstrikeApprovedLockInterpreter
-$rebindLock = Enter-DawnstrikeGovernedRuntimeLock -StateRoot $state -Operation capture_task_rebind `
-    -CandidateSha $CandidateSha -CandidateTree ([string]$runtimeContract.tree) `
-    -OriginIdentity $lockOrigin -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
+if ($null -eq $rebindLock) {
+    $rebindLock = Enter-DawnstrikeGovernedRuntimeLock -StateRoot $state -Operation capture_task_rebind `
+        -CandidateSha $CandidateSha -CandidateTree ([string]$runtimeContract.tree) `
+        -OriginIdentity $lockOrigin -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
+}
 try {
     $lockedAuxiliary = Get-DawnstrikeAuxiliaryCaptureTask $runtime $state
     if (
@@ -1030,8 +1059,14 @@ try {
             schema_version = "dawnstrike.capture_task_rebind_prepared.v1"
             status = "PREPARED"
             task_name = $script:DawnstrikeAuxiliaryCaptureTaskName
+            operation = "capture_task_rebind"
             candidate_sha = $CandidateSha
             candidate_tree = [string]$runtimeContract.tree
+            origin_identity = $lockOrigin
+            origin_identity_sha256 = Get-DawnstrikeSha256Text $lockOrigin
+            state_root_sha256 = Get-DawnstrikeSha256Text ([IO.Path]::GetFullPath($state).TrimEnd('\').ToLowerInvariant())
+            lock_token = [string]$rebindLock.token
+            lock_file_sha256 = [string]$rebindLock.bytes_sha256
             activation_id = $activationId
             activation_receipt_name = $activationReceiptName
             activation_receipt_sha256 = $activationReceiptSha256
@@ -1138,6 +1173,7 @@ try {
             $captureContract, "seal-receipt", "--input", $inputReceipt, "--output", $receiptFull
         ) $PSScriptRoot "Capture-task rebind receipt sealing" $ProcessTimeoutSeconds
         $receiptSealed = $true
+        if ($InjectCrashAfterComplete) { exit 137 }
         Remove-DawnstrikeCapturePrepared $preparedPath
         [string]$result.Stdout | ConvertFrom-Json | ConvertTo-Json -Depth 8 -Compress
     }

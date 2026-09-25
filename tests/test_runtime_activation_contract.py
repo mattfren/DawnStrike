@@ -435,6 +435,12 @@ def _receipt_payload(
     value: dict[str, object] = {
         "schema_version": schema,
         "status": status,
+        "operation": "runtime_activation" if schema == ACTIVATION_SCHEMA else "runtime_rollback",
+        "origin_identity": "github.com/mattfren/dawnstrike",
+        "origin_identity_sha256": hashlib.sha256(b"github.com/mattfren/dawnstrike").hexdigest(),
+        "state_root_sha256": "a" * 64,
+        "operation_lock_token": "b" * 32,
+        "operation_lock_file_sha256": "c" * 64,
         "activation_id": activation_id,
         "market_date": "2026-08-31",
         "candidate_sha": CANDIDATE_SHA,
