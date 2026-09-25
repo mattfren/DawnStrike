@@ -898,6 +898,37 @@ function Confirm-DawnstrikeActivationDailyLockHandshake {
     }
 }
 
+function ConvertTo-DawnstrikeUtcDateTimeOffset {
+    # Windows PowerShell 5.1's ConvertFrom-Json leaves an ISO-8601 JSON
+    # string as [string]; PowerShell 7's ConvertFrom-Json silently
+    # coerces the same value straight to [DateTime]. Casting that
+    # [DateTime] back to [string] with the default, culture-formatted
+    # ToString() drops both the "Z" designator and sub-second precision,
+    # so re-parsing the resulting string lands in the machine's local
+    # offset instead of UTC -- misclassifying a live owner as dead.
+    # Normalise by branching on the actual runtime type instead of
+    # assuming a string, so both engines resolve to the identical UTC
+    # instant.
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][AllowNull()]$Value)
+
+    if ($Value -is [DateTime]) {
+        $dt = $Value
+        if ($dt.Kind -eq [System.DateTimeKind]::Unspecified) {
+            # Source values are always UTC ("...Z") ISO-8601 timestamps.
+            # An Unspecified Kind must be explicitly tagged UTC -- never
+            # assumed to already be local wall-clock time.
+            $dt = [DateTime]::SpecifyKind($dt, [System.DateTimeKind]::Utc)
+        }
+        return [DateTimeOffset]$dt.ToUniversalTime()
+    }
+    return [DateTimeOffset]::Parse(
+        [string]$Value,
+        [cultureinfo]::InvariantCulture,
+        [System.Globalization.DateTimeStyles]::RoundtripKind
+    ).ToUniversalTime()
+}
+
 function Test-DawnstrikeLockOwnerActive {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string]$LockPath)
@@ -911,16 +942,25 @@ function Test-DawnstrikeLockOwnerActive {
         }
         $schemaVersion = [string]$payload.schema_version
         $recordedIdentity = [DateTimeOffset]::MinValue
+        # Parse timestamps by their runtime type, never via [string]: under
+        # PowerShell 7, ConvertFrom-Json turns ISO-8601 values into [DateTime],
+        # and a culture-formatted round trip drops "Z" and sub-second
+        # precision, which made a live owner look dead (lock stolen). Any
+        # value that cannot be parsed throws, so recovery fails closed.
         if ($schemaVersion -eq "dawnstrike.daily_run_lock.v3") {
             $startedProperty = $payload.PSObject.Properties["process_started_at_utc"]
             if (
                 $null -eq $startedProperty -or
-                [string]::IsNullOrWhiteSpace([string]$startedProperty.Value) -or
-                -not [DateTimeOffset]::TryParse(
-                    [string]$startedProperty.Value,
-                    [ref]$recordedIdentity
-                )
+                $null -eq $startedProperty.Value -or
+                ($startedProperty.Value -isnot [DateTime] -and
+                    [string]::IsNullOrWhiteSpace([string]$startedProperty.Value))
             ) {
+                throw "Lock owner process-start identity is invalid."
+            }
+            try {
+                $recordedIdentity = ConvertTo-DawnstrikeUtcDateTimeOffset -Value $startedProperty.Value
+            }
+            catch {
                 throw "Lock owner process-start identity is invalid."
             }
             # A reused PID has a different creation time.  Compare exact
@@ -930,10 +970,10 @@ function Test-DawnstrikeLockOwnerActive {
             # v2 locks predate the exact process-start field.  Retain the old
             # acquired_at relationship for compatibility, but require that
             # timestamp to be valid before deciding whether an owner is dead.
-            if (-not [DateTimeOffset]::TryParse(
-                [string]$payload.acquired_at,
-                [ref]$recordedIdentity
-            )) {
+            try {
+                $recordedIdentity = ConvertTo-DawnstrikeUtcDateTimeOffset -Value $payload.acquired_at
+            }
+            catch {
                 throw "Legacy lock owner acquisition identity is invalid."
             }
         }

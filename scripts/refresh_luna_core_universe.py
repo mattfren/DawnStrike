@@ -17,6 +17,7 @@ import socket
 import stat
 import sys
 import tempfile
+import time
 import uuid
 import zipfile
 from contextlib import ExitStack, contextmanager
@@ -42,7 +43,9 @@ from intraday_scanner.services.luna_core_universe_service import (
 )
 
 MAX_DOWNLOAD_BYTES = 2_000_000
-NDX_SOURCE_ID = "nasdaq-ndx-point-in-time-2026-08-27"
+NDX_SOURCE_ID = "nasdaq-ndx-point-in-time-2026-09-15"
+# Seeds the first-run bootstrap wrapper only. Attestation always uses the
+# current dated root from _current_spy_source_id(market_date).
 SPY_SOURCE_ID = "state-street-spy-holdings-proxy-2026-08-24"
 GENERATION_DIRECTORY = "luna_core_universe_generations"
 # The release root anchors trust, but is not a recurring-session gate.  A
@@ -576,18 +579,72 @@ def _source_url(root: dict[str, object], market_date: str) -> str:
     return str(root.get("source_uri") or "").strip()
 
 
+def _current_spy_source_id(market_date: str) -> str:
+    """Select the governed S&P 500 trust root current as of ``market_date``.
+
+    The prior generation's manifest names the source_id it was minted under;
+    that is historical evidence of what was attested then, not a live
+    selector for what to attest today.  A source release (a new dated root)
+    is only ever added deliberately, in committed and reviewed code - so
+    picking the newest root whose ``effective_date`` is not after the
+    requested market date cannot admit anything that was not already
+    governed.  If no such root exists the refresh fails closed rather than
+    falling back to a stale or unmatched root.
+    """
+
+    eligible = [
+        (str(root.get("effective_date") or ""), source_id)
+        for source_id, root in _TRUSTED_SOURCE_ROOTS.items()
+        if str(root.get("index") or "") == "S&P 500"
+        and str(root.get("effective_date") or "")
+        and str(root.get("effective_date") or "") <= market_date
+    ]
+    if not eligible:
+        raise RuntimeError(
+            f"no governed S&P 500 trust root is effective on or before {market_date}"
+        )
+    eligible.sort()
+    return eligible[-1][1]
+
+
+# A single transient network failure used to cost the whole trading day: on
+# 2026-09-17 one DNS miss at 08:00 ("getaddrinfo failed") returned
+# DATA_UNAVAILABLE, the morning omitted the core manifest, and the S&P 500 and
+# Nasdaq-100 lanes were dark until the next session - while the same URL served
+# HTTP 200 minutes later.
+#
+# These retries are deliberately small.  The refresh runs inside the morning
+# stage, which has a wall-clock budget, so the worst case here is bounded at
+# roughly 30s of timeout plus 9s of backoff per attempt sequence rather than
+# anything open-ended.  Only transport failures are retried; a bad HTTP status
+# or an oversized body is a fact about the source and is raised immediately.
+_FETCH_ATTEMPTS = 3
+_FETCH_BACKOFF_SECONDS = (3, 6)
+
+
 def _fetch(url: str) -> bytes:
     request = Request(url, headers={"User-Agent": "Dawnstrike/1 core-universe refresh"})
-    try:
-        with urlopen(request, timeout=30) as response:  # nosec B310 - fixed HTTPS roots below
-            if response.status != 200:
-                raise RuntimeError(f"source returned HTTP {response.status}")
-            payload = response.read(MAX_DOWNLOAD_BYTES + 1)
-    except (OSError, URLError) as exc:
-        raise RuntimeError(f"source download failed: {exc}") from exc
-    if len(payload) > MAX_DOWNLOAD_BYTES:
-        raise RuntimeError("source download exceeded bounded size")
-    return payload
+    last_error: Exception | None = None
+    for attempt in range(_FETCH_ATTEMPTS):
+        try:
+            with urlopen(request, timeout=30) as response:  # nosec B310 - fixed HTTPS roots below
+                if response.status != 200:
+                    # Not transient: the source answered, and answered wrongly.
+                    raise RuntimeError(f"source returned HTTP {response.status}")
+                payload = response.read(MAX_DOWNLOAD_BYTES + 1)
+        except (OSError, URLError) as exc:
+            last_error = exc
+            if attempt < _FETCH_ATTEMPTS - 1:
+                time.sleep(_FETCH_BACKOFF_SECONDS[attempt])
+                continue
+            raise RuntimeError(
+                f"source download failed after {_FETCH_ATTEMPTS} attempts: {exc}"
+            ) from exc
+        if len(payload) > MAX_DOWNLOAD_BYTES:
+            raise RuntimeError("source download exceeded bounded size")
+        return payload
+    # Unreachable: the loop either returns or raises.
+    raise RuntimeError(f"source download failed: {last_error}")
 
 
 def _read_json(path: Path) -> dict[str, object]:
@@ -769,7 +826,13 @@ def _ndx_manifest(
         "effective_date": market_date,
         "reconstitution_id": root["reconstitution_id"],
         "index_name": "Nasdaq-100",
-        "expected_count": 102,
+        # Derived from the attested set rather than a literal.  The export's row
+        # count moves with index events - KHC's removal on 2026-09-14 took it
+        # from 102 to 101 - and a hardcoded expectation turns that into a
+        # DATA_UNAVAILABLE core universe.  The governed band and the exact
+        # structural attestations in _parse_nasdaq_sod_weightings_xlsx_with_
+        # attestation are what refuse a malformed export.
+        "expected_count": len(records),
         "completeness_verdict": "COMPLETE",
         "members": records,
         "canonical_zip_member_names": attestation["member_names"],
@@ -1572,15 +1635,17 @@ def _refresh_locked(
             expected="file",
         )
     payload = ndx_artifact.read_bytes() if ndx_artifact else _fetch(ndx_url)
-    spy_source_id = str(proxy_children[0].get("source_id") or "").strip()
-    if not spy_source_id:
-        raise RuntimeError("SPY proxy source_id missing")
-    spy_url = str(proxy_children[0].get("source_uri") or "").strip()
+    # The prior generation's manifest (``proxy_children[0]``) is required
+    # above as proof a governed SPY tracker lineage already exists, but its
+    # named source_id is historical evidence, not a live selector: a stale
+    # pointer must never keep pinning today's refresh to an old root once a
+    # newer, committed root has been added.  The trust root to attest against
+    # is always the current one selected from _TRUSTED_SOURCE_ROOTS itself.
+    spy_source_id = _current_spy_source_id(market_date)
+    spy_root = _TRUSTED_SOURCE_ROOTS[spy_source_id]
+    spy_url = str(spy_root.get("source_uri") or "").strip()
     if not spy_url:
-        root = _TRUSTED_SOURCE_ROOTS.get(spy_source_id)
-        spy_url = str(root.get("source_uri") or "") if root else ""
-    if not spy_url:
-        raise RuntimeError("SPY proxy source_uri missing")
+        raise RuntimeError("SPY trust root source_uri missing")
     if spy_artifact is not None:
         spy_artifact = _assert_path_type(
             spy_artifact,

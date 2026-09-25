@@ -117,6 +117,45 @@ _NDX_CANONICAL_MEMBER_SET_HASH_SHA256 = (
     "c5e8bb1294642e0812f8a8d20f8c015548d41c64bfc6bef0aa0187994828a0ed"
 )
 
+# 2026-09-15 release root.  Kraft Heinz moved its primary listing from Nasdaq to
+# the NYSE with NYSE trading from 2026-09-14; removal from the Nasdaq-100 is
+# automatic on an exchange transfer, and no same-day replacement was added, so
+# the export went from 102 rows to 101.  The Aug-27 root correctly refused the
+# changed membership, which is what a governed root is for - accepting it
+# requires this new root rather than a relaxed check.
+#
+# Evidence that this is an index event and not a changed or substituted source:
+# eight of the ten decompressed members are byte-identical to the Aug-27
+# workbook.  Only xl/sharedStrings.xml and xl/worksheets/sheet1.xml differ, and
+# those are exactly the two members that carry the ticker list and cell values.
+# The static member hashes are therefore reused below rather than restated.
+NASDAQ_NDX_SOD_2026_09_15_URL = NASDAQ_NDX_SOD_URL_TEMPLATE.format(
+    month="09", day="15", year="2026"
+)
+_NDX_2026_09_15_CANONICAL_ZIP_MEMBER_HASHES = {
+    **_NDX_CANONICAL_STATIC_MEMBER_HASHES,
+    # pragma: allowlist nextline secret - deterministic trust-root hash
+    "docProps/core.xml": "79af568221e1a17b8e59f618591359eb00991d86542a1784e2cd7700ee223d1c",
+    # pragma: allowlist nextline secret - deterministic trust-root hash
+    "docProps/custom.xml": "18d57b34d4d3e2b37bc15406cd59124d2b461d905fe0775466e079611297c77b",
+    # pragma: allowlist nextline secret - deterministic trust-root hash
+    "xl/sharedStrings.xml": "9d1b1babceab5baeaf12b958827b1ad928fd80bcf0c9d08db0ec35ada14c9141",
+    # pragma: allowlist nextline secret - deterministic trust-root hash
+    "xl/worksheets/sheet1.xml": "fee51d0c1b85b5aedc33e658eab86b02a7cd53228830dfb530f2f61a559e24c2",
+}
+_NDX_2026_09_15_CANONICAL_ZIP_CONTENT_DIGEST_SHA256 = (
+    # pragma: allowlist nextline secret - deterministic trust-root hash
+    "b62b2bd42998f18925ce798fa7e9b0b9bde238ceee4128f0ea360a79fe460ad4"
+)
+_NDX_2026_09_15_CANONICAL_MEMBER_SET_HASH_SHA256 = (
+    # pragma: allowlist nextline secret - deterministic trust-root hash
+    "6d2e2362cb30d67f31e778da3f519aee1a85b05b2c345ec23886a6430fac0b9d"
+)
+_NDX_2026_09_15_CANONICAL_SYMBOL_SET_HASH_SHA256 = (
+    # pragma: allowlist nextline secret - deterministic trust-root hash
+    "1fc51855f0ababa944c0333c2d01185c8445edfab011fb5cebf2dc4cfa93cc80"
+)
+
 # State Street changes the daily holdings date and (usually) weights while
 # retaining this workbook package shape.  The proxy trust root therefore pins
 # the package structure and the canonical ticker set, rather than volatile ZIP
@@ -211,6 +250,39 @@ _TRUSTED_SOURCE_ROOTS: dict[str, dict[str, Any]] = {
         ),
         "source_uri": STATE_STREET_SPY_HOLDINGS_URL,
     },
+    # The Aug-24 root above is retained for historical research only.  This is
+    # the current release root: same source and transformer, same workbook
+    # structure, new membership after the routine 2026-09 rebalance (ADDED:
+    # BE, ILMN, P; REMOVED: BLDR, TAP, TTD; count held at 503).  It is a
+    # separate identity and effective date, as a source release must be.
+    "state-street-spy-holdings-proxy-2026-09-22": {
+        "index": "S&P 500",
+        "effective_date": "2026-09-21",
+        # Daily downloads change their raw bytes and embedded as-of date.  The
+        # source is accepted only after the strict package/schema and canonical
+        # ticker-set checks below; raw ZIP bytes are retained in each active
+        # generation for audit but are not a reusable trust root.
+        "raw_artifact_hashes": (),
+        "canonical_zip_member_names": _SPY_CANONICAL_ZIP_MEMBER_NAMES,
+        "canonical_static_member_hashes": _SPY_CANONICAL_STATIC_MEMBER_HASHES,
+        "canonical_symbol_set_hash_sha256": (
+            # pragma: allowlist nextline secret - deterministic trust-root hash
+            "d80deb8af1de5b17af7db50a5b634d0903585642f4c426db660767fe5a867e7e"
+        ),
+        "allow_future_same_semantic_set_dates": True,
+        "maximum_source_age_days": 4,
+        "transformation_id": "state-street-spy-holdings-parser-v1",
+        "lineage_builder_id": "state-street-spy-holdings-parser-v1",
+        "lineage_transformation_id": "exclude-cash-and-contra-holdings-v1",
+        "lineage_schema_version": "dawnstrike.core_universe_lineage.v1",
+        "reconstitution_id": "spy-holdings-2026-09-22",
+        "membership_authority": "tracker_holdings_proxy",
+        "official_index_authority": False,
+        "source_scope": (
+            "SPY tracker holdings used as an explicitly labeled S&P 500 membership proxy"
+        ),
+        "source_uri": STATE_STREET_SPY_HOLDINGS_URL,
+    },
     "nasdaq-ndx-point-in-time-2026-07-07": {
         "index": "Nasdaq-100",
         "effective_date": "2026-07-07",
@@ -266,6 +338,43 @@ _TRUSTED_SOURCE_ROOTS: dict[str, dict[str, Any]] = {
         "source_scope": "Official Nasdaq-100 SOD Weightings export for 2026-08-27",
         "source_uri": NASDAQ_NDX_SOD_2026_08_27_URL,
     },
+    # The Aug-27 root above is retained for historical research.  This is the
+    # current release root: same source, same transformer, same workbook
+    # structure, new membership after Kraft Heinz's 2026-09-14 exchange
+    # transfer.  It is a separate identity and effective date, as a source
+    # release must be.
+    "nasdaq-ndx-point-in-time-2026-09-15": {
+        "index": "Nasdaq-100",
+        "effective_date": "2026-09-15",
+        # As above: the raw ZIP SHA is not a stable trust root, because archive
+        # metadata changes between otherwise identical official downloads.
+        "raw_artifact_hashes": (),
+        "raw_artifact_byte_counts": (8391,),
+        "canonical_zip_member_names": _NDX_CANONICAL_ZIP_MEMBER_NAMES,
+        "canonical_zip_member_hashes": _NDX_2026_09_15_CANONICAL_ZIP_MEMBER_HASHES,
+        "canonical_static_member_hashes": _NDX_CANONICAL_STATIC_MEMBER_HASHES,
+        "canonical_content_digest_sha256": (
+            _NDX_2026_09_15_CANONICAL_ZIP_CONTENT_DIGEST_SHA256
+        ),
+        "canonical_member_set_hash_sha256": (
+            _NDX_2026_09_15_CANONICAL_MEMBER_SET_HASH_SHA256
+        ),
+        "allow_future_same_semantic_set_dates": True,
+        "source_uri_template": NASDAQ_NDX_SOD_URL_TEMPLATE,
+        "source_scope_template": "Official Nasdaq-100 SOD Weightings export for {market_date}",
+        "canonical_symbol_set_hash_sha256": (
+            _NDX_2026_09_15_CANONICAL_SYMBOL_SET_HASH_SHA256
+        ),
+        "transformation_id": "nasdaq-ndx-sod-weightings-parser-v1",
+        "lineage_builder_id": "nasdaq-ndx-sod-weightings-parser-v1",
+        "lineage_transformation_id": "official-sod-weightings-export-v1",
+        "lineage_schema_version": "dawnstrike.core_universe_lineage.v1",
+        "reconstitution_id": "ndx-sod-2026-09-15",
+        "membership_authority": "official_index_source",
+        "official_index_authority": True,
+        "source_scope": "Official Nasdaq-100 SOD Weightings export for 2026-09-15",
+        "source_uri": NASDAQ_NDX_SOD_2026_09_15_URL,
+    },
 }
 
 
@@ -307,6 +416,12 @@ def build_core_universe_contract(
     if (market_date or effective_date) and requested_date is None:
         errors.append("invalid_market_date")
     members: dict[str, dict[str, Any]] = {}
+    # Tracks, per merged symbol, whether ANY of its index memberships is
+    # open-ended (valid_to falsy).  Openness must dominate: once true for a
+    # symbol it stays true, so an open membership in one index can never be
+    # silently closed off by merging in a dated membership from another
+    # index.  See the valid_to merge below.
+    member_valid_to_open: dict[str, bool] = {}
     per_index: dict[str, set[str]] = {index: set() for index in CORE_INDEXES}
     expected: dict[str, int | None] = {index: None for index in CORE_INDEXES}
     expected_conflicts: set[str] = set()
@@ -586,10 +701,44 @@ def build_core_universe_contract(
             row["sources"] = sorted(
                 set(row["sources"]) | {value for value in (source_id, source_uri) if value}
             )
-            row["valid_from"] = max(
-                str(row.get("valid_from") or ""), str(item.get("valid_from") or "")
+            item_valid_from = item.get("valid_from")
+            item_valid_to = item.get("valid_to")
+            # `valid_from`/`valid_to` are per-(index, symbol) facts, not
+            # per-symbol facts: the same symbol can belong to two indexes
+            # with two different, equally true, effective windows.
+            # `index_validity` preserves each index's own window
+            # unambiguously and is the ONLY field hashing may read.
+            index_validity = row.setdefault("index_validity", {})
+            index_validity[item["index"]] = {
+                "valid_from": item_valid_from,
+                "valid_to": item_valid_to,
+            }
+            # The collapsed top-level valid_from/valid_to below are kept
+            # only for backward-compatible display/consumers that are not
+            # index-aware; they are NEVER used for hashing.  They are
+            # derived unambiguously as the union window across this
+            # symbol's memberships: valid_from is the earliest start, and
+            # valid_to is None (open) if ANY membership is open-ended,
+            # otherwise the latest end.  This guarantees an open-ended
+            # membership can never be truncated by merging in a dated one.
+            prior_valid_from = row.get("valid_from")
+            row["valid_from"] = (
+                str(item_valid_from)
+                if prior_valid_from is None
+                else min(str(prior_valid_from), str(item_valid_from))
             )
-            row["valid_to"] = max(str(row.get("valid_to") or ""), str(item.get("valid_to") or ""))
+            member_valid_to_open[symbol] = member_valid_to_open.get(symbol, False) or (
+                not item_valid_to
+            )
+            if member_valid_to_open[symbol]:
+                row["valid_to"] = None
+            else:
+                prior_valid_to = row.get("valid_to")
+                row["valid_to"] = (
+                    str(item_valid_to)
+                    if prior_valid_to is None
+                    else max(str(prior_valid_to), str(item_valid_to))
+                )
             if symbol in per_index[item["index"]]:
                 errors.append(f"duplicate_member_global:{item['index']}:{symbol}")
             per_index[item["index"]].add(symbol)
@@ -753,8 +902,15 @@ def build_core_universe_contract(
                 "provider_symbol": row.get("provider_symbol"),
                 "asset_class": row.get("asset_class"),
                 "index": index,
-                "valid_from": row.get("valid_from"),
-                "valid_to": row.get("valid_to"),
+                # Hash the per-index validity fact, never the collapsed
+                # union window: two indexes can legitimately disagree on
+                # this symbol's effective dates.
+                "valid_from": (row.get("index_validity") or {})
+                .get(index, {})
+                .get("valid_from", row.get("valid_from")),
+                "valid_to": (row.get("index_validity") or {})
+                .get(index, {})
+                .get("valid_to", row.get("valid_to")),
             }
             for row in contract["members"]
             for index in row["index_memberships"]
@@ -3235,6 +3391,26 @@ def _canonical_zip_content_digest(member_hashes: dict[str, str]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+# The Nasdaq-100 holds exactly 100 companies, but the SOD export lists one row
+# per security, so companies with a second listed share class add rows.  That
+# made the row count 102 for a long stretch, and the count was asserted as the
+# literal 102.
+#
+# On 2026-09-14 Kraft Heinz (KHC) left the index with no same-day replacement
+# and the export became 101 rows.  The literal rejected the whole workbook, so
+# the core universe refresh returned DATA_UNAVAILABLE and the S&P 500 and
+# Nasdaq-100 lanes went dark - for a routine index event, not a data defect.
+#
+# A band keeps the check meaningful (a truncated or duplicated export is still
+# refused) without re-breaking on every reconstitution.  The floor allows a
+# removal that has not yet been replaced; the ceiling allows several dual-class
+# constituents.  The real anti-tamper controls are unchanged and remain exact:
+# the canonical zip member names, the static member hashes, and the uniqueness
+# requirement below.
+NDX_MIN_MEMBER_ROWS = 99
+NDX_MAX_MEMBER_ROWS = 105
+
+
 def _parse_nasdaq_sod_weightings_xlsx_with_attestation(
     payload: bytes,
     *,
@@ -3327,8 +3503,13 @@ def _parse_nasdaq_sod_weightings_xlsx_with_attestation(
         if number > row_number
     ):
         raise ValueError("Nasdaq SOD rows continue after member block")
-    if len(symbols) != 102 or len(set(symbols)) != len(symbols):
-        raise ValueError("Nasdaq SOD membership count or uniqueness invalid")
+    if not NDX_MIN_MEMBER_ROWS <= len(symbols) <= NDX_MAX_MEMBER_ROWS:
+        raise ValueError(
+            "Nasdaq SOD membership count outside the governed band: "
+            f"{len(symbols)} not in [{NDX_MIN_MEMBER_ROWS}, {NDX_MAX_MEMBER_ROWS}]"
+        )
+    if len(set(symbols)) != len(symbols):
+        raise ValueError("Nasdaq SOD membership uniqueness invalid")
     attestation["member_set_hash_sha256"] = _canonical_member_hash(
         [
             {
@@ -3382,8 +3563,13 @@ def _replay_nasdaq_reconstitution(payloads: list[bytes]) -> tuple[list[str], str
         if notice_date <= effective:
             raise ValueError("Nasdaq notice effective dates are not increasing")
         effective = notice_date
-    if len(symbols) != 102 or len(set(symbols)) != len(symbols):
-        raise ValueError("Nasdaq replay membership count or uniqueness invalid")
+    if not NDX_MIN_MEMBER_ROWS <= len(symbols) <= NDX_MAX_MEMBER_ROWS:
+        raise ValueError(
+            "Nasdaq replay membership count outside the governed band: "
+            f"{len(symbols)} not in [{NDX_MIN_MEMBER_ROWS}, {NDX_MAX_MEMBER_ROWS}]"
+        )
+    if len(set(symbols)) != len(symbols):
+        raise ValueError("Nasdaq replay membership uniqueness invalid")
     return symbols, effective
 
 

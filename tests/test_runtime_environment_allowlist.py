@@ -30,7 +30,26 @@ LOADER = ROOT / "scripts" / "import_dawnstrike_environment.ps1"
 REQUIRED_FLAGS = (
     "DAWNSTRIKE_BOOTSTRAP_PAPER_MODE",
     "DAWNSTRIKE_ALPHAOPS_LIQUID_UNIVERSE",
+    # Alpaca PAPER execution. Without these the adapter deploys but can never
+    # be switched on, which is the failure mode this file exists to prevent.
+    "DAWNSTRIKE_PAPER_EXECUTION_ENABLED",
+    "DAWNSTRIKE_PAPER_ENTRIES_ENABLED",
+    "DAWNSTRIKE_PAPER_KILL_SWITCH",
+    "DAWNSTRIKE_PAPER_KILL_SWITCH_ENGAGED",
+    "DAWNSTRIKE_PAPER_RISK_PCT",
+    "DAWNSTRIKE_PAPER_MAX_POSITION_PCT",
+    "DAWNSTRIKE_PAPER_MAX_CONCURRENT",
+    "DAWNSTRIKE_PAPER_MAX_ENTRIES_PER_DAY",
+    "DAWNSTRIKE_PAPER_DAILY_LOSS_LIMIT_PCT",
+    "DAWNSTRIKE_PAPER_MAX_STALENESS_SECONDS",
 )
+
+
+def test_no_live_trading_key_is_allowlisted() -> None:
+    """The loader must not be able to hand the process a live-trading switch."""
+
+    forbidden = {"ALPACA_LIVE", "DAWNSTRIKE_LIVE_TRADING_ENABLED", "ALPACA_LIVE_API_KEY_ID"}
+    assert not (forbidden & _allowlist())
 
 
 def _allowlist() -> set[str]:
