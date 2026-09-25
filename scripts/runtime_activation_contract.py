@@ -803,13 +803,15 @@ def inspect_state(db_path: str | Path) -> dict[str, Any]:
     }
 
 
-def seal_receipt(payload: Mapping[str, Any], output_path: str | Path) -> dict[str, Any]:
+def seal_receipt(
+    payload: Mapping[str, Any], output_path: str | Path, *, replace_existing: bool = False
+) -> dict[str, Any]:
     """Validate and atomically write one activation or rollback receipt."""
 
     sealed = dict(payload)
     sealed["receipt_sha256"] = self_hash(sealed, "receipt_sha256")
     validate_receipt(sealed)
-    _atomic_write(Path(output_path), sealed)
+    _atomic_write(Path(output_path), sealed, replace_existing=replace_existing)
     return sealed
 
 
@@ -914,7 +916,7 @@ def validate_receipt(payload: Mapping[str, Any]) -> dict[str, Any]:
     prepared_at = _parse_utc(payload.get("prepared_at_utc"))
     completed_at = payload.get("completed_at_utc")
     if schema == ACTIVATION_SCHEMA:
-        if payload.get("status") not in {"PREPARED", "COMPLETE"}:
+        if payload.get("status") not in {"PREPARED", "READY", "COMPLETE"}:
             raise ActivationContractError("activation receipt status is invalid")
         if payload.get("swap_contract") != "same_volume_two_rename_with_immediate_restore":
             raise ActivationContractError("activation swap contract is invalid")
@@ -926,10 +928,10 @@ def validate_receipt(payload: Mapping[str, Any]) -> dict[str, Any]:
             raise ActivationContractError("activation rollback checkout name is invalid")
         if payload.get("rollback_bundle_name") != "previous-runtime.bundle":
             raise ActivationContractError("activation rollback bundle name is invalid")
-        if payload.get("status") == "PREPARED" and completed_at is not None:
+        if payload.get("status") in {"PREPARED", "READY"} and completed_at is not None:
             raise ActivationContractError("prepared activation receipt has a completion time")
         if (
-            payload.get("status") == "PREPARED"
+            payload.get("status") in {"PREPARED", "READY"}
             and payload.get("task_enablement_restored") is not False
         ):
             raise ActivationContractError("prepared activation receipt has invalid task state")
@@ -1239,12 +1241,14 @@ def _load_object(path: str | Path) -> dict[str, Any]:
     return value
 
 
-def _atomic_write(path: Path, payload: Mapping[str, Any]) -> None:
+def _atomic_write(
+    path: Path, payload: Mapping[str, Any], *, replace_existing: bool = False
+) -> None:
     path = _assert_no_reparse_components(path)
     _assert_no_reparse_components(path.parent)
     path.parent.mkdir(parents=True, exist_ok=True)
     _assert_no_reparse_components(path.parent)
-    if os.path.lexists(path):
+    if os.path.lexists(path) and not replace_existing:
         raise ActivationContractError("activation output already exists")
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
@@ -1258,7 +1262,10 @@ def _atomic_write(path: Path, payload: Mapping[str, Any]) -> None:
             os.fsync(handle.fileno())
         _assert_no_reparse_components(path.parent)
         _assert_no_reparse_components(path)
-        os.link(temporary, path)
+        if replace_existing:
+            os.replace(temporary, path)
+        else:
+            os.link(temporary, path)
         _assert_no_reparse_components(path)
     finally:
         temporary.unlink(missing_ok=True)
@@ -1526,10 +1533,13 @@ def main(argv: list[str] | None = None) -> int:
     seal = subparsers.add_parser("seal-receipt")
     seal.add_argument("--input", required=True)
     seal.add_argument("--output", required=True)
+    seal.add_argument("--replace-existing", action="store_true")
 
     verify = subparsers.add_parser("verify-receipt")
     verify.add_argument("--receipt", required=True)
-    verify.add_argument("--expected-status", choices=("PREPARED", "COMPLETE", "ROLLED_BACK"))
+    verify.add_argument(
+        "--expected-status", choices=("PREPARED", "READY", "COMPLETE", "ROLLED_BACK")
+    )
 
     declaration = subparsers.add_parser("validate-state-preparation-declaration")
     declaration.add_argument("--input", required=True)
@@ -1559,7 +1569,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "inspect-state":
             result = inspect_state(args.db_path)
         elif args.command == "seal-receipt":
-            result = seal_receipt(_load_object(args.input), args.output)
+            result = seal_receipt(
+                _load_object(args.input), args.output, replace_existing=args.replace_existing
+            )
         elif args.command == "validate-state-preparation-declaration":
             result = validate_state_preparation_declaration(
                 _load_object(args.input), require_interpreter_identity=True
