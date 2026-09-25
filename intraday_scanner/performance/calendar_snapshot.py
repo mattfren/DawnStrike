@@ -333,6 +333,20 @@ def _calendar_record(
         _calendar_detail(detail, selection_context.get(str(detail.get("signal_id") or "")))
         for detail in detail_rows[:20]
     ]
+    observed_gross_return = (
+        numeric_gross
+        if numeric_gross is not None
+        else _observed_gross_return_pct(detail_rows)
+    )
+    observed_gross_basis = (
+        "canonical_gross_return"
+        if numeric_gross is not None
+        else (
+            "deployed_capital_gross_pnl"
+            if observed_gross_return is not None
+            else None
+        )
+    )
     missing_reasons = _missing_reasons(row, status)
     return {
         "performance_id": row.get("performance_id"),
@@ -349,6 +363,8 @@ def _calendar_record(
         "eligible_for_return": eligible,
         "observed_zero": explicit_observed_zero,
         "gross_return_pct": numeric_gross if eligible else None,
+        "observed_gross_return_pct": observed_gross_return,
+        "observed_gross_return_basis": observed_gross_basis,
         "net_return_pct": numeric_return if eligible else None,
         "benchmark_return_pct": benchmark if eligible else None,
         "excess_return_pct": excess if eligible else None,
@@ -396,6 +412,7 @@ def _calendar_detail(
         "quantity": safe_float(row.get("quantity")),
         "notional_cents": row.get("notional_cents"),
         "gross_pnl_cents": row.get("gross_pnl_cents"),
+        "gross_return_pct": safe_float(row.get("gross_return_pct")),
         "fees_cents": row.get("fees_cents"),
         "slippage_cents": row.get("slippage_cents"),
         "net_pnl_cents": row.get("net_pnl_cents"),
@@ -411,6 +428,26 @@ def _calendar_detail(
         "block_or_veto_reasons": list(context.get("block_or_veto_reasons") or []),
         "quarantine_reason": row.get("quarantine_reason"),
     }
+
+
+def _observed_gross_return_pct(rows: Iterable[dict[str, Any]]) -> float | None:
+    """Return sourced gross P&L over deployed capital without implying a net account return."""
+
+    realized = [row for row in rows if str(row.get("record_status") or "") == "realized"]
+    if not realized:
+        return None
+    gross_pnl = 0.0
+    deployed_capital = 0.0
+    for row in realized:
+        row_gross = safe_float(row.get("gross_pnl_cents"))
+        row_notional = safe_float(row.get("notional_cents"))
+        if row_gross is None or row_notional is None or row_notional <= 0:
+            return None
+        gross_pnl += row_gross
+        deployed_capital += row_notional
+    if deployed_capital <= 0:
+        return None
+    return round((gross_pnl / deployed_capital) * 100.0, 4)
 
 
 def _monthly_aggregates(

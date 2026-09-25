@@ -69,6 +69,8 @@ document.querySelectorAll("[data-table][data-direction]").forEach((button) => {
 
 document.getElementById("calendar-previous-month")?.addEventListener("click", () => changeCalendarMonth(-1));
 document.getElementById("calendar-next-month")?.addEventListener("click", () => changeCalendarMonth(1));
+document.getElementById("calendar-show-observed")?.addEventListener("click", () => showLatestObservedCalendar());
+document.getElementById("journal-status-filter")?.addEventListener("change", () => renderJournal());
 [
   ["calendar-cohort-filter", "cohort"],
   ["calendar-strategy-filter", "strategy_id"],
@@ -140,7 +142,7 @@ async function init() {
     initializeCalendarFilters();
     render();
     const requestedView = window.location.hash.slice(1);
-    if (["overview", "calendar", "performance", "research", "scenarios", "system"].includes(requestedView)) showView(requestedView);
+    if (["overview", "calendar", "journal", "performance", "research", "scenarios", "system"].includes(requestedView)) showView(requestedView);
   } catch (error) {
     document.getElementById("header-status").textContent = "Snapshot unavailable";
     document.getElementById("app-alert").textContent = "The public snapshot could not be loaded. No return is being shown.";
@@ -178,6 +180,7 @@ function render() {
   document.getElementById("kpi-context").textContent = latest ? returnContext(latest) : "Official paper context pending: cohort, period, denominator, cost treatment, coverage, and as-of time will appear with the latest record.";
   renderOverview(official, latest);
   renderPerformance(daily);
+  renderJournal();
   renderResearch(rows);
   renderToday(rows, latest);
   renderLedger(rows, latest);
@@ -596,6 +599,7 @@ function renderCalendar() {
   const calendar = state.calendar || {};
   const allDays = Array.isArray(calendar.days) ? calendar.days : [];
   populateCalendarFilters();
+  renderCalendarObservedShortcut();
   const label = document.getElementById("calendar-month-label");
   const grid = document.getElementById("calendar-grid");
   if (!allDays.length || !state.calendarMonth) {
@@ -621,15 +625,21 @@ function renderCalendar() {
     const matches = filteredCalendarRecords(day);
     const record = matches.length === 1 ? matches[0] : null;
     const status = calendarCellStatus(day, matches);
-    const value = record?.eligible_for_return ? numberOrNull(record.net_return_pct) : null;
+    const displayReturn = calendarDisplayReturn(record);
+    const value = displayReturn.value;
     const selected = dateKey === state.calendarSelectedDate;
     const intensity = value == null ? 0 : Math.min(Math.abs(value) / 3, 1);
     const returnText = value == null ? "—" : formatPercentText(value);
-    const statusText = matches.length > 1 ? "Refine filters" : calendarStatusLabel(status);
-    const aria = `${dateKey}. ${statusText}. ${value == null ? "Return not reported" : `Net return ${returnText}`}`;
-    cells.push(`<button type="button" class="calendar-cell status-${String(status).toLowerCase().replaceAll("_", "-")} ${value > 0 ? "positive" : value < 0 ? "negative" : ""} ${selected ? "selected" : ""}" data-calendar-date="${dateKey}" style="--heat:${intensity.toFixed(3)}" aria-label="${escapeHtml(aria)}" aria-pressed="${selected}">
+    const cellReturnText = displayReturn.basis === "gross_observed" ? `Gross ${returnText}` : returnText;
+    const statusText = matches.length > 1
+      ? "Refine filters"
+      : displayReturn.basis === "gross_observed"
+        ? `${calendarStatusLabel(status)} · gross observed`
+        : calendarStatusLabel(status);
+    const aria = `${dateKey}. ${statusText}. ${value == null ? "Return not reported" : `${displayReturn.label} ${returnText}`}`;
+    cells.push(`<button type="button" class="calendar-cell status-${String(status).toLowerCase().replaceAll("_", "-")} ${displayReturn.basis === "gross_observed" ? "gross-observed" : ""} ${value > 0 ? "positive" : value < 0 ? "negative" : ""} ${selected ? "selected" : ""}" data-calendar-date="${dateKey}" style="--heat:${intensity.toFixed(3)}" aria-label="${escapeHtml(aria)}" aria-pressed="${selected}">
       <span class="calendar-date-number">${Number(dateKey.slice(-2))}</span>
-      <strong>${escapeHtml(returnText)}</strong>
+      <strong>${escapeHtml(cellReturnText)}</strong>
       <small>${escapeHtml(statusText)}</small>
       <i aria-hidden="true"></i>
     </button>`);
@@ -661,6 +671,108 @@ function renderCalendar() {
 function filteredCalendarRecords(day) {
   if (!day || !Array.isArray(day.records)) return [];
   return day.records.filter((record) => Object.entries(state.calendarFilters).every(([key, value]) => !value || String(record[key] || "") === value));
+}
+
+function journalRows() {
+  const rows = Array.isArray(state.data?.rows) ? state.data.rows : [];
+  return rows.filter((row) => String(row.cohort || "") === "official_forward_paper");
+}
+
+function journalState(row) {
+  const status = String(row.record_status || "").toLowerCase();
+  if (["realized", "closed", "complete"].includes(status)) return "realized";
+  if (["open", "pending", "unrealized"].includes(status)) return "open";
+  return "missing";
+}
+
+function formatPricePair(row) {
+  const entry = numberOrNull(row.entry_price);
+  const exit = numberOrNull(row.exit_price);
+  if (entry == null && exit == null) return "Not reported";
+  return `${entry == null ? "—" : `$${entry.toFixed(2)}`} / ${exit == null ? "—" : `$${exit.toFixed(2)}`}`;
+}
+
+function renderJournal() {
+  if (!state.data || !Array.isArray(state.data.rows)) {
+    ["journal-closed-count", "journal-open-count", "journal-missing-count", "journal-realized-pnl"].forEach((id) => {
+      const node = document.getElementById(id);
+      if (node) node.textContent = "Not reported";
+    });
+    const body = document.getElementById("journal-table");
+    if (body) body.innerHTML = '<tr><td colspan="6">The published paper snapshot is unavailable. No trade count or P&amp;L is being inferred.</td></tr>';
+    return;
+  }
+  const rows = journalRows();
+  const filter = document.getElementById("journal-status-filter")?.value || "";
+  const classified = rows.map((row) => ({ row, state: journalState(row) }));
+  const visible = filter ? classified.filter((item) => item.state === filter) : classified;
+  const closed = classified.filter((item) => item.state === "realized");
+  const open = classified.filter((item) => item.state === "open");
+  const missing = classified.filter((item) => item.state === "missing");
+  const realizedNet = closed.map((item) => numberOrNull(item.row.net_pnl_cents)).filter((value) => value != null);
+  document.getElementById("journal-closed-count").textContent = String(closed.length);
+  document.getElementById("journal-open-count").textContent = String(open.length);
+  document.getElementById("journal-missing-count").textContent = String(missing.length);
+  document.getElementById("journal-realized-pnl").textContent = realizedNet.length === closed.length
+    ? formatCents(realizedNet.reduce((total, value) => total + value, 0))
+    : "Not reported";
+  const body = document.getElementById("journal-table");
+  const empty = document.getElementById("journal-empty-note");
+  if (!body || !empty) return;
+  empty.hidden = visible.length > 0;
+  body.innerHTML = visible.length ? visible.slice().sort((a, b) => String(b.row.market_date || "").localeCompare(String(a.row.market_date || ""))).map(({ row, state: rowState }) => {
+    const gross = formatPercentText(row.gross_return_pct);
+    const net = rowState === "realized" && row.cost_status === "complete" ? formatPercentText(row.return_pct) : "Not reported";
+    const evidence = row.quarantine_reason || (Array.isArray(row.source_refs) && row.source_refs.length ? `${row.source_refs.length} source reference${row.source_refs.length === 1 ? "" : "s"}` : "Source evidence not reported");
+    const stateLabel = rowState === "realized" ? "Closed" : rowState === "open" ? "Open / pending" : "Outcome needed";
+    return `<tr><td>${escapeHtml(row.market_date || "Not reported")}</td><td><strong>${escapeHtml(row.ticker || "Not reported")}</strong><br><small>${escapeHtml(row.strategy_id || "Strategy not reported")}</small></td><td><span class="status-chip">${escapeHtml(stateLabel)}</span></td><td>${escapeHtml(formatPricePair(row))}</td><td>Gross ${escapeHtml(gross)}<br><small>Net ${escapeHtml(net)}</small></td><td>${escapeHtml(evidence)}</td></tr>`;
+  }).join("") : '<tr><td colspan="6">No published paper trades match this filter. This is not a zero-trade claim.</td></tr>';
+}
+
+function calendarDisplayReturn(record) {
+  if (!record) return { value: null, basis: null, label: "Return not reported" };
+  const net = record.eligible_for_return ? numberOrNull(record.net_return_pct) : null;
+  if (net != null) return { value: net, basis: "net_after_costs", label: "Net return" };
+  const gross = numberOrNull(record.observed_gross_return_pct);
+  if (gross != null) return { value: gross, basis: "gross_observed", label: "Gross observed return" };
+  return { value: null, basis: null, label: "Return not reported" };
+}
+
+function observedGrossCalendarRecords() {
+  return calendarRecords()
+    .filter((record) => !record.eligible_for_return && numberOrNull(record.observed_gross_return_pct) != null)
+    .sort((a, b) => String(a.date || "").localeCompare(String(b.date || "")));
+}
+
+function renderCalendarObservedShortcut() {
+  const note = document.getElementById("calendar-observation-note");
+  const button = document.getElementById("calendar-show-observed");
+  if (!note || !button) return;
+  const records = observedGrossCalendarRecords();
+  const latest = records.at(-1);
+  if (!latest) {
+    note.textContent = "No sourced gross observation is available outside eligible net returns.";
+    button.hidden = true;
+    return;
+  }
+  note.textContent = `${records.length} sourced gross-observed paper day${records.length === 1 ? "" : "s"} are available. Latest: ${formatCalendarDate(latest.date)} ${formatPercentText(latest.observed_gross_return_pct)}. Net totals remain withheld where costs or account evidence are incomplete.`;
+  button.textContent = `Show ${records.length} observed result${records.length === 1 ? "" : "s"}`;
+  button.hidden = false;
+}
+
+function showLatestObservedCalendar() {
+  const latest = observedGrossCalendarRecords().at(-1);
+  if (!latest) return;
+  state.calendarFilters = {
+    cohort: latest.cohort || "",
+    strategy_id: latest.strategy_id || "",
+    strategy_version: latest.strategy_version || "",
+    execution_policy_version: latest.execution_policy_version || "",
+    account_id: latest.account_id || "",
+  };
+  state.calendarMonth = String(latest.date || "").slice(0, 7) || state.calendarMonth;
+  state.calendarSelectedDate = latest.date || null;
+  renderCalendar();
 }
 
 function calendarCellStatus(day, records) {
@@ -723,10 +835,13 @@ function renderCalendarDetail(day, records) {
   setStatus("calendar-detail-status", calendarStatusLabel(record.status), record.status);
   note.textContent = record.eligible_for_return
     ? `${record.return_basis === "account_equity_identity_after_external_flows" ? "Account return" : "Canonical return"} is eligible under ${record.execution_policy_version}.`
-    : "The return is withheld until the required outcome, account, and source evidence is complete.";
+    : record.observed_gross_return_pct != null
+      ? "A sourced gross result is shown, but the net return remains withheld until cost and account evidence is complete."
+      : "The return is withheld until the required outcome, account, and source evidence is complete.";
   metrics.innerHTML = detailRows([
     ["Net return", formatPercentText(record.net_return_pct), record.net_return_pct != null],
-    ["Gross observed", formatPercentText(record.gross_return_pct), record.gross_return_pct != null],
+    ["Gross observed", formatPercentText(record.observed_gross_return_pct), record.observed_gross_return_pct != null],
+    ["Gross basis", returnBasisLabel(record.observed_gross_return_basis), record.observed_gross_return_basis != null],
     ["Benchmark", formatPercentText(record.benchmark_return_pct), record.benchmark_return_pct != null],
     ["Excess", formatPercentText(record.excess_return_pct), record.excess_return_pct != null],
     ["Beginning equity", formatMoneyText(record.opening_equity_cents), record.opening_equity_cents != null],
@@ -744,6 +859,7 @@ function renderCalendarDetail(day, records) {
     <div><strong>${escapeHtml(detail.ticker || "Account")}</strong><span>${escapeHtml(detail.telegram_selection_tier || detail.record_status || "Not reported")}</span></div>
     <dl>
       <dt>Outcome</dt><dd>${escapeHtml(labelForStatus(detail.record_status))}</dd>
+      <dt>Gross observed</dt><dd>${formatPercentText(detail.gross_return_pct)}</dd>
       <dt>Net result</dt><dd>${formatPercentText(detail.net_return_pct)}</dd>
       <dt>Catalyst</dt><dd>${escapeHtml(detail.catalyst || "Not reported")}</dd>
       <dt>Source lineage</dt><dd>${Array.isArray(detail.source_lineage) && detail.source_lineage.length ? `${detail.source_lineage.length} reference${detail.source_lineage.length === 1 ? "" : "s"}` : "Not reported"}</dd>
@@ -906,7 +1022,7 @@ function returnContext(item) {
   return `Official paper · daily period ending ${item.market_date || "not reported"} · ${returnBasisLabel(item.return_basis)} · ${costStatusLabel(item.cost_status)} · ${denominator} · ${sample} observed/outcome row${sample === 1 ? "" : "s"} · ${coverage} · as of ${formatTimestamp(item.generated_at || item.calculated_at)}`;
 }
 function formatCents(value) { return `$${(Number(value) / 100).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}`; }
-function returnBasisLabel(value) { return ({ account_equity_identity_after_external_flows: "account equity change after explicit external flows", net_after_costs: "net after fees/slippage", gross_observed_or_missing: "gross observed; complete net result pending", gross_observed: "gross observed" }[value] || "return basis not reported"); }
+function returnBasisLabel(value) { return ({ account_equity_identity_after_external_flows: "account equity change after explicit external flows", net_after_costs: "net after fees/slippage", gross_observed_or_missing: "gross observed; complete net result pending", gross_observed: "gross observed", canonical_gross_return: "canonical gross return", deployed_capital_gross_pnl: "gross P&L divided by deployed capital" }[value] || "return basis not reported"); }
 function costStatusLabel(value) { return ({ complete: "fees/slippage complete", missing_cost_component: "fees/slippage incomplete", unknown: "cost treatment unknown" }[value] || "cost treatment not reported"); }
 function safetyLabel(value) { return value?.state === "verified" ? "Verified" : value?.state === "blocked" ? "Blocked" : "Unknown — not reported"; }
 function numberOrNull(value) { if (value == null || value === "") return null; const numeric = Number(value); return Number.isFinite(numeric) ? numeric : null; }

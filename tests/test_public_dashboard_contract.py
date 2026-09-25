@@ -1,4 +1,21 @@
+import json
+import shutil
+import subprocess
 from pathlib import Path
+
+
+def _javascript_function(source: str, name: str) -> str:
+    start = source.index(f"function {name}(")
+    opening_brace = source.index("{", start)
+    depth = 0
+    for index in range(opening_brace, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : index + 1]
+    raise AssertionError(f"JavaScript function is not balanced: {name}")
 
 
 def test_public_dashboard_has_five_section_information_architecture() -> None:
@@ -9,6 +26,20 @@ def test_public_dashboard_has_five_section_information_architecture() -> None:
     assert "No broker connection" in html
     assert 'id="safety-details"' in html
     assert "Market safety evidence" in html
+
+
+def test_public_dashboard_has_a_read_only_trade_journal() -> None:
+    html = Path("web/index.html").read_text(encoding="utf-8")
+    script = Path("web/assets/dawnstrike.js").read_text(encoding="utf-8")
+
+    assert '>Journal<' in html
+    assert 'id="view-journal"' in html
+    assert 'id="journal-status-filter"' in html
+    assert 'id="journal-table"' in html
+    assert "Paper only" in html
+    assert "function renderJournal()" in script
+    assert "official_forward_paper" in script
+    assert "No published paper trades match this filter" in script
 
 
 def test_public_dashboard_uses_command_center_visual_system() -> None:
@@ -70,10 +101,18 @@ def test_public_dashboard_calendar_is_filterable_and_null_safe() -> None:
         "calendar-account-filter",
         "calendar-detail-metrics",
         "calendar-detail-trades",
+        "calendar-observation-note",
+        "calendar-show-observed",
     ):
         assert f'id="{element_id}"' in html
     assert 'loadJson("/data/calendar.json")' in script
-    assert "record?.eligible_for_return" in script
+    assert "const net = record.eligible_for_return" in script
+    assert "calendarDisplayReturn(record)" in script
+    assert 'basis: "gross_observed"' in script
+    assert "showLatestObservedCalendar" in script
+    assert "Gross ${returnText}" in script
+    assert "Gross observed / net pending" in html
+    assert "gross P&L divided by deployed capital" in script
     assert "calendarCellStatus(day, matches)" in script
     assert 'records.length === 1' in script
     assert 'market_session_status === "closed" ? "UNAVAILABLE" : "MISSING"' in script
@@ -83,3 +122,57 @@ def test_public_dashboard_calendar_is_filterable_and_null_safe() -> None:
     assert ".calendar-workspace > * { min-width:0; }" in stylesheet
     assert ".calendar-trade-card p {" in stylesheet
     assert "overflow-wrap:anywhere;" in stylesheet
+
+
+def test_calendar_display_keeps_eligible_net_and_pending_gross_distinct() -> None:
+    node = shutil.which("node")
+    assert node is not None, "Node.js is required for the public Calendar display contract"
+    source = Path("web/assets/dawnstrike.js").read_text(encoding="utf-8")
+    helpers = "\n".join(
+        _javascript_function(source, name)
+        for name in ("numberOrNull", "calendarDisplayReturn")
+    )
+    probe = f"""
+{helpers}
+console.log(JSON.stringify({{
+  net: calendarDisplayReturn({{
+    eligible_for_return: true,
+    net_return_pct: 1.25,
+    observed_gross_return_pct: 1.5,
+  }}),
+  gross: calendarDisplayReturn({{
+    eligible_for_return: false,
+    net_return_pct: null,
+    observed_gross_return_pct: -2.5,
+  }}),
+  missing: calendarDisplayReturn({{
+    eligible_for_return: false,
+    net_return_pct: null,
+    observed_gross_return_pct: null,
+  }}),
+}}));
+"""
+
+    completed = subprocess.run(
+        [node, "-e", probe],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout)
+
+    assert result["net"] == {
+        "value": 1.25,
+        "basis": "net_after_costs",
+        "label": "Net return",
+    }
+    assert result["gross"] == {
+        "value": -2.5,
+        "basis": "gross_observed",
+        "label": "Gross observed return",
+    }
+    assert result["missing"] == {
+        "value": None,
+        "basis": None,
+        "label": "Return not reported",
+    }

@@ -22,6 +22,7 @@
       <nav class="primary-nav" aria-label="Primary navigation">
         <button class="nav-link is-active" data-view="overview" aria-controls="view-overview" aria-pressed="true">Overview</button>
         <button class="nav-link" data-view="calendar" aria-controls="view-calendar" aria-pressed="false">Calendar</button>
+        <button class="nav-link" data-view="journal" aria-controls="view-journal" aria-pressed="false">Journal</button>
         <button class="nav-link" data-view="performance" aria-controls="view-performance" aria-pressed="false">Performance</button>
         <button class="nav-link" data-view="research" aria-controls="view-research" aria-pressed="false">Research</button>
         <button class="nav-link" data-view="scenarios" aria-controls="view-scenarios" aria-pressed="false">Scenarios</button>
@@ -140,8 +141,13 @@
           <span><i class="legend-complete"></i>Complete</span>
           <span><i class="legend-no-trade"></i>No trade</span>
           <span><i class="legend-pending"></i>Pending / unrealized</span>
+          <span><i class="legend-gross"></i>Gross observed / net pending</span>
           <span><i class="legend-missing"></i>Missing</span>
           <span><i class="legend-unavailable"></i>Market closed / unavailable</span>
+        </div>
+        <div class="calendar-observation-strip" role="note">
+          <p id="calendar-observation-note">Checking for sourced gross observations…</p>
+          <button class="button button-secondary" id="calendar-show-observed" type="button" hidden>Show observed results</button>
         </div>
 
         <div class="calendar-workspace">
@@ -167,6 +173,21 @@
         <article class="panel"><div class="panel-heading"><div><h3>Daily record</h3><p class="muted">Net return is shown only when the cost inputs support it.</p></div><span class="muted" id="performance-updated"></span></div><div class="table-wrap"><table><caption class="sr-only">Daily Dawnstrike performance by evidence cohort</caption><thead><tr><th scope="col">Date</th><th scope="col">Evidence</th><th scope="col">Status</th><th scope="col">Gross observed</th><th scope="col">Net after costs</th><th scope="col">Against benchmark</th><th scope="col">Open / missing</th></tr></thead><tbody id="performance-table"><tr><td colspan="7">Loading evidence…</td></tr></tbody></table></div><div class="table-toolbar" role="group" aria-label="Daily record pagination"><p id="performance-page-status" class="muted" aria-live="polite">Loading rows…</p><div class="pager"><button class="pager-button" data-table="performance" data-direction="-1" disabled>Previous</button><button class="pager-button" data-table="performance" data-direction="1" disabled>Next</button></div></div></article>
         <div class="performance-grid"><article class="panel"><div class="panel-heading"><div><h3>Equity and benchmark path</h3><p class="muted">Only sourced daily observations are plotted; gaps remain visible.</p></div></div><div id="return-curve" class="return-curve" role="img" aria-label="Cumulative official paper and benchmark returns"></div></article><article class="panel"><div class="panel-heading"><div><h3>Trade ledger</h3><p class="muted">Realized, open, missing, and quarantined rows stay distinct.</p></div></div><div class="table-wrap"><table><caption class="sr-only">Official paper trade ledger</caption><thead><tr><th scope="col">Date</th><th scope="col">Ticker</th><th scope="col">State</th><th scope="col">Net P&amp;L</th><th scope="col">Source</th></tr></thead><tbody id="ledger-table"><tr><td colspan="5">Loading evidence…</td></tr></tbody></table></div></article></div>
         <article class="panel methodology"><p class="eyebrow">Methodology</p><h3>What is allowed to become a return</h3><div class="methodology-grid"><span>Price basis</span><strong>Source-bar or verified equity observation</strong><span>Costs</span><strong>Fees and slippage must be sourced or the net result is withheld</strong><span>Benchmark</span><strong>Same market date and registered benchmark policy</strong><span>Missing truth</span><strong>Excluded from realized totals, never converted to zero</strong></div></article>
+      </section>
+
+      <section id="view-journal" class="page-view" aria-labelledby="journal-title">
+        <div class="section-heading"><div><p class="eyebrow">Trade journal</p><h2 id="journal-title">Review every paper trade like it will matter later.</h2><p class="muted">This is a read-only rehearsal journal. It records published paper evidence only; it never connects to a broker or invents fills.</p></div><span class="section-pill">Paper only</span></div>
+        <div class="journal-summary-grid" aria-label="Trade journal summary">
+          <article class="calendar-summary-card"><span>Closed</span><strong id="journal-closed-count">Not reported</strong><small>Rows with a realized paper outcome</small></article>
+          <article class="calendar-summary-card"><span>Open / pending</span><strong id="journal-open-count">Not reported</strong><small>Never included in realized totals</small></article>
+          <article class="calendar-summary-card"><span>Outcome needed</span><strong id="journal-missing-count">Not reported</strong><small>Evidence is incomplete or quarantined</small></article>
+          <article class="calendar-summary-card"><span>Reviewed P&amp;L</span><strong id="journal-realized-pnl">Not reported</strong><small>Net only when costs are complete</small></article>
+        </div>
+        <article class="panel journal-panel">
+          <div class="panel-heading"><div><p class="eyebrow">Blotter</p><h3>Paper trade review queue</h3><p class="muted">Use the state filter to separate completed reviews from incomplete evidence before live capital is ever considered.</p></div><label class="journal-filter">State<select id="journal-status-filter"><option value="">All published rows</option><option value="realized">Closed</option><option value="open">Open / pending</option><option value="missing">Outcome needed</option></select></label></div>
+          <div class="table-wrap"><table><caption class="sr-only">Dawnstrike paper trade journal</caption><thead><tr><th scope="col">Date</th><th scope="col">Ticker</th><th scope="col">State</th><th scope="col">Entry / exit</th><th scope="col">Gross / net</th><th scope="col">Review evidence</th></tr></thead><tbody id="journal-table"><tr><td colspan="6">Loading journal evidence…</td></tr></tbody></table></div>
+          <p id="journal-empty-note" class="muted journal-empty-note" hidden>No published paper trades match this filter. This is not a zero-trade claim.</p>
+        </article>
       </section>
 
       <section id="view-research" class="page-view" aria-labelledby="research-title">

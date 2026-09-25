@@ -77,6 +77,42 @@ def test_calendar_keeps_pending_null_and_counts_it_in_denominator() -> None:
     assert monthly["net_return_pct"] == 0.0
 
 
+def test_calendar_exposes_sourced_gross_observation_without_promoting_net_return() -> None:
+    pending = _daily("2026-08-04", return_pct=None, status="PARTIAL")
+    pending["gross_pnl_cents"] = 250
+    pending["realized_trade_count"] = 1
+    performance = _performance([pending], as_of="2026-08-04")
+    performance["rows"] = [
+        {
+            "record_id": "paper-position:one",
+            "market_date": "2026-08-04",
+            "cohort": "official_forward_paper",
+            "strategy_id": ALPHAOPS_V5_STRATEGY_ID,
+            "strategy_version": ALPHAOPS_V5_STRATEGY_VERSION,
+            "execution_policy_version": ALPHAOPS_V5_POLICY_VERSION,
+            "record_status": "realized",
+            "ticker": "TEST",
+            "notional_cents": 10_000,
+            "gross_pnl_cents": 250,
+            "gross_return_pct": 2.5,
+            "return_pct": None,
+            "source_refs": ["sourced-fill"],
+        }
+    ]
+
+    payload = build_calendar_payload(performance, as_of_market_date="2026-08-04")
+
+    record = _record(payload, "2026-08-04")
+    assert record["status"] == "PENDING"
+    assert record["eligible_for_return"] is False
+    assert record["net_return_pct"] is None
+    assert record["gross_return_pct"] is None
+    assert record["observed_gross_return_pct"] == 2.5
+    assert record["observed_gross_return_basis"] == "deployed_capital_gross_pnl"
+    assert record["details"][0]["gross_return_pct"] == 2.5
+    assert _month(payload, "2026-08")["net_return_pct"] is None
+
+
 def test_calendar_closed_day_is_unavailable_and_never_observed() -> None:
     payload = build_calendar_payload(
         _performance([], as_of="2026-08-02"),
