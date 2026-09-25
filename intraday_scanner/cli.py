@@ -524,6 +524,29 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Exact full Git SHA used to build strategy receipts",
     )
 
+    paper_session_parser = subparsers.add_parser(
+        "paper-session",
+        help="Submit and manage Alpaca PAPER orders for gate-approved signals",
+    )
+    paper_session_parser.add_argument("--db-path", default="data/shadow_real.sqlite")
+    paper_session_parser.add_argument("--market-date", required=True)
+    paper_session_parser.add_argument(
+        "--store-path",
+        default="data/paper_execution.sqlite",
+        help="Execution ledger; deliberately separate from the strategy database",
+    )
+    paper_session_parser.add_argument("--receipt", default=None)
+    paper_session_parser.add_argument(
+        "--force-exit",
+        action="store_true",
+        help="Close every open paper position (end-of-session flatten)",
+    )
+    paper_session_parser.add_argument(
+        "--preflight-only",
+        action="store_true",
+        help="Verify paper connectivity and report, without submitting anything",
+    )
+
     alpha_monitor_parser = subparsers.add_parser(
         "alpha-monitor", help="Check latest AlphaOps signals against current prices"
     )
@@ -1419,6 +1442,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_alpha_morning(args)
         if args.command == "alpha-cycle":
             return _run_alpha_cycle(args)
+        if args.command == "paper-session":
+            return _run_paper_session(args)
         if args.command == "alpha-monitor":
             return _run_alpha_monitor(args)
         if args.command == "alpha-outcomes":
@@ -2004,6 +2029,61 @@ def _run_alpha_cycle(args: argparse.Namespace) -> int:
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
+
+
+def _run_paper_session(args: argparse.Namespace) -> int:
+    """Run the Alpaca PAPER execution slice for one market date.
+
+    Exit codes: 0 the session ran (trading or not), 1 preflight failed. A
+    zero-trade session is a success - the receipt says why.
+    """
+
+    from intraday_scanner.execution.paper_broker import (
+        LiveTradingRefused,
+        PaperBrokerClient,
+        PaperBrokerError,
+    )
+    from intraday_scanner.execution.paper_session import run_paper_session
+
+    if args.preflight_only:
+        # Deliberately touches no ledger: this must be safe to run at any time,
+        # including before any execution store exists.
+        try:
+            client = PaperBrokerClient()
+            account = client.assert_paper_account()
+            clock = client.get_clock()
+        except (PaperBrokerError, LiveTradingRefused) as exc:
+            print(json.dumps({"status": "preflight_failed", "error": str(exc)}, indent=2))
+            return 1
+        print(
+            json.dumps(
+                {
+                    "status": "ok",
+                    "endpoint": client.base_url,
+                    "paper_account": True,
+                    "account_number_prefix": str(account.get("account_number", ""))[:2],
+                    "equity": float(account.get("equity") or 0),
+                    "cash": float(account.get("cash") or 0),
+                    "market_open": bool(clock.get("is_open")),
+                    "next_open": clock.get("next_open"),
+                    "next_close": clock.get("next_close"),
+                    "live_trading_enabled": False,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+
+    receipt = run_paper_session(
+        db_path=args.db_path,
+        market_date=args.market_date,
+        store_path=args.store_path,
+        receipt_path=args.receipt,
+        force_exit=args.force_exit,
+    )
+    print(json.dumps(receipt, indent=2, sort_keys=True, default=str))
+    return 0 if receipt.get("status") == "completed" else 1
 
 
 def _run_alpha_monitor(args: argparse.Namespace) -> int:

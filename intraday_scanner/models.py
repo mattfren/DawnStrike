@@ -200,7 +200,18 @@ CANDIDATE_COLUMNS = [
     "stop_min_distance_pct",
     "stop_max_distance_pct",
     "stop_structural_low",
+    # How much of the volatility the band asked for the stop actually covers.
+    # Below 1.0 the loss cap has pulled the stop inside the observed premarket
+    # range, so ordinary noise is expected to trip it.
+    "stop_volatility_coverage",
+    "stop_inside_observed_volatility",
     "stop_policy_version",
+    # Whether the reward:risk number is evidence about this setup or an
+    # artifact of the stop policy's own constants.  See _reward_risk_evidence.
+    "reward_risk_ratio_computed",
+    "reward_risk_basis",
+    "reward_risk_is_evidence",
+    "reward_risk_policy_version",
     "max_credible_gap_pct",
     "legacy_plan_status",
     "legacy_plan_reason",
@@ -1277,4 +1288,29 @@ class ScanResult:
         ):
             if key in self.config:
                 summary[key] = self.config[key]
+        capability_report = self.config.get("capability_report")
+        if isinstance(capability_report, dict):
+            summary["capability_report"] = capability_report
+            # Structural prominence for an unintended gap: a capability
+            # disabled only because its key was never set is surfaced here
+            # even when nothing else in the summary changes, distinct from
+            # an operator's deliberate DISABLED_BY_OPERATOR choice, which is
+            # normal and stays out of this dict entirely.
+            summary["capability_config_gaps"] = {
+                name: report
+                for name, report in capability_report.items()
+                if isinstance(report, dict)
+                and report.get("status") == "DISABLED_MISSING_CONFIG"
+            }
+        operator_run_status = self.config.get("operator_run_status")
+        if isinstance(operator_run_status, dict):
+            summary["operator_run_status"] = operator_run_status
+            # Structural prominence, same reasoning as capability_config_gaps
+            # above: NO_ELIGIBLE_POLICY is the state an operator most needs
+            # to be able to find without reading the whole payload, and it
+            # must never be reachable by reading "no trades" as an error or
+            # as an operator's own toggle.
+            summary["no_eligible_policy"] = (
+                operator_run_status.get("state") == "NO_ELIGIBLE_POLICY"
+            )
         return summary
