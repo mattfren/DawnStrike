@@ -9,24 +9,34 @@ param(
     [string]$ReceiptPath = "",
     [string]$BackupXmlPath = "",
     [pscredential]$RunAsCredential,
+    [ValidatePattern('^$|^[0-9a-f]{32}$')][string]$StateBoundaryTaskMutationOperationId = "",
     [ValidateSet("", "after_init", "after_lock", "after_prepared", "after_register", "after_complete")][string]$TestCrashPoint = "",
     [switch]$Rollback
 )
+
+$global:PSModuleAutoLoadingPreference = 'None'
+$env:PSModulePath = 'C:\Windows\System32\WindowsPowerShell\v1.0\Modules'
+. ([IO.Path]::Combine($PSScriptRoot, 'powershell_module_boundary.ps1'))
 
 $ErrorActionPreference = "Stop"
 $script:HardeningTaskName = "Dawnstrike Delayed SIP Capture"
 . (Join-Path $PSScriptRoot "capture_task_safety.ps1")
 . (Join-Path $PSScriptRoot "runtime_activation_lock.ps1")
+if ($null -eq (Get-Command Open-DawnstrikeStateBoundaryPath -ErrorAction SilentlyContinue)) {
+    . (Join-Path $PSScriptRoot "state_root_boundary.ps1")
+}
 $hardeningRuntimeRoot = $RuntimeRoot
 $hardeningStateRoot = $StateRoot
 $hardeningCandidateSha = $CandidateSha
 $hardeningCandidateTree = $CandidateTree
 $hardeningCredential = $RunAsCredential
+$hardeningStateBoundaryOperationId = $StateBoundaryTaskMutationOperationId
 $RuntimeRoot = $hardeningRuntimeRoot
 $StateRoot = $hardeningStateRoot
 $CandidateSha = $hardeningCandidateSha
 $CandidateTree = $hardeningCandidateTree
 $RunAsCredential = $hardeningCredential
+$StateBoundaryTaskMutationOperationId = $hardeningStateBoundaryOperationId
 # The shared dawnstrike-runtime-activation.lock and Get-Credential boundary
 # remain explicit governance markers; $broker_execution_enabled = $false is
 # part of every sealed receipt. Unregister-ScheduledTask is forbidden.
@@ -614,6 +624,115 @@ function Assert-HardeningCompleteTerminal {
     return [pscustomobject]@{ payload = $payload; runtime = $liveRuntime; task = $liveTask }
 }
 
+function Get-HardeningOpenStreamSha256 {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][System.IO.Stream]$Stream)
+
+    $Stream.Position = 0
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString($sha.ComputeHash($Stream))).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha.Dispose()
+        $Stream.Position = 0
+    }
+}
+
+function Get-HardeningTrustedTerminalEnvelope {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$ReceiptPath,
+        [Parameter(Mandatory = $true)][string]$JournalPath,
+        [Parameter(Mandatory = $true)][string]$StateRoot,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$CandidateSha,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$CandidateTree,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{32}$')][string]$OperationId,
+        [Parameter(Mandatory = $true)][object]$RuntimeIdentity,
+        [Parameter(Mandatory = $true)][string]$ContractScript,
+        [Parameter(Mandatory = $true)][object]$InterpreterIdentity
+    )
+
+    foreach ($name in @(
+        'Open-DawnstrikeStateBoundaryPath',
+        'Get-DawnstrikeStateBoundaryTaskMutationIntent',
+        'Assert-DawnstrikeStateBoundaryTaskMutationIntent'
+    )) {
+        if ($null -eq (Get-Command $name -ErrorAction SilentlyContinue)) {
+            throw 'Hardening terminal envelope requires the protected StateRoot boundary helper.'
+        }
+    }
+    $receiptLease = $null
+    $journalLease = $null
+    $receiptStream = $null
+    $journalStream = $null
+    try {
+        $receiptLease = Open-DawnstrikeStateBoundaryPath `
+            -Path $ReceiptPath -Label 'Hardening terminal receipt namespace'
+        $journalLease = Open-DawnstrikeStateBoundaryPath `
+            -Path $JournalPath -Label 'Hardening terminal journal namespace'
+        $receiptStream = [System.IO.File]::Open(
+            $ReceiptPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::Read
+        )
+        $journalStream = [System.IO.File]::Open(
+            $JournalPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::Read
+        )
+        $receiptHash = Get-HardeningOpenStreamSha256 $receiptStream
+        $journalHash = Get-HardeningOpenStreamSha256 $journalStream
+        $journal = Get-DawnstrikeStrictRuntimeOperationJournal `
+            $JournalPath $InterpreterIdentity.path $InterpreterIdentity.sha256
+        if ([string]$journal.raw_file_sha256 -cne $journalHash) {
+            throw 'Hardening terminal journal bytes changed during retained validation.'
+        }
+        $terminal = Assert-HardeningCompleteTerminal `
+            -Journal $journal -ReceiptPath $ReceiptPath -CandidateSha $CandidateSha `
+            -CandidateTree $CandidateTree -RuntimeIdentity $RuntimeIdentity `
+            -ContractScript $ContractScript -InterpreterIdentity $InterpreterIdentity
+        $intent = Get-DawnstrikeStateBoundaryTaskMutationIntent `
+            -EvidenceRoot 'C:\ProgramData\Dawnstrike'
+        if ($null -eq $intent -or [string]$intent.payload.operation_id -cne $OperationId) {
+            throw 'Hardening terminal envelope has no exact protected operation identity.'
+        }
+        $null = Assert-DawnstrikeStateBoundaryTaskMutationIntent `
+            -Intent $intent -StateRoot $StateRoot -Mode HardenCapture `
+            -ExpectedSha $CandidateSha -ExpectedTree $CandidateTree
+        $requestHash = [string]$intent.payload.request_contract_sha256
+        if ($requestHash -notmatch '^[0-9a-f]{64}$') {
+            throw 'Hardening terminal envelope has an invalid request binding.'
+        }
+        if (
+            (Get-HardeningOpenStreamSha256 $receiptStream) -cne $receiptHash -or
+            (Get-HardeningOpenStreamSha256 $journalStream) -cne $journalHash -or
+            (Get-HardeningSha256File $ReceiptPath) -cne $receiptHash -or
+            (Get-HardeningSha256File $JournalPath) -cne $journalHash
+        ) { throw 'Hardening terminal evidence changed during retained validation.' }
+        $payload = [ordered]@{}
+        foreach ($property in @($terminal.payload.PSObject.Properties)) {
+            if ([string]$property.Name -like 'state_boundary_*') {
+                throw 'Hardening receipt contains a reserved protected-envelope field.'
+            }
+            $payload[[string]$property.Name] = $property.Value
+        }
+        $payload.state_boundary_terminal_receipt_sha256 = $receiptHash
+        $payload.state_boundary_terminal_journal_sha256 = $journalHash
+        $payload.state_boundary_operation_id = $OperationId.ToLowerInvariant()
+        $payload.state_boundary_request_contract_sha256 = $requestHash
+        return [pscustomobject]$payload
+    }
+    finally {
+        if ($null -ne $journalStream) { $journalStream.Dispose() }
+        if ($null -ne $receiptStream) { $receiptStream.Dispose() }
+        if ($null -ne $journalLease -and $null -ne $journalLease.handle) {
+            $journalLease.handle.Dispose()
+        }
+        if ($null -ne $receiptLease -and $null -ne $receiptLease.handle) {
+            $receiptLease.handle.Dispose()
+        }
+    }
+}
+
 function Assert-HardeningCompensationReceiptExact {
     [CmdletBinding()]
     param(
@@ -653,13 +772,18 @@ function Get-HardeningCaptureActionLayout {
     param(
         [Parameter(Mandatory = $true)][string[]]$Tokens,
         [Parameter(Mandatory = $true)][string]$RuntimeRoot,
+        [string]$ReleaseRoot = "",
         [Parameter(Mandatory = $true)][string]$BytecodePrefix,
         [switch]$AllowMissingBootstrap
     )
     if ($Tokens.Count -eq 0) { throw "Capture action arguments are empty." }
     $runtime = [System.IO.Path]::GetFullPath($RuntimeRoot).TrimEnd('\')
-    $expectedBootstrap = [System.IO.Path]::GetFullPath((Join-Path $runtime "scripts\dawnstrike_python_bootstrap.py"))
-    $expectedRunner = [System.IO.Path]::GetFullPath((Join-Path $runtime "scripts\run_daily_intraday_capture.py"))
+    $release = if ([string]::IsNullOrWhiteSpace($ReleaseRoot)) {
+        $runtime
+    }
+    else { [System.IO.Path]::GetFullPath($ReleaseRoot).TrimEnd('\') }
+    $expectedBootstrap = [System.IO.Path]::GetFullPath((Join-Path $release "scripts\dawnstrike_python_bootstrap.py"))
+    $expectedRunner = [System.IO.Path]::GetFullPath((Join-Path $release "scripts\run_daily_intraday_capture.py"))
     $expectedPrefix = [System.IO.Path]::GetFullPath($BytecodePrefix)
     $runnerIndex = 0
     $optionStart = 0
@@ -698,7 +822,7 @@ function Get-HardeningCaptureActionLayout {
         if (-not [string]::Equals($bootstrap, $expectedBootstrap, [System.StringComparison]::OrdinalIgnoreCase) -or
             $Tokens[9] -notmatch '^[0-9a-f]{64}$' -or
             $Tokens[10] -ne "--release-root" -or
-            -not [string]::Equals([System.IO.Path]::GetFullPath($Tokens[11]).TrimEnd('\'), $runtime, [System.StringComparison]::OrdinalIgnoreCase) -or
+            -not [string]::Equals([System.IO.Path]::GetFullPath($Tokens[11]).TrimEnd('\'), $release, [System.StringComparison]::OrdinalIgnoreCase) -or
             $Tokens[12] -ne "--expected-sha" -or $Tokens[13] -notmatch '^[0-9a-f]{40}$' -or
             $Tokens[14] -ne "--script" -or
             -not [string]::Equals([System.IO.Path]::GetFullPath($Tokens[15]), $expectedRunner, [System.StringComparison]::OrdinalIgnoreCase) -or
@@ -712,7 +836,7 @@ function Get-HardeningCaptureActionLayout {
             }
         }
         elseif (-not $AllowMissingBootstrap) {
-            throw "Capture release bootstrap is missing from RuntimeRoot."
+            throw "Capture release bootstrap is missing from the protected release root."
         }
         $runnerIndex = 15
         $optionStart = 17
@@ -722,7 +846,7 @@ function Get-HardeningCaptureActionLayout {
     if ($Tokens.Count -le $runnerIndex) { throw "Capture action runner binding is missing." }
     $runner = [System.IO.Path]::GetFullPath($Tokens[$runnerIndex])
     if (-not [string]::Equals($runner, $expectedRunner, [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw "Capture action runner binding is outside the exact RuntimeRoot contract."
+        throw "Capture action runner binding is outside the protected release-root contract."
     }
     if ($Tokens.Count -le $optionStart -or $Tokens[$optionStart] -ne "--candidate-sha") {
         throw "Capture migration action candidate binding is missing."
@@ -748,6 +872,7 @@ function Set-HardeningDirectCaptureAction {
         [Parameter(Mandatory = $true)][string]$CandidateSha,
         [Parameter(Mandatory = $true)][string]$BytecodePrefix,
         [Parameter(Mandatory = $true)][string]$RuntimeRoot,
+        [Parameter(Mandatory = $true)][string]$ReleaseRoot,
         [Parameter(Mandatory = $true)][string]$CandidateBootstrapPath
     )
     $exec = @(Get-HardeningDirectNodes $Actions "Exec")
@@ -757,22 +882,27 @@ function Set-HardeningDirectCaptureAction {
     if ($command.Count -ne 1 -or $arguments.Count -ne 1) { throw "Capture action command contract is incomplete." }
     $tokens = @([regex]::Matches([string]$arguments[0].InnerText, '"(?<value>[^"\r\n]*)"') | ForEach-Object { [string]$_.Groups["value"].Value })
     if ($tokens.Count -eq 0 -or (($tokens | ForEach-Object { '"' + $_ + '"' }) -join ' ') -ne [string]$arguments[0].InnerText) { throw "Capture action arguments are not in canonical quoted form." }
-    $layout = Get-HardeningCaptureActionLayout -Tokens $tokens -RuntimeRoot $RuntimeRoot -BytecodePrefix $BytecodePrefix -AllowMissingBootstrap
+    $layout = Get-HardeningCaptureActionLayout -Tokens $tokens -RuntimeRoot $RuntimeRoot `
+        -ReleaseRoot $ReleaseRoot -BytecodePrefix $BytecodePrefix -AllowMissingBootstrap
     $tail = @($tokens[$layout.option_start..($tokens.Count - 1)])
     if ($tail.Count -lt 2 -or $tail[0] -ne "--candidate-sha" -or $tail[1] -notmatch '^[0-9a-f]{40}$') {
         throw "Capture migration action candidate binding is invalid."
     }
     $tail[1] = $CandidateSha
     $runtime = [System.IO.Path]::GetFullPath($RuntimeRoot).TrimEnd('\')
+    $release = [System.IO.Path]::GetFullPath($ReleaseRoot).TrimEnd('\')
     $bootstrapSource = Assert-DawnstrikeCaptureRegularPath $CandidateBootstrapPath "Candidate release bootstrap"
     $bootstrapSha256 = Get-HardeningGitBlobSha256 $bootstrapSource
     $bootstrapPreloader = Get-DawnstrikeCaptureBootstrapPreloader
-    $bootstrap = [System.IO.Path]::GetFullPath((Join-Path $runtime "scripts\dawnstrike_python_bootstrap.py"))
-    $runner = Assert-DawnstrikeCaptureRegularPath (Join-Path $runtime "scripts\run_daily_intraday_capture.py") "Capture runner"
+    $bootstrap = [System.IO.Path]::GetFullPath((Join-Path $release "scripts\dawnstrike_python_bootstrap.py"))
+    if (-not [string]::Equals($bootstrapSource, $bootstrap, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Candidate release bootstrap is outside the protected release root."
+    }
+    $runner = Assert-DawnstrikeCaptureRegularPath (Join-Path $release "scripts\run_daily_intraday_capture.py") "Capture runner"
     $prefix = @(
         "-I", "-B", "-S", "-X", ("pycache_prefix=" + [System.IO.Path]::GetFullPath($BytecodePrefix)), "-u",
         "-c", $bootstrapPreloader, $bootstrap, $bootstrapSha256,
-        "--release-root", $runtime, "--expected-sha", $CandidateSha,
+        "--release-root", $release, "--expected-sha", $CandidateSha,
         "--script", $runner, "--"
     )
     $newTokens = @($prefix + $tail)
@@ -944,6 +1074,9 @@ if ($TaskName -ne $script:HardeningTaskName) {
 if ([string]::IsNullOrWhiteSpace($CandidateSha) -or [string]::IsNullOrWhiteSpace($CandidateTree)) {
     throw "CandidateSha and CandidateTree are required to bind the hardening receipt."
 }
+if ($StateBoundaryTaskMutationOperationId -notmatch '^[0-9a-f]{32}$') {
+    throw "Capture hardening requires its exact protected StateRoot operation identity."
+}
 Assert-HardeningCandidateIdentity -ExpectedSha $CandidateSha -ExpectedTree $CandidateTree `
     -RefreshOrigin -DeferOriginMainAdmission
 $hardeningCandidateRoot = Split-Path -Parent $PSScriptRoot
@@ -998,6 +1131,18 @@ if (-not [string]::IsNullOrWhiteSpace($ReceiptPath) -and
 $ReceiptPath = $candidateReceiptPath
 $journalTaskContractSha256 = Get-HardeningSha256File $contractScript
 $emptyArtifactSha = Get-HardeningSha256Text ""
+function Write-HardeningTrustedTerminalEnvelope {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][object]$RuntimeIdentity)
+
+    $envelope = Get-HardeningTrustedTerminalEnvelope `
+        -ReceiptPath $ReceiptPath -JournalPath $operationJournalPath `
+        -StateRoot $StateRoot -CandidateSha $CandidateSha -CandidateTree $CandidateTree `
+        -OperationId $StateBoundaryTaskMutationOperationId `
+        -RuntimeIdentity $RuntimeIdentity -ContractScript $contractScript `
+        -InterpreterIdentity $interpreterIdentity
+    Write-Output (ConvertTo-Json $envelope -Depth 12 -Compress)
+}
 $preserveLocks = $false
 $hardeningLock = $null
 $terminalCompleteWithoutLock = $false
@@ -1147,7 +1292,7 @@ if ($terminalCompleteWithoutLock) {
     if (Test-Path -LiteralPath $preparedPath -PathType Leaf) {
         Remove-Item -LiteralPath $preparedPath -Force -ErrorAction SilentlyContinue
     }
-    Write-Output ([System.IO.File]::ReadAllText($ReceiptPath, [System.Text.UTF8Encoding]::new($false)).Trim())
+    Write-HardeningTrustedTerminalEnvelope -RuntimeIdentity $runtimeIdentity
     return
 }
 try {
@@ -1174,7 +1319,7 @@ try {
         if (Test-Path -LiteralPath $preparedPath -PathType Leaf) {
             Remove-Item -LiteralPath $preparedPath -Force -ErrorAction SilentlyContinue
         }
-        Write-Output ([System.IO.File]::ReadAllText((Join-Path $StateRoot ([string]$journal.payload.complete_receipt_relative_path).Replace('/', '\')), [System.Text.UTF8Encoding]::new($false)).Trim())
+        Write-HardeningTrustedTerminalEnvelope -RuntimeIdentity $runtimeIdentity
         return
     }
     $before = Get-HardeningTaskRecord
@@ -1214,7 +1359,7 @@ try {
             -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
         $journalPhase = "COMPLETE"
         if (Test-Path -LiteralPath $preparedPath -PathType Leaf) { Remove-Item -LiteralPath $preparedPath -Force }
-        Write-Output ([System.IO.File]::ReadAllText($ReceiptPath, [System.Text.UTF8Encoding]::new($false)).Trim())
+        Write-HardeningTrustedTerminalEnvelope -RuntimeIdentity $runtimeIdentity
         return
     }
     # A retry may reuse only an already sealed, exact current-candidate
@@ -1236,10 +1381,11 @@ try {
             throw "Existing hardening receipt does not attest the exact current Disabled task."
         }
         $null = Assert-DawnstrikeCaptureTaskSafety -Xml $before.xml -RuntimeRoot $runtimeRootResolved `
-            -StateRoot $StateRoot -ExpectedPrincipal $taskPrincipal -ExpectedCandidateSha $CandidateSha `
+            -StateRoot $StateRoot -ExpectedReleaseRoot $hardeningCandidateRoot `
+            -ExpectedPrincipal $taskPrincipal -ExpectedCandidateSha $CandidateSha `
             -ExpectedInterpreterPath ([string]$interpreterIdentity.path) -ExpectedInterpreterSha256 ([string]$interpreterIdentity.sha256) `
             -ExpectedEnabled "false" -RequirePasswordPrincipal -RequireRunner -AllowMissingBootstrap
-        Write-Output ([System.IO.File]::ReadAllText($ReceiptPath, [System.Text.UTF8Encoding]::new($false)).Trim())
+        Write-HardeningTrustedTerminalEnvelope -RuntimeIdentity $runtimeIdentity
         return
     }
     # Crash recovery boundary: Register-ScheduledTask may have committed the
@@ -1260,6 +1406,7 @@ try {
         $backupName = Split-Path -Leaf $backupXmlPath
         $bytecodePrefix = Join-Path $StateRoot ("capture-bytecode\" + $CandidateSha)
         $null = Assert-DawnstrikeCaptureTaskSafety -Xml $before.xml -RuntimeRoot $runtimeRootResolved -StateRoot $StateRoot `
+            -ExpectedReleaseRoot $hardeningCandidateRoot `
             -ExpectedPrincipal $taskPrincipal -ExpectedCandidateSha $CandidateSha `
             -ExpectedInterpreterPath ([string]$interpreterIdentity.path) -ExpectedInterpreterSha256 ([string]$interpreterIdentity.sha256) `
             -ExpectedEnabled "false" -RequirePasswordPrincipal -RequireRunner -AllowMissingBootstrap
@@ -1312,8 +1459,24 @@ try {
     $beforeActionArguments = @($beforeActionExec[0].ChildNodes | Where-Object { $_.LocalName -eq "Arguments" })
     if ($beforeActionArguments.Count -ne 1) { throw "Existing capture action arguments are ambiguous." }
     $beforeActionTokens = @([regex]::Matches([string]$beforeActionArguments[0].InnerText, '"(?<value>[^"\r\n]*)"') | ForEach-Object { [string]$_.Groups["value"].Value })
+    $beforeReleaseRoot = $runtimeRootResolved
+    if (
+        $beforeActionTokens.Count -ge 17 -and
+        $beforeActionTokens[10] -ceq '--release-root' -and
+        $beforeActionTokens[12] -ceq '--expected-sha' -and
+        $beforeActionTokens[13] -cmatch '^[0-9a-f]{40}$'
+    ) {
+        $declaredReleaseRoot = [IO.Path]::GetFullPath($beforeActionTokens[11]).TrimEnd('\')
+        $protectedReleaseRoot = [IO.Path]::GetFullPath((Join-Path `
+            'C:\Program Files\Dawnstrike\releases' $beforeActionTokens[13]
+        )).TrimEnd('\')
+        if ([string]::Equals($declaredReleaseRoot, $protectedReleaseRoot, [StringComparison]::OrdinalIgnoreCase)) {
+            $beforeReleaseRoot = $protectedReleaseRoot
+        }
+    }
     $beforeActionLayout = Get-HardeningCaptureActionLayout `
         -Tokens $beforeActionTokens -RuntimeRoot $runtimeRootResolved `
+        -ReleaseRoot $beforeReleaseRoot `
         -BytecodePrefix (Join-Path $StateRoot ("capture-bytecode\" + $CandidateSha)) `
         -AllowMissingBootstrap
     $safetyArguments = @{
@@ -1322,6 +1485,7 @@ try {
         StateRoot = $StateRoot
         ExpectedPrincipal = $taskPrincipal
         ExpectedCandidateSha = $runtimeIdentity.head
+        ExpectedReleaseRoot = $beforeReleaseRoot
         ExpectedInterpreterPath = [string]$interpreterIdentity.path
         ExpectedInterpreterSha256 = [string]$interpreterIdentity.sha256
         RequireRunner = $true
@@ -1386,6 +1550,7 @@ $replacementActionXml = Set-HardeningDirectCaptureAction `
     -InterpreterPath ([string]$interpreterIdentity.path) -CandidateSha $CandidateSha `
     -BytecodePrefix (Join-Path $StateRoot ("capture-bytecode\" + $CandidateSha)) `
     -RuntimeRoot $runtimeRootResolved `
+    -ReleaseRoot $hardeningCandidateRoot `
     -CandidateBootstrapPath ([string]$candidateBootstrapIdentity.path)
 $previewDocument = [System.Xml.XmlDocument]::new()
 $previewDocument.LoadXml('<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">' + $replacementActionXml + '</Task>')
@@ -1477,6 +1642,7 @@ $statePrefix = $stateRootFull + '\'
     Assert-HardeningFreshReplacementInfo -Info $replacementInfo
     $null = Assert-DawnstrikeCaptureTaskSafety `
         -Xml $currentTask.xml -RuntimeRoot $runtimeRootResolved -StateRoot $StateRoot `
+        -ExpectedReleaseRoot $hardeningCandidateRoot `
         -ExpectedPrincipal $taskPrincipal -ExpectedCandidateSha $CandidateSha `
         -ExpectedInterpreterPath ([string]$interpreterIdentity.path) `
         -ExpectedInterpreterSha256 ([string]$interpreterIdentity.sha256) -RequirePasswordPrincipal -RequireRunner `
@@ -1510,6 +1676,7 @@ $statePrefix = $stateRootFull + '\'
     if ($replacementTokens.Count -lt 3) { throw "Replacement capture action bindings are incomplete." }
     $replacementLayout = Get-HardeningCaptureActionLayout `
         -Tokens $replacementTokens -RuntimeRoot $runtimeRootResolved `
+        -ReleaseRoot $hardeningCandidateRoot `
         -BytecodePrefix (Join-Path $StateRoot ("capture-bytecode\" + $CandidateSha)) `
         -AllowMissingBootstrap
     $runnerBeforePath = [string]$replacementLayout.runner_path
@@ -1637,7 +1804,7 @@ $statePrefix = $stateRootFull + '\'
         if ($env:DAWNSTRIKE_TEST_LOCK_JOURNAL -ne "1") { throw "Hardening crash injection is test-only." }
         Stop-Process -Id $PID -Force
     }
-    Write-Output ([System.IO.File]::ReadAllText($ReceiptPath, $encoding).Trim())
+    Write-HardeningTrustedTerminalEnvelope -RuntimeIdentity $runtimeIdentity
 }
 catch {
     $failure = $_
@@ -1666,7 +1833,7 @@ catch {
             if (Test-Path -LiteralPath $preparedPath -PathType Leaf) {
                 try { Remove-Item -LiteralPath $preparedPath -Force -ErrorAction Stop } catch { }
             }
-            Write-Output ([System.IO.File]::ReadAllText($ReceiptPath, [System.Text.UTF8Encoding]::new($false)).Trim())
+            Write-HardeningTrustedTerminalEnvelope -RuntimeIdentity $runtimeIdentity
             return
         }
         catch {

@@ -112,7 +112,11 @@ def test_runner_child_uses_isolated_exact_interpreter(tmp_path: Path, monkeypatc
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(module.subprocess, "run", fake_run)
-    monkeypatch.setattr(module, "_approved_child_python", lambda: Path(sys.executable))
+    monkeypatch.setattr(
+        module,
+        "_approved_child_python",
+        lambda: Path(sys.executable).resolve(strict=True),
+    )
     argv = [
         "run_daily_intraday_capture.py",
         "--candidate-sha",

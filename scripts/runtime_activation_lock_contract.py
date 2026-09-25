@@ -7,11 +7,12 @@ import base64
 import hashlib
 import json
 import re
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 SCHEMA = "dawnstrike.runtime_activation_lock.v2"
+ROLLBACK_SCHEMA = "dawnstrike.runtime_activation_lock.v3"
 OPERATIONS = {
     "capture_task_hardening",
     "capture_task_rebind",
@@ -34,6 +35,7 @@ KEYS = {
     "research_only",
     "broker_execution_enabled",
 }
+ROLLBACK_KEYS = KEYS | {"rollback_target_market_date"}
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 TOKEN = re.compile(r"^[0-9a-f]{32}$")
@@ -69,10 +71,29 @@ def validate(raw: bytes) -> dict[str, Any]:
         value = json.loads(raw.decode("utf-8"), object_pairs_hook=_pairs)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise ValueError(f"invalid strict JSON: {exc}") from exc
-    if not isinstance(value, dict) or set(value) != KEYS:
+    value_keys = frozenset(value) if isinstance(value, dict) else frozenset()
+    if not isinstance(value, dict) or value_keys not in {
+        frozenset(KEYS),
+        frozenset(ROLLBACK_KEYS),
+    }:
         raise ValueError("lock keys are not exact")
-    if value["schema_version"] != SCHEMA or value["operation"] not in OPERATIONS:
+    operation = value["operation"]
+    schema = value["schema_version"]
+    if schema not in {SCHEMA, ROLLBACK_SCHEMA} or operation not in OPERATIONS:
         raise ValueError("lock schema or operation is invalid")
+    if operation == "runtime_rollback":
+        if schema != ROLLBACK_SCHEMA or value_keys != frozenset(ROLLBACK_KEYS):
+            raise ValueError("runtime rollback lock has no exact target")
+        target = value["rollback_target_market_date"]
+        if not isinstance(target, str):
+            raise ValueError("rollback target market date is invalid")
+        try:
+            if date.fromisoformat(target).isoformat() != target:
+                raise ValueError
+        except ValueError as exc:
+            raise ValueError("rollback target market date is invalid") from exc
+    elif schema != SCHEMA or value_keys != frozenset(KEYS):
+        raise ValueError("non-rollback lock carries rollback target state")
     for key in ("candidate_sha", "candidate_tree"):
         if not isinstance(value[key], str) or not HEX40.fullmatch(value[key]):
             raise ValueError(f"{key} is invalid")

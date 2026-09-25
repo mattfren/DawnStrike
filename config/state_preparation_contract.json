@@ -5,10 +5,10 @@
   "legacy_schema_marker": 30,
   "required_before_activation": true,
   "capture_interpreter_path": "C:\\Program Files\\Dawnstrike\\Python313\\python.exe",
-  "capture_interpreter_version": "3.13.14",
-  "capture_interpreter_sha256": "ef8f51028ac5329641985112f8efb1c2d4c47c86b8011ddf7e6fae21e2b4e5a1",
+  "capture_interpreter_version": "3.13.15",
+  "capture_interpreter_sha256": "85b71d8c6ec1905935f74be0c9869aae198d00e98f39df699ec66f9c5a84cecd",
   "capture_interpreter_signer_subject": "CN=Python Software Foundation, O=Python Software Foundation, L=Beaverton, S=Oregon, C=US",
-  "capture_interpreter_signer_thumbprint": "9BA3C2E210C7E8296C5056515BFC0B0BBA78AC48",
+  "capture_interpreter_signer_thumbprint": "847785B686B2D3879731FA9AA3F1F5D48E85D99E",
   "research_only": true,
   "broker_execution_enabled": false
 }

@@ -28,6 +28,7 @@ def _payload(operation: str = "runtime_activation", phase: str = "INIT") -> dict
             "POST_SWAP_READY",
             "COMPLETE",
             "COMPENSATED",
+            "TERMINAL_RECOVERY",
         ),
         "capture_task_rebind": ("INIT", "PRE_ENABLE", "POST_ENABLE", "COMPLETE", "COMPENSATED"),
         "runtime_rollback": (
@@ -37,8 +38,12 @@ def _payload(operation: str = "runtime_activation", phase: str = "INIT") -> dict
             "INIT", "PRE_TASK_UPDATE", "POST_TASK_UPDATE", "COMPLETE", "COMPENSATED"
         ),
     }
-    return {
-        "schema_version": "dawnstrike.runtime_operation_journal.v1",
+    value = {
+        "schema_version": (
+            "dawnstrike.runtime_operation_journal.v3"
+            if operation == "runtime_rollback"
+            else "dawnstrike.runtime_operation_journal.v1"
+        ),
         "operation": operation,
         "phase": phase,
         "sequence": phases[operation].index(phase),
@@ -83,7 +88,11 @@ def _payload(operation: str = "runtime_activation", phase: str = "INIT") -> dict
             if operation == "runtime_activation"
             else "receipts/runtime-activation/complete.json"
         ),
-        "complete_receipt_sha256": "8" * 64 if phase in {"POST_SWAP_READY", "COMPLETE"} else EMPTY,
+        "complete_receipt_sha256": (
+            "8" * 64
+            if phase in {"POST_SWAP_READY", "COMPLETE", "TERMINAL_RECOVERY"}
+            else EMPTY
+        ),
         "backup_contract_sha256": EMPTY if phase == "INIT" else "4" * 64,
         "task_contract_sha256": "5" * 64,
         "runtime_stage_contract_sha256": (
@@ -102,6 +111,13 @@ def _payload(operation: str = "runtime_activation", phase: str = "INIT") -> dict
         "research_only": True,
         "broker_execution_enabled": False,
     }
+    if operation == "runtime_rollback":
+        value.update(
+            rollback_target_market_date="2026-09-08",
+            compensation_receipt_relative_path="NONE",
+            compensation_receipt_sha256=EMPTY,
+        )
+    return value
 
 
 @pytest.mark.parametrize(
@@ -150,6 +166,50 @@ def test_journal_rejects_hostile_payload(tmp_path: Path, mutation: dict) -> None
 def test_journal_rejects_duplicate_keys() -> None:
     with pytest.raises(ValueError, match="duplicate key"):
         validate(b'{"schema_version":"x","schema_version":"y"}')
+
+
+def test_rollback_target_is_required_for_inflight_and_immutable_on_transition(
+    tmp_path: Path,
+) -> None:
+    legacy = _payload("runtime_rollback", "INIT")
+    legacy["schema_version"] = "dawnstrike.runtime_operation_journal.v2"
+    legacy.pop("rollback_target_market_date")
+    source = tmp_path / "legacy.json"
+    source.write_text(json.dumps(legacy), encoding="utf-8")
+    with pytest.raises(ValueError, match="legacy in-flight rollback"):
+        seal(source, tmp_path / "legacy-journal.json")
+
+    initial_source = tmp_path / "input.json"
+    journal = tmp_path / "journal.json"
+    initial_source.write_text(
+        json.dumps(_payload("runtime_rollback", "INIT")), encoding="utf-8"
+    )
+    initial = transition(initial_source, journal, None)
+    remapped = _payload("runtime_rollback", "PRE_SWAP")
+    remapped["prior_journal_file_sha256"] = initial["raw_file_sha256"]
+    remapped["rollback_target_market_date"] = "2026-09-09"
+    initial_source.write_text(json.dumps(remapped), encoding="utf-8")
+    with pytest.raises(ValueError, match="immutable field changed"):
+        transition(initial_source, journal, journal)
+
+
+@pytest.mark.parametrize("phase", ["COMPLETE", "COMPENSATED"])
+def test_legacy_rollback_evidence_is_accepted_only_when_terminal(
+    tmp_path: Path, phase: str
+) -> None:
+    legacy = _payload("runtime_rollback", phase)
+    legacy["schema_version"] = "dawnstrike.runtime_operation_journal.v2"
+    legacy.pop("rollback_target_market_date")
+    if phase == "COMPENSATED":
+        legacy.update(
+            compensation_receipt_relative_path="receipts/compensated.json",
+            compensation_receipt_sha256="7" * 64,
+            runtime_stage_contract_sha256=EMPTY,
+        )
+    source = tmp_path / f"{phase}.json"
+    source.write_text(json.dumps(legacy), encoding="utf-8")
+    result = seal(source, tmp_path / f"{phase}-journal.json")
+    assert result["payload"]["phase"] == phase
 
 
 @pytest.mark.parametrize("state", ["ADOPTION_PREPARED", "ADOPTED"])
@@ -329,7 +389,11 @@ def test_runtime_compensation_converges_from_recoverable_swap_phases(
     journal = tmp_path / "journal.json"
     initial = _payload(operation, "INIT")
     initial.update(
-        schema_version="dawnstrike.runtime_operation_journal.v2",
+        schema_version=(
+            "dawnstrike.runtime_operation_journal.v3"
+            if operation == "runtime_rollback"
+            else "dawnstrike.runtime_operation_journal.v2"
+        ),
         compensation_receipt_relative_path="NONE",
         compensation_receipt_sha256=EMPTY,
     )
@@ -338,7 +402,11 @@ def test_runtime_compensation_converges_from_recoverable_swap_phases(
     if operation == "runtime_activation":
         quiesce = _payload(operation, "PRE_QUIESCE")
         quiesce.update(
-            schema_version="dawnstrike.runtime_operation_journal.v2",
+            schema_version=(
+                "dawnstrike.runtime_operation_journal.v3"
+                if operation == "runtime_rollback"
+                else "dawnstrike.runtime_operation_journal.v2"
+            ),
             compensation_receipt_relative_path="NONE",
             compensation_receipt_sha256=EMPTY,
             prior_journal_file_sha256=prior["raw_file_sha256"],
@@ -348,7 +416,11 @@ def test_runtime_compensation_converges_from_recoverable_swap_phases(
     if prior_phase == "POST_SWAP":
         pre_swap = _payload(operation, "PRE_SWAP")
         pre_swap.update(
-            schema_version="dawnstrike.runtime_operation_journal.v2",
+            schema_version=(
+                "dawnstrike.runtime_operation_journal.v3"
+                if operation == "runtime_rollback"
+                else "dawnstrike.runtime_operation_journal.v2"
+            ),
             compensation_receipt_relative_path="NONE",
             compensation_receipt_sha256=EMPTY,
             prior_journal_file_sha256=prior["raw_file_sha256"],
@@ -358,7 +430,11 @@ def test_runtime_compensation_converges_from_recoverable_swap_phases(
     if prior_phase == "POST_SWAP":
         post_swap = _payload(operation, "POST_SWAP")
         post_swap.update(
-            schema_version="dawnstrike.runtime_operation_journal.v2",
+            schema_version=(
+                "dawnstrike.runtime_operation_journal.v3"
+                if operation == "runtime_rollback"
+                else "dawnstrike.runtime_operation_journal.v2"
+            ),
             compensation_receipt_relative_path="NONE",
             compensation_receipt_sha256=EMPTY,
             prior_journal_file_sha256=prior["raw_file_sha256"],
@@ -367,7 +443,11 @@ def test_runtime_compensation_converges_from_recoverable_swap_phases(
         prior = transition(source, journal, journal)
     compensated = _payload(operation, "COMPENSATED")
     compensated.update(
-        schema_version="dawnstrike.runtime_operation_journal.v2",
+        schema_version=(
+            "dawnstrike.runtime_operation_journal.v3"
+            if operation == "runtime_rollback"
+            else "dawnstrike.runtime_operation_journal.v2"
+        ),
         prior_journal_file_sha256=prior["raw_file_sha256"],
         compensation_receipt_relative_path="receipts/compensated.json",
         compensation_receipt_sha256="9" * 64,
@@ -562,6 +642,86 @@ def test_v2_compensated_journal_is_terminal_and_requires_compensation_proof(tmp_
     source.write_text(json.dumps(compensated), encoding="utf-8")
     terminal = transition(source, journal, journal)
     assert terminal["payload"]["phase"] == "COMPENSATED"
+
+
+def test_activation_terminal_recovery_is_exact_init_to_compensated_bridge(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "input.json"
+    journal = tmp_path / "journal.json"
+    initial = _payload("runtime_activation", "INIT")
+    initial.update(
+        schema_version="dawnstrike.runtime_operation_journal.v2",
+        compensation_receipt_relative_path="NONE",
+        compensation_receipt_sha256=EMPTY,
+    )
+    source.write_text(json.dumps(initial), encoding="utf-8")
+    init_result = transition(source, journal, None)
+
+    recovery = _payload("runtime_activation", "TERMINAL_RECOVERY")
+    recovery.update(
+        schema_version="dawnstrike.runtime_operation_journal.v2",
+        prior_journal_file_sha256=init_result["raw_file_sha256"],
+        compensation_receipt_relative_path="NONE",
+        compensation_receipt_sha256=EMPTY,
+    )
+    source.write_text(json.dumps(recovery), encoding="utf-8")
+    recovery_result = transition(source, journal, journal)
+    assert recovery_result["payload"]["phase"] == "TERMINAL_RECOVERY"
+
+    compensated = _payload("runtime_activation", "COMPENSATED")
+    compensated.update(
+        schema_version="dawnstrike.runtime_operation_journal.v2",
+        prior_journal_file_sha256=recovery_result["raw_file_sha256"],
+        compensation_receipt_relative_path="receipts/compensated.json",
+        compensation_receipt_sha256="9" * 64,
+        runtime_stage_contract_sha256=EMPTY,
+    )
+    source.write_text(json.dumps(compensated), encoding="utf-8")
+    terminal = transition(source, journal, journal)
+    assert terminal["payload"]["phase"] == "COMPENSATED"
+
+
+def test_activation_terminal_recovery_rejects_non_init_or_premature_proof(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "input.json"
+    journal = tmp_path / "journal.json"
+    initial = _payload("runtime_activation", "INIT")
+    initial.update(
+        schema_version="dawnstrike.runtime_operation_journal.v2",
+        compensation_receipt_relative_path="NONE",
+        compensation_receipt_sha256=EMPTY,
+    )
+    source.write_text(json.dumps(initial), encoding="utf-8")
+    init_result = transition(source, journal, None)
+
+    pre_quiesce = _payload("runtime_activation", "PRE_QUIESCE")
+    pre_quiesce.update(
+        schema_version="dawnstrike.runtime_operation_journal.v2",
+        prior_journal_file_sha256=init_result["raw_file_sha256"],
+        compensation_receipt_relative_path="NONE",
+        compensation_receipt_sha256=EMPTY,
+    )
+    source.write_text(json.dumps(pre_quiesce), encoding="utf-8")
+    pre_result = transition(source, journal, journal)
+    recovery = _payload("runtime_activation", "TERMINAL_RECOVERY")
+    recovery.update(
+        schema_version="dawnstrike.runtime_operation_journal.v2",
+        prior_journal_file_sha256=pre_result["raw_file_sha256"],
+        compensation_receipt_relative_path="NONE",
+        compensation_receipt_sha256=EMPTY,
+    )
+    source.write_text(json.dumps(recovery), encoding="utf-8")
+    with pytest.raises(ValueError, match="activation INIT"):
+        transition(source, journal, journal)
+
+    recovery["prior_journal_file_sha256"] = init_result["raw_file_sha256"]
+    recovery["compensation_receipt_relative_path"] = "receipts/forged.json"
+    recovery["compensation_receipt_sha256"] = "9" * 64
+    source.write_text(json.dumps(recovery), encoding="utf-8")
+    with pytest.raises(ValueError, match="artifact proof"):
+        seal(source, tmp_path / "forged.json")
 
 
 def test_consumers_keep_nonterminal_journal_until_compensation_or_completion() -> None:

@@ -3,23 +3,25 @@ from __future__ import annotations
 import base64
 import hashlib
 import importlib.metadata
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path, PurePosixPath
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_BOOTSTRAP = ROOT / "scripts" / "dawnstrike_python_bootstrap.py"
-PRODUCTION_GIT_PATH = r"C:\Program Files\Git\cmd\git.exe"
+PRODUCTION_GIT_PATH = r"C:\Program Files\Dawnstrike\Git-2.55.0.5\cmd\git.exe"
 PRODUCTION_GIT_SHA256 = (
-    "37c5725818d602e951ba2563b870d62763322956b73373da4c33a0b566a80bc9"  # pragma: allowlist secret
+    "78211c7ed73988da93a6d8a33d47ec6187f464d7ea2a9a00c182bbd7a1ecf30f"  # pragma: allowlist secret
 )
 PRODUCTION_RECORD_SET_SHA256 = (
-    "447a0d12feffcfd6c353d9acb4cfd1e5cc1b35e3548cd7e9ad58666516b4b3af"  # pragma: allowlist secret
+    "abd40a213fd6b5b396d803a5a2ed1bdfdea22556bb2552f20b942e90d7c4c8c5"  # pragma: allowlist secret
 )
 BOOTSTRAP_PRELOADER = (
     "import hashlib,sys; p=sys.argv[1]; e=sys.argv[2]; b=open(p,'rb').read(); "
@@ -67,10 +69,16 @@ def _copy_bootstrap_for_host(destination: Path) -> None:
         )
         .replace(PRODUCTION_GIT_SHA256, git_sha256, 1)
         .replace(PRODUCTION_RECORD_SET_SHA256, host_record_set, 1)
+        .replace(
+            '    production_dependency_boundary = os.name == "nt"',
+            "    production_dependency_boundary = False",
+        )
     )
     assert repr(str(git_path)) in source
     assert git_sha256 in source
     assert host_record_set in source
+    assert 'production_dependency_boundary = os.name == "nt"' not in source
+    assert source.count("production_dependency_boundary = False") == 2
     destination.write_text(source, encoding="utf-8")
 
 
@@ -112,9 +120,7 @@ def _release(
         bootstrap.write_text(source, encoding="utf-8")
     if source_dispatch_race_fixture:
         source = bootstrap.read_text(encoding="utf-8")
-        anchor = (
-            "    source_guard = retry_budget.admit(root, args.expected_sha)\n"
-        )
+        anchor = "    source_guard = retry_budget.admit(root, args.expected_sha)\n"
         assert source.count(anchor) == 1
         source = source.replace("import sys\n", "import sys\nimport time\n", 1).replace(
             anchor,
@@ -181,6 +187,38 @@ def _run(
     )
 
 
+def _run_preloaded_topology(
+    root: Path,
+    expected_sha: str,
+    *,
+    bootstrap: Path,
+    hash_reference: Path,
+    target: Path,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-B",
+            "-S",
+            "-c",
+            BOOTSTRAP_PRELOADER,
+            str(bootstrap),
+            hashlib.sha256(hash_reference.read_bytes()).hexdigest(),
+            "--release-root",
+            str(root),
+            "--expected-sha",
+            expected_sha,
+            "--script",
+            str(target),
+            "--",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 def _amend_release(root: Path) -> str:
     _git(root, "add", ".")
     _git(root, "commit", "--amend", "--no-edit")
@@ -198,12 +236,92 @@ def test_bootstrap_runs_only_clean_exact_release(tmp_path: Path, preloaded: bool
     assert result.stdout.strip() == "BOOTSTRAP_OK"
 
 
+def test_candidate_bootstrap_accepts_hash_from_exact_protected_reference(
+    tmp_path: Path,
+) -> None:
+    root, sha = _release(tmp_path)
+    bootstrap = root / "scripts" / "dawnstrike_python_bootstrap.py"
+    reference = tmp_path / "protected" / bootstrap.name
+    reference.parent.mkdir()
+    shutil.copy2(bootstrap, reference)
+
+    result = _run_preloaded_topology(
+        root,
+        sha,
+        bootstrap=bootstrap,
+        hash_reference=reference,
+        target=root / "scripts" / "target.py",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "BOOTSTRAP_OK"
+
+
+def test_external_bootstrap_rejects_candidate_release_root(tmp_path: Path) -> None:
+    root, sha = _release(tmp_path)
+    external = tmp_path / "protected" / "dawnstrike_python_bootstrap.py"
+    external.parent.mkdir()
+    shutil.copy2(root / "scripts" / external.name, external)
+
+    result = _run_preloaded_topology(
+        root,
+        sha,
+        bootstrap=external,
+        hash_reference=external,
+        target=root / "scripts" / "target.py",
+    )
+
+    assert result.returncode != 0
+    assert "release bootstrap root is not the materialized bootstrap parent" in result.stderr
+
+
+def test_candidate_bootstrap_rejects_external_target(tmp_path: Path) -> None:
+    root, sha = _release(tmp_path)
+    bootstrap = root / "scripts" / "dawnstrike_python_bootstrap.py"
+    external_target = tmp_path / "protected" / "target.py"
+    external_target.parent.mkdir()
+    external_target.write_text("print('HOSTILE_EXTERNAL_TARGET')\n", encoding="utf-8")
+
+    result = _run_preloaded_topology(
+        root,
+        sha,
+        bootstrap=bootstrap,
+        hash_reference=bootstrap,
+        target=external_target,
+    )
+
+    assert result.returncode != 0
+    assert "release bootstrap script is outside the exact release root" in result.stderr
+    assert "HOSTILE_EXTERNAL_TARGET" not in result.stdout
+
+
+def test_candidate_bootstrap_tamper_fails_against_protected_reference(
+    tmp_path: Path,
+) -> None:
+    root, sha = _release(tmp_path)
+    bootstrap = root / "scripts" / "dawnstrike_python_bootstrap.py"
+    reference = tmp_path / "protected" / bootstrap.name
+    reference.parent.mkdir()
+    shutil.copy2(bootstrap, reference)
+    bootstrap.write_text("print('HOSTILE_BOOTSTRAP')\n", encoding="utf-8")
+
+    result = _run_preloaded_topology(
+        root,
+        sha,
+        bootstrap=bootstrap,
+        hash_reference=reference,
+        target=root / "scripts" / "target.py",
+    )
+
+    assert result.returncode != 0
+    assert "bootstrap hash mismatch" in result.stderr
+    assert "HOSTILE_BOOTSTRAP" not in result.stdout
+
+
 def test_exact_source_admission_retries_one_transient_then_passes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    bootstrap = __import__(
-        "scripts.dawnstrike_python_bootstrap", fromlist=["_assert_exact_source"]
-    )
+    bootstrap = __import__("scripts.dawnstrike_python_bootstrap", fromlist=["_assert_exact_source"])
     admitted_guard = object()
     calls = 0
 
@@ -225,9 +343,7 @@ def test_exact_source_admission_retries_one_transient_then_passes(
 def test_exact_source_admission_persistent_notification_fails_after_one_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    bootstrap = __import__(
-        "scripts.dawnstrike_python_bootstrap", fromlist=["_assert_exact_source"]
-    )
+    bootstrap = __import__("scripts.dawnstrike_python_bootstrap", fromlist=["_assert_exact_source"])
     calls = 0
 
     def reject(_root: Path, _expected_sha: str) -> None:
@@ -243,6 +359,91 @@ def test_exact_source_admission_persistent_notification_fails_after_one_retry(
         bootstrap._assert_exact_source_with_bounded_retry(Path("release"), "a" * 40)
 
     assert calls == 2
+
+
+@pytest.mark.skipif(os.name != "nt", reason="protected dependency admission is Windows-only")
+def test_protected_dependency_admission_verifies_the_complete_in_root_seal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bootstrap = __import__("scripts.dawnstrike_python_bootstrap", fromlist=["_fail"])
+    release = tmp_path / "release"
+    release.mkdir()
+    lockfile = release / "requirements.lock"
+    captured = b"fixture-package==1.0 --hash=sha256:" + b"0" * 64 + b"\n"
+    lock_sha256 = hashlib.sha256(captured).hexdigest()
+    dependency_parent = tmp_path / "protected" / "Dependencies"
+    dependency_root = dependency_parent / lock_sha256
+    site_packages = dependency_root / "Lib" / "site-packages"
+    payload = site_packages / "fixture_package" / "__init__.py"
+    payload.parent.mkdir(parents=True)
+    payload.write_bytes(b"VALUE = 1\n")
+    relative = payload.relative_to(dependency_root).as_posix()
+    manifest = {
+        "schema_version": "dawnstrike.dependency_boundary.v1",
+        "requirements_lock_blob": bootstrap._git_blob_sha1_bytes(captured),
+        "requirements_lock_sha256": lock_sha256,
+        "files": [
+            {
+                "path": relative,
+                "length": payload.stat().st_size,
+                "sha256": hashlib.sha256(payload.read_bytes()).hexdigest(),
+            }
+        ],
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+    manifest_path = dependency_root / bootstrap._PROTECTED_DEPENDENCY_MANIFEST_NAME
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    release_bytes = {os.path.normcase(os.path.abspath(lockfile)): captured}
+    monkeypatch.setattr(bootstrap, "_PROTECTED_DEPENDENCY_PARENT", dependency_parent)
+    original_path = list(sys.path)
+    try:
+        admitted = bootstrap._append_governed_dependencies(release, release_bytes)
+        assert admitted == (site_packages,)
+        payload.write_bytes(b"VALUE = 2\n")
+        with pytest.raises(
+            RuntimeError,
+            match="protected dependency file inventory differs from its sealed manifest",
+        ):
+            bootstrap._append_governed_dependencies(release, release_bytes)
+    finally:
+        sys.path[:] = original_path
+
+
+def test_source_guard_rejects_bytes_different_from_admission_snapshot(
+    tmp_path: Path,
+) -> None:
+    bootstrap = __import__("scripts.dawnstrike_python_bootstrap", fromlist=["_ExactSourceGuard"])
+    tracked = tmp_path / "tracked.py"
+    tracked.write_bytes(b"changed after admission\n")
+    handle = tracked.open("rb")
+
+    class StableMetadataGuard:
+        def assert_unchanged(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    guard = bootstrap._ExactSourceGuard(
+        [handle],
+        StableMetadataGuard(),
+        {},
+        (),
+        {tracked: handle},
+        {tracked: b"admitted\n"},
+        {tracked: os.fstat(handle.fileno())},
+        {},
+        object(),
+    )
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match="release tracked file changed during dispatched target lifetime",
+        ):
+            guard.assert_unchanged()
+    finally:
+        guard.close()
 
 
 def test_final_pre_dispatch_notification_restarts_exact_admission_once(
@@ -303,7 +504,7 @@ def test_final_pre_dispatch_notification_restarts_exact_admission_once(
     monkeypatch.setattr(bootstrap, "_release_root", lambda _raw: root)
     monkeypatch.setattr(bootstrap, "_assert_exact_source", admit)
     monkeypatch.setattr(bootstrap, "_install_verified_release_importer", lambda *_args: None)
-    monkeypatch.setattr(bootstrap, "_append_governed_dependencies", lambda: ())
+    monkeypatch.setattr(bootstrap, "_append_governed_dependencies", lambda *_args: ())
     monkeypatch.setattr(bootstrap, "_assert_locked_dependencies", check_dependencies)
     monkeypatch.setattr(bootstrap, "_install_verified_dependency_importers", lambda *_args: None)
     monkeypatch.setattr(bootstrap, "_install_verified_git_dispatch_guard", install_audit)
@@ -373,7 +574,7 @@ def test_bootstrap_never_retries_a_post_dispatch_lifetime_failure(
     monkeypatch.setattr(bootstrap, "_release_root", lambda _raw: root)
     monkeypatch.setattr(bootstrap, "_assert_exact_source", admit)
     monkeypatch.setattr(bootstrap, "_install_verified_release_importer", lambda *_args: None)
-    monkeypatch.setattr(bootstrap, "_append_governed_dependencies", lambda: ())
+    monkeypatch.setattr(bootstrap, "_append_governed_dependencies", lambda *_args: ())
     monkeypatch.setattr(
         bootstrap,
         "_assert_locked_dependencies",
@@ -478,13 +679,120 @@ def test_bootstrap_keeps_tracked_source_guarded_through_dispatch(tmp_path: Path)
         guarded_module.write_text("print('HOSTILE_TRACKED_MODULE')\n", encoding="utf-8")
     stdout, stderr = process.communicate(timeout=30)
 
-    assert stdout.strip() == "SAFE_TRACKED_MODULE"
-    assert "HOSTILE_TRACKED_MODULE" not in stdout
     if sys.platform == "win32":
+        assert stdout.strip() == "SAFE_TRACKED_MODULE"
+        assert "HOSTILE_TRACKED_MODULE" not in stdout
         assert process.returncode == 0, (marker, stdout, stderr)
     else:
+        # POSIX locks are advisory, so a hostile same-user writer can change the
+        # pathname.  The final pre-dispatch guard must then stop the target
+        # before either the captured or hostile module is executed.
+        assert stdout == ""
+        assert "SAFE_TRACKED_MODULE" not in stdout
+        assert "HOSTILE_TRACKED_MODULE" not in stdout
         assert process.returncode != 0
         assert "release tracked file changed" in stderr
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX advisory locks permit a hostile writer to ignore the retained lock",
+)
+def test_bootstrap_rejects_tracked_asset_swapped_and_restored_during_dispatch(
+    tmp_path: Path,
+) -> None:
+    root, _ = _release(tmp_path)
+    asset = root / "tracked_asset.txt"
+    admitted_bytes = b"SAFE_TRACKED_ASSET\n"
+    asset.write_bytes(admitted_bytes)
+    target = root / "scripts" / "target.py"
+    target.write_text(
+        "import time\n"
+        "from pathlib import Path\n"
+        "asset = Path(__file__).resolve().parents[1] / 'tracked_asset.txt'\n"
+        "print('DAWNSTRIKE_TEST_TRACKED_ASSET_READY', flush=True)\n"
+        "deadline = time.monotonic() + 20\n"
+        "while True:\n"
+        "    try:\n"
+        "        payload = asset.read_text(encoding='utf-8').strip()\n"
+        "    except FileNotFoundError:\n"
+        "        payload = ''\n"
+        "    if payload == 'HOSTILE_TRACKED_ASSET':\n"
+        "        break\n"
+        "    if time.monotonic() >= deadline:\n"
+        "        raise RuntimeError('hostile tracked asset was not observed')\n"
+        "    time.sleep(0.01)\n"
+        "print(payload, flush=True)\n"
+        "print('DAWNSTRIKE_TEST_TRACKED_ASSET_READ', flush=True)\n"
+        "time.sleep(3)\n",
+        encoding="utf-8",
+    )
+    sha = _amend_release(root)
+    admission_stat = asset.stat()
+    away = root / "tracked_asset.admitted"
+    bootstrap = root / "scripts" / "dawnstrike_python_bootstrap.py"
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-I",
+            "-B",
+            "-S",
+            str(bootstrap),
+            "--release-root",
+            str(root),
+            "--expected-sha",
+            sha,
+            "--script",
+            str(target),
+            "--",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert process.stdout is not None
+        marker = process.stdout.readline().strip()
+        if marker != "DAWNSTRIKE_TEST_TRACKED_ASSET_READY":
+            stdout, stderr = process.communicate(timeout=10)
+            pytest.fail(f"tracked asset race did not synchronize: {marker!r} {stdout!r} {stderr!r}")
+
+        # Let the filesystem clock advance, then temporarily replace the tracked
+        # path with a hostile inode. Touch the retained inode while it is away so
+        # its POSIX ctime records the transient even after bytes and mtime return.
+        time.sleep(1.1)
+        asset.replace(away)
+        away.write_bytes(admitted_bytes)
+        asset.write_text("HOSTILE_TRACKED_ASSET\n", encoding="utf-8")
+        observed = process.stdout.readline().strip()
+        read_marker = process.stdout.readline().strip()
+        assert observed == "HOSTILE_TRACKED_ASSET"
+        assert read_marker == "DAWNSTRIKE_TEST_TRACKED_ASSET_READ"
+
+        asset.unlink()
+        away.replace(asset)
+        os.utime(
+            asset,
+            ns=(admission_stat.st_atime_ns, admission_stat.st_mtime_ns),
+        )
+        restored_stat = asset.stat()
+        assert restored_stat.st_ino == admission_stat.st_ino
+        assert restored_stat.st_size == admission_stat.st_size
+        assert restored_stat.st_mtime_ns == admission_stat.st_mtime_ns
+        assert restored_stat.st_ctime_ns != admission_stat.st_ctime_ns
+
+        stdout, stderr = process.communicate(timeout=30)
+        assert stdout == ""
+        assert process.returncode != 0
+        assert "release tracked file changed during dispatched target lifetime" in stderr
+    finally:
+        if away.exists():
+            if asset.exists():
+                asset.unlink()
+            away.replace(asset)
+        if process.poll() is None:
+            process.kill()
+            process.communicate()
 
 
 def test_bootstrap_uses_captured_exact_commit_requirements_after_admission(
@@ -525,10 +833,14 @@ def test_bootstrap_uses_captured_exact_commit_requirements_after_admission(
         requirements.write_text(hostile, encoding="utf-8")
     stdout, stderr = process.communicate(timeout=30)
 
-    assert stdout.strip() == "BOOTSTRAP_OK"
     if sys.platform == "win32":
+        assert stdout.strip() == "BOOTSTRAP_OK"
         assert process.returncode == 0, (marker, stdout, stderr)
     else:
+        # POSIX cannot deny the write, but the last pre-dispatch identity check
+        # must fail closed before the captured target executes.
+        assert stdout == ""
+        assert "BOOTSTRAP_OK" not in stdout
         assert process.returncode != 0
         assert "release tracked file changed" in stderr
 

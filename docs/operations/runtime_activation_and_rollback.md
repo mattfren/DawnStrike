@@ -26,6 +26,31 @@ that already have authoritative finalizer or public-build evidence. This
 prevents a runtime SHA swap from diverging from a frozen daily/public
 artifact. A read-only clock seam exists only for guarded tests.
 
+Immediately before every host mutation, Task Scheduler must also prove an
+ordered EOD-to-Finalizer boundary no earlier than the calendar-derived
+preceding open session and before the target date. EOD is a weekday task while
+Finalizer is daily, so Sunday-before-Monday correctly binds Friday EOD to
+Sunday Finalizer; a holiday weekday can likewise advance both host task
+timestamps without pretending that it was an open market session. Every
+nonzero canonical `NextRunTime` must be in the future and on or after the
+target date. This postpones activation until every intervening weekend or
+holiday trigger is finished, permits future target-date triggers overnight,
+and rejects stale or overdue triggers. When the preceding open session was
+Monday, its Weekly task must also have completed.
+
+A validated recovery journal may additionally admit an exact target-date
+EOD-to-Finalizer boundary solely to compensate or clean up an expired
+activation; it cannot use that evidence to progress or enable the candidate.
+Monday-target recovery waits for the target's Weekly run and its advanced
+next trigger. A multi-day stale nonterminal transaction, or a stale `COMPLETE`
+transaction awaiting protected StateRoot completion, restores the exact
+protected predecessor runtime and definitions but leaves every canonical and
+auxiliary task `Disabled`. The activation tool returns an explicit deeply
+validated fail-closed terminal envelope; the protected boundary binds its exact
+receipt and journal hashes, preserves predecessor authorization and activation
+lineage, seals the Disabled disposition, and clears the intent. A new governed
+current-target activation is required before any task may be enabled.
+
 The tool fails closed unless all of the following are true:
 
 - `CandidateRoot` is a clean, self-contained clone (not a linked Git worktree)
@@ -126,20 +151,21 @@ assertion into CI or audit proof.
 
 ```powershell
 $sha = '<accepted-origin-main-sha>'
+$release = "C:\Program Files\Dawnstrike\releases\$sha"
 & 'C:\Program Files\Dawnstrike\Python313\python.exe' -I -B -S `
-  C:\r\dawnstrike-main\scripts\dawnstrike_python_bootstrap.py `
-  --release-root C:\r\dawnstrike-main `
+  (Join-Path $release 'scripts\dawnstrike_python_bootstrap.py') `
+  --release-root $release `
   --expected-sha $sha `
-  --script C:\r\dawnstrike-main\scripts\runtime_activation_contract.py -- `
+  --script (Join-Path $release 'scripts\runtime_activation_contract.py') -- `
   seal-evidence `
   --input C:\r\dawnstrike-state\evidence\ci-unsealed.json `
   --output C:\r\dawnstrike-state\evidence\ci.json
 
 & 'C:\Program Files\Dawnstrike\Python313\python.exe' -I -B -S `
-  C:\r\dawnstrike-main\scripts\dawnstrike_python_bootstrap.py `
-  --release-root C:\r\dawnstrike-main `
+  (Join-Path $release 'scripts\dawnstrike_python_bootstrap.py') `
+  --release-root $release `
   --expected-sha $sha `
-  --script C:\r\dawnstrike-main\scripts\runtime_activation_contract.py -- `
+  --script (Join-Path $release 'scripts\runtime_activation_contract.py') -- `
   seal-evidence `
   --input C:\r\dawnstrike-state\evidence\sol-unsealed.json `
   --output C:\r\dawnstrike-state\evidence\sol.json
@@ -153,33 +179,156 @@ cleanup workflow. Never put either evidence object in `runtime.env`.
 The preflight refreshes `origin/main` and reads Git, Task Scheduler, SQLite,
 and evidence state. It does not create a state backup or swap a directory.
 
-Before the first activation on a host, an administrator must establish the
-protected bootstrap at
-`C:\Program Files\Dawnstrike\bin\install_dawnstrike_host_boundary.ps1`.
-The initial copy is an operator-controlled trust ceremony: hold the source
-file read-locked, require its filtered Git blob to equal
-`<accepted-origin-main-sha>:scripts/install_dawnstrike_host_boundary.ps1`,
-then write those exact bytes into the administrator-owned destination. Do not
-launch the installer directly from the user-writable checkout. Once the
-protected bootstrap exists, run it from an elevated PowerShell process:
+The first protected release uses an explicit two-install transition. Do not
+collapse these steps or install B directly over the legacy runtime:
+
+1. Independently freeze A's 40-hex commit/tree plus the exact byte length and
+   SHA-256 of A's outer bridge and committed installer. Admit the bridge through
+   the tiny built-in preloader below; never execute its mutable pathname. The
+   admitted unelevated bridge extracts the installer from the exact Git object
+   and crosses UAC only through a built-in Windows PowerShell encoded command.
+   The elevated command reopens and rechecks those exact bytes, publishes the
+   administrator-only `installers\A` directory by a same-parent no-replace
+   rename, retains the protected installer handle, and invokes it.
+2. Invoke the protected A launcher in `BootstrapBaseline` mode. This performs
+   the governed legacy b722-to-A runtime transaction, leaves all five canonical
+   tasks Disabled, and commits exact BOOTSTRAP current-runtime authorization for
+   A. Require A's exact sealed CI/Sol evidence; a host-install receipt alone is
+   not activation authority.
+3. Independently freeze B plus B's bridge and installer length/SHA-256, admit
+   that bridge through the same built-in preloader, and pass all four
+   predecessor fields set to A's boundary SHA/tree and runtime SHA/tree. B's
+   protected launcher performs the crash-safe candidate migration and must
+   preserve A's BOOTSTRAP authorization and Disabled tasks.
+4. Invoke the protected B launcher in ordinary `Activate` mode with B's exact
+   CI/Sol evidence. Only this transaction may authorize B and restore the
+   canonical task enablement contract.
 
 ```powershell
+$shaA = '<accepted-bootstrap-A-sha>'
+$treeA = '<accepted-bootstrap-A-tree>'
+$bridgeA = 'C:\r\dawnstrike-main\scripts\bootstrap_dawnstrike_host_boundary.ps1'
+$bridgeShaA = '<independently-frozen-sha256-of-exact-A-bridge-bytes>'
+$bridgeLengthA = <length-of-exact-A-bridge-bytes>
+$installerShaA = '<sha256-of-exact-A-installer-bytes>'
+$installerLengthA = <length-of-exact-A-installer-bytes>
+$shaB = '<accepted-release-B-sha>'
+$bridgeB = 'C:\r\dawnstrike-main\scripts\bootstrap_dawnstrike_host_boundary.ps1'
+$bridgeShaB = '<independently-frozen-sha256-of-exact-B-bridge-bytes>'
+$bridgeLengthB = <length-of-exact-B-bridge-bytes>
+$installerShaB = '<sha256-of-exact-B-installer-bytes>'
+$installerLengthB = <length-of-exact-B-installer-bytes>
+$marketDate = '<YYYY-MM-DD>'
+
+# Type/audit this tiny built-in preloader independently. Never invoke the
+# checkout bridge with -File. The no-share stream stays open through bridge
+# execution, so no mutable pathname is parsed after its exact hash admission.
+function Invoke-FrozenDawnstrikeBootstrapBridge {
+  param(
+    [string]$Path,
+    [string]$ExpectedSha256,
+    [long]$ExpectedLength,
+    [hashtable]$Arguments
+  )
+  if ($ExpectedSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+      $ExpectedLength -lt 1 -or $ExpectedLength -gt 1048576) { throw 'Invalid bridge contract.' }
+  $stream = [IO.File]::Open($Path, 'Open', 'Read', 'None')
+  $bytes = $null
+  try {
+    if ($stream.Length -ne $ExpectedLength) { throw 'Bridge length mismatch.' }
+    $bytes = New-Object byte[] $ExpectedLength
+    $offset = 0
+    while ($offset -lt $bytes.Length) {
+      $read = $stream.Read($bytes, $offset, $bytes.Length - $offset)
+      if ($read -le 0) { throw 'Bridge read ended early.' }
+      $offset += $read
+    }
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+      $actual = ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+    } finally { $sha.Dispose() }
+    if ($actual -cne $ExpectedSha256) { throw 'Bridge SHA-256 mismatch.' }
+    $command = [ScriptBlock]::Create([Text.Encoding]::UTF8.GetString($bytes))
+    & $command @Arguments
+  } finally {
+    if ($null -ne $bytes) { [Array]::Clear($bytes, 0, $bytes.Length) }
+    $stream.Dispose()
+  }
+}
+
+# These exact bridge bytes run unelevated. Only their encoded payload crosses UAC.
+Invoke-FrozenDawnstrikeBootstrapBridge `
+  -Path $bridgeA -ExpectedSha256 $bridgeShaA -ExpectedLength $bridgeLengthA `
+  -Arguments @{
+    ExpectedSha = $shaA
+    CandidateRoot = 'C:\r\dawnstrike-main'
+    ExpectedInstallerSha256 = $installerShaA
+    ExpectedInstallerLength = $installerLengthA
+  }
+
 C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe `
-  -NoProfile -ExecutionPolicy Bypass `
-  -File 'C:\Program Files\Dawnstrike\bin\install_dawnstrike_host_boundary.ps1' `
-  -ExpectedSha <accepted-origin-main-sha> `
-  -CandidateRoot C:\r\dawnstrike-main
+  -NoProfile -ExecutionPolicy Bypass -Command {
+    $runAs = Get-Credential
+    & "C:\Program Files\Dawnstrike\releases\$shaA\scripts\dawnstrike_release_launcher.ps1" `
+      -Mode BootstrapBaseline -ExpectedSha $shaA -CandidateRoot C:\r\dawnstrike-main `
+      -MarketDate $marketDate -CiEvidencePath C:\r\dawnstrike-state\evidence\ci-A.json `
+      -SolEvidencePath C:\r\dawnstrike-state\evidence\sol-A.json `
+      -RuntimeRoot C:\r\dawnstrike-runtime -StateRoot C:\r\dawnstrike-state `
+      -BackupRoot C:\r\dawnstrike-state-backups -RunAsCredential $runAs
+  }
+
+Invoke-FrozenDawnstrikeBootstrapBridge `
+  -Path $bridgeB -ExpectedSha256 $bridgeShaB -ExpectedLength $bridgeLengthB `
+  -Arguments @{
+    ExpectedSha = $shaB
+    CandidateRoot = 'C:\r\dawnstrike-main'
+    ExpectedInstallerSha256 = $installerShaB
+    ExpectedInstallerLength = $installerLengthB
+    BoundaryPredecessorSha = $shaA
+    BoundaryPredecessorTree = $treeA
+    RuntimePredecessorSha = $shaA
+    RuntimePredecessorTree = $treeA
+  }
+
+C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe `
+  -NoProfile -ExecutionPolicy Bypass -Command {
+    $runAs = Get-Credential
+    & "C:\Program Files\Dawnstrike\releases\$shaB\scripts\dawnstrike_release_launcher.ps1" `
+      -Mode Activate -ExpectedSha $shaB -CandidateRoot C:\r\dawnstrike-main `
+      -MarketDate $marketDate -CiEvidencePath C:\r\dawnstrike-state\evidence\ci-B.json `
+      -SolEvidencePath C:\r\dawnstrike-state\evidence\sol-B.json `
+      -RuntimeRoot C:\r\dawnstrike-runtime -StateRoot C:\r\dawnstrike-state `
+      -BackupRoot C:\r\dawnstrike-state-backups -RunAsCredential $runAs
+  }
 ```
 
-The installer anchors the Python 3.13.14 core to the official PSF installer
-digest and signer. It treats the existing user-profile environment only as a
-byte cache: only `requirements.lock` distributions are materialized, and every
-copied source, native, and data payload must match its source-approved wheel
-`RECORD` hash and size. Extra distributions and unowned files are never copied.
+After each boundary, retain and verify the exact protected receipts. Step 1
+creates `host-boundary-A.json` and `state-boundary-A.json`; step 2 must leave a
+COMPLETE runtime-activation receipt/journal plus BOOTSTRAP authorization for A.
+Step 3 creates `host-boundary-B.json`, `state-boundary-B.json`, and the protected
+candidate-migration intent/completion lineage naming A. Step 4 must end with B's
+COMPLETE runtime-activation receipt/journal and current ACTIVATE authorization.
+A missing, mismatched, or nonterminal receipt is a stop condition, not permission
+to infer or repeat a later step.
+
+The installer anchors MinGit 2.55.0.5 and the Python 3.13.15 core to their
+official archive/installer lengths, digests, and signers. Git, Python, and the
+lock-content-addressed dependency tree each receive a fixed in-root seal while
+still in an administrator-only random stage; the complete sealed directory is
+validated before a same-parent no-replace rename. The user-profile Python
+environment is only a byte cache: every materialized source, native, and data
+payload must be owned by `requirements.lock` and match its source-approved
+wheel `RECORD` hash and size. Extra distributions and unowned files are never
+copied.
+`CandidateRoot` is compatibility/audit input only. The installer independently
+fetches live canonical main into an immutable, administrator-owned
+`C:\Program Files\Dawnstrike\releases\<sha>` tree, and every promoted or
+executed release file comes from that protected exact-SHA repository.
 The installer writes only below
 `C:\Program Files\Dawnstrike` and `C:\ProgramData\Dawnstrike`, removes
 inherited non-admin write access, and records a host-boundary receipt.
-Activation and rollback must then enter through the installed launcher so
+Activation and rollback must then enter through the exact protected launcher
+at `C:\Program Files\Dawnstrike\releases\<sha>\scripts\dawnstrike_release_launcher.ps1` so
 their candidate entry bytes are verified and held read-locked before
 PowerShell parses them.
 
@@ -201,7 +350,7 @@ forward the credential:
 C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe `
   -NoProfile -ExecutionPolicy Bypass -Command {
     $runAs = Get-Credential
-    & 'C:\Program Files\Dawnstrike\bin\dawnstrike_release_launcher.ps1' `
+    & "C:\Program Files\Dawnstrike\releases\<accepted-origin-main-sha>\scripts\dawnstrike_release_launcher.ps1" `
       -Mode HardenCapture `
       -CandidateRoot C:\r\dawnstrike-main `
       -ExpectedSha <accepted-origin-main-sha> `
@@ -212,7 +361,7 @@ C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe `
 
 C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe `
   -NoProfile -ExecutionPolicy Bypass `
-  -File 'C:\Program Files\Dawnstrike\bin\dawnstrike_release_launcher.ps1' `
+  -File 'C:\Program Files\Dawnstrike\releases\<accepted-origin-main-sha>\scripts\dawnstrike_release_launcher.ps1' `
   -Mode Prepare `
   -CandidateRoot C:\r\dawnstrike-main `
   -ExpectedSha <accepted-origin-main-sha> `
@@ -224,7 +373,7 @@ C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe `
 ```powershell
 C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe `
   -NoProfile -ExecutionPolicy Bypass `
-  -File 'C:\Program Files\Dawnstrike\bin\dawnstrike_release_launcher.ps1' `
+  -File 'C:\Program Files\Dawnstrike\releases\<accepted-origin-main-sha>\scripts\dawnstrike_release_launcher.ps1' `
   -Mode Activate `
   -CandidateRoot C:\r\dawnstrike-main `
   -ExpectedSha <accepted-origin-main-sha> `
@@ -311,11 +460,15 @@ contains a plausible SHA or points somewhere under `C:\r`.
 
 No nonterminal recovery phase inherits an earlier process's activation clock.
 An expired recovery is terminally compensated to the exact previous runtime and
-pre-activation Ready task contract. In every pre-swap crash shape the candidate
-is preserved at the governed failed-candidate path, while the fixed stage and
-rollback-checkout paths are proven absent before the compensation journal and
-locks become terminal. Candidate task enablement is never used as a recovery
-mechanism after the Morning boundary.
+pre-activation task definitions/actions with every canonical and auxiliary task
+left `Disabled`. This fail-closed disposition applies even when the sealed
+backup recorded `Ready`: compensation is never an alternate enablement path,
+and a later governed current-target transaction is required to restore task
+enablement. In every pre-swap crash shape the candidate is preserved at the
+governed failed-candidate path, while the fixed stage and rollback-checkout
+paths are proven absent before the compensation journal and locks become
+terminal. Candidate or predecessor task enablement is never used as a stale
+recovery mechanism after the Morning or market-date boundary.
 
 Never normalize a task manually with Task Scheduler, `Set-ScheduledTask`, or
 `schtasks`. Those edits would not be journaled, would break the XML/action
@@ -369,7 +522,7 @@ enable it with separately hashed, current provider inputs:
 C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe `
   -NoProfile -ExecutionPolicy Bypass -Command {
     $runAs = Get-Credential
-    & 'C:\Program Files\Dawnstrike\bin\dawnstrike_release_launcher.ps1' `
+    & "C:\Program Files\Dawnstrike\releases\<accepted-origin-main-sha>\scripts\dawnstrike_release_launcher.ps1" `
       -Mode RebindCapture `
       -CandidateRoot C:\r\dawnstrike-main `
       -ExpectedSha <accepted-origin-main-sha> `
@@ -393,7 +546,7 @@ Rollback is permitted from a valid `PREPARED` or `COMPLETE` activation receipt:
 ```powershell
 C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe `
   -NoProfile -ExecutionPolicy Bypass `
-  -File 'C:\Program Files\Dawnstrike\bin\dawnstrike_release_launcher.ps1' `
+  -File 'C:\Program Files\Dawnstrike\releases\<exact-candidate-sha>\scripts\dawnstrike_release_launcher.ps1' `
   -Mode Rollback `
   -CandidateRoot C:\r\dawnstrike-main `
   -ExpectedSha <exact-candidate-sha> `
@@ -404,18 +557,57 @@ C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe `
   -BackupRoot C:\r\dawnstrike-state-backups
 ```
 
-Rollback has no pre-Morning mutation window. Immediately before creating or
-adopting its runtime-activation lock, it takes a fresh host Task Scheduler
-snapshot and requires exactly one instance of each of the five canonical
-tasks. Every task must be `Ready` or `Disabled` (never `Running` or `Queued`),
-the EOD and Finalizer `LastRunTime` values must be from the host current date
-with EOD no later than Finalizer and Finalizer no later than the current time,
-and no canonical `NextRunTime` may remain on that date. On Monday, Weekly must
-also have a same-date completed run and an advanced next-run time. Fresh and
-crash-recovery rollback paths share this post-Finalizer-only admission.
-Compensation receipt verification and sealing use the same bounded child
-process timeout as the rollback transaction; a timeout preserves journal and
-receipt evidence and removes only the uncommitted temporary input file.
+Fresh rollback derives `rollback_target_market_date` from the exact candidate
+calendar; it never accepts a caller-selected rollback date. It may begin in the
+pre-Morning window for the current open session or after the core session/on a
+closed day for the next open session. This target is distinct from the
+activation receipt's immutable `activation_market_date`. The rollback target
+is sealed into the v3 `INIT` journal and runtime lock, every later journal
+phase, both rollback receipts, and the retained daily lock. Recovery takes the
+target only from that protected evidence and re-derives the preceding open
+date using the same exact candidate tree. A changed calendar result, remapped
+date, stale unprotected request, or legacy nonterminal rollback journal fails
+closed.
+
+Immediately before lock admission, after the runtime and target-date daily
+locks are both retained, and before every task enable, rollback requires one
+exact instance of each canonical task in `Ready` or `Disabled` state. Every
+nonzero `NextRunTime` must be strictly in the future and dated on or after the
+rollback target; a `Ready` task may not report `MinValue`. EOD and Finalizer
+must have `LastTaskResult=0`, be ordered, no later than now, no earlier than
+the preceding open date, and earlier than the target. No canonical
+`LastRunTime` may reach the target. The latest elapsed Monday Weekly occurrence
+must also have completed successfully. These rules
+admit weekday pre-Morning and Sunday-after-trigger completion before Monday,
+reject an active session, and block Monday-after-session rollback until the
+21:00 Weekly occurrence completes.
+
+A protected in-flight rollback reuses `PROGRESS` only while that original
+pre-Morning target window remains open. After target progress, automatic
+`RECOVERY_WITH_RUN` requires target-date Morning, Monitor, EOD, and Finalizer
+completion with `LastTaskResult=0`, plus the successful elapsed target Weekly
+occurrence when the target is Monday. Every canonical trigger must expose a
+non-`MinValue` future `NextRunTime`; timestamps from failed lock-denied launches
+are not completion proof. A crash during sequential enablement is
+admissible only in `POST_SWAP_READY`, when the journal hash-binds the exact
+ready receipt and sealed scheduler inventory and the live states form the
+canonical Ready-prefix/Disabled-suffix. An exact all-`Ready` recovery with
+advanced triggers is finalized without another Task Scheduler mutation. A
+shorter prefix is normalized to all `Disabled`; it is replayed only while the
+original `PROGRESS` window remains open. If disabling hides trigger advancement
+after target progress, the tool preserves both locks and the journal instead of
+guessing that a catch-up enable is safe.
+
+If a protected transaction outlives the target without any target run,
+canonical `StartWhenAvailable=true` means enabling could launch missed work,
+and a Disabled task may legitimately expose `MinValue` for `NextRunTime`.
+Until a separately journaled catch-up-neutralization protocol has live Task
+Scheduler proof, `EXPIRED_NO_RUN` therefore stops at an exact all-Disabled
+boundary and preserves the journal plus both retained locks for governed
+operator recovery. It never claims rollback completion or automatically
+enables a task. Compensation receipt verification and sealing use the same
+bounded child-process timeout as the rollback transaction; a timeout likewise
+preserves journal and receipt evidence and removes only an uncommitted input.
 
 For a crash before the complete receipt, pass the matching `.prepared.json`.
 The tool verifies the bundle hash, exact previous commit/tree/origin, current
@@ -423,8 +615,12 @@ schema compatibility, all task definitions, persisted scheduler XML evidence,
 and both locks. It stages the previous commit from the sealed Git bundle,
 captures and disables exact-`Ready` tasks, requires exact `Disabled` state
 throughout the swap, preserves the deactivated candidate, restores exact task
-XML before re-enabling, and writes an idempotent `ROLLED_BACK` receipt under
-`receipts\runtime-rollback`.
+XML before any allowed enable, and writes an idempotent `ROLLED_BACK` receipt
+under `receipts\runtime-rollback`. Prepared and completed rollback receipts
+retain both the activation date and rollback-target date as separate fields. A
+power loss after the terminal receipt is linked but before the journal reaches
+`COMPLETE` adopts that receipt only when it is the exact field-for-field
+terminal derivation of the journal-bound ready receipt and live Ready contract.
 
 Rollback never restores SQLite automatically. The activation's online backup
 is immutable recovery evidence; any database restore remains a separately

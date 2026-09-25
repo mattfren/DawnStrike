@@ -23,7 +23,7 @@ APPROVED_PYTHON_SHA256 = hashlib.sha256(APPROVED_PYTHON.read_bytes()).hexdigest(
 
 def _host_python_signer_thumbprint() -> str:
     if shutil.which("powershell.exe") is None:
-        return "9BA3C2E210C7E8296C5056515BFC0B0BBA78AC48"  # pragma: allowlist secret
+        return "847785B686B2D3879731FA9AA3F1F5D48E85D99E"  # pragma: allowlist secret
     environment = os.environ.copy()
     environment["DAWNSTRIKE_TEST_PYTHON"] = str(APPROVED_PYTHON)
     result = subprocess.run(
@@ -104,10 +104,10 @@ def _fixture(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     for key, value in options:
         tokens.extend((key, value))
     tokens.append("--execute")
-    arguments = " ".join(f'&quot;{token}&quot;' for token in tokens)
+    arguments = " ".join(f"&quot;{token}&quot;" for token in tokens)
     xml = tmp_path / "task.xml"
     xml.write_text(
-        f'''<?xml version="1.0" encoding="UTF-16"?>
+        f"""<?xml version="1.0" encoding="UTF-16"?>
 <Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task" version="1.3">
   <RegistrationInfo>
     <Description>Dawnstrike delayed SIP research capture; no broker execution.</Description>
@@ -126,13 +126,17 @@ def _fixture(tmp_path: Path) -> tuple[Path, dict[str, str]]:
   <Actions Context="Author"><Exec><Command>py.exe</Command>
     <Arguments>{arguments}</Arguments><WorkingDirectory>{runtime}</WorkingDirectory>
   </Exec></Actions>
-</Task>''',
+</Task>""",
         encoding="utf-8",
     )
     return xml, {
-        "runtime": str(runtime), "state": str(state), "symbols": str(files["symbols.json"]),
-        "symbols_hash": _sha(files["symbols.json"]), "entitlement": str(files["entitlement.json"]),
-        "entitlement_hash": _sha(files["entitlement.json"]), "source": str(files["sources.yaml"]),
+        "runtime": str(runtime),
+        "state": str(state),
+        "symbols": str(files["symbols.json"]),
+        "symbols_hash": _sha(files["symbols.json"]),
+        "entitlement": str(files["entitlement.json"]),
+        "entitlement_hash": _sha(files["entitlement.json"]),
+        "source": str(files["sources.yaml"]),
         "source_hash": _sha(files["sources.yaml"]),
         "external": str(external),
     }
@@ -141,8 +145,13 @@ def _fixture(tmp_path: Path) -> tuple[Path, dict[str, str]]:
 def _canonical_fixture(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     xml, values = _fixture(tmp_path)
     runtime = Path(values["runtime"])
+    release = tmp_path / "protected-release" / ("a" * 40)
+    (release / "scripts").mkdir(parents=True)
+    (release / "scripts" / "run_daily_intraday_capture.py").write_text(
+        "# protected runner\n", encoding="utf-8"
+    )
     state = Path(values["state"])
-    bootstrap = runtime / "scripts" / "dawnstrike_python_bootstrap.py"
+    bootstrap = release / "scripts" / "dawnstrike_python_bootstrap.py"
     bootstrap.write_text("# safe bootstrap\n", encoding="utf-8")
     (state / "capture-bytecode" / ("a" * 40)).mkdir(parents=True)
     options = (
@@ -175,11 +184,11 @@ def _canonical_fixture(tmp_path: Path) -> tuple[Path, dict[str, str]]:
         str(bootstrap),
         _sha(bootstrap),
         "--release-root",
-        str(runtime),
+        str(release),
         "--expected-sha",
         "a" * 40,
         "--script",
-        str(runtime / "scripts" / "run_daily_intraday_capture.py"),
+        str(release / "scripts" / "run_daily_intraday_capture.py"),
         "--",
     ]
     for key, value in options:
@@ -204,6 +213,7 @@ def _canonical_fixture(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     )
     values["canonical"] = "1"
     values["bootstrap"] = str(bootstrap)
+    values["release"] = str(release)
     return xml, values
 
 
@@ -253,7 +263,9 @@ def _run(
     command = (
         f'. "{HELPER}"; $x=[IO.File]::ReadAllText("{xml}"); '
         f'Assert-DawnstrikeCaptureTaskSafety -Xml $x -RuntimeRoot "{values["runtime"]}" '
-        f'-StateRoot "{values["state"]}" -ExpectedPrincipal "S-1-5-18" '
+        f'-StateRoot "{values["state"]}" '
+        f'-ExpectedReleaseRoot "{values.get("release", values["runtime"])}" '
+        f'-ExpectedPrincipal "S-1-5-18" '
         f'-ExpectedCandidateSha "{"a" * 40}" -ExpectedSymbolsManifest "{values["symbols"]}" '
         f'-ExpectedSymbolsManifestSha256 "{values["symbols_hash"]}" '
         f'-ExpectedEntitlementReceipt "{values["entitlement"]}" '
@@ -266,12 +278,14 @@ def _run(
         f'-ExpectedOutputRoot "{values["external"]}\\output" '
         f'-ExpectedSessionRoot "{values["external"]}\\sessions" '
         f'-ExpectedConfigRoot "{values["external"]}\\config" '
-        f'-RequirePasswordPrincipal -RequireRunner {interpreter_args} {extra_args} '
-        '| ConvertTo-Json -Compress'
+        f"-RequirePasswordPrincipal -RequireRunner {interpreter_args} {extra_args} "
+        "| ConvertTo-Json -Compress"
     )
     return subprocess.run(
         ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
-        text=True, capture_output=True, check=False,
+        text=True,
+        capture_output=True,
+        check=False,
     )
 
 
@@ -314,53 +328,56 @@ def test_legacy_direct_override_requires_disabled_task(tmp_path: Path) -> None:
     assert "only for a Disabled task migration" in result.stderr
 
 
-@pytest.mark.parametrize("mutation", [
-    "missing_s",
-    "wrong_preloader",
-    "missing_preloader",
-    "wrong_bootstrap",
-    "wrong_bootstrap_hash",
-    "missing_bootstrap_hash",
-    "tampered_bootstrap",
-    "wrong_expected_sha",
-    "missing_expected_sha",
-    "wrong_release_root",
-    "wrong_runner",
-    "missing_separator",
-])
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing_s",
+        "wrong_preloader",
+        "missing_preloader",
+        "wrong_bootstrap",
+        "wrong_bootstrap_hash",
+        "missing_bootstrap_hash",
+        "tampered_bootstrap",
+        "wrong_expected_sha",
+        "missing_expected_sha",
+        "wrong_release_root",
+        "wrong_runner",
+        "missing_separator",
+    ],
+)
 def test_bootstrap_action_hostile_layout_fails_closed(tmp_path: Path, mutation: str) -> None:
     xml, values = _canonical_fixture(tmp_path)
     text = xml.read_text(encoding="utf-8")
     runtime = Path(values["runtime"])
     if mutation == "missing_s":
-        text = text.replace('&quot;-S&quot; ', "", 1)
+        text = text.replace("&quot;-S&quot; ", "", 1)
     elif mutation == "wrong_preloader":
         text = text.replace(
-            f'&quot;{BOOTSTRAP_PRELOADER}&quot;',
-            '&quot;import sys&quot;',
+            f"&quot;{BOOTSTRAP_PRELOADER}&quot;",
+            "&quot;import sys&quot;",
             1,
         )
     elif mutation == "missing_preloader":
         text = text.replace(
-            f'&quot;-c&quot; &quot;{BOOTSTRAP_PRELOADER}&quot; ',
+            f"&quot;-c&quot; &quot;{BOOTSTRAP_PRELOADER}&quot; ",
             "",
             1,
         )
     elif mutation == "wrong_bootstrap":
         text = text.replace(
-            f'&quot;{values["bootstrap"]}&quot;',
-            f'&quot;{runtime / "scripts" / "wrong_bootstrap.py"}&quot;',
+            f"&quot;{values['bootstrap']}&quot;",
+            f"&quot;{runtime / 'scripts' / 'wrong_bootstrap.py'}&quot;",
             1,
         )
     elif mutation == "wrong_bootstrap_hash":
         text = text.replace(
-            f'&quot;{_sha(Path(values["bootstrap"]))}&quot;',
-            f'&quot;{"b" * 64}&quot;',
+            f"&quot;{_sha(Path(values['bootstrap']))}&quot;",
+            f"&quot;{'b' * 64}&quot;",
             1,
         )
     elif mutation == "missing_bootstrap_hash":
         text = text.replace(
-            f'&quot;{_sha(Path(values["bootstrap"]))}&quot; ',
+            f"&quot;{_sha(Path(values['bootstrap']))}&quot; ",
             "",
             1,
         )
@@ -368,28 +385,28 @@ def test_bootstrap_action_hostile_layout_fails_closed(tmp_path: Path, mutation: 
         Path(values["bootstrap"]).write_text("# changed bootstrap\n", encoding="utf-8")
     elif mutation == "wrong_expected_sha":
         text = text.replace(
-            f'&quot;--expected-sha&quot; &quot;{"a" * 40}&quot;',
-            f'&quot;--expected-sha&quot; &quot;{"b" * 40}&quot;',
+            f"&quot;--expected-sha&quot; &quot;{'a' * 40}&quot;",
+            f"&quot;--expected-sha&quot; &quot;{'b' * 40}&quot;",
             1,
         )
     elif mutation == "missing_expected_sha":
         text = text.replace(
-            f'&quot;--expected-sha&quot; &quot;{"a" * 40}&quot; ',
+            f"&quot;--expected-sha&quot; &quot;{'a' * 40}&quot; ",
             "",
             1,
         )
     elif mutation == "wrong_release_root":
-        text = text.replace(
-            f'&quot;{runtime}&quot;', f'&quot;{runtime.parent}&quot;', 1
-        )
+        release = Path(values["release"])
+        text = text.replace(f"&quot;{release}&quot;", f"&quot;{release.parent}&quot;", 1)
     elif mutation == "wrong_runner":
+        release = Path(values["release"])
         text = text.replace(
-            f'&quot;{runtime / "scripts" / "run_daily_intraday_capture.py"}&quot;',
-            f'&quot;{runtime / "scripts" / "wrong_runner.py"}&quot;',
+            f"&quot;{release / 'scripts' / 'run_daily_intraday_capture.py'}&quot;",
+            f"&quot;{release / 'scripts' / 'wrong_runner.py'}&quot;",
             1,
         )
     else:
-        text = text.replace('&quot;--&quot; ', "", 1)
+        text = text.replace("&quot;--&quot; ", "", 1)
     xml.write_text(text, encoding="utf-8")
     result = _run(xml, values, canonical=True)
     assert result.returncode != 0
@@ -485,9 +502,14 @@ def test_origin_credentials_and_unknown_schemes_fail_closed(origin: str) -> None
     escaped = origin.replace("'", "''")
     result = subprocess.run(
         [
-            "powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
-            f'. "{HELPER}"; Get-DawnstrikeCanonicalOrigin \'{escaped}\'',
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            f". \"{HELPER}\"; Get-DawnstrikeCanonicalOrigin '{escaped}'",
         ],
-        text=True, capture_output=True, check=False,
+        text=True,
+        capture_output=True,
+        check=False,
     )
     assert result.returncode != 0

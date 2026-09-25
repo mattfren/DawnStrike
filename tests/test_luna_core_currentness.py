@@ -5,13 +5,16 @@ import io
 import json
 import os
 import shutil
+import stat
 import struct
 import subprocess
 import threading
+import time
 import zipfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -670,7 +673,7 @@ def test_refresh_blocks_config_swap_after_admission_without_external_writes(
             assert result == {"status": "READY"}
             assert swapped is False
         else:
-            with pytest.raises(RuntimeError, match="config root.*changed"):
+            with pytest.raises(RuntimeError, match="config root moved or was deleted"):
                 refresh_script.refresh(
                     state_root=state,
                     proxy_manifest=None,
@@ -678,11 +681,74 @@ def test_refresh_blocks_config_swap_after_admission_without_external_writes(
                     market_date="2026-08-27",
                 )
             assert swapped is True
+            assert not (saved / refresh_script.REFRESH_LOCK_NAME).exists()
         assert list(outside.iterdir()) == []
     finally:
         if swapped:
             _remove_directory_reparse(config)
             saved.rename(config)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory-descriptor semantics only")
+def test_posix_refresh_writes_remain_in_admitted_config_after_path_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ndx_symbols: list[str],
+) -> None:
+    output, _ndx_payload, _spy_payload = _refresh_fixture(tmp_path, monkeypatch, ndx_symbols)
+    prior = output.read_bytes()
+    config = output.parent
+    admitted = tmp_path / "config.admitted"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    proxy_path = tmp_path / "proxy.json"
+    proxy = json.loads(output.read_text(encoding="utf-8"))
+    proxy["manifests"][0]["source_artifacts"][0]["path"] = str(tmp_path / "spy.xlsx")
+    proxy_path.write_text(json.dumps(proxy), encoding="utf-8")
+    real_refresh_locked = refresh_script._refresh_locked
+    real_build = refresh_script.build_core_universe_contract
+    swapped = False
+
+    def restore_admitted_config() -> None:
+        nonlocal swapped
+        if not swapped:
+            return
+        config.rename(outside)
+        admitted.rename(config)
+        swapped = False
+
+    def swap_after_write_boundary_admission(**kwargs: object) -> dict[str, object]:
+        nonlocal swapped
+        config.rename(admitted)
+        outside.rename(config)
+        swapped = True
+        try:
+            return real_refresh_locked(**kwargs)  # type: ignore[arg-type]
+        finally:
+            restore_admitted_config()
+
+    def restore_before_path_based_validation(*args: object, **kwargs: object) -> dict[str, object]:
+        restore_admitted_config()
+        return real_build(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(refresh_script, "_refresh_locked", swap_after_write_boundary_admission)
+    monkeypatch.setattr(
+        refresh_script,
+        "build_core_universe_contract",
+        restore_before_path_based_validation,
+    )
+    with pytest.raises(RuntimeError, match="config root moved or was deleted"):
+        refresh_script.refresh(
+            state_root=tmp_path,
+            proxy_manifest=proxy_path,
+            ndx_artifact=tmp_path / "ndx.xlsx",
+            spy_artifact=tmp_path / "spy.xlsx",
+        )
+
+    assert swapped is False
+    assert list(outside.iterdir()) == []
+    assert output.read_bytes() == prior
+    assert (config / refresh_script.GENERATION_DIRECTORY).is_dir()
 
 
 def test_sod_export_parser_accepts_exact_102_row_schema(ndx_symbols: list[str]) -> None:
@@ -1070,13 +1136,18 @@ def test_state_street_bootstrap_rejects_non_file_and_dangling_output_entries(
     assert output.is_dir()
 
     output.rmdir()
-    original_lexists = refresh_script.os.path.lexists
-    monkeypatch.setattr(
-        refresh_script.os.path,
-        "lexists",
-        lambda path: Path(path) == output or original_lexists(path),
-    )
-    with pytest.raises(RuntimeError, match="requires a completely absent active pointer"):
+    if os.name == "nt":
+        original_lexists = refresh_script.os.path.lexists
+        monkeypatch.setattr(
+            refresh_script.os.path,
+            "lexists",
+            lambda path: Path(path) == output or original_lexists(path),
+        )
+        expected_error = "requires a completely absent active pointer"
+    else:
+        output.symlink_to(config / "missing-pointer-target")
+        expected_error = "active pointer"
+    with pytest.raises(RuntimeError, match=expected_error):
         refresh_script.refresh(
             state_root=tmp_path,
             proxy_manifest=None,
@@ -1420,6 +1491,58 @@ def test_refresh_lock_release_never_unlinks_a_replacement_after_handle_close(
     assert lock_path.read_bytes() == replacement_bytes
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory-descriptor semantics only")
+def test_posix_refresh_lock_cleanup_stays_bound_to_admitted_config_directory(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config"
+    admitted = tmp_path / "config.admitted"
+    config.mkdir()
+    replacement_bytes = b"replacement owner must remain byte-identical\n"
+
+    with pytest.raises(RuntimeError, match="config root moved or was deleted"):
+        with refresh_script._refresh_lock(config):
+            config.rename(admitted)
+            config.mkdir()
+            (config / refresh_script.REFRESH_LOCK_NAME).write_bytes(replacement_bytes)
+
+    assert not (admitted / refresh_script.REFRESH_LOCK_NAME).exists()
+    assert (config / refresh_script.REFRESH_LOCK_NAME).read_bytes() == replacement_bytes
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory-descriptor semantics only")
+def test_posix_existing_lock_after_config_swap_remains_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config"
+    admitted = tmp_path / "config.admitted"
+    replacement = tmp_path / "config.replacement"
+    config.mkdir()
+    replacement.mkdir()
+    admitted_bytes = b"admitted owner must remain byte-identical\n"
+    replacement_bytes = b"replacement owner must remain byte-identical\n"
+    (config / refresh_script.REFRESH_LOCK_NAME).write_bytes(admitted_bytes)
+    (replacement / refresh_script.REFRESH_LOCK_NAME).write_bytes(replacement_bytes)
+    real_owner_metadata = refresh_script._lock_owner_metadata
+
+    def swap_after_directory_admission() -> dict[str, object]:
+        owner = real_owner_metadata()
+        config.rename(admitted)
+        replacement.rename(config)
+        return owner
+
+    monkeypatch.setattr(refresh_script, "_lock_owner_metadata", swap_after_directory_admission)
+    with pytest.raises(RuntimeError, match="config root moved or was deleted"):
+        with refresh_script._refresh_lock(config):
+            pytest.fail("replacement namespace was admitted")
+
+    assert (admitted / refresh_script.REFRESH_LOCK_NAME).read_bytes() == admitted_bytes
+    assert (config / refresh_script.REFRESH_LOCK_NAME).read_bytes() == replacement_bytes
+    assert not list(admitted.glob(f"{refresh_script.REFRESH_LOCK_NAME}.dead.*"))
+    assert not list(config.glob(f"{refresh_script.REFRESH_LOCK_NAME}.dead.*"))
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows handle-bound rename only")
 def test_stale_lock_archival_blocks_replacement_after_exact_handle_admission(
     tmp_path: Path,
@@ -1561,6 +1684,84 @@ def test_atomic_output_temp_swap_is_blocked_or_restores_exact_prior_truth(
         assert refresh_script._same_file_identity(prior_identity, os.lstat(destination))
 
 
+@pytest.mark.skipif(
+    not refresh_script.sys.platform.startswith("linux"),
+    reason="Linux renameat2 and POSIX ctime semantics only",
+)
+def test_posix_exact_handle_commit_accepts_rename_ctime_drift(tmp_path: Path) -> None:
+    source = tmp_path / "admitted.tmp"
+    destination = tmp_path / "active.json"
+    expected = b"admitted pointer\n"
+    source.write_bytes(expected)
+    destination.write_bytes(b"prior pointer\n")
+
+    with source.open("rb") as handle:
+        admitted = os.fstat(handle.fileno())
+        refresh_script._replace_from_exact_handle(handle, source, destination, expected)
+
+    installed = os.lstat(destination)
+    assert refresh_script._same_file_after_namespace_move(admitted, installed)
+    assert destination.read_bytes() == expected
+    # Some filesystems retain ctime across rename while GitHub's Linux runner
+    # advances it. Model only that permitted rename-side difference so the
+    # comparator contract is deterministic on both kinds of filesystem.
+    renamed_with_ctime_drift = SimpleNamespace(
+        st_dev=admitted.st_dev,
+        st_ino=admitted.st_ino,
+        st_mode=admitted.st_mode,
+        st_nlink=admitted.st_nlink,
+        st_size=admitted.st_size,
+        st_mtime_ns=admitted.st_mtime_ns,
+        st_ctime_ns=admitted.st_ctime_ns + 1,
+    )
+    assert not refresh_script._same_file_snapshot(
+        admitted,
+        renamed_with_ctime_drift,  # type: ignore[arg-type]
+    )
+    assert refresh_script._same_file_after_namespace_move(
+        admitted,
+        renamed_with_ctime_drift,  # type: ignore[arg-type]
+    )
+
+
+@pytest.mark.skipif(
+    not refresh_script.sys.platform.startswith("linux"),
+    reason="POSIX ctime mutation guard only",
+)
+def test_posix_exact_handle_commit_rejects_pre_rename_ctime_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "admitted.tmp"
+    destination = tmp_path / "active.json"
+    expected = b"admitted pointer\n"
+    prior = b"prior pointer\n"
+    source.write_bytes(expected)
+    destination.write_bytes(prior)
+    original_mode = stat.S_IMODE(os.lstat(source).st_mode)
+    real_lstat = refresh_script.os.lstat
+    mutated = False
+
+    def mutate_before_snapshot(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+    ) -> os.stat_result:
+        nonlocal mutated
+        if not mutated and Path(os.fsdecode(path)) == source:
+            mutated = True
+            time.sleep(0.01)
+            os.chmod(source, original_mode)
+        return real_lstat(path)
+
+    monkeypatch.setattr(refresh_script.os, "lstat", mutate_before_snapshot)
+    with source.open("rb") as handle:
+        with pytest.raises(RuntimeError, match="temporary changed before replacement"):
+            refresh_script._replace_from_exact_handle(handle, source, destination, expected)
+
+    assert mutated is True
+    assert source.read_bytes() == expected
+    assert destination.read_bytes() == prior
+
+
 def test_refresh_rolls_back_active_pointer_when_post_swap_validation_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1611,6 +1812,206 @@ def test_refresh_rolls_back_active_pointer_when_post_swap_validation_fails(
     )
     assert len(orphans) == 1
     assert (orphans[0] / "luna_core_universe.json").is_file()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory-descriptor semantics only")
+def test_posix_post_pointer_swap_restore_never_returns_ready_and_restores_prior_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ndx_symbols: list[str],
+) -> None:
+    output, _ndx_payload, _spy_payload = _refresh_fixture(tmp_path, monkeypatch, ndx_symbols)
+    prior = output.read_bytes()
+    config = output.parent
+    admitted = tmp_path / "config.admitted"
+    crafted = tmp_path / "config.crafted"
+    real_build = refresh_script.build_core_universe_contract
+    calls = 0
+    crafted_path_contract_status: str | None = None
+
+    def swap_for_post_pointer_validation(
+        *args: object,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        nonlocal calls, crafted_path_contract_status
+        calls += 1
+        if calls != 2:
+            return real_build(*args, **kwargs)  # type: ignore[arg-type]
+        shutil.copytree(config, crafted)
+        config.rename(admitted)
+        crafted.rename(config)
+        try:
+            pointer = json.loads(output.read_text(encoding="utf-8"))
+            crafted_path_contract_status = str(
+                core.build_core_universe_contract(
+                    output,
+                    observed_at=pointer["observed_at"],
+                    market_date="2026-08-27",
+                )["status"]
+            )
+            return real_build(*args, **kwargs)  # type: ignore[arg-type]
+        finally:
+            config.rename(crafted)
+            admitted.rename(config)
+
+    monkeypatch.setattr(
+        refresh_script,
+        "build_core_universe_contract",
+        swap_for_post_pointer_validation,
+    )
+    with pytest.raises(
+        RuntimeError,
+        match="(?:config root moved or was deleted|active pointer directory.*governed children)",
+    ):
+        refresh_script.refresh(
+            state_root=tmp_path,
+            proxy_manifest=None,
+            ndx_artifact=tmp_path / "ndx.xlsx",
+            spy_artifact=tmp_path / "spy.xlsx",
+        )
+
+    assert calls == 2
+    assert crafted_path_contract_status == "READY"
+    assert output.read_bytes() == prior
+    assert json.loads(output.read_text(encoding="utf-8"))["manifests"][0]["source_id"] == (
+        "test-spy-refresh"
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory-descriptor semantics only")
+def test_posix_generation_name_swap_after_admission_rolls_back_exact_pointer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ndx_symbols: list[str],
+) -> None:
+    output, _ndx_payload, _spy_payload = _refresh_fixture(tmp_path, monkeypatch, ndx_symbols)
+    prior = output.read_bytes()
+    real_replace = refresh_script._replace_bytes
+    swapped_generation: Path | None = None
+    admitted_generation: Path | None = None
+
+    def swap_generation_before_pointer_commit(
+        path: Path,
+        payload: bytes,
+        *,
+        directory_fd: int | None = None,
+    ) -> None:
+        nonlocal swapped_generation, admitted_generation
+        if path == output and swapped_generation is None:
+            pointer = json.loads(payload.decode("utf-8"))
+            generation = output.parent / Path(pointer["manifest_path"]).parent
+            admitted = generation.with_name(f"{generation.name}.admitted")
+            generation.rename(admitted)
+            shutil.copytree(admitted, generation)
+            swapped_generation = generation
+            admitted_generation = admitted
+        real_replace(path, payload, directory_fd=directory_fd)
+
+    monkeypatch.setattr(refresh_script, "_replace_bytes", swap_generation_before_pointer_commit)
+    with pytest.raises(
+        RuntimeError,
+        match="generation (?:name|root|directory).*(?:changed|governed children)",
+    ):
+        refresh_script.refresh(
+            state_root=tmp_path,
+            proxy_manifest=None,
+            ndx_artifact=tmp_path / "ndx.xlsx",
+            spy_artifact=tmp_path / "spy.xlsx",
+        )
+
+    assert swapped_generation is not None and swapped_generation.is_dir()
+    assert admitted_generation is not None and admitted_generation.is_dir()
+    assert output.read_bytes() == prior
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory-descriptor semantics only")
+def test_posix_generation_child_swap_at_terminal_validation_rolls_back_pointer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ndx_symbols: list[str],
+) -> None:
+    output, _ndx_payload, _spy_payload = _refresh_fixture(tmp_path, monkeypatch, ndx_symbols)
+    prior = output.read_bytes()
+    real_build = refresh_script.build_core_universe_contract
+    calls = 0
+    replacement_bytes: bytes | None = None
+
+    def replace_manifest_after_terminal_read(
+        *args: object,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        nonlocal calls, replacement_bytes
+        calls += 1
+        contract = real_build(*args, **kwargs)  # type: ignore[arg-type]
+        if calls == 2:
+            generations = output.parent / refresh_script.GENERATION_DIRECTORY
+            candidate = next(generations.glob("ndx-sod-*/luna_core_universe.json"))
+            admitted = candidate.with_suffix(".admitted.json")
+            replacement_bytes = candidate.read_bytes()
+            candidate.rename(admitted)
+            candidate.write_bytes(replacement_bytes)
+        return contract
+
+    monkeypatch.setattr(
+        refresh_script,
+        "build_core_universe_contract",
+        replace_manifest_after_terminal_read,
+    )
+    with pytest.raises(RuntimeError, match="generation directory.*governed children changed"):
+        refresh_script.refresh(
+            state_root=tmp_path,
+            proxy_manifest=None,
+            ndx_artifact=tmp_path / "ndx.xlsx",
+            spy_artifact=tmp_path / "spy.xlsx",
+        )
+
+    assert calls == 2
+    assert replacement_bytes is not None
+    assert output.read_bytes() == prior
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory-descriptor semantics only")
+def test_posix_active_pointer_swap_at_terminal_validation_rolls_back_pointer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ndx_symbols: list[str],
+) -> None:
+    output, _ndx_payload, _spy_payload = _refresh_fixture(tmp_path, monkeypatch, ndx_symbols)
+    prior = output.read_bytes()
+    real_build = refresh_script.build_core_universe_contract
+    calls = 0
+    replacement_bytes: bytes | None = None
+
+    def replace_pointer_after_terminal_read(
+        *args: object,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        nonlocal calls, replacement_bytes
+        calls += 1
+        contract = real_build(*args, **kwargs)  # type: ignore[arg-type]
+        if calls == 2:
+            admitted = output.with_name("luna_core_universe.admitted.json")
+            replacement_bytes = output.read_bytes()
+            output.rename(admitted)
+            output.write_bytes(replacement_bytes)
+        return contract
+
+    monkeypatch.setattr(
+        refresh_script,
+        "build_core_universe_contract",
+        replace_pointer_after_terminal_read,
+    )
+    with pytest.raises(RuntimeError, match="active pointer directory.*governed children changed"):
+        refresh_script.refresh(
+            state_root=tmp_path,
+            proxy_manifest=None,
+            ndx_artifact=tmp_path / "ndx.xlsx",
+            spy_artifact=tmp_path / "spy.xlsx",
+        )
+
+    assert calls == 2
+    assert replacement_bytes is not None
+    assert output.read_bytes() == prior
 
 
 def test_refresh_changed_member_attestation_leaves_prior_generation_intact(

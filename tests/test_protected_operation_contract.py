@@ -749,12 +749,29 @@ def test_native_process_console_replay_can_be_suppressed(tmp_path: Path) -> None
     assert "child-output" in (tmp_path / "single-json-proof.stdout.log").read_text()
 
 
-def test_recovery_launcher_holds_toolchain_helper_bytes() -> None:
+def test_recovery_launcher_holds_toolchain_helper_bytes(tmp_path: Path) -> None:
     launcher = ROOT / "scripts" / "dawnstrike_release_launcher.ps1"
     toolchain = ROOT / "scripts" / "vercel_toolchain_contract.py"
+    candidate = tmp_path / "protected-release-fixture"
+    fixture_toolchain = candidate / "scripts" / toolchain.name
+    fixture_toolchain.parent.mkdir(parents=True)
+    fixture_toolchain.write_bytes(toolchain.read_bytes())
+    subprocess.run(["git", "init", "-q"], cwd=candidate, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.invalid"], cwd=candidate, check=True
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Dawnstrike Test"], cwd=candidate, check=True
+    )
+    subprocess.run(
+        ["git", "add", "scripts/vercel_toolchain_contract.py"],
+        cwd=candidate,
+        check=True,
+    )
+    subprocess.run(["git", "commit", "-q", "-m", "fixture"], cwd=candidate, check=True)
     expected_sha = subprocess.run(
         ["git", "rev-parse", "HEAD"],
-        cwd=ROOT,
+        cwd=candidate,
         capture_output=True,
         text=True,
         check=True,
@@ -768,6 +785,7 @@ def test_recovery_launcher_holds_toolchain_helper_bytes() -> None:
     )
     if ($errors.Count -ne 0) {{ throw 'launcher parse failed' }}
     $required = @(
+        'Assert-DawnstrikeLauncherProtectedPath',
         'Get-DawnstrikeNormalizedBlobSha1',
         'Invoke-DawnstrikeLauncherGit',
         'Get-DawnstrikeLauncherGitDirectory',
@@ -783,21 +801,30 @@ def test_recovery_launcher_holds_toolchain_helper_bytes() -> None:
         if ($matches.Count -ne 1) {{ throw "missing launcher function: $name" }}
         Invoke-Expression ([string]$matches[0].Extent.Text)
     }}
-    $script:DawnstrikeReleaseGitPath = 'C:\\Program Files\\Git\\cmd\\git.exe'
-    $original = [IO.File]::ReadAllBytes({_ps_quote(toolchain)})
+    # This focused unit proves the retained file-handle behavior against the
+    # local fixture. Protected Program Files ACL/path admission is exercised by
+    # the launcher boundary tests rather than weakened here.
+    function Assert-DawnstrikeLauncherProtectedPath {{ param([string]$Path) return $Path }}
+    function Open-DawnstrikeStateBoundaryPath {{
+        param([string]$Path, [string]$Label)
+        return [pscustomobject]@{{ handle = [IO.MemoryStream]::new(); is_directory = $false }}
+    }}
+    $script:DawnstrikeReleaseGitPath = (Get-Command git.exe -ErrorAction Stop).Source
+    $original = [IO.File]::ReadAllBytes({_ps_quote(fixture_toolchain)})
     $wrote = $false
     $lock = Open-DawnstrikeLauncherEntry `
-        -Root {_ps_quote(ROOT)} `
+        -Root {_ps_quote(candidate)} `
         -Sha '{expected_sha}' `
         -RelativePath 'scripts/vercel_toolchain_contract.py'
     try {{
         try {{
-            [IO.File]::WriteAllText({_ps_quote(toolchain)}, 'hostile replacement')
+            [IO.File]::WriteAllText({_ps_quote(fixture_toolchain)}, 'hostile replacement')
             $wrote = $true
         }} catch {{}}
     }} finally {{
         $lock.stream.Dispose()
-        if ($wrote) {{ [IO.File]::WriteAllBytes({_ps_quote(toolchain)}, $original) }}
+        $lock.namespace_lease.Dispose()
+        if ($wrote) {{ [IO.File]::WriteAllBytes({_ps_quote(fixture_toolchain)}, $original) }}
     }}
     if ($wrote) {{ throw 'launcher toolchain lock permitted replacement' }}
     """

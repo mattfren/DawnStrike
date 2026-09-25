@@ -1,6 +1,122 @@
+$global:PSModuleAutoLoadingPreference = 'None'
+$env:PSModulePath = 'C:\Windows\System32\WindowsPowerShell\v1.0\Modules'
+. ([IO.Path]::Combine($PSScriptRoot, 'powershell_module_boundary.ps1'))
+
 Set-StrictMode -Version Latest
 $script:DawnstrikeExpectedReleaseSha = ""
 $script:DawnstrikeScheduledSourceLocks = @()
+$script:DawnstrikeProtectedReleaseParent = 'C:\Program Files\Dawnstrike\releases'
+$script:DawnstrikeProtectedGitRoot = 'C:\Program Files\Dawnstrike\Git-2.55.0.5'
+$script:DawnstrikeProtectedGitPath = 'C:\Program Files\Dawnstrike\Git-2.55.0.5\cmd\git.exe'
+$script:DawnstrikeProtectedGitSha256 = '78211c7ed73988da93a6d8a33d47ec6187f464d7ea2a9a00c182bbd7a1ecf30f' # pragma: allowlist secret
+$script:DawnstrikeProtectedGitBoundaryManifest = 'C:\Program Files\Dawnstrike\Git-2.55.0.5\.dawnstrike-git-boundary-v1.json'
+$script:DawnstrikeProtectedGitArchiveUri = 'https://github.com/git-for-windows/git/releases/download/v2.55.0.windows.5/MinGit-2.55.0.5-64-bit.zip'
+$script:DawnstrikeProtectedGitArchiveSha256 = '56d7b226b7693196cfc71fef26568f536c4a021ab6c37ff2db4287bed908e96e' # pragma: allowlist secret
+$script:DawnstrikeProtectedGitBoundaryContract = $null
+$script:DawnstrikeProtectedVercelTreeSha256 = '3bfb7509c4bf6a8fec920566c290a385c8160b9851b2350a655f0fd8b6c9e069' # pragma: allowlist secret
+$script:DawnstrikeProtectedVercelRoot = 'C:\Program Files\Dawnstrike\VercelCli-' + $script:DawnstrikeProtectedVercelTreeSha256
+$script:DawnstrikeProtectedVercelManifest = Join-Path $script:DawnstrikeProtectedVercelRoot '.dawnstrike-vercel-cli-boundary-v1.json'
+$script:DawnstrikeProtectedVercelEntry = Join-Path $script:DawnstrikeProtectedVercelRoot 'node_modules\vercel\dist\vc.js'
+$script:DawnstrikeProtectedVercelEntrySha256 = '2dd6e7c273a24bf4317af867d9b7bacb4db35487b42ea77912e2e7c33fa0c152' # pragma: allowlist secret
+$script:DawnstrikeProtectedVercelBoundaryContract = $null
+$script:DawnstrikeProtectedPythonRoot = 'C:\Program Files\Dawnstrike\Python313'
+$script:DawnstrikeProtectedDependencyParent = 'C:\Program Files\Dawnstrike\Dependencies'
+$script:DawnstrikeProtectedPrincipalSids = @{
+    'S-1-5-18' = $true
+    'S-1-5-32-544' = $true
+    'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464' = $true
+}
+
+function Resolve-DawnstrikeProcessAclSid {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$IdentityReference,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    try {
+        if ($IdentityReference -is [Security.Principal.SecurityIdentifier]) {
+            return [string]$IdentityReference.Value
+        }
+        if ($IdentityReference -is [Security.Principal.IdentityReference]) {
+            return [string]$IdentityReference.Translate(
+                [Security.Principal.SecurityIdentifier]
+            ).Value
+        }
+        return [string]([Security.Principal.NTAccount]::new(
+            [string]$IdentityReference
+        )).Translate([Security.Principal.SecurityIdentifier]).Value
+    }
+    catch { throw "$Label cannot be translated to an exact SID." }
+}
+
+function Assert-DawnstrikeProcessProtectedPath {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $full = [IO.Path]::GetFullPath($Path)
+    $installRoot = 'C:\Program Files\Dawnstrike'
+    $installPrefix = $installRoot + '\'
+    if (
+        -not [string]::Equals($full, $installRoot, [StringComparison]::OrdinalIgnoreCase) -and
+        -not $full.StartsWith($installPrefix, [StringComparison]::OrdinalIgnoreCase)
+    ) { throw 'Protected process path is outside the Dawnstrike installation.' }
+    $boundaries = @('C:\Program Files', $installRoot)
+    if (-not [string]::Equals($full, $installRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        $cursor = $installRoot
+        foreach ($component in @($full.Substring($installPrefix.Length) -split '\\')) {
+            if ([string]::IsNullOrWhiteSpace($component)) {
+                throw 'Protected process path contains an empty component.'
+            }
+            $cursor = Join-Path $cursor $component
+            $boundaries += $cursor
+        }
+    }
+    $writeLikeRights = (
+        [Security.AccessControl.FileSystemRights]::Write -bor
+        [Security.AccessControl.FileSystemRights]::Modify -bor
+        [Security.AccessControl.FileSystemRights]::Delete -bor
+        [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [Security.AccessControl.FileSystemRights]::TakeOwnership -bor
+        [Security.AccessControl.FileSystemRights]::FullControl
+    )
+    foreach ($boundary in @($boundaries | Select-Object -Unique)) {
+        $item = Get-Item -LiteralPath $boundary -Force -ErrorAction Stop
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Protected process path contains a reparse point.'
+        }
+        $acl = Get-Acl -LiteralPath $boundary -ErrorAction Stop
+        $ownerSid = Resolve-DawnstrikeProcessAclSid `
+            -IdentityReference $acl.Owner -Label 'Protected process owner'
+        if (-not $script:DawnstrikeProtectedPrincipalSids.ContainsKey($ownerSid)) {
+            throw 'Protected process path is not administrator-owned.'
+        }
+        foreach ($rule in @($acl.Access)) {
+            $ruleSid = Resolve-DawnstrikeProcessAclSid `
+                -IdentityReference $rule.IdentityReference -Label 'Protected process access principal'
+            if (
+                $rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+                -not $script:DawnstrikeProtectedPrincipalSids.ContainsKey($ruleSid) -and
+                ($rule.FileSystemRights -band $writeLikeRights) -ne 0
+            ) { throw 'Protected process path is writable by a non-admin principal.' }
+        }
+    }
+    return $full
+}
+
+function Get-DawnstrikeProtectedReleaseRoot {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[0-9a-f]{40}$')]
+        [string]$ExpectedSha
+    )
+
+    return [IO.Path]::GetFullPath(
+        (Join-Path $script:DawnstrikeProtectedReleaseParent $ExpectedSha.ToLowerInvariant())
+    ).TrimEnd('\')
+}
 
 # Every scheduled child is launched through the native Job Object runner.  A
 # PowerShell process tree is not a sufficient ownership boundary on Windows:
@@ -18,6 +134,265 @@ if (-not (Get-Command Get-DawnstrikeApprovedLockInterpreter -ErrorAction Silentl
 }
 if (-not (Get-Command Assert-DawnstrikeStateRootBoundary -ErrorAction SilentlyContinue)) {
     . (Join-Path $PSScriptRoot "state_root_boundary.ps1")
+}
+
+function Get-DawnstrikeProtectedGitBoundaryContract {
+    [CmdletBinding()]
+    param()
+
+    if ($null -ne $script:DawnstrikeProtectedGitBoundaryContract) {
+        return $script:DawnstrikeProtectedGitBoundaryContract
+    }
+    $root = [IO.Path]::GetFullPath($script:DawnstrikeProtectedGitRoot).TrimEnd('\')
+    $manifestPath = [IO.Path]::GetFullPath($script:DawnstrikeProtectedGitBoundaryManifest)
+    $manifestName = [IO.Path]::GetFileName($manifestPath)
+    $rootPrefix = $root + '\'
+    $locks = @()
+    try {
+        foreach ($boundaryPath in @($root, $manifestPath)) {
+            $null = Assert-DawnstrikeProcessProtectedPath -Path $boundaryPath
+            $lease = Open-DawnstrikeStateBoundaryPath `
+                -Path $boundaryPath -Label 'Protected Git boundary namespace'
+            $locks += $lease.handle
+        }
+        $manifestStream = [IO.File]::Open(
+            $manifestPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read
+        )
+        $locks += $manifestStream
+        $manifestBuffer = [IO.MemoryStream]::new()
+        $manifestStream.CopyTo($manifestBuffer)
+        $manifestBytes = $manifestBuffer.ToArray()
+        try { $manifest = [Text.Encoding]::UTF8.GetString($manifestBytes) | ConvertFrom-Json }
+        catch { throw 'Protected Git boundary manifest is invalid JSON.' }
+        if (
+            [string]$manifest.schema_version -cne 'dawnstrike.git_boundary.v1' -or
+            [string]$manifest.archive_uri -cne $script:DawnstrikeProtectedGitArchiveUri -or
+            [string]$manifest.archive_sha256 -cne $script:DawnstrikeProtectedGitArchiveSha256 -or
+            [string]$manifest.git_sha256 -cne $script:DawnstrikeProtectedGitSha256 -or
+            @($manifest.files).Count -lt 1
+        ) { throw 'Protected Git boundary manifest contract is invalid.' }
+
+        $expected = @{}
+        foreach ($entry in @($manifest.files)) {
+            $relative = [string]$entry.path
+            $segments = @($relative -split '/')
+            if (
+                [string]::IsNullOrWhiteSpace($relative) -or
+                $relative.Contains('\') -or
+                $relative.Contains(':') -or
+                [IO.Path]::IsPathRooted($relative) -or
+                $segments.Count -lt 1 -or
+                @($segments | Where-Object { $_ -in @('', '.', '..') }).Count -gt 0 -or
+                $expected.ContainsKey($relative) -or
+                [string]$entry.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+                [long]$entry.length -lt 0
+            ) { throw 'Protected Git boundary manifest contains an invalid file identity.' }
+            $full = [IO.Path]::GetFullPath((Join-Path $root ($relative.Replace('/', '\'))))
+            if (-not $full.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                throw 'Protected Git boundary manifest file escapes its root.'
+            }
+            $null = Assert-DawnstrikeProcessProtectedPath -Path $full
+            $lease = Open-DawnstrikeStateBoundaryPath `
+                -Path $full -Label 'Protected Git file namespace'
+            $locks += $lease.handle
+            $item = Get-Item -LiteralPath $full -Force -ErrorAction Stop
+            if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'Protected Git boundary contains a non-regular file.'
+            }
+            $stream = [IO.File]::Open(
+                $full, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read
+            )
+            $locks += $stream
+            $sha = [Security.Cryptography.SHA256]::Create()
+            try { $digest = ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-', '').ToLowerInvariant() }
+            finally { $sha.Dispose(); $stream.Position = 0 }
+            if ($stream.Length -ne [long]$entry.length -or $digest -cne [string]$entry.sha256) {
+                throw "Protected Git file identity differs from its sealed manifest: $relative"
+            }
+            $expected[$relative] = $true
+        }
+        $actual = @{}
+        foreach ($item in @(Get-ChildItem -LiteralPath $root -Recurse -Force -ErrorAction Stop)) {
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'Protected Git boundary contains a reparse point.'
+            }
+            if ($item.PSIsContainer) { continue }
+            $relative = $item.FullName.Substring($rootPrefix.Length).Replace('\', '/')
+            if ([string]::Equals($relative, $manifestName, [StringComparison]::OrdinalIgnoreCase)) {
+                continue
+            }
+            if ($actual.ContainsKey($relative) -or -not $expected.ContainsKey($relative)) {
+                throw "Protected Git boundary contains an unsealed file: $relative"
+            }
+            $actual[$relative] = $true
+        }
+        if ($actual.Count -ne $expected.Count) {
+            throw 'Protected Git file set differs from its sealed manifest.'
+        }
+        $approvedGit = Get-DawnstrikeApprovedGit
+        if (
+            -not [string]::Equals([string]$approvedGit.path, $script:DawnstrikeProtectedGitPath, [StringComparison]::OrdinalIgnoreCase) -or
+            [string]$approvedGit.sha256 -cne $script:DawnstrikeProtectedGitSha256
+        ) { throw 'Protected Git executable identity differs from its boundary contract.' }
+        $contract = [pscustomobject]@{
+            git_path = $script:DawnstrikeProtectedGitPath
+            git_sha256 = $script:DawnstrikeProtectedGitSha256
+            git_boundary_manifest_path = $manifestPath
+            git_boundary_manifest_sha256 = Get-DawnstrikeLaunchSha256Bytes $manifestBytes
+        }
+        $script:DawnstrikeScheduledSourceLocks += @($locks)
+        $script:DawnstrikeProtectedGitBoundaryContract = $contract
+        return $contract
+    }
+    catch {
+        foreach ($lock in @($locks)) { if ($null -ne $lock) { $lock.Dispose() } }
+        throw
+    }
+}
+
+function Get-DawnstrikeProtectedVercelBoundaryContract {
+    [CmdletBinding()]
+    param()
+
+    if ($null -ne $script:DawnstrikeProtectedVercelBoundaryContract) {
+        return $script:DawnstrikeProtectedVercelBoundaryContract
+    }
+    $root = [IO.Path]::GetFullPath($script:DawnstrikeProtectedVercelRoot).TrimEnd('\')
+    $manifestPath = [IO.Path]::GetFullPath($script:DawnstrikeProtectedVercelManifest)
+    $manifestName = [IO.Path]::GetFileName($manifestPath)
+    $rootPrefix = $root + '\'
+    $locks = @()
+    try {
+        foreach ($pathContract in @(
+            @($root, 'Protected Vercel CLI root namespace'),
+            @($manifestPath, 'Protected Vercel CLI manifest namespace'),
+            @($script:DawnstrikeProtectedVercelEntry, 'Protected Vercel CLI entry namespace')
+        )) {
+            $null = Assert-DawnstrikeProcessProtectedPath -Path ([string]$pathContract[0])
+            $lease = Open-DawnstrikeStateBoundaryPath `
+                -Path ([string]$pathContract[0]) -Label ([string]$pathContract[1])
+            $locks += $lease.handle
+        }
+        $manifestStream = [IO.File]::Open(
+            $manifestPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read
+        )
+        $locks += $manifestStream
+        $manifestBuffer = [IO.MemoryStream]::new()
+        $manifestStream.CopyTo($manifestBuffer)
+        $manifestBytes = $manifestBuffer.ToArray()
+        try { $manifest = [Text.Encoding]::UTF8.GetString($manifestBytes) | ConvertFrom-Json }
+        catch { throw 'Protected Vercel CLI manifest is invalid JSON.' }
+        if (
+            [string]$manifest.schema_version -cne 'dawnstrike.vercel_cli_boundary.v1' -or
+            [string]$manifest.tree_sha256 -cne $script:DawnstrikeProtectedVercelTreeSha256 -or
+            [int]$manifest.file_count -ne 7131 -or
+            [string]$manifest.entry_relative_path -cne 'node_modules/vercel/dist/vc.js' -or
+            [string]$manifest.entry_sha256 -cne $script:DawnstrikeProtectedVercelEntrySha256 -or
+            [string]$manifest.vercel_version -cne '59.11.2' -or
+            @($manifest.files).Count -ne 7131 -or
+            $manifest.research_only -ne $true -or
+            $manifest.broker_execution_enabled -ne $false
+        ) { throw 'Protected Vercel CLI manifest contract is invalid.' }
+        $expected = @{}
+        $treeEntries = @()
+        foreach ($entry in @($manifest.files)) {
+            $relative = [string]$entry.path
+            $segments = @($relative -split '/')
+            if (
+                [string]::IsNullOrWhiteSpace($relative) -or
+                $relative.Contains('\') -or
+                $relative.Contains(':') -or
+                [IO.Path]::IsPathRooted($relative) -or
+                $segments.Count -lt 1 -or
+                @($segments | Where-Object { $_ -in @('', '.', '..') }).Count -gt 0 -or
+                [string]::Equals($relative, $manifestName, [StringComparison]::OrdinalIgnoreCase) -or
+                $expected.ContainsKey($relative) -or
+                [string]$entry.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+                [long]$entry.length -lt 0
+            ) { throw 'Protected Vercel CLI manifest contains an invalid file identity.' }
+            $full = [IO.Path]::GetFullPath((Join-Path $root ($relative.Replace('/', '\'))))
+            if (-not $full.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                throw 'Protected Vercel CLI manifest entry escaped its root.'
+            }
+            $null = Assert-DawnstrikeProcessProtectedPath -Path $full
+            $lease = Open-DawnstrikeStateBoundaryPath `
+                -Path $full -Label 'Protected Vercel CLI file namespace'
+            $locks += $lease.handle
+            $item = Get-Item -LiteralPath $full -Force -ErrorAction Stop
+            if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'Protected Vercel CLI boundary contains a non-regular file.'
+            }
+            $stream = [IO.File]::Open(
+                $full, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read
+            )
+            $locks += $stream
+            $sha = [Security.Cryptography.SHA256]::Create()
+            try { $digest = ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-', '').ToLowerInvariant() }
+            finally { $sha.Dispose(); $stream.Position = 0 }
+            if ($stream.Length -ne [long]$entry.length -or $digest -cne [string]$entry.sha256) {
+                throw "Protected Vercel CLI file differs from its seal: $relative"
+            }
+            $expected[$relative] = $true
+            $treeEntries += [pscustomobject]@{
+                path = $relative
+                length = [long]$entry.length
+                sha256 = [string]$entry.sha256
+            }
+        }
+        $actual = @{}
+        foreach ($item in @(Get-ChildItem -LiteralPath $root -Recurse -Force -ErrorAction Stop)) {
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'Protected Vercel CLI boundary contains a reparse point.'
+            }
+            if ($item.PSIsContainer) { continue }
+            $relative = $item.FullName.Substring($rootPrefix.Length).Replace('\', '/')
+            if ([string]::Equals($relative, $manifestName, [StringComparison]::OrdinalIgnoreCase)) {
+                continue
+            }
+            if ($actual.ContainsKey($relative) -or -not $expected.ContainsKey($relative)) {
+                throw "Protected Vercel CLI contains an unsealed file: $relative"
+            }
+            $actual[$relative] = $true
+        }
+        if ($actual.Count -ne $expected.Count) {
+            throw 'Protected Vercel CLI file set differs from its sealed manifest.'
+        }
+        $canonical = @(
+            $treeEntries |
+                Sort-Object `
+                    @{ Expression = { ([string]$_.path).ToLowerInvariant() } }, `
+                    @{ Expression = { [string]$_.path } } |
+                ForEach-Object {
+                    [string]$_.path + '|' + [string][long]$_.length + '|' + [string]$_.sha256
+                }
+        ) -join "`n"
+        $treeSha256 = Get-DawnstrikeLaunchSha256Bytes ([Text.Encoding]::UTF8.GetBytes($canonical))
+        if ($treeSha256 -cne $script:DawnstrikeProtectedVercelTreeSha256) {
+            throw 'Protected Vercel CLI canonical tree identity is invalid.'
+        }
+        $entryStream = @($locks | Where-Object {
+            $_ -is [IO.FileStream] -and
+            [string]::Equals($_.Name, $script:DawnstrikeProtectedVercelEntry, [StringComparison]::OrdinalIgnoreCase)
+        })
+        if ($entryStream.Count -ne 1) {
+            throw 'Protected Vercel CLI entrypoint is not retained exactly once.'
+        }
+        $contract = [pscustomobject]@{
+            vercel_cli_root = $root
+            vercel_cli_tree_sha256 = $script:DawnstrikeProtectedVercelTreeSha256
+            vercel_cli_entry_path = $script:DawnstrikeProtectedVercelEntry
+            vercel_cli_entry_sha256 = $script:DawnstrikeProtectedVercelEntrySha256
+            vercel_cli_boundary_manifest_path = $manifestPath
+            vercel_cli_boundary_manifest_sha256 = Get-DawnstrikeLaunchSha256Bytes $manifestBytes
+        }
+        $script:DawnstrikeScheduledSourceLocks += @($locks)
+        $script:DawnstrikeProtectedVercelBoundaryContract = $contract
+        return $contract
+    }
+    catch {
+        foreach ($lock in @($locks)) { if ($null -ne $lock) { $lock.Dispose() } }
+        throw
+    }
 }
 
 function Get-DawnstrikeGitBlobSha1 {
@@ -113,7 +488,7 @@ function Assert-DawnstrikeProcessSourceBoundToHead {
     if ($localConfig -match "(?im)^\s*\[\s*(?:filter|url|protocol|include|credential|http)(?:\s|\])|^\s*(?:attributesfile|hookspath|path|sshcommand|proxy|helper|command)\s*=") {
         throw "Scheduled Python release contains a Git execution/filter configuration."
     }
-    $git = (Get-DawnstrikeApprovedGit).path
+    $git = (Get-DawnstrikeProtectedGitBoundaryContract).git_path
     # Windows checkouts may materialize committed LF blobs as CRLF.  Keep the
     # normal Git text normalization contract while disabling all external
     # filters/hooks; otherwise a clean, ordinary checkout is falsely rejected
@@ -308,7 +683,7 @@ function Get-DawnstrikeLunaCoreSourceFiles {
     # Returning every HEAD-listed Python path means a file hidden during the
     # directory walk is still required and opened by the caller's admission
     # pass before Python can import anything.
-    $git = [string](Get-DawnstrikeApprovedGit).path
+    $git = [string](Get-DawnstrikeProtectedGitBoundaryContract).git_path
     $treeish = if ($ExpectedSha) { $ExpectedSha.ToLowerInvariant() } else { 'HEAD' }
     $gitArgs = @(
         '-c', 'core.autocrlf=true', '-c', 'core.fsmonitor=false',
@@ -380,6 +755,7 @@ function Get-DawnstrikeScheduledLaunchFiles {
     )
 
     $common = @(
+        "requirements.lock",
         "scripts/$TaskScript",
         "scripts/import_dawnstrike_environment.ps1",
         "scripts/dawnstrike_process_runner.ps1",
@@ -390,6 +766,7 @@ function Get-DawnstrikeScheduledLaunchFiles {
         "scripts/runtime_activation_contract.py",
         "scripts/dawnstrike_python_bootstrap.py",
         "scripts/state_disaster_recovery.py",
+        "scripts/powershell_module_boundary.ps1",
         "scripts/state_root_boundary.ps1",
         "scripts/invoke_dawnstrike_stage.ps1"
     )
@@ -411,7 +788,8 @@ function Get-DawnstrikeScheduledLaunchFiles {
             "scripts/publication_boundary.py",
             "scripts/verify_daily_prepublication.py",
             "scripts/build_vercel_public_stage.ps1",
-            "scripts/verify_vercel_candidate.ps1"
+            "scripts/verify_vercel_candidate.ps1",
+            "scripts/verify_public_artifact.py"
         )
     }
     return @($common | Select-Object -Unique)
@@ -446,7 +824,15 @@ function New-DawnstrikeScheduledLaunchManifest {
     )
 
     $runtime = [System.IO.Path]::GetFullPath($RuntimeRoot).TrimEnd('\')
+    $release = Get-DawnstrikeProtectedReleaseRoot -ExpectedSha $ExpectedSha
     $state = [System.IO.Path]::GetFullPath($StateRoot).TrimEnd('\')
+    $gitContract = Get-DawnstrikeProtectedGitBoundaryContract
+    $pythonContract = Get-DawnstrikeProtectedPythonDependencyContract `
+        -ReleaseRoot $release -ExpectedSha $ExpectedSha
+    $vercelContract = if ($TaskScript -eq 'run_daily_finalize.ps1') {
+        Get-DawnstrikeProtectedVercelBoundaryContract
+    }
+    else { $null }
     $stateBoundary = $null
     if ([string]::Equals($state, $script:DawnstrikeStateBoundaryFixedRoot, [StringComparison]::OrdinalIgnoreCase)) {
         $stateBoundary = Assert-DawnstrikeStateRootBoundary -StateRoot $state
@@ -457,13 +843,13 @@ function New-DawnstrikeScheduledLaunchManifest {
     New-Item -ItemType Directory -Path $root -Force | Out-Null
     $path = Join-Path $root ($ExpectedSha.ToLowerInvariant() + '-' + $safeTask + '.json')
     $entries = @()
-    $runtimePrefix = $runtime.TrimEnd('\') + '\'
+    $releasePrefix = $release.TrimEnd('\') + '\'
     foreach ($relative in @(
         Get-DawnstrikeScheduledLaunchFiles -TaskScript $TaskScript -ExpectedSha $ExpectedSha
     )) {
-        $full = [IO.Path]::GetFullPath((Join-Path $runtime ($relative.Replace('/', '\'))))
-        if (-not $full.StartsWith($runtimePrefix, [StringComparison]::OrdinalIgnoreCase)) {
-            throw "Scheduled launch manifest entry escaped the runtime root: $relative"
+        $full = [IO.Path]::GetFullPath((Join-Path $release ($relative.Replace('/', '\'))))
+        if (-not $full.StartsWith($releasePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Scheduled launch manifest entry escaped the protected release root: $relative"
         }
         Assert-DawnstrikeSharedLockNoReparse $full "Scheduled launch manifest entry"
         $item = Get-Item -LiteralPath $full -Force -ErrorAction Stop
@@ -481,10 +867,34 @@ function New-DawnstrikeScheduledLaunchManifest {
         schema_version = 'dawnstrike.scheduled_launch_manifest.v1'
         release_sha = $ExpectedSha.ToLowerInvariant()
         task_script = $TaskScript
+        protected_release_root = $release
         runtime_root = $runtime
+        git_path = [string]$gitContract.git_path
+        git_sha256 = [string]$gitContract.git_sha256
+        git_boundary_manifest_path = [string]$gitContract.git_boundary_manifest_path
+        git_boundary_manifest_sha256 = [string]$gitContract.git_boundary_manifest_sha256
+        python_path = [string]$pythonContract.python_path
+        python_sha256 = [string]$pythonContract.python_sha256
+        python_boundary_manifest_path = [string]$pythonContract.python_boundary_manifest_path
+        python_boundary_manifest_sha256 = [string]$pythonContract.python_boundary_manifest_sha256
+        requirements_lock_sha256 = [string]$pythonContract.requirements_lock_sha256
+        requirements_lock_blob = [string]$pythonContract.requirements_lock_blob
+        dependency_root = [string]$pythonContract.dependency_root
+        dependency_manifest_path = [string]$pythonContract.dependency_manifest_path
+        dependency_manifest_sha256 = [string]$pythonContract.dependency_manifest_sha256
         files = @($entries)
         research_only = $true
         broker_execution_enabled = $false
+    }
+    if ($null -ne $vercelContract) {
+        foreach ($name in @(
+            'vercel_cli_root',
+            'vercel_cli_tree_sha256',
+            'vercel_cli_entry_path',
+            'vercel_cli_entry_sha256',
+            'vercel_cli_boundary_manifest_path',
+            'vercel_cli_boundary_manifest_sha256'
+        )) { $payload[$name] = [string]$vercelContract.$name }
     }
     $json = $payload | ConvertTo-Json -Depth 8
     [IO.File]::WriteAllText($path, $json, [Text.UTF8Encoding]::new($false))
@@ -497,6 +907,128 @@ function New-DawnstrikeScheduledLaunchManifest {
     finally {
         if ($null -ne $stateBoundary -and $null -ne $stateBoundary.locks) {
             foreach ($lock in @($stateBoundary.locks)) { if ($null -ne $lock) { $lock.Dispose() } }
+        }
+    }
+}
+
+function Get-DawnstrikeProtectedPythonDependencyContract {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$ReleaseRoot,
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[0-9a-f]{40}$')]
+        [string]$ExpectedSha,
+        [switch]$RetainLocks
+    )
+
+    $release = [IO.Path]::GetFullPath($ReleaseRoot).TrimEnd('\')
+    $expectedRelease = Get-DawnstrikeProtectedReleaseRoot -ExpectedSha $ExpectedSha
+    if (-not [string]::Equals($release, $expectedRelease, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Python dependency contract release root is not the protected exact-SHA root.'
+    }
+    $pythonRoot = [IO.Path]::GetFullPath($script:DawnstrikeProtectedPythonRoot).TrimEnd('\')
+    $pythonPath = Join-Path $pythonRoot 'python.exe'
+    $pythonBoundaryManifest = Join-Path $pythonRoot '.dawnstrike-python-boundary-v1.json'
+    $dependencyParent = [IO.Path]::GetFullPath(
+        $script:DawnstrikeProtectedDependencyParent
+    ).TrimEnd('\')
+    $requirementsPath = Join-Path $release 'requirements.lock'
+    $locks = @()
+    $returnLocks = $false
+    try {
+        foreach ($pathContract in @(
+            @($requirementsPath, 'Exact requirements.lock namespace'),
+            @($pythonPath, 'Protected Python executable namespace'),
+            @($pythonBoundaryManifest, 'Protected Python manifest namespace')
+        )) {
+            $lease = Open-DawnstrikeStateBoundaryPath `
+                -Path ([string]$pathContract[0]) -Label ([string]$pathContract[1])
+            $locks += $lease.handle
+        }
+        $requirementsStream = [IO.File]::Open(
+            $requirementsPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read
+        )
+        $locks += $requirementsStream
+        $requirementsBuffer = [IO.MemoryStream]::new()
+        $requirementsStream.CopyTo($requirementsBuffer)
+        $requirementsBytes = $requirementsBuffer.ToArray()
+        $requirementsSha256 = Get-DawnstrikeLaunchSha256Bytes $requirementsBytes
+        $dependencyRoot = Join-Path $dependencyParent $requirementsSha256
+        $dependencyManifest = Join-Path $dependencyRoot '.dawnstrike-dependency-boundary-v1.json'
+        foreach ($pathContract in @(
+            @($dependencyRoot, 'Protected dependency root namespace'),
+            @($dependencyManifest, 'Protected dependency manifest namespace')
+        )) {
+            $lease = Open-DawnstrikeStateBoundaryPath `
+                -Path ([string]$pathContract[0]) -Label ([string]$pathContract[1])
+            $locks += $lease.handle
+        }
+        $pythonManifestStream = [IO.File]::Open(
+            $pythonBoundaryManifest, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read
+        )
+        $locks += $pythonManifestStream
+        $pythonManifestBuffer = [IO.MemoryStream]::new()
+        $pythonManifestStream.CopyTo($pythonManifestBuffer)
+        $pythonManifestBytes = $pythonManifestBuffer.ToArray()
+        $dependencyManifestStream = [IO.File]::Open(
+            $dependencyManifest, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read
+        )
+        $locks += $dependencyManifestStream
+        $dependencyManifestBuffer = [IO.MemoryStream]::new()
+        $dependencyManifestStream.CopyTo($dependencyManifestBuffer)
+        $dependencyManifestBytes = $dependencyManifestBuffer.ToArray()
+        try {
+            $pythonManifestPayload = [Text.Encoding]::UTF8.GetString(
+                $pythonManifestBytes
+            ) | ConvertFrom-Json
+            $dependencyManifestPayload = [Text.Encoding]::UTF8.GetString(
+                $dependencyManifestBytes
+            ) | ConvertFrom-Json
+        }
+        catch { throw 'Protected Python or dependency boundary manifest is invalid JSON.' }
+        $approvedPython = Get-DawnstrikeApprovedLockInterpreter
+        if (
+            [string]$pythonManifestPayload.schema_version -cne 'dawnstrike.python_boundary.v1' -or
+            [string]$pythonManifestPayload.python_sha256 -cne [string]$approvedPython.sha256 -or
+            @($pythonManifestPayload.files).Count -lt 1 -or
+            $pythonManifestPayload.research_only -ne $true -or
+            $pythonManifestPayload.broker_execution_enabled -ne $false
+        ) { throw 'Protected Python boundary manifest contract is invalid.' }
+        $requirementsBlob = Get-DawnstrikeGitBlobSha1 $requirementsPath
+        if (
+            [string]$dependencyManifestPayload.schema_version -cne 'dawnstrike.dependency_boundary.v1' -or
+            [string]$dependencyManifestPayload.requirements_lock_blob -cne $requirementsBlob -or
+            [string]$dependencyManifestPayload.requirements_lock_sha256 -cne $requirementsSha256 -or
+            @($dependencyManifestPayload.files).Count -lt 1 -or
+            $dependencyManifestPayload.research_only -ne $true -or
+            $dependencyManifestPayload.broker_execution_enabled -ne $false
+        ) { throw 'Protected dependency boundary manifest contract is invalid.' }
+        Assert-DawnstrikePythonDependencyAclBoundary `
+            -InterpreterPath $pythonPath `
+            -AdditionalPaths @(
+                $pythonBoundaryManifest,
+                $dependencyParent,
+                $dependencyRoot,
+                $dependencyManifest
+            )
+        $contract = [pscustomobject]@{
+            python_path = [string]$approvedPython.path
+            python_sha256 = [string]$approvedPython.sha256
+            python_boundary_manifest_path = $pythonBoundaryManifest
+            python_boundary_manifest_sha256 = Get-DawnstrikeLaunchSha256Bytes $pythonManifestBytes
+            requirements_lock_sha256 = $requirementsSha256
+            requirements_lock_blob = $requirementsBlob
+            dependency_root = [IO.Path]::GetFullPath($dependencyRoot).TrimEnd('\')
+            dependency_manifest_path = [IO.Path]::GetFullPath($dependencyManifest)
+            dependency_manifest_sha256 = Get-DawnstrikeLaunchSha256Bytes $dependencyManifestBytes
+            locks = if ($RetainLocks) { @($locks) } else { @() }
+        }
+        if ($RetainLocks) { $returnLocks = $true }
+        return $contract
+    }
+    finally {
+        if (-not $returnLocks) {
+            foreach ($lock in @($locks)) { if ($null -ne $lock) { $lock.Dispose() } }
         }
     }
 }
@@ -523,6 +1055,7 @@ function Assert-DawnstrikeScheduledLaunchManifest {
 
     $manifest = [System.IO.Path]::GetFullPath($ManifestPath)
     $runtime = [System.IO.Path]::GetFullPath($RuntimeRoot).TrimEnd('\')
+    $release = Get-DawnstrikeProtectedReleaseRoot -ExpectedSha $ExpectedSha
     $state = [System.IO.Path]::GetFullPath($StateRoot).TrimEnd('\')
     if (-not $manifest.StartsWith(([System.IO.Path]::GetFullPath($StateRoot).TrimEnd('\') + '\'), [StringComparison]::OrdinalIgnoreCase)) {
         throw 'Scheduled launch manifest is outside the approved state root.'
@@ -535,6 +1068,14 @@ function Assert-DawnstrikeScheduledLaunchManifest {
     $locks = @()
     if ($null -ne $stateBoundary) { $locks += @($stateBoundary.locks) }
     try {
+        $gitContract = Get-DawnstrikeProtectedGitBoundaryContract
+        $pythonContract = Get-DawnstrikeProtectedPythonDependencyContract `
+            -ReleaseRoot $release -ExpectedSha $ExpectedSha -RetainLocks
+        $locks += @($pythonContract.locks)
+        $vercelContract = if ($TaskScript -eq 'run_daily_finalize.ps1') {
+            Get-DawnstrikeProtectedVercelBoundaryContract
+        }
+        else { $null }
         $manifestStream = [IO.File]::Open($manifest, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
         $locks += $manifestStream
         $manifestBytes = [IO.MemoryStream]::new()
@@ -548,22 +1089,73 @@ function Assert-DawnstrikeScheduledLaunchManifest {
             [string]$payload.schema_version -cne 'dawnstrike.scheduled_launch_manifest.v1' -or
             [string]$payload.release_sha -cne $ExpectedSha.ToLowerInvariant() -or
             [string]$payload.task_script -cne $TaskScript -or
+            -not [string]::Equals(
+                [string]$payload.protected_release_root,
+                $release,
+                [StringComparison]::OrdinalIgnoreCase
+            ) -or
+            -not [string]::Equals(
+                [string]$payload.runtime_root,
+                $runtime,
+                [StringComparison]::OrdinalIgnoreCase
+            ) -or
+            -not [string]::Equals([string]$payload.git_path, [string]$gitContract.git_path, [StringComparison]::OrdinalIgnoreCase) -or
+            [string]$payload.git_sha256 -cne [string]$gitContract.git_sha256 -or
+            -not [string]::Equals([string]$payload.git_boundary_manifest_path, [string]$gitContract.git_boundary_manifest_path, [StringComparison]::OrdinalIgnoreCase) -or
+            [string]$payload.git_boundary_manifest_sha256 -cne [string]$gitContract.git_boundary_manifest_sha256 -or
+            -not [string]::Equals([string]$payload.python_path, [string]$pythonContract.python_path, [StringComparison]::OrdinalIgnoreCase) -or
+            [string]$payload.python_sha256 -cne [string]$pythonContract.python_sha256 -or
+            -not [string]::Equals([string]$payload.python_boundary_manifest_path, [string]$pythonContract.python_boundary_manifest_path, [StringComparison]::OrdinalIgnoreCase) -or
+            [string]$payload.python_boundary_manifest_sha256 -cne [string]$pythonContract.python_boundary_manifest_sha256 -or
+            [string]$payload.requirements_lock_sha256 -cne [string]$pythonContract.requirements_lock_sha256 -or
+            [string]$payload.requirements_lock_blob -cne [string]$pythonContract.requirements_lock_blob -or
+            -not [string]::Equals([string]$payload.dependency_root, [string]$pythonContract.dependency_root, [StringComparison]::OrdinalIgnoreCase) -or
+            -not [string]::Equals([string]$payload.dependency_manifest_path, [string]$pythonContract.dependency_manifest_path, [StringComparison]::OrdinalIgnoreCase) -or
+            [string]$payload.dependency_manifest_sha256 -cne [string]$pythonContract.dependency_manifest_sha256 -or
             $payload.research_only -ne $true -or
             $payload.broker_execution_enabled -ne $false
         ) { throw 'Scheduled launch manifest safety identity is invalid.' }
+        $vercelFields = @(
+            'vercel_cli_root',
+            'vercel_cli_tree_sha256',
+            'vercel_cli_entry_path',
+            'vercel_cli_entry_sha256',
+            'vercel_cli_boundary_manifest_path',
+            'vercel_cli_boundary_manifest_sha256'
+        )
+        if ($null -ne $vercelContract) {
+            foreach ($name in $vercelFields) {
+                $expectedValue = [string]$vercelContract.$name
+                $actualValue = [string]$payload.$name
+                $matches = if ($name -in @(
+                    'vercel_cli_root',
+                    'vercel_cli_entry_path',
+                    'vercel_cli_boundary_manifest_path'
+                )) {
+                    [string]::Equals($actualValue, $expectedValue, [StringComparison]::OrdinalIgnoreCase)
+                }
+                else { $actualValue -ceq $expectedValue }
+                if (-not $matches) {
+                    throw "Scheduled finalizer Vercel CLI boundary differs from its launch manifest: $name"
+                }
+            }
+        }
+        elseif (@($vercelFields | Where-Object { $payload.PSObject.Properties.Name -ccontains $_ }).Count -ne 0) {
+            throw 'Non-publication launch manifest contains an unexpected Vercel CLI boundary.'
+        }
         $expected = @{}
         foreach ($entry in @($payload.files)) {
             $relative = [string]$entry.path
             if (
-                $relative -notmatch '^(?:scripts|intraday_scanner)/[A-Za-z0-9._/-]+$' -or
+                $relative -notmatch '^(?:requirements\.lock|(?:scripts|intraday_scanner)/[A-Za-z0-9._/-]+)$' -or
                 $expected.ContainsKey($relative)
             ) {
                 throw 'Scheduled launch manifest contains an invalid or duplicate path.'
             }
-            $full = [IO.Path]::GetFullPath((Join-Path $runtime ($relative.Replace('/', '\'))))
-            $runtimePrefix = $runtime.TrimEnd('\') + '\'
-            if (-not $full.StartsWith($runtimePrefix, [StringComparison]::OrdinalIgnoreCase)) {
-                throw 'Scheduled launch manifest entry escaped the runtime root.'
+            $full = [IO.Path]::GetFullPath((Join-Path $release ($relative.Replace('/', '\'))))
+            $releasePrefix = $release.TrimEnd('\') + '\'
+            if (-not $full.StartsWith($releasePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                throw 'Scheduled launch manifest entry escaped the protected release root.'
             }
             Assert-DawnstrikeSharedLockNoReparse $full "Scheduled launch manifest entry"
             $stream = [IO.File]::Open($full, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
@@ -585,9 +1177,9 @@ function Assert-DawnstrikeScheduledLaunchManifest {
         }
         if ($EntryScript) {
             $entryPath = [IO.Path]::GetFullPath($EntryScript)
-            $rootPrefix = $runtime.TrimEnd('\') + '\'
+            $rootPrefix = $release.TrimEnd('\') + '\'
             if (-not $entryPath.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-                throw 'Scheduled entry script is outside the approved runtime root.'
+                throw 'Scheduled entry script is outside the protected release root.'
             }
             $entryRelative = $entryPath.Substring($rootPrefix.Length).Replace('\', '/')
             if (-not $expected.ContainsKey($entryRelative)) { throw 'Scheduled entry script is absent from the launch manifest.' }
@@ -602,10 +1194,13 @@ function Assert-DawnstrikeScheduledLaunchManifest {
 
 function Assert-DawnstrikePythonDependencyAclBoundary {
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][string]$InterpreterPath)
+    param(
+        [Parameter(Mandatory = $true)][string]$InterpreterPath,
+        [string[]]$AdditionalPaths = @()
+    )
 
     $interpreter = [IO.Path]::GetFullPath($InterpreterPath)
-    $expectedInterpreter = 'C:\Program Files\Dawnstrike\Python313\python.exe'
+    $expectedInterpreter = Join-Path $script:DawnstrikeProtectedPythonRoot 'python.exe'
     if (-not [string]::Equals(
             $interpreter,
             $expectedInterpreter,
@@ -614,7 +1209,7 @@ function Assert-DawnstrikePythonDependencyAclBoundary {
         throw "Python dependency boundary is outside the administrator-owned prefix."
     }
     $prefix = [IO.Directory]::GetParent($interpreter).FullName
-    $targets = @(
+    $targets = @(@(
         'C:\Program Files',
         'C:\Program Files\Dawnstrike',
         $prefix,
@@ -629,7 +1224,7 @@ function Assert-DawnstrikePythonDependencyAclBoundary {
         (Join-Path $prefix 'Lib\site-packages'),
         (Join-Path $prefix 'Scripts'),
         (Join-Path $prefix 'Scripts\uv.exe')
-    ) | Select-Object -Unique
+    ) + @($AdditionalPaths)) | Select-Object -Unique
     $writeLikeRights = (
         [Security.AccessControl.FileSystemRights]::Write -bor
         [Security.AccessControl.FileSystemRights]::Modify -bor
@@ -645,13 +1240,17 @@ function Assert-DawnstrikePythonDependencyAclBoundary {
             throw "Python dependency boundary contains a reparse point: $target"
         }
         $acl = Get-Acl -LiteralPath $target -ErrorAction Stop
-        if ([string]$acl.Owner -notmatch '(?i)(^|\\)(SYSTEM|Administrators|TrustedInstaller)$') {
+        $ownerSid = Resolve-DawnstrikeProcessAclSid `
+            -IdentityReference $acl.Owner -Label 'Python dependency owner'
+        if (-not $script:DawnstrikeProtectedPrincipalSids.ContainsKey($ownerSid)) {
             throw "Python dependency boundary is not owned by an administrator principal: $target"
         }
         foreach ($rule in @($acl.Access)) {
+            $ruleSid = Resolve-DawnstrikeProcessAclSid `
+                -IdentityReference $rule.IdentityReference -Label 'Python dependency access principal'
             if (
                 $rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
-                [string]$rule.IdentityReference -notmatch '(?i)(^|\\)(SYSTEM|Administrators|TrustedInstaller)$' -and
+                -not $script:DawnstrikeProtectedPrincipalSids.ContainsKey($ruleSid) -and
                 ($rule.FileSystemRights -band $writeLikeRights) -ne 0
             ) {
                 throw "Python dependency boundary is writable by a non-admin principal: $target"
@@ -674,15 +1273,63 @@ function Get-DawnstrikeScheduledLaunchCommand {
     )
 
     function Quote-Launch([string]$Value) { return "'" + $Value.Replace("'", "''") + "'" }
+    $releaseRoot = Get-DawnstrikeProtectedReleaseRoot -ExpectedSha $ExpectedSha
+    $gitContract = Get-DawnstrikeProtectedGitBoundaryContract
+    $pythonContract = Get-DawnstrikeProtectedPythonDependencyContract `
+        -ReleaseRoot $releaseRoot -ExpectedSha $ExpectedSha
+    $runnerLeaf = [IO.Path]::GetFileName($Runner)
+    $vercelContract = if ($runnerLeaf -eq 'run_daily_finalize.ps1') {
+        Get-DawnstrikeProtectedVercelBoundaryContract
+    }
+    else { $null }
+    $expectedRunner = Join-Path $releaseRoot ('scripts\' + [IO.Path]::GetFileName($Runner))
+    if (-not [string]::Equals(
+        [IO.Path]::GetFullPath($Runner),
+        [IO.Path]::GetFullPath($expectedRunner),
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw 'Scheduled runner is outside the protected exact-SHA release root.'
+    }
     $entry = Quote-Launch $Runner
     $runtime = Quote-Launch $RuntimeRoot
     $state = Quote-Launch $StateRoot
     $manifest = Quote-Launch $ManifestPath
-    $runnerName = Quote-Launch ([IO.Path]::GetFileName($Runner))
-    $stateBoundaryHelper = Join-Path $RuntimeRoot 'scripts\state_root_boundary.ps1'
+    $runnerName = Quote-Launch $runnerLeaf
+    $moduleBoundaryHelper = Join-Path $releaseRoot 'scripts\powershell_module_boundary.ps1'
+    $moduleBoundaryHelperSha256 = Get-DawnstrikeLaunchSha256Bytes `
+        ([IO.File]::ReadAllBytes($moduleBoundaryHelper))
+    $stateBoundaryHelper = Join-Path $releaseRoot 'scripts\state_root_boundary.ps1'
     $stateBoundaryHelperSha256 = Get-DawnstrikeLaunchSha256Bytes ([IO.File]::ReadAllBytes($stateBoundaryHelper))
-    $commandPrefix = "`$ErrorActionPreference='Stop'; `$hp=$(Quote-Launch $stateBoundaryHelper); `$hi=Get-Item -LiteralPath `$hp -Force -ErrorAction Stop; if ((`$hi.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Scheduled StateRoot helper is a reparse point.' }; `$hs=[IO.File]::Open(`$hp,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read); `$boundaryLocks=@(`$hs); try { `$hx=[Security.Cryptography.SHA256]::Create(); try { `$hh=([BitConverter]::ToString(`$hx.ComputeHash(`$hs))).Replace('-','').ToLowerInvariant() } finally { `$hx.Dispose(); `$hs.Position=0 }; if (`$hh -cne $(Quote-Launch $stateBoundaryHelperSha256)) { throw 'Scheduled StateRoot helper hash mismatch.' }; . `$hp; `$sb=Assert-DawnstrikeStateRootBoundary -StateRoot $(Quote-Launch $StateRoot); `$boundaryLocks += @(`$sb.locks); "
-    $command = "`$ErrorActionPreference='Stop'; `$m=$(Quote-Launch $ManifestPath); `$expected=$(Quote-Launch $ManifestSha256.ToLowerInvariant()); `$s=[IO.File]::Open(`$m,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read); try { `$b=[IO.MemoryStream]::new(); `$s.CopyTo(`$b); `$x=[Security.Cryptography.SHA256]::Create(); try { `$actual=([BitConverter]::ToString(`$x.ComputeHash(`$b.ToArray()))).Replace('-','').ToLowerInvariant() } finally { `$x.Dispose() }; if (`$actual -cne `$expected) { throw 'Scheduled launch manifest hash mismatch.' }; `$j=[Text.Encoding]::UTF8.GetString(`$b.ToArray()) | ConvertFrom-Json; if ([string]`$j.schema_version -cne 'dawnstrike.scheduled_launch_manifest.v1' -or [string]`$j.release_sha -cne $(Quote-Launch $ExpectedSha.ToLowerInvariant()) -or [string]`$j.task_script -cne `$runnerName -or `$j.research_only -ne `$true -or `$j.broker_execution_enabled -ne `$false) { throw 'Scheduled launch manifest identity is invalid.' }; `$locks=@(`$s); foreach(`$f in @(`$j.files)) { `$p=Join-Path $(Quote-Launch $RuntimeRoot) ([string]`$f.path -replace '/', '\\'); `$h=[IO.File]::Open(`$p,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read); `$locks += `$h; `$v=[IO.MemoryStream]::new(); `$h.CopyTo(`$v); `$y=[Security.Cryptography.SHA256]::Create(); try { `$fh=([BitConverter]::ToString(`$y.ComputeHash(`$v.ToArray()))).Replace('-','').ToLowerInvariant() } finally { `$y.Dispose() }; if (`$fh -cne ([string]`$f.sha256).ToLowerInvariant()) { throw ('Scheduled launch bytes mismatch: ' + [string]`$f.path) } }; & $(Quote-Launch $Runner) -RuntimeRoot $(Quote-Launch $RuntimeRoot) -StateRoot $(Quote-Launch $StateRoot) -ExpectedSha $(Quote-Launch $ExpectedSha.ToLowerInvariant()) -LaunchManifestPath `$m -LaunchManifestSha256 `$expected"
+    $namespacePaths = @(
+        $releaseRoot,
+        $Runner,
+        $ManifestPath,
+        $moduleBoundaryHelper,
+        $stateBoundaryHelper,
+        [string]$gitContract.git_path,
+        [string]$gitContract.git_boundary_manifest_path,
+        [string]$pythonContract.python_path,
+        [string]$pythonContract.python_boundary_manifest_path,
+        [string]$pythonContract.dependency_root,
+        [string]$pythonContract.dependency_manifest_path,
+        (Join-Path $releaseRoot 'requirements.lock')
+    ) | Select-Object -Unique
+    if ($null -ne $vercelContract) {
+        $namespacePaths = @($namespacePaths) + @(
+            [string]$vercelContract.vercel_cli_root,
+            [string]$vercelContract.vercel_cli_entry_path,
+            [string]$vercelContract.vercel_cli_boundary_manifest_path
+        ) | Select-Object -Unique
+    }
+    $namespacePathLiteral = '@(' + (($namespacePaths | ForEach-Object {
+        Quote-Launch ([string]$_)
+    }) -join ',') + ')'
+    $commandPrefix = "`$global:PSModuleAutoLoadingPreference='None'; `$env:PSModulePath='C:\Windows\System32\WindowsPowerShell\v1.0\Modules'; `$bp=$(Quote-Launch $moduleBoundaryHelper); `$bs=[IO.File]::Open(`$bp,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read); `$boundaryLocks=@(`$bs); try { `$bb=[IO.MemoryStream]::new(); `$bs.CopyTo(`$bb); `$bbytes=`$bb.ToArray(); `$bx=[Security.Cryptography.SHA256]::Create(); try { `$bh=([BitConverter]::ToString(`$bx.ComputeHash(`$bbytes))).Replace('-','').ToLowerInvariant() } finally { `$bx.Dispose(); `$bs.Position=0 }; if (`$bh -cne $(Quote-Launch $moduleBoundaryHelperSha256)) { throw 'Scheduled PowerShell module boundary hash mismatch.' }; . ([ScriptBlock]::Create([Text.Encoding]::UTF8.GetString(`$bbytes))); `$ErrorActionPreference='Stop'; `$hp=$(Quote-Launch $stateBoundaryHelper); `$hi=Get-Item -LiteralPath `$hp -Force -ErrorAction Stop; if ((`$hi.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Scheduled StateRoot helper is a reparse point.' }; `$hs=[IO.File]::Open(`$hp,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read); `$boundaryLocks+=`$hs; `$hb=[IO.MemoryStream]::new(); `$hs.CopyTo(`$hb); `$hbytes=`$hb.ToArray(); `$hx=[Security.Cryptography.SHA256]::Create(); try { `$hh=([BitConverter]::ToString(`$hx.ComputeHash(`$hbytes))).Replace('-','').ToLowerInvariant() } finally { `$hx.Dispose(); `$hs.Position=0 }; if (`$hh -cne $(Quote-Launch $stateBoundaryHelperSha256)) { throw 'Scheduled StateRoot helper hash mismatch.' }; . ([ScriptBlock]::Create([Text.Encoding]::UTF8.GetString(`$hbytes))); foreach(`$np in $namespacePathLiteral){ `$nl=Open-DawnstrikeStateBoundaryPath -Path `$np -Label 'Scheduled protected namespace'; `$boundaryLocks += `$nl.handle }; `$sb=Assert-DawnstrikeStateRootBoundary -StateRoot $(Quote-Launch $StateRoot); `$boundaryLocks += @(`$sb.locks); "
+    $vercelIdentityClause = ''
+    if ($null -ne $vercelContract) {
+        $vercelIdentityClause = " -or -not [string]::Equals([string]`$j.vercel_cli_root,$(Quote-Launch ([string]$vercelContract.vercel_cli_root)),[StringComparison]::OrdinalIgnoreCase) -or [string]`$j.vercel_cli_tree_sha256 -cne $(Quote-Launch ([string]$vercelContract.vercel_cli_tree_sha256)) -or -not [string]::Equals([string]`$j.vercel_cli_entry_path,$(Quote-Launch ([string]$vercelContract.vercel_cli_entry_path)),[StringComparison]::OrdinalIgnoreCase) -or [string]`$j.vercel_cli_entry_sha256 -cne $(Quote-Launch ([string]$vercelContract.vercel_cli_entry_sha256)) -or -not [string]::Equals([string]`$j.vercel_cli_boundary_manifest_path,$(Quote-Launch ([string]$vercelContract.vercel_cli_boundary_manifest_path)),[StringComparison]::OrdinalIgnoreCase) -or [string]`$j.vercel_cli_boundary_manifest_sha256 -cne $(Quote-Launch ([string]$vercelContract.vercel_cli_boundary_manifest_sha256))"
+    }
+    $command = "`$ErrorActionPreference='Stop'; `$m=$(Quote-Launch $ManifestPath); `$expected=$(Quote-Launch $ManifestSha256.ToLowerInvariant()); `$s=[IO.File]::Open(`$m,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read); try { `$b=[IO.MemoryStream]::new(); `$s.CopyTo(`$b); `$x=[Security.Cryptography.SHA256]::Create(); try { `$actual=([BitConverter]::ToString(`$x.ComputeHash(`$b.ToArray()))).Replace('-','').ToLowerInvariant() } finally { `$x.Dispose() }; if (`$actual -cne `$expected) { throw 'Scheduled launch manifest hash mismatch.' }; `$j=[Text.Encoding]::UTF8.GetString(`$b.ToArray()) | ConvertFrom-Json; if ([string]`$j.schema_version -cne 'dawnstrike.scheduled_launch_manifest.v1' -or [string]`$j.release_sha -cne $(Quote-Launch $ExpectedSha.ToLowerInvariant()) -or -not [string]::Equals([string]`$j.protected_release_root,$(Quote-Launch $releaseRoot),[StringComparison]::OrdinalIgnoreCase) -or -not [string]::Equals([string]`$j.runtime_root,$(Quote-Launch $RuntimeRoot),[StringComparison]::OrdinalIgnoreCase) -or -not [string]::Equals([string]`$j.git_path,$(Quote-Launch ([string]$gitContract.git_path)),[StringComparison]::OrdinalIgnoreCase) -or [string]`$j.git_sha256 -cne $(Quote-Launch ([string]$gitContract.git_sha256)) -or -not [string]::Equals([string]`$j.git_boundary_manifest_path,$(Quote-Launch ([string]$gitContract.git_boundary_manifest_path)),[StringComparison]::OrdinalIgnoreCase) -or [string]`$j.git_boundary_manifest_sha256 -cne $(Quote-Launch ([string]$gitContract.git_boundary_manifest_sha256)) -or -not [string]::Equals([string]`$j.python_path,$(Quote-Launch ([string]$pythonContract.python_path)),[StringComparison]::OrdinalIgnoreCase) -or [string]`$j.python_sha256 -cne $(Quote-Launch ([string]$pythonContract.python_sha256)) -or -not [string]::Equals([string]`$j.python_boundary_manifest_path,$(Quote-Launch ([string]$pythonContract.python_boundary_manifest_path)),[StringComparison]::OrdinalIgnoreCase) -or [string]`$j.python_boundary_manifest_sha256 -cne $(Quote-Launch ([string]$pythonContract.python_boundary_manifest_sha256)) -or [string]`$j.requirements_lock_sha256 -cne $(Quote-Launch ([string]$pythonContract.requirements_lock_sha256)) -or [string]`$j.requirements_lock_blob -cne $(Quote-Launch ([string]$pythonContract.requirements_lock_blob)) -or -not [string]::Equals([string]`$j.dependency_root,$(Quote-Launch ([string]$pythonContract.dependency_root)),[StringComparison]::OrdinalIgnoreCase) -or -not [string]::Equals([string]`$j.dependency_manifest_path,$(Quote-Launch ([string]$pythonContract.dependency_manifest_path)),[StringComparison]::OrdinalIgnoreCase) -or [string]`$j.dependency_manifest_sha256 -cne $(Quote-Launch ([string]$pythonContract.dependency_manifest_sha256))$vercelIdentityClause -or [string]`$j.task_script -cne `$runnerName -or `$j.research_only -ne `$true -or `$j.broker_execution_enabled -ne `$false) { throw 'Scheduled launch manifest identity is invalid.' }; `$locks=@(`$s); foreach(`$f in @(`$j.files)) { `$p=Join-Path $(Quote-Launch $releaseRoot) ([string]`$f.path -replace '/', '\\'); `$pl=Open-DawnstrikeStateBoundaryPath -Path `$p -Label 'Scheduled launch file namespace'; `$boundaryLocks += `$pl.handle; `$h=[IO.File]::Open(`$p,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read); `$locks += `$h; `$v=[IO.MemoryStream]::new(); `$h.CopyTo(`$v); `$y=[Security.Cryptography.SHA256]::Create(); try { `$fh=([BitConverter]::ToString(`$y.ComputeHash(`$v.ToArray()))).Replace('-','').ToLowerInvariant() } finally { `$y.Dispose() }; if (`$fh -cne ([string]`$f.sha256).ToLowerInvariant()) { throw ('Scheduled launch bytes mismatch: ' + [string]`$f.path) } }; & $(Quote-Launch $Runner) -RuntimeRoot $(Quote-Launch $RuntimeRoot) -StateRoot $(Quote-Launch $StateRoot) -ExpectedSha $(Quote-Launch $ExpectedSha.ToLowerInvariant()) -LaunchManifestPath `$m -LaunchManifestSha256 `$expected"
     $command = $commandPrefix + $command
     if ($PublicationMode) { $command += " -PublicationMode $(Quote-Launch $PublicationMode)" }
     if ($VercelProjectId) { $command += " -VercelProjectId $(Quote-Launch $VercelProjectId)" }
@@ -822,6 +1469,9 @@ function Invoke-DawnstrikeNativeProcess {
     $pythonIsolated = $false
     $pythonBootstrapPath = $null
     $pythonBootstrapSha256 = $null
+    $pythonDependencyContract = $null
+    $pythonDependencyLocks = @()
+    $gitBoundaryContract = $null
 
     try {
         # Windows PowerShell promotes native stderr records to PowerShell error
@@ -832,6 +1482,7 @@ function Invoke-DawnstrikeNativeProcess {
         # native process to complete and trust its real exit code.
         $requestedLeaf = [System.IO.Path]::GetFileName($FilePath).ToLowerInvariant()
         if ($requestedLeaf -in @("py.exe", "python.exe")) {
+            $gitBoundaryContract = Get-DawnstrikeProtectedGitBoundaryContract
             $approved = Get-DawnstrikeApprovedLockInterpreter
             $resolved = [string]$approved.path
             $resolvedExecutableSha256 = [string]$approved.sha256
@@ -840,6 +1491,9 @@ function Invoke-DawnstrikeNativeProcess {
                 (Join-Path $PSScriptRoot "..") `
                 -ExpectedSha ([string]$script:DawnstrikeExpectedReleaseSha)
             $releaseRoot = [string]$sourceIdentity.root
+            $pythonDependencyContract = Get-DawnstrikeProtectedPythonDependencyContract `
+                -ReleaseRoot $releaseRoot -ExpectedSha ([string]$sourceIdentity.head) -RetainLocks
+            $pythonDependencyLocks = @($pythonDependencyContract.locks)
             $effectiveArguments = ConvertTo-DawnstrikeIsolatedPythonArguments `
                 -ArgumentList $effectiveArguments -ReleaseRoot $releaseRoot `
                 -ExpectedSha ([string]$sourceIdentity.head)
@@ -850,13 +1504,15 @@ function Invoke-DawnstrikeNativeProcess {
                 PYTHONPATH = $null
                 PYTHONSTARTUP = $null
                 PYTHONDONTWRITEBYTECODE = "1"
+                PYTHONNOUSERSITE = "1"
+                PYTHONSAFEPATH = "1"
             }
             $pythonIsolated = $true
         }
         elseif ($requestedLeaf -in @("git", "git.exe")) {
-            $approved = Get-DawnstrikeApprovedGit
-            $resolved = [string]$approved.path
-            $resolvedExecutableSha256 = [string]$approved.sha256
+            $gitBoundaryContract = Get-DawnstrikeProtectedGitBoundaryContract
+            $resolved = [string]$gitBoundaryContract.git_path
+            $resolvedExecutableSha256 = [string]$gitBoundaryContract.git_sha256
         }
         else {
             $resolved = (Get-Command $FilePath -ErrorAction Stop).Path
@@ -904,6 +1560,9 @@ function Invoke-DawnstrikeNativeProcess {
     }
     finally {
         $ErrorActionPreference = $previousErrorActionPreference
+        foreach ($pythonDependencyLock in @($pythonDependencyLocks)) {
+            if ($null -ne $pythonDependencyLock) { $pythonDependencyLock.Dispose() }
+        }
     }
 
     $completedAt = (Get-Date).ToUniversalTime()
@@ -919,9 +1578,18 @@ function Invoke-DawnstrikeNativeProcess {
         argument_count = @($effectiveArguments).Count
         resolved_executable_path = $resolved
         resolved_executable_sha256 = $resolvedExecutableSha256
+        git_boundary_manifest_path = if ($null -ne $gitBoundaryContract) { [string]$gitBoundaryContract.git_boundary_manifest_path } else { $null }
+        git_boundary_manifest_sha256 = if ($null -ne $gitBoundaryContract) { [string]$gitBoundaryContract.git_boundary_manifest_sha256 } else { $null }
         python_isolated = $pythonIsolated
         python_bootstrap_path = $pythonBootstrapPath
         python_bootstrap_sha256 = $pythonBootstrapSha256
+        python_boundary_manifest_path = if ($null -ne $pythonDependencyContract) { [string]$pythonDependencyContract.python_boundary_manifest_path } else { $null }
+        python_boundary_manifest_sha256 = if ($null -ne $pythonDependencyContract) { [string]$pythonDependencyContract.python_boundary_manifest_sha256 } else { $null }
+        requirements_lock_sha256 = if ($null -ne $pythonDependencyContract) { [string]$pythonDependencyContract.requirements_lock_sha256 } else { $null }
+        requirements_lock_blob = if ($null -ne $pythonDependencyContract) { [string]$pythonDependencyContract.requirements_lock_blob } else { $null }
+        dependency_root = if ($null -ne $pythonDependencyContract) { [string]$pythonDependencyContract.dependency_root } else { $null }
+        dependency_manifest_path = if ($null -ne $pythonDependencyContract) { [string]$pythonDependencyContract.dependency_manifest_path } else { $null }
+        dependency_manifest_sha256 = if ($null -ne $pythonDependencyContract) { [string]$pythonDependencyContract.dependency_manifest_sha256 } else { $null }
         started_at = $startedAt.ToString("o")
         completed_at = $completedAt.ToString("o")
         duration_ms = [math]::Round(($completedAt - $startedAt).TotalMilliseconds)
@@ -965,7 +1633,13 @@ function Resolve-DawnstrikeReleaseSha {
         [System.IO.Path]::DirectorySeparatorChar,
         [System.IO.Path]::AltDirectorySeparatorChar
     )
-    $null = Assert-DawnstrikeProcessSourceBoundToHead -ReleaseRoot $runtimePath -ExpectedSha $ExpectedSha
+    # This function is hosted by the immutable exact-SHA code tree while the
+    # RuntimeRoot remains the mutable deployed data/worktree target.  Prove the
+    # executing helper against the protected tree; the Git commands below
+    # independently prove the runtime checkout identity and cleanliness.
+    $codeRoot = Get-DawnstrikeProtectedReleaseRoot -ExpectedSha $ExpectedSha
+    $null = Assert-DawnstrikeProcessSourceBoundToHead `
+        -ReleaseRoot $codeRoot -ExpectedSha $ExpectedSha
     $rootReceipt = Invoke-DawnstrikeNativeProcess `
         -FilePath "git.exe" `
         -ArgumentList @("-C", $runtimePath, "rev-parse", "--show-toplevel") `

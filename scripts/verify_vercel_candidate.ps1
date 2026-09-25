@@ -9,9 +9,21 @@ param(
 
 $ErrorActionPreference = "Stop"
 $resolvedRoot = (Resolve-Path $ProjectRoot).Path
+$codeRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')).TrimEnd('\')
 $stage = Join-Path $resolvedRoot $StageRoot
-. (Join-Path $resolvedRoot "scripts\runtime_activation_lock.ps1")
-. (Join-Path $resolvedRoot "scripts\vercel_source_contract.ps1")
+. (Join-Path $PSScriptRoot "runtime_activation_lock.ps1")
+. (Join-Path $PSScriptRoot "dawnstrike_process_runner.ps1")
+$expectedCodeRoot = Get-DawnstrikeProtectedReleaseRoot -ExpectedSha $ExpectedSourceSha
+if (-not [string]::Equals($codeRoot, $expectedCodeRoot, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Vercel candidate verifier must execute from the protected exact-SHA release root."
+}
+$null = Assert-DawnstrikeProcessSourceBoundToHead `
+    -ReleaseRoot $codeRoot -ExpectedSha $ExpectedSourceSha -EntryScript $PSCommandPath `
+    -AdditionalSourceFiles @(
+        'scripts/vercel_source_contract.ps1',
+        'scripts/verify_public_artifact.py'
+    )
+. (Join-Path $PSScriptRoot "vercel_source_contract.ps1")
 Assert-VercelGitSourceStable `
     -Root $resolvedRoot `
     -ExpectedSourceSha $ExpectedSourceSha `
@@ -44,31 +56,24 @@ Assert-VercelStagedSourceManifest `
     -ExpectedSourceSha $ExpectedSourceSha `
     -ExpectedSourceTree $ExpectedSourceTree
 $verifyArgs = @(
-    "scripts\verify_public_artifact.py", "--root", $public,
+    (Join-Path $codeRoot "scripts\verify_public_artifact.py"), "--root", $public,
     "--expected-source-sha", $ExpectedSourceSha
 )
 if ($AllowDegraded) {
     $verifyArgs += "--allow-degraded"
 }
 $approvedPython = Get-DawnstrikeApprovedLockInterpreter
-$previousPythonHome = $env:PYTHONHOME
-$previousPythonPath = $env:PYTHONPATH
-$previousPythonStartup = $env:PYTHONSTARTUP
-$previousNoBytecode = $env:PYTHONDONTWRITEBYTECODE
-try {
-    $env:PYTHONHOME = ""
-    $env:PYTHONPATH = ""
-    $env:PYTHONSTARTUP = ""
-    $env:PYTHONDONTWRITEBYTECODE = "1"
-    & $approvedPython.path -I -B @verifyArgs
+$script:DawnstrikeExpectedReleaseSha = $ExpectedSourceSha
+$verificationReceipt = Invoke-DawnstrikeNativeProcess `
+    -FilePath ([string]$approvedPython.path) `
+    -ArgumentList $verifyArgs `
+    -LogRoot (Join-Path $resolvedRoot 'build\vercel-verification-logs') `
+    -LogName 'verify_vercel_public_artifact' `
+    -WorkingDirectory $resolvedRoot `
+    -NoSite
+if ([int]$verificationReceipt.exit_code -ne 0) {
+    throw "Public artifact verification failed"
 }
-finally {
-    $env:PYTHONHOME = $previousPythonHome
-    $env:PYTHONPATH = $previousPythonPath
-    $env:PYTHONSTARTUP = $previousPythonStartup
-    $env:PYTHONDONTWRITEBYTECODE = $previousNoBytecode
-}
-if ($LASTEXITCODE -ne 0) { throw "Public artifact verification failed" }
 $scanRoots = @(
     $public,
     (Join-Path $stage "api")

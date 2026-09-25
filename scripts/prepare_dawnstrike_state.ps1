@@ -9,6 +9,10 @@ param(
     [ValidateRange(30, 1800)][int]$ProcessTimeoutSeconds = 300
 )
 
+$global:PSModuleAutoLoadingPreference = 'None'
+$env:PSModulePath = 'C:\Windows\System32\WindowsPowerShell\v1.0\Modules'
+. ([IO.Path]::Combine($PSScriptRoot, 'powershell_module_boundary.ps1'))
+
 $ErrorActionPreference = "Stop"
 if ([string]::IsNullOrWhiteSpace($CandidateRoot)) {
     $CandidateRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
@@ -29,14 +33,14 @@ function Assert-DawnstrikeStatePreparationBootstrapSource {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string]$Root)
 
-    $bootstrapGit = 'C:\Program Files\Git\cmd\git.exe'
-    $bootstrapGitSha256 = '37c5725818d602e951ba2563b870d62763322956b73373da4c33a0b566a80bc9'
-    $bootstrapGitSubject = 'CN=Johannes Schindelin, O=Johannes Schindelin, S=Nordrhein-Westfalen, C=DE'
-    $bootstrapGitThumbprint = '3EB14A3AEF84B7153E139397F0A49E2FAC662B0E'
+    $bootstrapGit = 'C:\Program Files\Dawnstrike\Git-2.55.0.5\cmd\git.exe'
+    $bootstrapGitSha256 = '78211c7ed73988da93a6d8a33d47ec6187f464d7ea2a9a00c182bbd7a1ecf30f'
+    $bootstrapGitSubject = 'CN=Johannes Schindelin, O=Johannes Schindelin, L=Bruehl, C=DE'
+    $bootstrapGitThumbprint = '2A1E97CBF0DFCDA15B0DA0AC9745014F989D4AD0'
     $bootstrapPython = 'C:\Program Files\Dawnstrike\Python313\python.exe'
-    $bootstrapPythonSha256 = 'ef8f51028ac5329641985112f8efb1c2d4c47c86b8011ddf7e6fae21e2b4e5a1'
+    $bootstrapPythonSha256 = '85b71d8c6ec1905935f74be0c9869aae198d00e98f39df699ec66f9c5a84cecd'
     $bootstrapPythonSubject = 'CN=Python Software Foundation, O=Python Software Foundation, L=Beaverton, S=Oregon, C=US'
-    $bootstrapPythonThumbprint = '9BA3C2E210C7E8296C5056515BFC0B0BBA78AC48'
+    $bootstrapPythonThumbprint = '847785B686B2D3879731FA9AA3F1F5D48E85D99E'
 
     foreach ($executable in @(
         [pscustomobject]@{ path = $bootstrapGit; hash = $bootstrapGitSha256; subject = $bootstrapGitSubject; thumbprint = $bootstrapGitThumbprint; label = 'Git' },

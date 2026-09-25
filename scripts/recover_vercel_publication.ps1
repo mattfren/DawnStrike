@@ -8,9 +8,16 @@ param(
     [switch]$ProtectedLauncherGrant
 )
 
+$global:PSModuleAutoLoadingPreference = 'None'
+$env:PSModulePath = 'C:\Windows\System32\WindowsPowerShell\v1.0\Modules'
+. ([IO.Path]::Combine($PSScriptRoot, 'powershell_module_boundary.ps1'))
+
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
-$protectedLauncher = 'C:\Program Files\Dawnstrike\bin\dawnstrike_release_launcher.ps1'
+$protectedLauncher = [IO.Path]::GetFullPath((Join-Path `
+    (Join-Path 'C:\Program Files\Dawnstrike\releases' $ExpectedSha) `
+    'scripts\dawnstrike_release_launcher.ps1'
+))
 $callerPath = [string]$MyInvocation.ScriptName
 if (
     -not $ProtectedLauncherGrant -or
@@ -35,14 +42,30 @@ if ($ProjectId -cne 'prj_5pef3EZF1u5YadebEz3dFjnkWOXy') {
 . (Join-Path $PSScriptRoot 'protected_operation_contract.ps1')
 $null = ConvertTo-DawnstrikeExactMarketDate -Value $MarketDate
 $runtime = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $RuntimeRoot).Path).TrimEnd('\')
-$executingRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')).TrimEnd('\')
-if (-not [string]::Equals($runtime, $executingRoot, [StringComparison]::OrdinalIgnoreCase)) {
-    throw 'Vercel publication recovery must execute from the exact mounted runtime root.'
-}
+$codeRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')).TrimEnd('\')
 $state = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $StateRoot).Path).TrimEnd('\')
 
 . (Join-Path $PSScriptRoot 'runtime_activation_lock.ps1')
+. (Join-Path $PSScriptRoot 'dawnstrike_process_runner.ps1')
+$expectedCodeRoot = Get-DawnstrikeProtectedReleaseRoot -ExpectedSha $ExpectedSha
+if (-not [string]::Equals($codeRoot, $expectedCodeRoot, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Vercel publication recovery must execute from the protected exact-SHA release root.'
+}
+$null = Assert-DawnstrikeProcessSourceBoundToHead `
+    -ReleaseRoot $codeRoot -ExpectedSha $ExpectedSha -EntryScript $PSCommandPath `
+    -AdditionalSourceFiles @(
+        'scripts/recover_vercel_publication.ps1',
+        'scripts/publish_vercel_public.ps1',
+        'scripts/protected_operation_contract.ps1'
+    )
 $state = Assert-DawnstrikeRuntimeLockStateRoot $state
+$verificationLogRoot = Join-Path $state 'logs\publication-recovery'
+$null = New-Item -ItemType Directory -Path $verificationLogRoot -Force
+$runtimeSha = Resolve-DawnstrikeReleaseSha `
+    -RuntimeRoot $runtime -LogRoot $verificationLogRoot -ExpectedSha $ExpectedSha
+if ($runtimeSha -cne $ExpectedSha) {
+    throw 'Vercel publication recovery runtime identity changed during admission.'
+}
 Assert-DawnstrikeSharedLockNoReparse `
     (Join-Path $state 'secrets\runtime.env') 'Vercel recovery environment file'
 . (Join-Path $PSScriptRoot 'import_dawnstrike_environment.ps1')

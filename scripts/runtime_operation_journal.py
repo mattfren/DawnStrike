@@ -9,12 +9,13 @@ import os
 import re
 import stat
 import tempfile
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 SCHEMA = "dawnstrike.runtime_operation_journal.v1"
 COMPENSATED_SCHEMA = "dawnstrike.runtime_operation_journal.v2"
+ROLLBACK_SCHEMA = "dawnstrike.runtime_operation_journal.v3"
 OPERATIONS = {
     "runtime_activation", "capture_task_rebind", "runtime_rollback",
     "capture_task_hardening", "state_preparation",
@@ -24,7 +25,8 @@ PHASES = {
     # mutation.  It lets activation recovery distinguish an interrupted
     # quiescence operation from an unstarted activation.
     "runtime_activation": (
-        "INIT", "PRE_QUIESCE", "PRE_SWAP", "POST_SWAP", "POST_SWAP_READY", "COMPLETE", "COMPENSATED"
+        "INIT", "PRE_QUIESCE", "PRE_SWAP", "POST_SWAP", "POST_SWAP_READY", "COMPLETE",
+        "COMPENSATED", "TERMINAL_RECOVERY",
     ),
     "capture_task_rebind": ("INIT", "PRE_ENABLE", "POST_ENABLE", "COMPLETE", "COMPENSATED"),
     "runtime_rollback": (
@@ -59,6 +61,7 @@ KEYS = {
     "compensation_receipt_relative_path", "compensation_receipt_sha256",
 }
 LEGACY_KEYS = KEYS - {"compensation_receipt_relative_path", "compensation_receipt_sha256"}
+ROLLBACK_KEYS = KEYS | {"rollback_target_market_date"}
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 TOKEN = re.compile(r"^[0-9a-f]{32}$")
@@ -109,19 +112,44 @@ def validate(raw: bytes) -> dict[str, Any]:
         value = json.loads(raw.decode(), object_pairs_hook=_pairs)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise ValueError(f"invalid strict JSON: {exc}") from exc
-    if not isinstance(value, dict) or set(value) not in (LEGACY_KEYS, KEYS):
+    if not isinstance(value, dict) or set(value) not in (
+        LEGACY_KEYS,
+        KEYS,
+        ROLLBACK_KEYS,
+    ):
         raise ValueError("journal keys are not exact")
     operation = value["operation"]
-    if value["schema_version"] not in (SCHEMA, COMPENSATED_SCHEMA) or operation not in OPERATIONS:
+    schema = value["schema_version"]
+    if schema not in (SCHEMA, COMPENSATED_SCHEMA, ROLLBACK_SCHEMA) or operation not in OPERATIONS:
         raise ValueError("journal schema or operation is invalid")
     extended = set(value) == KEYS
-    if value["schema_version"] == COMPENSATED_SCHEMA and not extended:
+    rollback_extended = set(value) == ROLLBACK_KEYS
+    if schema == COMPENSATED_SCHEMA and not extended:
         raise ValueError("compensated journal keys are incomplete")
-    if value["schema_version"] == SCHEMA and extended:
+    if schema == SCHEMA and extended:
         raise ValueError("legacy journal carries compensation keys")
+    if schema == ROLLBACK_SCHEMA and (operation != "runtime_rollback" or not rollback_extended):
+        raise ValueError("rollback journal target contract is incomplete")
+    if rollback_extended and schema != ROLLBACK_SCHEMA:
+        raise ValueError("rollback target appears under the wrong journal schema")
     phases = PHASES[operation]
     if value["phase"] not in phases or type(value["sequence"]) is not int:
         raise ValueError("journal phase or sequence is invalid")
+    if (
+        operation == "runtime_rollback"
+        and schema != ROLLBACK_SCHEMA
+        and value["phase"] not in {"COMPLETE", "COMPENSATED"}
+    ):
+        raise ValueError("legacy in-flight rollback journal has no sealed target")
+    if rollback_extended:
+        target = value["rollback_target_market_date"]
+        if not isinstance(target, str):
+            raise ValueError("rollback target market date is invalid")
+        try:
+            if date.fromisoformat(target).isoformat() != target:
+                raise ValueError
+        except ValueError as exc:
+            raise ValueError("rollback target market date is invalid") from exc
     if value["sequence"] != phases.index(value["phase"]):
         raise ValueError("journal phase sequence is invalid")
     candidate_pair = (value["candidate_sha"], value["candidate_tree"])
@@ -155,7 +183,7 @@ def validate(raw: bytes) -> dict[str, Any]:
     if value["phase"] == "INIT":
         if any(item != empty for item in (prepared_receipt, complete_receipt, backup, stage)):
             raise ValueError("INIT journal carries non-sentinel artifact hashes")
-        if extended and (
+        if (extended or rollback_extended) and (
             value["compensation_receipt_relative_path"] != "NONE"
             or value["compensation_receipt_sha256"] != empty
         ):
@@ -185,15 +213,18 @@ def validate(raw: bytes) -> dict[str, Any]:
     elif value["phase"] == "COMPENSATED":
         # Compensation is legal from any recoverable task-operation phase,
         # including INIT when the failure occurred before PREPARED existed.
-        if not extended or value["schema_version"] != COMPENSATED_SCHEMA:
-            raise ValueError("compensated phase requires the v2 journal contract")
+        if not (extended or rollback_extended) or schema not in {
+            COMPENSATED_SCHEMA,
+            ROLLBACK_SCHEMA,
+        }:
+            raise ValueError("compensated phase requires an extended journal contract")
         if complete_receipt != empty or value["compensation_receipt_sha256"] == empty:
             raise ValueError("compensated receipt proof is invalid")
         if value["compensation_receipt_relative_path"] == "NONE":
             raise ValueError("compensated receipt path is invalid")
         if value["runtime_stage_contract_sha256"] != empty:
             raise ValueError("compensated task journal carries runtime stage proof")
-    elif value["phase"] == "POST_SWAP_READY":
+    elif value["phase"] in {"POST_SWAP_READY", "TERMINAL_RECOVERY"}:
         # A COMPLETE receipt is sealed before scheduler enablement.  This
         # durable intermediate phase is the recovery boundary for a power loss
         # while tasks are being re-enabled: a Ready task set can never exist
@@ -203,6 +234,10 @@ def validate(raw: bytes) -> dict[str, Any]:
             or complete_receipt == empty
             or backup == empty
             or stage == empty
+            or (extended and (
+                value["compensation_receipt_relative_path"] != "NONE"
+                or value["compensation_receipt_sha256"] != empty
+            ))
         ):
             raise ValueError("POST_SWAP_READY journal artifact proof is invalid")
     else:
@@ -210,7 +245,7 @@ def validate(raw: bytes) -> dict[str, Any]:
             raise ValueError("mutation phase lacks prepared receipt or backup proof")
         if (value["phase"] == "COMPLETE") != (complete_receipt != empty):
             raise ValueError("complete receipt proof sentinel is invalid")
-        elif extended and (
+        elif (extended or rollback_extended) and (
             value["compensation_receipt_sha256"] != empty
             or value["compensation_receipt_relative_path"] != "NONE"
         ):
@@ -236,6 +271,10 @@ def validate(raw: bytes) -> dict[str, Any]:
     ):
         if not isinstance(value[key], str) or not HEX64.fullmatch(value[key]):
             raise ValueError(f"{key} is invalid")
+    if (extended or rollback_extended) and not HEX64.fullmatch(
+        str(value["compensation_receipt_sha256"])
+    ):
+        raise ValueError("compensation_receipt_sha256 is invalid")
     if not isinstance(value["lock_token"], str) or not TOKEN.fullmatch(value["lock_token"]):
         raise ValueError("lock token is invalid")
     if type(value["init_owner_process_id"]) is not int or value["init_owner_process_id"] <= 0:
@@ -282,7 +321,7 @@ def validate(raw: bytes) -> dict[str, Any]:
         raise ValueError("adopted journal identities are inconsistent")
     _safe_relative(value["prepared_receipt_relative_path"])
     _safe_relative(value["complete_receipt_relative_path"])
-    if extended and value["compensation_receipt_relative_path"] != "NONE":
+    if (extended or rollback_extended) and value["compensation_receipt_relative_path"] != "NONE":
         _safe_relative(value["compensation_receipt_relative_path"])
     _utc(value["recorded_at_utc"])
     if value["research_only"] is not True or value["broker_execution_enabled"] is not False:
@@ -328,6 +367,7 @@ def seal(source: Path, target: Path) -> dict[str, Any]:
     if set(value) not in (
         LEGACY_KEYS - {"journal_self_sha256"},
         KEYS - {"journal_self_sha256"},
+        ROLLBACK_KEYS - {"journal_self_sha256"},
     ):
         raise ValueError("journal input keys are not exact")
     value["journal_self_sha256"] = hashlib.sha256(_canonical(value)).hexdigest()
@@ -370,18 +410,25 @@ def transition(source: Path, target: Path, previous: Path | None) -> dict[str, A
         if phase == "COMPENSATED":
             if prior["phase"] in {"COMPLETE", "COMPENSATED"}:
                 raise ValueError("journal compensation transition is not recoverable")
+        elif phase == "TERMINAL_RECOVERY":
+            if operation != "runtime_activation" or prior["phase"] != "INIT":
+                raise ValueError("terminal recovery must advance an activation INIT journal")
         elif expected_index < 0 or prior["phase"] != PHASES[operation][expected_index]:
             raise ValueError("journal transition is not adjacent")
         if candidate.get("prior_journal_file_sha256") != hashlib.sha256(prior_raw).hexdigest():
             raise ValueError("journal prior raw hash mismatch")
+        if candidate.get("operation") != prior.get("operation"):
+            raise ValueError("journal immutable field changed: operation")
         immutable = {
-            "operation", "candidate_sha", "candidate_tree",
+            "candidate_sha", "candidate_tree",
             "previous_sha", "previous_tree", "origin_identity",
             "origin_identity_sha256", "state_root_sha256",
             "prepared_receipt_relative_path",
             "init_owner_process_id", "init_owner_started_at_utc",
             "research_only", "broker_execution_enabled",
         }
+        if prior["operation"] == "runtime_rollback":
+            immutable.add("rollback_target_market_date")
         for key in immutable:
             if candidate.get(key) != prior[key]:
                 raise ValueError(f"journal immutable field changed: {key}")
@@ -399,12 +446,30 @@ def transition(source: Path, target: Path, previous: Path | None) -> dict[str, A
                 if ready_match
                 else ""
             )
-            if not (
+            rollback_ready_match = re.fullmatch(
+                r"receipts/runtime-rollback/"
+                r"runtime-rollback-([0-9a-f]{24})\.ready\.json",
+                prior_complete_path,
+            )
+            exact_rollback_terminal_path = (
+                "receipts/runtime-rollback/"
+                f"runtime-rollback-{rollback_ready_match.group(1)}.json"
+                if rollback_ready_match
+                else ""
+            )
+            activation_ready_transition = (
                 operation == "runtime_activation"
                 and prior["phase"] == "POST_SWAP_READY"
                 and phase == "COMPLETE"
                 and next_complete_path == exact_terminal_path
-            ):
+            )
+            rollback_ready_transition = (
+                operation == "runtime_rollback"
+                and prior["phase"] == "POST_SWAP_READY"
+                and phase == "COMPLETE"
+                and next_complete_path == exact_rollback_terminal_path
+            )
+            if not (activation_ready_transition or rollback_ready_transition):
                 raise ValueError(
                     "journal immutable field changed: complete_receipt_relative_path"
                 )
@@ -413,9 +478,9 @@ def transition(source: Path, target: Path, previous: Path | None) -> dict[str, A
         current_pair = (candidate["current_sha"], candidate["current_tree"])
         if operation == "runtime_activation":
             expected = (
-                previous_pair
-                if phase in {"PRE_QUIESCE", "PRE_SWAP", "COMPENSATED"}
-                else candidate_pair
+            previous_pair
+            if phase in {"PRE_QUIESCE", "PRE_SWAP", "COMPENSATED"}
+            else candidate_pair
             )
         elif operation == "runtime_rollback":
             expected = (
@@ -430,8 +495,8 @@ def transition(source: Path, target: Path, previous: Path | None) -> dict[str, A
         if current_pair != expected:
             raise ValueError("current runtime identity is invalid for the phase")
         if phase == "COMPENSATED":
-            if prior["schema_version"] != COMPENSATED_SCHEMA:
-                raise ValueError("compensation requires a v2 journal")
+            if prior["schema_version"] not in {COMPENSATED_SCHEMA, ROLLBACK_SCHEMA}:
+                raise ValueError("compensation requires an extended journal")
             if candidate.get("compensation_receipt_sha256") == hashlib.sha256(b"").hexdigest():
                 raise ValueError("compensation requires a receipt hash")
     return seal(source, target)

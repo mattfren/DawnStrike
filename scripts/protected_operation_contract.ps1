@@ -1,3 +1,8 @@
+$global:PSModuleAutoLoadingPreference = 'None'
+$env:PSModulePath = 'C:\Windows\System32\WindowsPowerShell\v1.0\Modules'
+. ([IO.Path]::Combine($PSScriptRoot, 'powershell_module_boundary.ps1'))
+. ([IO.Path]::Combine($PSScriptRoot, 'powershell_native_support.ps1'))
+
 Set-StrictMode -Version Latest
 
 function ConvertTo-DawnstrikeExactMarketDate {
@@ -145,27 +150,9 @@ function Open-DawnstrikeProtectedDirectoryHandle {
         [switch]$AllowWriteShare
     )
 
+    $null = & ${function:Import-DawnstrikePowerShellSupport}
     if (-not ('Dawnstrike.Security.ProtectedDirectoryNative' -as [type])) {
-        Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-using Microsoft.Win32.SafeHandles;
-
-namespace Dawnstrike.Security {
-    public static class ProtectedDirectoryNative {
-        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        public static extern SafeFileHandle CreateFileW(
-            string path,
-            UInt32 desiredAccess,
-            UInt32 shareMode,
-            IntPtr securityAttributes,
-            UInt32 creationDisposition,
-            UInt32 flagsAndAttributes,
-            IntPtr templateFile
-        );
-    }
-}
-'@
+        throw 'Precompiled Dawnstrike protected-directory support did not load.'
     }
     $full = Assert-DawnstrikeProtectedPathNoReparse `
         -Path $Path -Label $Label -ExpectedType Directory
@@ -358,8 +345,12 @@ function Close-DawnstrikeProtectedWriteDirectoryBoundary {
 }
 
 function New-DawnstrikeUniverseLogDirectorySecurity {
-    [CmdletBinding()]
-    param()
+[CmdletBinding()]
+param()
+
+$global:PSModuleAutoLoadingPreference = 'None'
+$env:PSModulePath = 'C:\Windows\System32\WindowsPowerShell\v1.0\Modules'
+. ([IO.Path]::Combine($PSScriptRoot, 'powershell_module_boundary.ps1'))
 
     $administrators = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
     $system = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')

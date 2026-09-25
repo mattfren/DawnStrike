@@ -19,6 +19,7 @@ import importlib.machinery
 import importlib.metadata
 import importlib.util
 import io
+import json
 import os
 import re
 import runpy
@@ -28,14 +29,16 @@ import sys
 import sysconfig
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import BinaryIO, NoReturn
+from typing import BinaryIO, NoReturn, cast
 
-_APPROVED_GIT = Path(r"C:\Program Files\Git\cmd\git.exe")
+_APPROVED_GIT = Path(r"C:\Program Files\Dawnstrike\Git-2.55.0.5\cmd\git.exe")
+_PROTECTED_DEPENDENCY_PARENT = Path(r"C:\Program Files\Dawnstrike\Dependencies")
+_PROTECTED_DEPENDENCY_MANIFEST_NAME = ".dawnstrike-dependency-boundary-v1.json"
 _APPROVED_GIT_SHA256 = (
-    "37c5725818d602e951ba2563b870d62763322956b73373da4c33a0b566a80bc9"  # pragma: allowlist secret
+    "78211c7ed73988da93a6d8a33d47ec6187f464d7ea2a9a00c182bbd7a1ecf30f"  # pragma: allowlist secret
 )
 _APPROVED_DISTRIBUTION_RECORD_SET_SHA256 = (
-    "447a0d12feffcfd6c353d9acb4cfd1e5cc1b35e3548cd7e9ad58666516b4b3af"  # pragma: allowlist secret
+    "abd40a213fd6b5b396d803a5a2ed1bdfdea22556bb2552f20b942e90d7c4c8c5"  # pragma: allowlist secret
 )
 _FORBIDDEN_IGNORED_SUFFIXES = {
     ".bat",
@@ -229,7 +232,7 @@ def _open_locked_exact_file(path: Path) -> BinaryIO:
     import msvcrt
     from ctypes import wintypes
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
     create_file = kernel32.CreateFileW
     create_file.argtypes = (
         wintypes.LPCWSTR,
@@ -255,10 +258,10 @@ def _open_locked_exact_file(path: Path) -> BinaryIO:
     )
     invalid_handle = ctypes.c_void_p(-1).value
     if raw_handle is None or int(raw_handle) == invalid_handle:
-        error = ctypes.get_last_error()
+        error = ctypes.get_last_error()  # type: ignore[attr-defined]
         raise OSError(error, f"cannot lock Git metadata: {path}")
     try:
-        descriptor = msvcrt.open_osfhandle(
+        descriptor = msvcrt.open_osfhandle(  # type: ignore[attr-defined]
             int(raw_handle), os.O_RDONLY | getattr(os, "O_BINARY", 0)
         )
     except Exception:
@@ -267,7 +270,11 @@ def _open_locked_exact_file(path: Path) -> BinaryIO:
     return os.fdopen(descriptor, "rb", closefd=True)
 
 
-def _read_locked_exact_file(path: Path, handles: list[BinaryIO]) -> bytes:
+def _read_locked_exact_file(
+    path: Path,
+    handles: list[BinaryIO],
+    stat_snapshots: dict[Path, os.stat_result] | None = None,
+) -> bytes:
     before = path.lstat()
     handle = _open_locked_exact_file(path)
     try:
@@ -288,8 +295,37 @@ def _read_locked_exact_file(path: Path, handles: list[BinaryIO]) -> bytes:
     except Exception:
         handle.close()
         raise
+    if stat_snapshots is not None:
+        stat_snapshots[path] = opened
     handles.append(handle)
     return content
+
+
+def _retained_file_matches_snapshot(
+    path: Path,
+    handle: BinaryIO,
+    expected_bytes: bytes,
+    expected_stat: os.stat_result,
+) -> bool:
+    """Re-read one retained inode and prove its path and bytes stayed admitted."""
+
+    opened_before = os.fstat(handle.fileno())
+    path_before = path.lstat()
+    handle.seek(0)
+    try:
+        current_bytes = handle.read()
+    finally:
+        handle.seek(0)
+    opened_after = os.fstat(handle.fileno())
+    path_after = path.lstat()
+    return (
+        stat.S_ISREG(opened_before.st_mode)
+        and current_bytes == expected_bytes
+        and _same_file_snapshot(expected_stat, opened_before)
+        and _same_file_snapshot(expected_stat, opened_after)
+        and _same_file_snapshot(expected_stat, path_before)
+        and _same_file_snapshot(expected_stat, path_after)
+    )
 
 
 class _GitMetadataChangeGuard:
@@ -303,7 +339,7 @@ class _GitMetadataChangeGuard:
         import ctypes
         from ctypes import wintypes
 
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
         find_first = kernel32.FindFirstChangeNotificationW
         find_first.argtypes = (wintypes.LPCWSTR, wintypes.BOOL, wintypes.DWORD)
         find_first.restype = wintypes.HANDLE
@@ -320,7 +356,7 @@ class _GitMetadataChangeGuard:
         )
         invalid_handle = ctypes.c_void_p(-1).value
         if handle is None or int(handle) == invalid_handle:
-            error = ctypes.get_last_error()
+            error = ctypes.get_last_error()  # type: ignore[attr-defined]
             raise OSError(error, f"cannot guard Git metadata directory: {git_dir}")
         self._handle = int(handle)
 
@@ -331,7 +367,7 @@ class _GitMetadataChangeGuard:
         import ctypes
         from ctypes import wintypes
 
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
         wait = kernel32.WaitForSingleObject
         wait.argtypes = (wintypes.HANDLE, wintypes.DWORD)
         wait.restype = wintypes.DWORD
@@ -348,7 +384,7 @@ class _GitMetadataChangeGuard:
         import ctypes
         from ctypes import wintypes
 
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
         close = kernel32.FindCloseChangeNotification
         close.argtypes = (wintypes.HANDLE,)
         close.restype = wintypes.BOOL
@@ -366,6 +402,8 @@ class _ExactSourceGuard:
         metadata_snapshots: dict[Path, bytes],
         forbidden_absent: tuple[Path, ...],
         tracked_handles: dict[Path, BinaryIO],
+        tracked_snapshots: dict[Path, bytes],
+        tracked_stat_snapshots: dict[Path, os.stat_result],
         source_bytes: dict[str, bytes],
         git_contract: object,
     ) -> None:
@@ -374,6 +412,8 @@ class _ExactSourceGuard:
         self._metadata_snapshots = metadata_snapshots
         self._forbidden_absent = forbidden_absent
         self._tracked_handles = tracked_handles
+        self._tracked_snapshots = tracked_snapshots
+        self._tracked_stat_snapshots = tracked_stat_snapshots
         self.source_bytes = source_bytes
         self.git_contract = git_contract
 
@@ -388,9 +428,15 @@ class _ExactSourceGuard:
             if any(path.exists() for path in self._forbidden_absent):
                 _fail("release Git metadata absence changed during dispatched target lifetime")
             for path, handle in self._tracked_handles.items():
-                opened = os.fstat(handle.fileno())
-                current = path.lstat()
-                if not _same_file_snapshot(opened, current):
+                expected_bytes = self._tracked_snapshots.get(path)
+                expected_stat = self._tracked_stat_snapshots.get(path)
+                if (
+                    expected_bytes is None
+                    or expected_stat is None
+                    or not _retained_file_matches_snapshot(
+                        path, handle, expected_bytes, expected_stat
+                    )
+                ):
                     _fail("release tracked file changed during dispatched target lifetime")
             self._metadata_guard.assert_unchanged()
         except OSError as exc:
@@ -572,7 +618,13 @@ def _assert_exact_source(root: Path, expected_sha: str) -> _ExactSourceGuard:
         _validated_git_metadata(root)
     )
     try:
-        source_bytes, git_contract, tracked_handles = _assert_exact_source_locked(
+        (
+            source_bytes,
+            git_contract,
+            tracked_handles,
+            tracked_snapshots,
+            tracked_stat_snapshots,
+        ) = _assert_exact_source_locked(
             root,
             expected_sha,
             metadata_snapshots,
@@ -591,6 +643,8 @@ def _assert_exact_source(root: Path, expected_sha: str) -> _ExactSourceGuard:
         metadata_snapshots,
         forbidden_absent,
         tracked_handles,
+        tracked_snapshots,
+        tracked_stat_snapshots,
         source_bytes,
         git_contract,
     )
@@ -630,7 +684,13 @@ def _assert_exact_source_locked(
     forbidden_absent: tuple[Path, ...],
     metadata_guard: _GitMetadataChangeGuard,
     source_handles: list[BinaryIO],
-) -> tuple[dict[str, bytes], object, dict[Path, BinaryIO]]:
+) -> tuple[
+    dict[str, bytes],
+    object,
+    dict[Path, BinaryIO],
+    dict[Path, bytes],
+    dict[Path, os.stat_result],
+]:
     attributes_path = root / ".gitattributes"
     if not attributes_path.is_file() or _is_reparse(attributes_path):
         _fail("release checkout has no regular governed .gitattributes")
@@ -707,6 +767,8 @@ def _assert_exact_source_locked(
 
     source_bytes: dict[str, bytes] = {}
     tracked_handles: dict[Path, BinaryIO] = {}
+    tracked_snapshots: dict[Path, bytes] = {}
+    tracked_stat_snapshots: dict[Path, os.stat_result] = {}
     tracked_inventory: list[tuple[str, str, str]] = []
     release_authority_blobs: dict[str, bytes] = {}
     public_web_inventory: list[tuple[str, str, str]] = []
@@ -739,7 +801,9 @@ def _assert_exact_source_locked(
                 _fail("release Git tracked path contains a reparse point")
             parent = parent.parent
         try:
-            worktree_contents = _read_locked_exact_file(resolved, source_handles)
+            worktree_contents = _read_locked_exact_file(
+                resolved, source_handles, tracked_stat_snapshots
+            )
         except OSError as exc:
             _fail(f"release Git tracked file cannot be handle-locked: {exc}")
         if (
@@ -750,6 +814,7 @@ def _assert_exact_source_locked(
         if resolved in tracked_handles:
             _fail("release Git tracked file inventory is ambiguous")
         tracked_handles[resolved] = source_handles[-1]
+        tracked_snapshots[resolved] = worktree_contents
         tracked_inventory.append((mode, object_id, relative))
 
         key = os.path.normcase(str(resolved))
@@ -846,7 +911,13 @@ def _assert_exact_source_locked(
         if any(path.exists() for path in forbidden_absent):
             _fail("release Git metadata absence changed during final source admission")
         for path, handle in tracked_handles.items():
-            if not _same_file_snapshot(os.fstat(handle.fileno()), path.lstat()):
+            expected_bytes = tracked_snapshots.get(path)
+            expected_stat = tracked_stat_snapshots.get(path)
+            if (
+                expected_bytes is None
+                or expected_stat is None
+                or not _retained_file_matches_snapshot(path, handle, expected_bytes, expected_stat)
+            ):
                 _fail("release tracked file changed during final source admission")
         metadata_guard.assert_unchanged()
     except OSError as exc:
@@ -867,7 +938,13 @@ def _assert_exact_source_locked(
             "public_web_blobs": MappingProxyType(public_web_blobs),
         }
     )
-    return source_bytes, git_contract, tracked_handles
+    return (
+        source_bytes,
+        git_contract,
+        tracked_handles,
+        tracked_snapshots,
+        tracked_stat_snapshots,
+    )
 
 
 def _release_root(raw: str) -> Path:
@@ -894,8 +971,10 @@ def _assert_package_from(root: Path) -> None:
         raise RuntimeError("intraday_scanner did not resolve from the exact release root")
 
 
-def _append_governed_dependencies() -> tuple[Path, ...]:
-    """Expose only the pinned interpreter's dependency directories.
+def _append_governed_dependencies(
+    root: Path | None = None, release_bytes: dict[str, bytes] | None = None
+) -> tuple[Path, ...]:
+    """Expose only the content-addressed protected dependency directory.
 
     The -S switch intentionally prevents Python from running site.py. That
     means the normal site-packages directories are absent from sys.path;
@@ -905,34 +984,104 @@ def _append_governed_dependencies() -> tuple[Path, ...]:
     main and therefore remains the package authority.
     """
 
-    paths = sysconfig.get_paths()
-    dependency_paths = set()
-    for name in ("purelib", "platlib"):
-        raw_dependency = Path(paths[name]) if paths.get(name) else None
-        if raw_dependency is None:
-            continue
-        if _is_reparse(raw_dependency) or any(
-            _is_reparse(parent) for parent in raw_dependency.parents
+    # POSIX is a test/development branch; the governed production boundary is
+    # the immutable Program Files content address on Windows. Keep this as one
+    # explicit switch so CI can exercise the development branch on Windows
+    # without weakening any individual production-only check.
+    production_dependency_boundary = os.name == "nt"
+    if not production_dependency_boundary:
+        paths = sysconfig.get_paths()
+        dependency_paths = {
+            Path(paths[name]).resolve(strict=True)
+            for name in ("purelib", "platlib")
+            if paths.get(name)
+        }
+    else:
+        if root is None or release_bytes is None:
+            _fail("protected dependency admission requires exact release authority")
+        lockfile = root / "requirements.lock"
+        captured = release_bytes.get(os.path.normcase(os.path.abspath(lockfile)))
+        if captured is None:
+            _fail("release checkout has no captured exact-commit requirements manifest")
+        lock_sha256 = hashlib.sha256(captured).hexdigest()
+        lock_blob = _git_blob_sha1_bytes(captured)
+        dependency_root = (_PROTECTED_DEPENDENCY_PARENT / lock_sha256).resolve(strict=True)
+        manifest_path = dependency_root / _PROTECTED_DEPENDENCY_MANIFEST_NAME
+        if (
+            _is_reparse(_PROTECTED_DEPENDENCY_PARENT)
+            or _is_reparse(dependency_root)
+            or _is_reparse(manifest_path)
+            or any(_is_reparse(parent) for parent in dependency_root.parents)
         ):
-            raise RuntimeError("interpreter dependency path contains a reparse point")
-        dependency_paths.add(raw_dependency.resolve(strict=True))
-    prefix = Path(sysconfig.get_config_var("prefix") or sys.prefix).resolve(strict=True)
+            _fail("protected dependency boundary contains a reparse point")
+        try:
+            manifest = json.loads(manifest_path.read_bytes().decode("utf-8", "strict"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            _fail(f"protected dependency manifest is unreadable: {exc}")
+        if (
+            manifest.get("schema_version") != "dawnstrike.dependency_boundary.v1"
+            or manifest.get("requirements_lock_blob") != lock_blob
+            or manifest.get("requirements_lock_sha256") != lock_sha256
+            or manifest.get("research_only") is not True
+            or manifest.get("broker_execution_enabled") is not False
+            or not isinstance(manifest.get("files"), list)
+        ):
+            _fail("protected dependency manifest contract is invalid")
+        expected_files: dict[str, tuple[int, str]] = {}
+        for entry in manifest["files"]:
+            if not isinstance(entry, dict):
+                _fail("protected dependency manifest file identity is invalid")
+            relative = entry.get("path")
+            length = entry.get("length")
+            sha256 = entry.get("sha256")
+            pure = PurePosixPath(relative) if isinstance(relative, str) else None
+            if (
+                pure is None
+                or pure.is_absolute()
+                or not pure.parts
+                or any(part in {"", ".", ".."} for part in pure.parts)
+                or relative in expected_files
+                or not isinstance(length, int)
+                or length < 0
+                or not isinstance(sha256, str)
+                or re.fullmatch(r"[0-9a-f]{64}", sha256) is None
+            ):
+                _fail("protected dependency manifest file identity is invalid")
+            expected_files[cast(str, relative)] = (cast(int, length), cast(str, sha256))
+        actual_files: dict[str, tuple[int, str]] = {}
+        for path in dependency_root.rglob("*"):
+            if _is_reparse(path):
+                _fail("protected dependency file inventory contains a reparse point")
+            if not path.is_file():
+                continue
+            relative = path.relative_to(dependency_root).as_posix()
+            if relative == _PROTECTED_DEPENDENCY_MANIFEST_NAME:
+                continue
+            body = path.read_bytes()
+            actual_files[relative] = (len(body), hashlib.sha256(body).hexdigest())
+        if actual_files != expected_files:
+            _fail("protected dependency file inventory differs from its sealed manifest")
+        dependency_paths = {dependency_root / "Lib" / "site-packages"}
+
     for dependency in sorted(dependency_paths, key=str):
         if (
             not dependency.is_dir()
             or _is_reparse(dependency)
-            or prefix not in dependency.parents
             or any(_is_reparse(parent) for parent in dependency.parents)
         ):
             raise RuntimeError("interpreter dependency path is outside the approved prefix")
-        # -S suppresses .pth execution, but a reparse point or startup file in
-        # the approved dependency directory would still let imports escape the
-        # pinned interpreter boundary.
         for child in dependency.iterdir():
-            if _is_reparse(child) or child.name.lower() in {"sitecustomize.py", "usercustomize.py"}:
+            if _is_reparse(child) or child.name.lower() in {
+                "sitecustomize.py",
+                "usercustomize.py",
+            }:
                 raise RuntimeError(
                     "interpreter dependency directory contains an unsafe startup link"
                 )
+        if production_dependency_boundary and any(
+            path.suffix.lower() == ".pth" for path in dependency.rglob("*.pth")
+        ):
+            raise RuntimeError("interpreter dependency directory contains an unsafe path file")
         text = str(dependency)
         if text not in sys.path:
             sys.path.append(text)
@@ -1087,7 +1236,13 @@ def _assert_locked_dependencies(
     """Require the actual interpreter environment to match requirements.lock."""
 
     requirements = _locked_requirements(root, release_bytes)
-    prefix = Path(sysconfig.get_config_var("prefix") or sys.prefix).resolve(strict=True)
+    production_dependency_boundary = os.name == "nt"
+    if production_dependency_boundary:
+        if len(dependency_paths) != 1:
+            _fail("protected dependency boundary is ambiguous")
+        prefix = dependency_paths[0].parent.parent.resolve(strict=True)
+    else:
+        prefix = Path(sysconfig.get_config_var("prefix") or sys.prefix).resolve(strict=True)
     installed: dict[str, list[importlib.metadata.Distribution]] = {}
     owned_paths: set[str] = set()
     owned_hashes: dict[str, tuple[bytes, int | None]] = {}
@@ -1100,7 +1255,9 @@ def _assert_locked_dependencies(
                 _fail("installed dependency metadata has no package name")
             normalized = re.sub(r"[-_.]+", "-", name).lower()
             installed.setdefault(normalized, []).append(dist)
-    for name, version in requirements.items():
+    # Keep the approved distribution contract independent of presentation
+    # sections such as pip-compile's trailing ``--allow-unsafe`` block.
+    for name, version in sorted(requirements.items()):
         matches = installed.get(name, [])
         if len(matches) != 1 or matches[0].version != version:
             _fail(f"installed dependency does not exactly match requirements.lock: {name}")
@@ -1332,7 +1489,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         _install_verified_release_importer(root, source_guard.source_bytes)
         sys.path.insert(0, str(root))
-        dependency_paths = _append_governed_dependencies()
+        dependency_paths = _append_governed_dependencies(root, source_guard.source_bytes)
         allowed_dependencies, owned_dependency_paths, owned_dependency_hashes = (
             _assert_locked_dependencies(root, dependency_paths, source_guard.source_bytes)
         )

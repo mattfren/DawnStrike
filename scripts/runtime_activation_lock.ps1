@@ -1,13 +1,18 @@
 # Shared, strict activation-lock implementation. Callers set operation and
 # immutable source identity before acquisition; credentials are never accepted.
+$global:PSModuleAutoLoadingPreference = 'None'
+$env:PSModulePath = 'C:\Windows\System32\WindowsPowerShell\v1.0\Modules'
+. ([IO.Path]::Combine($PSScriptRoot, 'powershell_module_boundary.ps1'))
+. ([IO.Path]::Combine($PSScriptRoot, 'powershell_native_support.ps1'))
+
 $script:DawnstrikeApprovedPythonPath='C:\Program Files\Dawnstrike\Python313\python.exe'
-$script:DawnstrikeApprovedPythonSha256='ef8f51028ac5329641985112f8efb1c2d4c47c86b8011ddf7e6fae21e2b4e5a1'
+$script:DawnstrikeApprovedPythonSha256='85b71d8c6ec1905935f74be0c9869aae198d00e98f39df699ec66f9c5a84cecd'
 $script:DawnstrikeApprovedPythonSubject='CN=Python Software Foundation, O=Python Software Foundation, L=Beaverton, S=Oregon, C=US'
-$script:DawnstrikeApprovedPythonThumbprint='9BA3C2E210C7E8296C5056515BFC0B0BBA78AC48'
-$script:DawnstrikeApprovedGitPath='C:\Program Files\Git\cmd\git.exe'
-$script:DawnstrikeApprovedGitSha256='37c5725818d602e951ba2563b870d62763322956b73373da4c33a0b566a80bc9'
-$script:DawnstrikeApprovedGitSubject='CN=Johannes Schindelin, O=Johannes Schindelin, S=Nordrhein-Westfalen, C=DE'
-$script:DawnstrikeApprovedGitThumbprint='3EB14A3AEF84B7153E139397F0A49E2FAC662B0E'
+$script:DawnstrikeApprovedPythonThumbprint='847785B686B2D3879731FA9AA3F1F5D48E85D99E'
+$script:DawnstrikeApprovedGitPath='C:\Program Files\Dawnstrike\Git-2.55.0.5\cmd\git.exe'
+$script:DawnstrikeApprovedGitSha256='78211c7ed73988da93a6d8a33d47ec6187f464d7ea2a9a00c182bbd7a1ecf30f'
+$script:DawnstrikeApprovedGitSubject='CN=Johannes Schindelin, O=Johannes Schindelin, L=Bruehl, C=DE'
+$script:DawnstrikeApprovedGitThumbprint='2A1E97CBF0DFCDA15B0DA0AC9745014F989D4AD0'
 
 if (-not (Get-Command Invoke-DawnstrikeJobProcess -ErrorAction SilentlyContinue)) {
     . (Join-Path $PSScriptRoot 'dawnstrike_job_process.ps1')
@@ -64,186 +69,10 @@ function Get-DawnstrikeRuntimeLockHash([string]$Path) {
 }
 
 function Initialize-DawnstrikeRuntimeLockNative {
-    if ('Dawnstrike.Locking.RuntimeLockNative' -as [type]) { return }
-    Add-Type -TypeDefinition @'
-using System;
-using System.ComponentModel;
-using System.Runtime.InteropServices;
-using System.Text;
-using Microsoft.Win32.SafeHandles;
-
-namespace Dawnstrike.Locking {
-    [StructLayout(LayoutKind.Sequential)]
-    public struct RuntimeFileDispositionInfo {
-        [MarshalAs(UnmanagedType.Bool)]
-        public bool DeleteFile;
+    $null = & ${function:Import-DawnstrikePowerShellSupport}
+    if (-not ('Dawnstrike.Locking.RuntimeLockNative' -as [type])) {
+        throw 'Precompiled Dawnstrike runtime-lock support did not load.'
     }
-
-    public static class RuntimeLockNative {
-        private const UInt32 GenericRead = 0x80000000;
-        private const UInt32 GenericWrite = 0x40000000;
-        private const UInt32 DeleteAccess = 0x00010000;
-        private const UInt32 FileReadAttributes = 0x00000080;
-        private const UInt32 FileShareRead = 0x00000001;
-        private const UInt32 FileShareWrite = 0x00000002;
-        private const UInt32 CreateNew = 1;
-        private const UInt32 OpenExisting = 3;
-        private const UInt32 FileAttributeNormal = 0x00000080;
-        private const UInt32 FileFlagBackupSemantics = 0x02000000;
-        private const UInt32 FileFlagOpenReparsePoint = 0x00200000;
-        private const int FileRenameInformation = 3;
-        private const int FileDispositionInformation = 4;
-
-        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern SafeFileHandle CreateFileW(
-            string path,
-            UInt32 desiredAccess,
-            UInt32 shareMode,
-            IntPtr securityAttributes,
-            UInt32 creationDisposition,
-            UInt32 flagsAndAttributes,
-            IntPtr templateFile
-        );
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern bool SetFileInformationByHandle(
-            SafeFileHandle file,
-            int fileInformationClass,
-            IntPtr fileInformation,
-            UInt32 bufferSize
-        );
-
-        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern UInt32 GetFinalPathNameByHandleW(
-            SafeFileHandle file,
-            StringBuilder path,
-            UInt32 pathLength,
-            UInt32 flags
-        );
-
-        private static SafeFileHandle Open(
-            string path,
-            UInt32 access,
-            UInt32 share,
-            UInt32 disposition,
-            UInt32 flags,
-            string label
-        ) {
-            SafeFileHandle handle = CreateFileW(
-                path, access, share, IntPtr.Zero, disposition, flags, IntPtr.Zero
-            );
-            if (handle == null || handle.IsInvalid) {
-                int error = Marshal.GetLastWin32Error();
-                if (handle != null) handle.Dispose();
-                throw new Win32Exception(error, label);
-            }
-            return handle;
-        }
-
-        public static SafeFileHandle CreateNewRetained(string path) {
-            return Open(
-                path,
-                GenericRead | GenericWrite | DeleteAccess,
-                FileShareRead,
-                CreateNew,
-                FileAttributeNormal,
-                "Retained runtime lock creation failed"
-            );
-        }
-
-        public static SafeFileHandle OpenExistingRetained(string path) {
-            return Open(
-                path,
-                GenericRead | GenericWrite | DeleteAccess,
-                FileShareRead,
-                OpenExisting,
-                FileAttributeNormal | FileFlagOpenReparsePoint,
-                "Retained runtime lock open failed"
-            );
-        }
-
-        public static SafeFileHandle OpenDirectoryRetained(string path) {
-            return Open(
-                path,
-                FileReadAttributes,
-                FileShareRead | FileShareWrite,
-                OpenExisting,
-                FileFlagBackupSemantics | FileFlagOpenReparsePoint,
-                "Retained runtime lock root open failed"
-            );
-        }
-
-        public static void MarkDelete(SafeFileHandle handle) {
-            RuntimeFileDispositionInfo disposition = new RuntimeFileDispositionInfo();
-            disposition.DeleteFile = true;
-            int size = Marshal.SizeOf(typeof(RuntimeFileDispositionInfo));
-            IntPtr buffer = Marshal.AllocHGlobal(size);
-            try {
-                Marshal.StructureToPtr(disposition, buffer, false);
-                if (!SetFileInformationByHandle(
-                    handle, FileDispositionInformation, buffer, (UInt32)size
-                )) {
-                    throw new Win32Exception(
-                        Marshal.GetLastWin32Error(),
-                        "Retained runtime lock exact deletion failed"
-                    );
-                }
-            }
-            finally { Marshal.FreeHGlobal(buffer); }
-        }
-
-        public static void RenameNoReplace(SafeFileHandle handle, string destination) {
-            byte[] name = Encoding.Unicode.GetBytes(destination);
-            int rootOffset = IntPtr.Size;
-            int lengthOffset = rootOffset + IntPtr.Size;
-            int nameOffset = lengthOffset + 4;
-            // FileNameLength excludes the terminator, but Windows still reads
-            // the variable tail as a Unicode string on supported Desktop
-            // builds.  Reserve and zero an explicit terminator so the rename
-            // cannot acquire allocator-tail bytes in its directory entry.
-            int size = nameOffset + name.Length + 2;
-            IntPtr buffer = Marshal.AllocHGlobal(size);
-            try {
-                for (int index = 0; index < size; index++) Marshal.WriteByte(buffer, index, 0);
-                Marshal.WriteByte(buffer, 0, 0);
-                Marshal.WriteIntPtr(buffer, rootOffset, IntPtr.Zero);
-                Marshal.WriteInt32(buffer, lengthOffset, name.Length);
-                Marshal.Copy(name, 0, IntPtr.Add(buffer, nameOffset), name.Length);
-                if (!SetFileInformationByHandle(
-                    handle, FileRenameInformation, buffer, (UInt32)size
-                )) {
-                    throw new Win32Exception(
-                        Marshal.GetLastWin32Error(),
-                        "Retained runtime lock exact rename failed"
-                    );
-                }
-            }
-            finally { Marshal.FreeHGlobal(buffer); }
-        }
-
-        public static string GetFinalPath(SafeFileHandle handle) {
-            StringBuilder path = new StringBuilder(32768);
-            UInt32 length = GetFinalPathNameByHandleW(
-                handle, path, (UInt32)path.Capacity, 0
-            );
-            if (length == 0 || length >= path.Capacity) {
-                throw new Win32Exception(
-                    Marshal.GetLastWin32Error(),
-                    "Retained runtime lock path lookup failed"
-                );
-            }
-            string value = path.ToString();
-            if (value.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase)) {
-                return @"\\" + value.Substring(8);
-            }
-            if (value.StartsWith(@"\\?\", StringComparison.OrdinalIgnoreCase)) {
-                return value.Substring(4);
-            }
-            return value;
-        }
-    }
-}
-'@
 }
 
 function Test-DawnstrikeRuntimeLockPathEqual([string]$Left,[string]$Right) {
@@ -428,10 +257,34 @@ function Convert-DawnstrikeCanonicalOriginIdentity([string]$Origin) {
     throw "Origin URL cannot be reduced to an approved canonical identity."
 }
 
-function New-DawnstrikeRuntimeLockPayload([string]$Operation,[string]$CandidateSha,[string]$CandidateTree,[string]$OriginIdentity,[string]$Token) {
+function New-DawnstrikeRuntimeLockPayload {
+    param(
+        [string]$Operation,
+        [string]$CandidateSha,
+        [string]$CandidateTree,
+        [string]$OriginIdentity,
+        [string]$Token,
+        [string]$RollbackTargetMarketDate = 'NONE'
+    )
+    if ($Operation -eq 'runtime_rollback') {
+        try {
+            $parsedRollbackTarget = [DateTime]::ParseExact(
+                $RollbackTargetMarketDate, 'yyyy-MM-dd',
+                [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::None
+            )
+        }
+        catch { throw 'Runtime rollback lock target market date is invalid.' }
+        if ($parsedRollbackTarget.ToString('yyyy-MM-dd') -cne $RollbackTargetMarketDate) {
+            throw 'Runtime rollback lock target market date is invalid.'
+        }
+    }
+    elseif ($RollbackTargetMarketDate -cne 'NONE') {
+        throw 'Non-rollback runtime lock cannot carry rollback target state.'
+    }
     $originHash = Get-DawnstrikeSharedLockSha256Text $OriginIdentity
-    return [ordered]@{
-        schema_version = "dawnstrike.runtime_activation_lock.v2"
+    $payload = [ordered]@{
+        schema_version = if ($Operation -eq 'runtime_rollback') { 'dawnstrike.runtime_activation_lock.v3' } else { 'dawnstrike.runtime_activation_lock.v2' }
         operation = $Operation
         candidate_sha = $CandidateSha
         candidate_tree = $CandidateTree
@@ -444,6 +297,10 @@ function New-DawnstrikeRuntimeLockPayload([string]$Operation,[string]$CandidateS
         research_only = $true
         broker_execution_enabled = $false
     }
+    if ($Operation -eq 'runtime_rollback') {
+        $payload.rollback_target_market_date = $RollbackTargetMarketDate
+    }
+    return $payload
 }
 
 function Enter-DawnstrikeGovernedRuntimeLock {
@@ -455,7 +312,8 @@ function Enter-DawnstrikeGovernedRuntimeLock {
         [ValidatePattern('^[0-9a-f]{40}$')][string]$CandidateTree = $script:DawnstrikeLockCandidateTree,
         [Parameter(Mandatory=$true)][string]$OriginIdentity,
         [Parameter(Mandatory=$true)][string]$PythonPath,
-        [Parameter(Mandatory=$true)][ValidatePattern('^[0-9a-f]{64}$')][string]$PythonSha256
+        [Parameter(Mandatory=$true)][ValidatePattern('^[0-9a-f]{64}$')][string]$PythonSha256,
+        [string]$RollbackTargetMarketDate = 'NONE'
     )
     if ([string]::IsNullOrWhiteSpace($CandidateSha) -or [string]::IsNullOrWhiteSpace($CandidateTree) -or [string]::IsNullOrWhiteSpace($OriginIdentity)) { throw "Runtime activation lock source identity is incomplete." }
     $state = Assert-DawnstrikeRuntimeLockStateRoot $StateRoot
@@ -474,7 +332,7 @@ function Enter-DawnstrikeGovernedRuntimeLock {
         if($daily.Count){throw "A daily run lock exists; runtime activation is not permitted."}
         if (Test-Path -LiteralPath $path) { $null = Get-DawnstrikeStrictRuntimeLock $path $PythonPath $PythonSha256; throw "A runtime activation lock already exists and requires governed recovery." }
         $token = [guid]::NewGuid().ToString("N")
-        $json = (New-DawnstrikeRuntimeLockPayload $Operation $CandidateSha $CandidateTree $OriginIdentity $token) | ConvertTo-Json -Compress
+        $json = (New-DawnstrikeRuntimeLockPayload $Operation $CandidateSha $CandidateTree $OriginIdentity $token $RollbackTargetMarketDate) | ConvertTo-Json -Compress
         $bytes = [Text.UTF8Encoding]::new($false).GetBytes($json)
         $handle=Open-DawnstrikeRetainedRuntimeLockFile $path -CreateNew
         $handle.Write($bytes,0,$bytes.Length);$handle.Flush($true)
@@ -500,7 +358,7 @@ function Enter-DawnstrikeGovernedRuntimeLock {
 
 function Adopt-DawnstrikeGovernedRuntimeLock {
     [CmdletBinding()]
-param([string]$StateRoot,[string]$ExpectedToken,[string]$ExpectedFileSha256,[string]$ExpectedOperation,[string]$CandidateSha,[string]$CandidateTree,[string]$OriginIdentity,[string]$PythonPath,[string]$PythonSha256,[ValidateSet("capture_task_rebind","runtime_activation","runtime_rollback","state_preparation","recovery")][string]$RecoveryOperation="recovery")
+param([string]$StateRoot,[string]$ExpectedToken,[string]$ExpectedFileSha256,[string]$ExpectedOperation,[string]$CandidateSha,[string]$CandidateTree,[string]$OriginIdentity,[string]$PythonPath,[string]$PythonSha256,[ValidateSet("capture_task_rebind","runtime_activation","runtime_rollback","state_preparation","recovery")][string]$RecoveryOperation="recovery",[string]$RollbackTargetMarketDate='NONE')
     $state = Assert-DawnstrikeRuntimeLockStateRoot $StateRoot
     $path = Join-Path $state "locks\dawnstrike-runtime-activation.lock"
     $mutex = Enter-DawnstrikeRuntimeLockMutex
@@ -508,18 +366,19 @@ param([string]$StateRoot,[string]$ExpectedToken,[string]$ExpectedFileSha256,[str
     try {
         $script:DawnstrikeLockMutexAbandoned=$false
         $preview=Get-DawnstrikeStrictRuntimeLock $path $PythonPath $PythonSha256
-        if ($preview.payload.lock_token -ne $ExpectedToken -or $preview.raw_file_sha256 -ne $ExpectedFileSha256 -or $preview.payload.operation -ne $ExpectedOperation -or $preview.payload.candidate_sha -ne $CandidateSha -or $preview.payload.candidate_tree -ne $CandidateTree -or $preview.payload.origin_identity -ne $OriginIdentity) { throw "Stale runtime lock does not match the PREPARED contract." }
+        if ($preview.payload.lock_token -ne $ExpectedToken -or $preview.raw_file_sha256 -ne $ExpectedFileSha256 -or $preview.payload.operation -ne $ExpectedOperation -or $preview.payload.candidate_sha -ne $CandidateSha -or $preview.payload.candidate_tree -ne $CandidateTree -or $preview.payload.origin_identity -ne $OriginIdentity -or ($ExpectedOperation -eq 'runtime_rollback' -and [string]$preview.payload.rollback_target_market_date -cne $RollbackTargetMarketDate)) { throw "Stale runtime lock does not match the PREPARED contract." }
         if (-not (Test-DawnstrikeRuntimeLockOwnerDead $preview.payload)) { throw "Runtime activation lock owner is still active." }
         $rootHandle=Open-DawnstrikeRetainedRuntimeLockRoot (Split-Path $path -Parent)
         $staleHandle=Open-DawnstrikeRetainedRuntimeLockFile $path
         $stale = Get-DawnstrikeStrictRuntimeLock $path $PythonPath $PythonSha256 $staleHandle
-        if ($stale.payload.lock_token -ne $ExpectedToken -or $stale.raw_file_sha256 -ne $ExpectedFileSha256 -or $stale.payload.operation -ne $ExpectedOperation -or $stale.payload.candidate_sha -ne $CandidateSha -or $stale.payload.candidate_tree -ne $CandidateTree -or $stale.payload.origin_identity -ne $OriginIdentity) { throw "Stale runtime lock does not match the PREPARED contract." }
+        if ($stale.payload.lock_token -ne $ExpectedToken -or $stale.raw_file_sha256 -ne $ExpectedFileSha256 -or $stale.payload.operation -ne $ExpectedOperation -or $stale.payload.candidate_sha -ne $CandidateSha -or $stale.payload.candidate_tree -ne $CandidateTree -or $stale.payload.origin_identity -ne $OriginIdentity -or ($ExpectedOperation -eq 'runtime_rollback' -and [string]$stale.payload.rollback_target_market_date -cne $RollbackTargetMarketDate)) { throw "Stale runtime lock does not match the PREPARED contract." }
         if (-not (Test-DawnstrikeRuntimeLockOwnerDead $stale.payload)) { throw "Runtime activation lock owner is still active." }
         $archive = Join-Path (Split-Path $path -Parent) ("recovered-stale-" + $ExpectedFileSha256 + ".lock")
         Assert-DawnstrikeSharedLockNoReparse $archive 'Stale lock archive'
         if (Test-Path -LiteralPath $archive) { throw "Stale lock archive already exists; adoption is ambiguous." }
         $token=[guid]::NewGuid().ToString("N")
-        $json=(New-DawnstrikeRuntimeLockPayload $RecoveryOperation $CandidateSha $CandidateTree $OriginIdentity $token)|ConvertTo-Json -Compress
+        $nextRollbackTarget = if ($RecoveryOperation -eq 'runtime_rollback') { $RollbackTargetMarketDate } else { 'NONE' }
+        $json=(New-DawnstrikeRuntimeLockPayload $RecoveryOperation $CandidateSha $CandidateTree $OriginIdentity $token $nextRollbackTarget)|ConvertTo-Json -Compress
         $temp=Join-Path (Split-Path $path -Parent) (".lock-recovery-"+[guid]::NewGuid().ToString('N')+".tmp")
         Assert-DawnstrikeSharedLockNoReparse $temp 'Recovery lock temporary file'
         $bytes=[Text.UTF8Encoding]::new($false).GetBytes($json)
@@ -798,7 +657,7 @@ function Get-DawnstrikeAdvancedOriginRecoveryAdmission {
             prepared_receipt_relative_path = [string]$selectedPayload.prepared_receipt_relative_path
             complete_receipt_relative_path = [string]$selectedPayload.complete_receipt_relative_path
             compensation_receipt_relative_path = [string]$selectedPayload.compensation_receipt_relative_path
-            market_date = if ($selectedPayload.PSObject.Properties.Name -contains 'market_date') { [string]$selectedPayload.market_date } else { 'NONE' }
+            rollback_target_market_date = if ($selectedPayload.PSObject.Properties.Name -contains 'rollback_target_market_date') { [string]$selectedPayload.rollback_target_market_date } else { 'NONE' }
         }
     }
     finally { Exit-DawnstrikeRuntimeLockMutex $mutex }
@@ -861,12 +720,18 @@ function Set-DawnstrikeRuntimeOperationJournalAdoption {
     foreach($property in $Journal.payload.PSObject.Properties){
         if($property.Name-ne'journal_self_sha256'){$payload[$property.Name]=$property.Value}
     }
-    # Adoption is also the compatibility boundary for journals written by
-    # older candidates.  New terminal recovery always uses the v2 exact key
-    # set, while ordinary v1 journals remain readable until adopted.
+    # Adoption upgrades ordinary journals to v2. Runtime rollback is v3 and
+    # must already carry its immutable target; a legacy in-flight rollback is
+    # rejected by the strict journal parser before this boundary.
     if(-not $payload.Contains('compensation_receipt_relative_path')){$payload.compensation_receipt_relative_path='NONE'}
     if(-not $payload.Contains('compensation_receipt_sha256')){$payload.compensation_receipt_sha256=(Get-DawnstrikeSharedLockSha256Text '')}
-    $payload.schema_version='dawnstrike.runtime_operation_journal.v2'
+    $payload.schema_version = if ([string]$payload.operation -eq 'runtime_rollback') {
+        if (-not $payload.Contains('rollback_target_market_date')) {
+            throw 'Runtime rollback adoption has no sealed target market date.'
+        }
+        'dawnstrike.runtime_operation_journal.v3'
+    }
+    else { 'dawnstrike.runtime_operation_journal.v2' }
     $payload.adoption_state=$State;$payload.lock_token=$CurrentToken
     $payload.lock_file_sha256=$CurrentHash;$payload.old_lock_token=$OldToken
     $payload.old_lock_file_sha256=$OldHash;$payload.next_lock_token=$NextToken
@@ -923,6 +788,10 @@ function Adopt-DawnstrikeGovernedRuntimeLockWithJournal {
             $journal=Get-DawnstrikeStrictRuntimeOperationJournal $journalFull $PythonPath $PythonSha256
             $payload=$journal.payload
             if($payload.candidate_sha-ne$CandidateSha-or$payload.candidate_tree-ne$CandidateTree-or$payload.origin_identity-ne$OriginIdentity){throw 'Journal source identity does not match recovery.'}
+            $rollbackTargetMarketDate = if ([string]$payload.operation -eq 'runtime_rollback') {
+                [string]$payload.rollback_target_market_date
+            }
+            else { 'NONE' }
             $ownerStart=(Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ')
             $needsNewRound=$false;$shape=''
 
@@ -935,6 +804,10 @@ function Adopt-DawnstrikeGovernedRuntimeLockWithJournal {
                 $current=Get-DawnstrikeStrictRuntimeLock $path $PythonPath $PythonSha256 $currentHandle
                 if((Get-DawnstrikeRetainedRuntimeLockSnapshot $currentHandle $path).raw_file_sha256-ne$current.raw_file_sha256){throw 'Journal-bound runtime activation lock changed while opening its retained handle.'}
                 if($payload.lock_token-ne$current.payload.lock_token-or$payload.lock_file_sha256-ne$current.raw_file_sha256){throw 'Journal does not bind the stale lock.'}
+                if ([string]$payload.operation -eq 'runtime_rollback' -and
+                    [string]$current.payload.rollback_target_market_date -cne $rollbackTargetMarketDate) {
+                    throw 'Rollback journal and stale lock target identities disagree.'
+                }
                 $ownedByCurrent=([int]$current.payload.process_id-eq[int]$PID-and[string]$current.payload.process_started_at_utc-eq$ownerStart)
                 if($ownedByCurrent){
                     $owned=New-DawnstrikeRetainedRuntimeLockObject $path ([string]$current.payload.lock_token) ([string]$current.raw_file_sha256) ([string]$current.payload.operation) $PythonPath $PythonSha256 $currentHandle $rootHandle $journalFull ([string]$journal.raw_file_sha256)
@@ -949,6 +822,7 @@ function Adopt-DawnstrikeGovernedRuntimeLockWithJournal {
                 if(Test-Path -LiteralPath $path -PathType Leaf){
                     $currentHandle=Open-DawnstrikeRetainedRuntimeLockFile $path
                     $current=Get-DawnstrikeStrictRuntimeLock $path $PythonPath $PythonSha256 $currentHandle
+                    if ([string]$payload.operation -eq 'runtime_rollback' -and [string]$current.payload.rollback_target_market_date -cne $rollbackTargetMarketDate) { throw 'Prepared rollback lock target changed.' }
                     if((Get-DawnstrikeRetainedRuntimeLockSnapshot $currentHandle $path).raw_file_sha256-ne$current.raw_file_sha256){throw 'Prepared adoption canonical lock changed while opening its retained handle.'}
                     if($current.raw_file_sha256-eq[string]$payload.old_lock_file_sha256){
                         if(Test-Path -LiteralPath $oldPath){throw 'Prepared adoption old archive already exists while the old canonical lock remains.'}
@@ -958,6 +832,7 @@ function Adopt-DawnstrikeGovernedRuntimeLockWithJournal {
                         if(-not(Test-Path -LiteralPath $oldPath -PathType Leaf)){throw 'Prepared adoption archive is missing.'}
                         $archiveHandle=Open-DawnstrikeRetainedRuntimeLockFile $oldPath
                         $archived=Get-DawnstrikeStrictRuntimeLock $oldPath $PythonPath $PythonSha256 $archiveHandle
+                        if ([string]$payload.operation -eq 'runtime_rollback' -and [string]$archived.payload.rollback_target_market_date -cne $rollbackTargetMarketDate) { throw 'Archived rollback lock target changed.' }
                         if($archived.raw_file_sha256-ne[string]$payload.old_lock_file_sha256-or(Get-DawnstrikeRetainedRuntimeLockSnapshot $archiveHandle $oldPath).raw_file_sha256-ne$archived.raw_file_sha256){throw 'Prepared adoption archive is missing or changed.'}
                         $archiveHandle.Dispose();$archiveHandle=$null
                         if(-not(Test-DawnstrikeRuntimeLockOwnerDead $current.payload)){throw 'Prepared next runtime activation lock owner is still active.'}
@@ -970,6 +845,7 @@ function Adopt-DawnstrikeGovernedRuntimeLockWithJournal {
                     if(-not(Test-Path -LiteralPath $oldPath -PathType Leaf)-or-not(Test-Path -LiteralPath $nextPath -PathType Leaf)){throw 'Prepared adoption missing-canonical shape is incomplete.'}
                     $archiveHandle=Open-DawnstrikeRetainedRuntimeLockFile $oldPath
                     $archived=Get-DawnstrikeStrictRuntimeLock $oldPath $PythonPath $PythonSha256 $archiveHandle
+                    if ([string]$payload.operation -eq 'runtime_rollback' -and [string]$archived.payload.rollback_target_market_date -cne $rollbackTargetMarketDate) { throw 'Archived rollback lock target changed.' }
                     if($archived.raw_file_sha256-ne[string]$payload.old_lock_file_sha256-or(Get-DawnstrikeRetainedRuntimeLockSnapshot $archiveHandle $oldPath).raw_file_sha256-ne$archived.raw_file_sha256){throw 'Prepared adoption archive is missing or changed.'}
                     $shape='OLD_ARCHIVED'
                 }
@@ -978,7 +854,7 @@ function Adopt-DawnstrikeGovernedRuntimeLockWithJournal {
             if($needsNewRound){
                 $oldToken=[string]$current.payload.lock_token;$oldHash=[string]$current.raw_file_sha256
                 $nextToken=[guid]::NewGuid().ToString('N')
-                $nextJson=(New-DawnstrikeRuntimeLockPayload ([string]$current.payload.operation) $CandidateSha $CandidateTree $OriginIdentity $nextToken)|ConvertTo-Json -Compress
+                $nextJson=(New-DawnstrikeRuntimeLockPayload ([string]$current.payload.operation) $CandidateSha $CandidateTree $OriginIdentity $nextToken $rollbackTargetMarketDate)|ConvertTo-Json -Compress
                 $nextBytes=[Text.UTF8Encoding]::new($false).GetBytes($nextJson)
                 $nextHash=Get-DawnstrikeSharedLockSha256Text $nextJson
                 $nextName='.next-runtime-lock-'+$nextHash+'.tmp';$nextPath=Join-Path $lockRoot $nextName
@@ -993,6 +869,7 @@ function Adopt-DawnstrikeGovernedRuntimeLockWithJournal {
                 if($null-eq$nextHandle){
                     $nextHandle=Open-DawnstrikeRetainedRuntimeLockFile $nextPath
                     $next=Get-DawnstrikeStrictRuntimeLock $nextPath $PythonPath $PythonSha256 $nextHandle
+                    if ([string]$payload.operation -eq 'runtime_rollback' -and [string]$next.payload.rollback_target_market_date -cne $rollbackTargetMarketDate) { throw 'Prepared next rollback lock target changed.' }
                     if($next.raw_file_sha256-ne[string]$payload.next_lock_file_sha256-or(Get-DawnstrikeRetainedRuntimeLockSnapshot $nextHandle $nextPath).raw_file_sha256-ne$next.raw_file_sha256){throw 'Prepared next-lock bytes are missing or changed.'}
                 }
             }
@@ -1007,6 +884,7 @@ function Adopt-DawnstrikeGovernedRuntimeLockWithJournal {
             $currentHandle=$nextHandle;$nextHandle=$null
             if($TestCrashPoint-eq'after_replace'){exit 137}
             $current=Get-DawnstrikeStrictRuntimeLock $path $PythonPath $PythonSha256 $currentHandle
+            if ([string]$payload.operation -eq 'runtime_rollback' -and [string]$current.payload.rollback_target_market_date -cne $rollbackTargetMarketDate) { throw 'Installed rollback lock target changed.' }
             if((Get-DawnstrikeRetainedRuntimeLockSnapshot $currentHandle $path).raw_file_sha256-ne$current.raw_file_sha256){throw 'Installed runtime activation lock changed while held.'}
             $journal=Set-DawnstrikeRuntimeOperationJournalAdoption $journal $journalFull 'ADOPTED' ([string]$current.payload.lock_token) ([string]$current.raw_file_sha256) ([string]$payload.old_lock_token) ([string]$payload.old_lock_file_sha256) ([string]$payload.next_lock_token) ([string]$payload.next_lock_file_sha256) ([string]$payload.old_lock_archive_relative_path) 'NONE' $PythonPath $PythonSha256
             if($null-ne$archiveHandle){$archiveHandle.Dispose();$archiveHandle=$null}
@@ -1028,7 +906,7 @@ function Set-DawnstrikeRuntimeOperationJournalPhase {
         [Parameter(Mandatory=$true)][string]$JournalPath,
         [Parameter(Mandatory=$true)][object]$Lock,
 [ValidateSet('runtime_activation','runtime_rollback','capture_task_rebind','capture_task_hardening','state_preparation')][string]$Operation,
- [ValidateSet('INIT','PRE_QUIESCE','PRE_SWAP','POST_SWAP','POST_SWAP_READY','PRE_ENABLE','POST_ENABLE','PRE_TASK_UPDATE','POST_TASK_UPDATE','PREPARE','COMPLETE','COMPENSATED')][string]$Phase,
+ [ValidateSet('INIT','PRE_QUIESCE','PRE_SWAP','POST_SWAP','POST_SWAP_READY','PRE_ENABLE','POST_ENABLE','PRE_TASK_UPDATE','POST_TASK_UPDATE','PREPARE','COMPLETE','COMPENSATED','TERMINAL_RECOVERY')][string]$Phase,
         [ValidatePattern('^[0-9a-f]{40}$')][string]$CandidateSha,
         [ValidatePattern('^[0-9a-f]{40}$')][string]$CandidateTree,
         [ValidatePattern('^[0-9a-f]{40}$')][string]$CurrentSha,
@@ -1047,6 +925,7 @@ function Set-DawnstrikeRuntimeOperationJournalPhase {
         [string]$CompensationReceiptSha256='',
         [Parameter(Mandatory=$true)][string]$PythonPath,
         [Parameter(Mandatory=$true)][ValidatePattern('^[0-9a-f]{64}$')][string]$PythonSha256,
+        [string]$RollbackTargetMarketDate='NONE',
         [ValidateRange(1,1800)][int]$ProcessTimeoutSeconds=300
     )
     $state=Assert-DawnstrikeRuntimeLockStateRoot $StateRoot
@@ -1059,7 +938,7 @@ function Set-DawnstrikeRuntimeOperationJournalPhase {
     if($current.payload.lock_token-ne$Lock.token-or$current.raw_file_sha256-ne$Lock.bytes_sha256-or[int]$current.payload.process_id-ne[int]$PID-or[string]$current.payload.process_started_at_utc-ne$processStart){throw 'Journal transition requires the exact live lock owned by this process.'}
     if($current.payload.operation-ne$Operation-or$current.payload.candidate_sha-ne$CandidateSha-or$current.payload.candidate_tree-ne$CandidateTree-or$current.payload.origin_identity-ne$OriginIdentity){throw 'Journal transition lock identity does not match the operation.'}
     $phases=@{
-runtime_activation=@('INIT','PRE_QUIESCE','PRE_SWAP','POST_SWAP','POST_SWAP_READY','COMPLETE','COMPENSATED')
+runtime_activation=@('INIT','PRE_QUIESCE','PRE_SWAP','POST_SWAP','POST_SWAP_READY','COMPLETE','COMPENSATED','TERMINAL_RECOVERY')
 runtime_rollback=@('INIT','PRE_SWAP','POST_SWAP','POST_SWAP_READY','COMPLETE','COMPENSATED')
 capture_task_rebind=@('INIT','PRE_ENABLE','POST_ENABLE','COMPLETE','COMPENSATED')
 capture_task_hardening=@('INIT','PRE_TASK_UPDATE','POST_TASK_UPDATE','COMPLETE','COMPENSATED')
@@ -1077,11 +956,27 @@ capture_task_hardening=@('INIT','PRE_TASK_UPDATE','POST_TASK_UPDATE','COMPLETE',
         $initOwnerProcessId=[int]$prior.payload.init_owner_process_id
         $initOwnerStartedAtUtc=[string]$prior.payload.init_owner_started_at_utc
     }elseif(Test-Path -LiteralPath $journalFull){throw 'INIT journal already exists.'}
+    if ($Operation -eq 'runtime_rollback') {
+        if ($Phase -ne 'INIT') {
+            $sealedRollbackTarget = [string]$prior.payload.rollback_target_market_date
+            if ($RollbackTargetMarketDate -ne 'NONE' -and
+                $RollbackTargetMarketDate -cne $sealedRollbackTarget) {
+                throw 'Journal transition attempted to remap the rollback target.'
+            }
+            $RollbackTargetMarketDate = $sealedRollbackTarget
+        }
+        if ([string]$current.payload.rollback_target_market_date -cne $RollbackTargetMarketDate) {
+            throw 'Journal transition lock target does not match the sealed rollback target.'
+        }
+    }
+    elseif ($RollbackTargetMarketDate -cne 'NONE') {
+        throw 'Non-rollback journal transition cannot carry rollback target state.'
+    }
     if($Phase -eq 'COMPENSATED'){
         if($CompensationReceiptRelativePath -eq 'NONE' -or $CompensationReceiptSha256 -notmatch '^[0-9a-f]{64}$' -or $CompensationReceiptSha256 -eq $empty){throw 'Compensated journal requires an exact compensation receipt.'}
     }elseif($CompensationReceiptRelativePath -ne 'NONE' -or $CompensationReceiptSha256 -ne ''){throw 'Non-compensated journal cannot carry compensation proof.'}
     $payload=[ordered]@{
-        schema_version='dawnstrike.runtime_operation_journal.v2';operation=$Operation;phase=$Phase;sequence=$sequence
+        schema_version=$(if($Operation -eq 'runtime_rollback'){'dawnstrike.runtime_operation_journal.v3'}else{'dawnstrike.runtime_operation_journal.v2'});operation=$Operation;phase=$Phase;sequence=$sequence
         candidate_sha=$CandidateSha;candidate_tree=$CandidateTree;current_sha=$CurrentSha;current_tree=$CurrentTree
         previous_sha=$PreviousSha;previous_tree=$PreviousTree;origin_identity=$OriginIdentity
         origin_identity_sha256=Get-DawnstrikeSharedLockSha256Text $OriginIdentity
@@ -1098,6 +993,9 @@ capture_task_hardening=@('INIT','PRE_TASK_UPDATE','POST_TASK_UPDATE','COMPLETE',
         next_lock_token=[string]$current.payload.lock_token;next_lock_file_sha256=[string]$current.raw_file_sha256
         old_lock_archive_relative_path='NONE';next_lock_relative_path='NONE'
         init_owner_process_id=$initOwnerProcessId;init_owner_started_at_utc=$initOwnerStartedAtUtc
+    }
+    if ($Operation -eq 'runtime_rollback') {
+        $payload.rollback_target_market_date = $RollbackTargetMarketDate
     }
     New-Item -ItemType Directory -Path (Split-Path $journalFull -Parent) -Force|Out-Null
     $input=Join-Path (Split-Path $journalFull -Parent) ('.journal-transition-'+[guid]::NewGuid().ToString('N')+'.json')
@@ -1175,11 +1073,28 @@ function Enter-DawnstrikeGovernedRuntimeLockWithJournal {
         [ValidatePattern('^[0-9a-f]{64}$')][string]$TaskContractSha256,
         [Parameter(Mandatory=$true)][string]$PythonPath,
         [Parameter(Mandatory=$true)][ValidatePattern('^[0-9a-f]{64}$')][string]$PythonSha256,
+        [string]$RollbackTargetMarketDate='NONE',
         [ValidateRange(1,1800)][int]$ProcessTimeoutSeconds=300,
         [ValidateSet('after_init','after_lock')][string]$TestCrashPoint='',
         [switch]$TestInjectDailyLockRace
     )
     if($TestCrashPoint-and$env:DAWNSTRIKE_TEST_LOCK_JOURNAL-ne'1'){throw 'Journal acquisition crash injection is test-only.'}
+    if ($Operation -eq 'runtime_rollback') {
+        try {
+            $parsedRollbackTarget = [DateTime]::ParseExact(
+                $RollbackTargetMarketDate, 'yyyy-MM-dd',
+                [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::None
+            )
+        }
+        catch { throw 'Runtime rollback journal target market date is invalid.' }
+        if ($parsedRollbackTarget.ToString('yyyy-MM-dd') -cne $RollbackTargetMarketDate) {
+            throw 'Runtime rollback journal target market date is invalid.'
+        }
+    }
+    elseif ($RollbackTargetMarketDate -cne 'NONE') {
+        throw 'Non-rollback journal initialization cannot carry rollback target state.'
+    }
     $state=Assert-DawnstrikeRuntimeLockStateRoot $StateRoot
     $journalFull=[IO.Path]::GetFullPath($JournalPath)
     $journalRoot=[IO.Path]::GetFullPath((Join-Path $state 'receipts\runtime-operation')).TrimEnd('\')+'\'
@@ -1203,11 +1118,11 @@ function Enter-DawnstrikeGovernedRuntimeLockWithJournal {
         $hasLock=Test-Path -LiteralPath $lockPath -PathType Leaf
         if($hasJournal){
             $journal=Get-DawnstrikeStrictRuntimeOperationJournal $journalFull $PythonPath $PythonSha256
-            if([string]$journal.payload.operation-ne$Operation-or[string]$journal.payload.candidate_sha-ne$CandidateSha-or[string]$journal.payload.candidate_tree-ne$CandidateTree-or[string]$journal.payload.origin_identity-ne$OriginIdentity-or[string]$journal.payload.prepared_receipt_relative_path-ne$PreparedReceiptRelativePath-or[string]$journal.payload.complete_receipt_relative_path-ne$CompleteReceiptRelativePath-or[string]$journal.payload.task_contract_sha256-ne$TaskContractSha256){throw 'Existing journal identity is invalid.'}
+            if([string]$journal.payload.operation-ne$Operation-or[string]$journal.payload.candidate_sha-ne$CandidateSha-or[string]$journal.payload.candidate_tree-ne$CandidateTree-or[string]$journal.payload.origin_identity-ne$OriginIdentity-or[string]$journal.payload.prepared_receipt_relative_path-ne$PreparedReceiptRelativePath-or[string]$journal.payload.complete_receipt_relative_path-ne$CompleteReceiptRelativePath-or[string]$journal.payload.task_contract_sha256-ne$TaskContractSha256-or($Operation-eq'runtime_rollback'-and[string]$journal.payload.rollback_target_market_date-cne$RollbackTargetMarketDate)){throw 'Existing journal identity is invalid.'}
             if([string]$journal.payload.phase -eq 'COMPENSATED'){
                 if($hasLock){
                     $lock=Get-DawnstrikeStrictRuntimeLock $lockPath $PythonPath $PythonSha256
-                    if($journal.payload.lock_token-ne$lock.payload.lock_token-or$journal.payload.lock_file_sha256-ne$lock.raw_file_sha256){throw 'Compensated journal and lock do not match.'}
+                    if($journal.payload.lock_token-ne$lock.payload.lock_token-or$journal.payload.lock_file_sha256-ne$lock.raw_file_sha256-or($Operation-eq'runtime_rollback'-and[string]$lock.payload.rollback_target_market_date-cne$RollbackTargetMarketDate)){throw 'Compensated journal and lock do not match.'}
                     if(-not(Test-DawnstrikeRuntimeLockOwnerDead $lock.payload)){throw 'Runtime activation lock owner is still active.'}
                     $adopted=Adopt-DawnstrikeGovernedRuntimeLockWithJournal -StateRoot $state -JournalPath $journalFull -CandidateSha $CandidateSha -CandidateTree $CandidateTree -OriginIdentity $OriginIdentity -PythonPath $PythonPath -PythonSha256 $PythonSha256
                     return $adopted
@@ -1225,19 +1140,19 @@ function Enter-DawnstrikeGovernedRuntimeLockWithJournal {
                 $hasJournal=$false
             }else{
                 $lock=Get-DawnstrikeStrictRuntimeLock $lockPath $PythonPath $PythonSha256
-                if($journal.payload.lock_token-ne$lock.payload.lock_token-or$journal.payload.lock_file_sha256-ne$lock.raw_file_sha256){throw 'INIT journal and lock do not match.'}
+                if($journal.payload.lock_token-ne$lock.payload.lock_token-or$journal.payload.lock_file_sha256-ne$lock.raw_file_sha256-or($Operation-eq'runtime_rollback'-and[string]$lock.payload.rollback_target_market_date-cne$RollbackTargetMarketDate)){throw 'INIT journal and lock do not match.'}
                 if(-not(Test-DawnstrikeRuntimeLockOwnerDead $lock.payload)){throw 'Runtime activation lock owner is still active.'}
                 $adopted=Adopt-DawnstrikeGovernedRuntimeLockWithJournal -StateRoot $state -JournalPath $journalFull -CandidateSha $CandidateSha -CandidateTree $CandidateTree -OriginIdentity $OriginIdentity -PythonPath $PythonPath -PythonSha256 $PythonSha256
                 return $adopted
             }
         }elseif($hasLock){throw 'Runtime lock exists without its exact INIT journal.'}
         $token=[guid]::NewGuid().ToString('N')
-        $lockJson=(New-DawnstrikeRuntimeLockPayload $Operation $CandidateSha $CandidateTree $OriginIdentity $token)|ConvertTo-Json -Compress
+        $lockJson=(New-DawnstrikeRuntimeLockPayload $Operation $CandidateSha $CandidateTree $OriginIdentity $token $RollbackTargetMarketDate)|ConvertTo-Json -Compress
         $lockBytes=[Text.UTF8Encoding]::new($false).GetBytes($lockJson)
         $lockHash=Get-DawnstrikeSharedLockSha256Text $lockJson
         $empty=Get-DawnstrikeSharedLockSha256Text ''
         $payload=[ordered]@{
-            schema_version='dawnstrike.runtime_operation_journal.v2';operation=$Operation;phase='INIT';sequence=0
+            schema_version=$(if($Operation-eq'runtime_rollback'){'dawnstrike.runtime_operation_journal.v3'}else{'dawnstrike.runtime_operation_journal.v2'});operation=$Operation;phase='INIT';sequence=0
             candidate_sha=$CandidateSha;candidate_tree=$CandidateTree;current_sha=$CurrentSha;current_tree=$CurrentTree
             previous_sha=$PreviousSha;previous_tree=$PreviousTree;origin_identity=$OriginIdentity
             origin_identity_sha256=Get-DawnstrikeSharedLockSha256Text $OriginIdentity
@@ -1251,6 +1166,9 @@ function Enter-DawnstrikeGovernedRuntimeLockWithJournal {
             adoption_state='NONE';old_lock_token=$token;old_lock_file_sha256=$lockHash;next_lock_token=$token;next_lock_file_sha256=$lockHash
             old_lock_archive_relative_path='NONE';next_lock_relative_path='NONE'
             init_owner_process_id=[int]$PID;init_owner_started_at_utc=(Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ')
+        }
+        if ($Operation -eq 'runtime_rollback') {
+            $payload.rollback_target_market_date = $RollbackTargetMarketDate
         }
         New-Item -ItemType Directory -Path (Split-Path $journalFull -Parent) -Force|Out-Null
         $input=Join-Path (Split-Path $journalFull -Parent) ('.journal-init-'+[guid]::NewGuid().ToString('N')+'.json')
@@ -1312,6 +1230,75 @@ function Exit-DawnstrikeGovernedRuntimeLock {
         if (Test-Path -LiteralPath $Lock.path) { throw "Runtime activation lock release was not proven." }
     } finally {
         if($deleted-and$null-ne$Lock.root_handle){$Lock.root_handle.Dispose();$Lock.root_handle=$null}
+        Exit-DawnstrikeRuntimeLockMutex $mutex
+    }
+}
+
+function Get-DawnstrikeTerminalRecoveryJournalPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)][string]$StateRoot,
+        [Parameter(Mandatory=$true)][ValidatePattern('^[0-9a-f]{32}$')][string]$OperationId
+    )
+
+    $state=Assert-DawnstrikeRuntimeLockStateRoot $StateRoot
+    return Join-Path $state "receipts\runtime-operation\terminal-recovery-$OperationId.json"
+}
+
+function Exit-DawnstrikeGovernedTerminalRecoveryLockWithJournal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)][string]$StateRoot,
+        [Parameter(Mandatory=$true)][string]$JournalPath,
+        [Parameter(Mandatory=$true)][object]$Lock,
+        [Parameter(Mandatory=$true)][ValidateSet('runtime_activation','runtime_rollback','capture_task_rebind')][string]$Operation,
+        [Parameter(Mandatory=$true)][ValidatePattern('^[0-9a-f]{40}$')][string]$CandidateSha,
+        [Parameter(Mandatory=$true)][ValidatePattern('^[0-9a-f]{40}$')][string]$CandidateTree,
+        [Parameter(Mandatory=$true)][string]$OriginIdentity,
+        [Parameter(Mandatory=$true)][string]$PythonPath,
+        [Parameter(Mandatory=$true)][ValidatePattern('^[0-9a-f]{64}$')][string]$PythonSha256,
+        [string]$RollbackTargetMarketDate = 'NONE'
+    )
+
+    $state=Assert-DawnstrikeRuntimeLockStateRoot $StateRoot
+    $journalFull=[IO.Path]::GetFullPath($JournalPath)
+    $journalRoot=[IO.Path]::GetFullPath((Join-Path $state 'receipts\runtime-operation')).TrimEnd('\')+'\'
+    if(-not$journalFull.StartsWith($journalRoot,[StringComparison]::OrdinalIgnoreCase)-or
+       [IO.Path]::GetFileName($journalFull)-notmatch '^terminal-recovery-[0-9a-f]{32}\.json$'){
+        throw 'Terminal recovery journal path is invalid.'
+    }
+    $mutex=Enter-DawnstrikeRuntimeLockMutex
+    try{
+        $journal=Get-DawnstrikeStrictRuntimeOperationJournal $journalFull $PythonPath $PythonSha256
+        $current=Confirm-DawnstrikeGovernedRuntimeLock $Lock
+        if([string]$journal.payload.operation-ne$Operation-or
+           [string]$journal.payload.phase-ne'INIT'-or
+           [string]$journal.payload.candidate_sha-ne$CandidateSha-or
+           [string]$journal.payload.candidate_tree-ne$CandidateTree-or
+           [string]$journal.payload.origin_identity-ne$OriginIdentity-or
+           ($Operation-eq'runtime_rollback'-and(
+               [string]$journal.payload.rollback_target_market_date-cne$RollbackTargetMarketDate-or
+               [string]$current.payload.rollback_target_market_date-cne$RollbackTargetMarketDate
+           ))-or
+           [string]$journal.payload.lock_token-ne[string]$current.payload.lock_token-or
+           [string]$journal.payload.lock_file_sha256-ne[string]$current.raw_file_sha256-or
+           [string]$Lock.journal_path-ne$journalFull){
+            throw 'Terminal recovery journal and retained runtime lock are not exact.'
+        }
+        $journalHash=[string]$journal.raw_file_sha256
+        Exit-DawnstrikeGovernedRuntimeLock -Lock $Lock
+        if(Test-Path -LiteralPath (Join-Path $state 'locks\dawnstrike-runtime-activation.lock')){
+            throw 'Terminal recovery runtime lock release was not proven.'
+        }
+        $after=Get-DawnstrikeStrictRuntimeOperationJournal $journalFull $PythonPath $PythonSha256
+        if([string]$after.raw_file_sha256-ne$journalHash){
+            throw 'Terminal recovery journal changed during lock release.'
+        }
+        Remove-Item -LiteralPath $journalFull -Force
+        if(Test-Path -LiteralPath $journalFull){
+            throw 'Terminal recovery journal cleanup was not proven.'
+        }
+    }finally{
         Exit-DawnstrikeRuntimeLockMutex $mutex
     }
 }

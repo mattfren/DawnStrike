@@ -15,8 +15,13 @@ param(
     [string]$TestNowUtc = ""
 )
 
+$global:PSModuleAutoLoadingPreference = 'None'
+$env:PSModulePath = 'C:\Windows\System32\WindowsPowerShell\v1.0\Modules'
+. ([IO.Path]::Combine($PSScriptRoot, 'powershell_module_boundary.ps1'))
+
 $ErrorActionPreference = "Stop"
 $runtime = (Resolve-Path $RuntimeRoot).Path
+$codeRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')).TrimEnd('\')
 New-Item -ItemType Directory -Path $StateRoot -Force | Out-Null
 $state = (Resolve-Path $StateRoot).Path
 . (Join-Path $PSScriptRoot "dawnstrike_process_runner.ps1")
@@ -24,7 +29,7 @@ $script:DawnstrikeLaunchLocks = (Assert-DawnstrikeScheduledLaunchManifest -Runti
 . (Join-Path $PSScriptRoot "import_dawnstrike_environment.ps1")
 . (Join-Path $PSScriptRoot "invoke_dawnstrike_stage.ps1")
 Import-DawnstrikeEnvironment -StateRoot $state
-$null = Assert-DawnstrikeProcessSourceBoundToHead -ReleaseRoot $runtime -ExpectedSha $ExpectedSha -EntryScript $PSCommandPath
+$null = Assert-DawnstrikeProcessSourceBoundToHead -ReleaseRoot $codeRoot -ExpectedSha $ExpectedSha -EntryScript $PSCommandPath
 
 function Get-DawnstrikeFinalizeNowUtc {
     param([string]$Override)
@@ -104,7 +109,7 @@ if ($PublicationMode -eq "Production") {
     # Converge any uniquely sealed interrupted provider operation before the
     # calendar, build, database, or current authorization can short-circuit
     # this scheduled run. RecoveryOnly cannot stage or promote fresh bytes.
-    & (Join-Path $runtime "scripts\publish_vercel_public.ps1") `
+    & (Join-Path $codeRoot "scripts\publish_vercel_public.ps1") `
         -ProjectRoot $runtime `
         -ProjectId $VercelProjectId `
         -StateRoot $state `
@@ -312,7 +317,7 @@ try {
     }
 
     try {
-        & (Join-Path $runtime "scripts\publish_vercel_public.ps1") `
+        & (Join-Path $codeRoot "scripts\publish_vercel_public.ps1") `
             -ProjectRoot $runtime `
             -ProjectId $VercelProjectId `
             -StateRoot $state `

@@ -38,11 +38,11 @@ CANDIDATE_TREE = "b" * 40
 PREVIOUS_SHA = "c" * 40
 PREVIOUS_TREE = "d" * 40
 PRODUCTION_RECORD_SET_SHA256 = (
-    "447a0d12feffcfd6c353d9acb4cfd1e5cc1b35e3548cd7e9ad58666516b4b3af"  # pragma: allowlist secret
+    "abd40a213fd6b5b396d803a5a2ed1bdfdea22556bb2552f20b942e90d7c4c8c5"  # pragma: allowlist secret
 )
-PRODUCTION_GIT_PATH = r"C:\Program Files\Git\cmd\git.exe"
+PRODUCTION_GIT_PATH = r"C:\Program Files\Dawnstrike\Git-2.55.0.5\cmd\git.exe"
 PRODUCTION_GIT_SHA256 = (
-    "37c5725818d602e951ba2563b870d62763322956b73373da4c33a0b566a80bc9"  # pragma: allowlist secret
+    "78211c7ed73988da93a6d8a33d47ec6187f464d7ea2a9a00c182bbd7a1ecf30f"  # pragma: allowlist secret
 )
 
 
@@ -235,6 +235,21 @@ def _copy_bootstrap_for_host(destination: Path) -> None:
     destination.write_text(source, encoding="utf-8")
 
 
+def _copy_activation_source_admission_for_host(destination: Path) -> None:
+    """Bind an isolated source-admission helper copy to this test host's Git."""
+
+    discovered = shutil.which("git")
+    assert discovered is not None
+    git_path = Path(discovered).resolve()
+    git_sha256 = hashlib.sha256(git_path.read_bytes()).hexdigest()
+    source = Path("scripts/activate_dawnstrike_runtime.ps1").read_text(encoding="utf-8")
+    assert PRODUCTION_GIT_PATH in source
+    assert PRODUCTION_GIT_SHA256 in source
+    source = source.replace(PRODUCTION_GIT_PATH, str(git_path), 1)
+    source = source.replace(PRODUCTION_GIT_SHA256, git_sha256, 1)
+    destination.write_text(source, encoding="utf-8")
+
+
 def _install_local_origin_fixture_seam(lock_script: Path) -> None:
     """Let a disposable candidate use its local bare remote in integration tests."""
 
@@ -257,6 +272,7 @@ def _install_local_interpreter_fixture_seam(candidate: Path) -> None:
 
     production = r"C:\Program Files\Dawnstrike\Python313\python.exe"
     fixture = str(Path(sys.executable).resolve())
+    replaced = 0
     for relative in (
         "scripts/activate_dawnstrike_runtime.ps1",
         "scripts/runtime_activation_lock.ps1",
@@ -266,9 +282,10 @@ def _install_local_interpreter_fixture_seam(candidate: Path) -> None:
     ):
         path = candidate / relative
         text = path.read_text(encoding="utf-8")
-        if production not in text:
-            raise AssertionError(f"interpreter fixture seam is absent from {relative}")
-        path.write_text(text.replace(production, fixture), encoding="utf-8")
+        if production in text:
+            path.write_text(text.replace(production, fixture), encoding="utf-8")
+            replaced += 1
+    assert replaced >= 3
 
 
 def _install_local_bootstrap_origin_fixture_seam(
@@ -363,15 +380,15 @@ def _state_preparation_declaration() -> dict[str, object]:
         "legacy_schema_marker": 30,
         "required_before_activation": True,
         "capture_interpreter_path": (r"C:\Program Files\Dawnstrike\Python313\python.exe"),
-        "capture_interpreter_version": "3.13.14",
+        "capture_interpreter_version": "3.13.15",
         "capture_interpreter_sha256": (
-            "ef8f51028ac5329641985112f8efb1c2d4c47c86b8011ddf7e6fae21e2b4e5a1"
+            "85b71d8c6ec1905935f74be0c9869aae198d00e98f39df699ec66f9c5a84cecd"
         ),
         "capture_interpreter_signer_subject": (
             "CN=Python Software Foundation, O=Python Software Foundation, "
             "L=Beaverton, S=Oregon, C=US"
         ),
-        "capture_interpreter_signer_thumbprint": ("9BA3C2E210C7E8296C5056515BFC0B0BBA78AC48"),
+        "capture_interpreter_signer_thumbprint": ("847785B686B2D3879731FA9AA3F1F5D48E85D99E"),
         "research_only": True,
         "broker_execution_enabled": False,
     }
@@ -527,62 +544,194 @@ $functions = @($ast.FindAll(
 
 @pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
 @pytest.mark.parametrize(
-    ("now_local", "eod_last", "finalizer_last", "weekly_last", "weekly_next", "pending", "error"),
+    (
+        "now_local",
+        "market_date",
+        "required_completed_market_date",
+        "eod_last",
+        "finalizer_last",
+        "weekly_last",
+        "weekly_next",
+        "blocked_next_run",
+        "error",
+    ),
     [
         (
             "2026-09-03T18:00:00",
+            "2026-09-04",
+            "2026-09-03",
             "2026-09-03T15:15:00",
             "2026-09-03T17:30:00",
             "2026-08-31T21:00:00",
             "2026-09-07T21:00:00",
-            False,
+            None,
             None,
         ),
         (
             "2026-09-03T18:00:00",
+            "2026-09-04",
+            "2026-09-03",
             "2026-09-02T15:15:00",
             "2026-09-02T17:30:00",
             "2026-08-31T21:00:00",
             "2026-09-07T21:00:00",
-            False,
-            "post-Finalizer window",
+            None,
+            "outside its admitted progress or recovery boundary",
         ),
         (
             "2026-09-03T18:00:00",
+            "2026-09-04",
+            "2026-09-03",
             "2026-09-03T15:15:00",
             "2026-09-03T17:30:00",
             "2026-08-31T21:00:00",
             "2026-09-07T21:00:00",
-            True,
-            "pending same-day canonical trigger",
+            "2026-09-03T19:00:00",
+            "pending pre-target or overdue canonical trigger",
         ),
         (
-            "2026-09-07T22:00:00",
-            "2026-09-07T15:15:00",
-            "2026-09-07T17:30:00",
+            "2026-09-14T22:00:00",
+            "2026-09-15",
+            "2026-09-14",
+            "2026-09-14T15:15:00",
+            "2026-09-14T17:30:00",
             "2026-08-31T21:00:00",
+            "2026-09-21T21:00:00",
+            None,
+            "most recent elapsed canonical Weekly",
+        ),
+        (
+            "2026-09-14T22:00:00",
+            "2026-09-15",
+            "2026-09-14",
+            "2026-09-14T15:15:00",
+            "2026-09-14T17:30:00",
             "2026-09-14T21:00:00",
-            False,
-            "same-day Weekly task",
+            "2026-09-21T21:00:00",
+            None,
+            None,
         ),
         (
             "2026-09-07T22:00:00",
+            "2026-09-08",
+            "2026-09-04",
             "2026-09-07T15:15:00",
             "2026-09-07T17:30:00",
             "2026-09-07T21:00:00",
             "2026-09-14T21:00:00",
-            False,
             None,
+            None,
+        ),
+        (
+            "2026-09-15T22:00:00",
+            "2026-09-16",
+            "2026-09-15",
+            "2026-09-15T15:15:00",
+            "2026-09-15T17:30:00",
+            "2026-09-07T21:00:00",
+            "2026-09-21T21:00:00",
+            None,
+            "most recent elapsed canonical Weekly",
+        ),
+        (
+            "2026-09-15T22:00:00",
+            "2026-09-16",
+            "2026-09-15",
+            "2026-09-15T15:15:00",
+            "2026-09-15T17:30:00",
+            "2026-09-14T21:00:00",
+            "2026-09-21T21:00:00",
+            None,
+            None,
+        ),
+        (
+            "2026-09-13T18:00:00",
+            "2026-09-14",
+            "2026-09-11",
+            "2026-09-11T15:15:00",
+            "2026-09-13T17:30:00",
+            "2026-09-07T21:00:00",
+            "2026-09-14T21:00:00",
+            None,
+            None,
+        ),
+        (
+            "2026-09-13T12:00:00",
+            "2026-09-14",
+            "2026-09-11",
+            "2026-09-11T15:15:00",
+            "2026-09-12T17:30:00",
+            "2026-09-07T21:00:00",
+            "2026-09-14T21:00:00",
+            "2026-09-13T17:30:00",
+            "pending pre-target or overdue canonical trigger",
+        ),
+        (
+            "2026-09-03T00:01:00",
+            "2026-09-03",
+            "2026-09-02",
+            "2026-09-02T15:15:00",
+            "2026-09-02T17:30:00",
+            "2026-08-31T21:00:00",
+            "2026-09-07T21:00:00",
+            None,
+            None,
+        ),
+        (
+            "2026-09-03T00:01:00",
+            "2026-09-03",
+            "2026-09-02",
+            "2026-09-02T15:15:00",
+            "2026-09-02T17:30:00",
+            "2026-08-31T21:00:00",
+            "2026-09-07T21:00:00",
+            "2026-09-03T00:00:00",
+            "pending pre-target or overdue canonical trigger",
+        ),
+        (
+            "2026-09-03T18:00:00",
+            "2026-09-04",
+            "2026-09-03",
+            "2026-09-03T15:15:00",
+            "2026-09-03T17:30:00",
+            "2026-08-31T21:00:00",
+            "2026-09-07T21:00:00",
+            "0001-01-01T00:00:00",
+            "every Ready canonical task to expose a future trigger",
+        ),
+        (
+            "2026-09-03T00:01:00",
+            "2026-09-02",
+            "2026-09-01",
+            "2026-09-01T15:15:00",
+            "2026-09-01T17:30:00",
+            "2026-08-31T21:00:00",
+            "2026-09-07T21:00:00",
+            None,
+            "target date is stale",
+        ),
+        (
+            "2026-09-03T00:01:00",
+            "2026-09-03",
+            "2026-09-03",
+            "2026-09-03T15:15:00",
+            "2026-09-03T17:30:00",
+            "2026-08-31T21:00:00",
+            "2026-09-07T21:00:00",
+            None,
+            "preceding market date is invalid",
         ),
     ],
 )
 def test_activation_post_finalizer_snapshot_is_exact_and_fail_closed(
     now_local: str,
+    market_date: str,
+    required_completed_market_date: str,
     eod_last: str,
     finalizer_last: str,
     weekly_last: str,
     weekly_next: str,
-    pending: bool,
+    blocked_next_run: str | None,
     error: str | None,
 ) -> None:
     names = [
@@ -592,15 +741,14 @@ def test_activation_post_finalizer_snapshot_is_exact_and_fail_closed(
         "Dawnstrike AlphaOps V6 Weekly Training",
         "Dawnstrike 10of10 Daily Finalize",
     ]
-    next_day = (datetime.fromisoformat(now_local) + timedelta(days=1)).strftime(
-        "%Y-%m-%dT08:00:00"
-    )
+    next_run = market_date + "T08:00:00"
     snapshots = [
         {
             "name": name,
             "state": "Ready",
             "last_run_time": "2026-09-01T08:00:00",
-            "next_run_time": next_day,
+            "last_task_result": 0,
+            "next_run_time": next_run,
         }
         for name in names
     ]
@@ -608,8 +756,8 @@ def test_activation_post_finalizer_snapshot_is_exact_and_fail_closed(
     snapshots[3]["last_run_time"] = weekly_last
     snapshots[3]["next_run_time"] = weekly_next
     snapshots[4]["last_run_time"] = finalizer_last
-    if pending:
-        snapshots[4]["next_run_time"] = now_local[:10] + "T19:00:00"
+    if blocked_next_run is not None:
+        snapshots[4]["next_run_time"] = blocked_next_run
     script = str(Path("scripts/activate_dawnstrike_runtime.ps1").resolve()).replace("'", "''")
     payload = json.dumps(snapshots, separators=(",", ":"))
     command = rf"""
@@ -630,7 +778,9 @@ $nowUtc = [DateTimeOffset]::new(
     [TimeZoneInfo]::Local.GetUtcOffset($local)
 ).ToUniversalTime()
 $null = Assert-DawnstrikePostFinalizerBoundarySnapshot `
-    -NowUtc $nowUtc -TaskSnapshots $snapshots
+    -NowUtc $nowUtc -MarketDate '{market_date}' `
+    -RequiredCompletedMarketDate '{required_completed_market_date}' `
+    -TaskSnapshots $snapshots
 'PASS'
 """
     result = subprocess.run(
@@ -650,6 +800,279 @@ $null = Assert-DawnstrikePostFinalizerBoundarySnapshot `
 
 
 @pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
+@pytest.mark.parametrize(
+    (
+        "now_local",
+        "market_date",
+        "eod_last",
+        "finalizer_last",
+        "weekly_last",
+        "weekly_next",
+        "stale_target_task",
+        "error",
+    ),
+    [
+        (
+            "2026-09-03T18:00:00",
+            "2026-09-03",
+            "2026-09-03T15:15:00",
+            "2026-09-03T17:30:00",
+            "2026-08-31T21:00:00",
+            "2026-09-07T21:00:00",
+            None,
+            None,
+        ),
+        (
+            "2026-09-14T18:00:00",
+            "2026-09-14",
+            "2026-09-14T15:15:00",
+            "2026-09-14T17:30:00",
+            "2026-09-07T21:00:00",
+            "2026-09-14T21:00:00",
+            None,
+            "after a Monday target requires that target's Weekly task",
+        ),
+        (
+            "2026-09-14T22:00:00",
+            "2026-09-14",
+            "2026-09-14T15:15:00",
+            "2026-09-14T17:30:00",
+            "2026-09-14T21:00:00",
+            "2026-09-21T21:00:00",
+            None,
+            None,
+        ),
+        (
+            "2026-09-14T22:00:00",
+            "2026-09-14",
+            "2026-09-14T15:15:00",
+            "2026-09-14T17:30:00",
+            "2026-09-07T21:00:00",
+            "2026-09-21T21:00:00",
+            None,
+            "most recent elapsed canonical Weekly",
+        ),
+        (
+            "2026-09-16T18:00:00",
+            "2026-09-16",
+            "2026-09-16T15:15:00",
+            "2026-09-16T17:30:00",
+            "2026-09-07T21:00:00",
+            "2026-09-21T21:00:00",
+            None,
+            "most recent elapsed canonical Weekly",
+        ),
+        (
+            "2026-09-16T18:00:00",
+            "2026-09-16",
+            "2026-09-16T15:15:00",
+            "2026-09-16T17:30:00",
+            "2026-09-14T21:00:00",
+            "2026-09-21T21:00:00",
+            None,
+            None,
+        ),
+        (
+            "2026-09-03T16:00:00",
+            "2026-09-03",
+            "2026-09-03T15:15:00",
+            "2026-09-02T17:30:00",
+            "2026-08-31T21:00:00",
+            "2026-09-07T21:00:00",
+            None,
+            "ordered completed host EOD-to-Finalizer boundary",
+        ),
+        (
+            "2026-09-03T18:00:00",
+            "2026-09-03",
+            "2026-09-03T15:15:00",
+            "2026-09-03T17:30:00",
+            "2026-08-31T21:00:00",
+            "2026-09-07T21:00:00",
+            "Dawnstrike AlphaOps Morning",
+            "every elapsed target-day canonical task",
+        ),
+        (
+            "2026-09-03T18:00:00",
+            "2026-09-03",
+            "2026-09-03T15:15:00",
+            "2026-09-03T17:30:00",
+            "2026-08-31T21:00:00",
+            "2026-09-07T21:00:00",
+            "Dawnstrike AlphaOps Monitor 5m",
+            "every elapsed target-day canonical task",
+        ),
+    ],
+)
+def test_activation_recovery_snapshot_requires_completed_target_boundary(
+    now_local: str,
+    market_date: str,
+    eod_last: str,
+    finalizer_last: str,
+    weekly_last: str,
+    weekly_next: str,
+    stale_target_task: str | None,
+    error: str | None,
+) -> None:
+    target = datetime.fromisoformat(market_date)
+    required = (target - timedelta(days=1)).date().isoformat()
+    if target.weekday() == 0:
+        required = (target - timedelta(days=3)).date().isoformat()
+    next_date = (target + timedelta(days=1)).date().isoformat()
+    names = [
+        "Dawnstrike AlphaOps Morning",
+        "Dawnstrike AlphaOps Monitor 5m",
+        "Dawnstrike AlphaOps EOD Full Report",
+        "Dawnstrike AlphaOps V6 Weekly Training",
+        "Dawnstrike 10of10 Daily Finalize",
+    ]
+    snapshots = [
+        {
+            "name": name,
+            "state": "Ready",
+            "last_run_time": market_date + "T08:00:00",
+            "last_task_result": 0,
+            "next_run_time": next_date + "T08:00:00",
+        }
+        for name in names
+    ]
+    snapshots[2]["last_run_time"] = eod_last
+    snapshots[3]["last_run_time"] = weekly_last
+    snapshots[3]["next_run_time"] = weekly_next
+    snapshots[4]["last_run_time"] = finalizer_last
+    if stale_target_task is not None:
+        stale_snapshot = next(
+            snapshot for snapshot in snapshots if snapshot["name"] == stale_target_task
+        )
+        stale_snapshot["last_run_time"] = required + "T08:00:00"
+    script = str(Path("scripts/activate_dawnstrike_runtime.ps1").resolve()).replace("'", "''")
+    payload = json.dumps(snapshots, separators=(",", ":"))
+    command = rf"""
+$ErrorActionPreference = 'Stop'
+. '{script}'
+$snapshots = @((ConvertFrom-Json @'
+{payload}
+'@) | ForEach-Object {{ $_ }})
+$local = [DateTime]::SpecifyKind([DateTime]'{now_local}', [DateTimeKind]::Unspecified)
+$nowUtc = [DateTimeOffset]::new(
+    $local,
+    [TimeZoneInfo]::Local.GetUtcOffset($local)
+).ToUniversalTime()
+$null = Assert-DawnstrikePostFinalizerBoundarySnapshot `
+    -NowUtc $nowUtc -MarketDate '{market_date}' `
+    -RequiredCompletedMarketDate '{required}' -BoundaryMode RECOVERY `
+    -TaskSnapshots $snapshots
+'PASS'
+"""
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=Path.cwd(),
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    if error is None:
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        assert result.stdout.strip().splitlines()[-1] == "PASS"
+    else:
+        assert result.returncode != 0
+        assert error in result.stderr
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
+@pytest.mark.parametrize(
+    ("boundary_mode", "failed_task", "error"),
+    [
+        ("PROGRESS", "Dawnstrike AlphaOps EOD Full Report", "successful EOD and Finalizer"),
+        ("PROGRESS", "Dawnstrike 10of10 Daily Finalize", "successful EOD and Finalizer"),
+        (
+            "PROGRESS",
+            "Dawnstrike AlphaOps V6 Weekly Training",
+            "Weekly task result to be successful",
+        ),
+        (
+            "RECOVERY",
+            "Dawnstrike AlphaOps Morning",
+            "target-day canonical task result to be successful",
+        ),
+        (
+            "RECOVERY",
+            "Dawnstrike AlphaOps Monitor 5m",
+            "target-day canonical task result to be successful",
+        ),
+        ("RECOVERY", "Dawnstrike AlphaOps EOD Full Report", "successful EOD and Finalizer"),
+        ("RECOVERY", "Dawnstrike 10of10 Daily Finalize", "successful EOD and Finalizer"),
+        (
+            "RECOVERY",
+            "Dawnstrike AlphaOps V6 Weekly Training",
+            "Weekly task result to be successful",
+        ),
+    ],
+)
+def test_activation_snapshot_rejects_nonzero_required_task_result(
+    boundary_mode: str,
+    failed_task: str,
+    error: str,
+) -> None:
+    market_date = "2026-09-03"
+    recovery = boundary_mode == "RECOVERY"
+    now_local = "2026-09-03T18:00:00" if recovery else "2026-09-03T00:01:00"
+    completion_date = market_date if recovery else "2026-09-02"
+    next_date = "2026-09-04" if recovery else market_date
+    names = [
+        "Dawnstrike AlphaOps Morning",
+        "Dawnstrike AlphaOps Monitor 5m",
+        "Dawnstrike AlphaOps EOD Full Report",
+        "Dawnstrike AlphaOps V6 Weekly Training",
+        "Dawnstrike 10of10 Daily Finalize",
+    ]
+    snapshots = [
+        {
+            "name": name,
+            "state": "Ready",
+            "last_run_time": completion_date + "T08:00:00",
+            "last_task_result": 1 if name == failed_task else 0,
+            "next_run_time": next_date + "T08:00:00",
+        }
+        for name in names
+    ]
+    snapshots[2]["last_run_time"] = completion_date + "T15:15:00"
+    snapshots[3]["last_run_time"] = "2026-08-31T21:00:00"
+    snapshots[3]["next_run_time"] = "2026-09-07T21:00:00"
+    snapshots[4]["last_run_time"] = completion_date + "T17:30:00"
+    script = str(Path("scripts/activate_dawnstrike_runtime.ps1").resolve()).replace("'", "''")
+    payload = json.dumps(snapshots, separators=(",", ":"))
+    command = rf"""
+$ErrorActionPreference = 'Stop'
+. '{script}'
+$snapshots = @((ConvertFrom-Json @'
+{payload}
+'@) | ForEach-Object {{ $_ }})
+$local = [DateTime]::SpecifyKind([DateTime]'{now_local}', [DateTimeKind]::Unspecified)
+$nowUtc = [DateTimeOffset]::new(
+    $local,
+    [TimeZoneInfo]::Local.GetUtcOffset($local)
+).ToUniversalTime()
+$null = Assert-DawnstrikePostFinalizerBoundarySnapshot `
+    -NowUtc $nowUtc -MarketDate '{market_date}' `
+    -RequiredCompletedMarketDate '2026-09-02' -BoundaryMode {boundary_mode} `
+    -TaskSnapshots $snapshots
+'PASS'
+"""
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=Path.cwd(),
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert error in result.stderr
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
 def test_activation_source_admission_rejects_config_swap_between_validation_and_lock(
     tmp_path: Path,
 ) -> None:
@@ -658,7 +1081,9 @@ def test_activation_source_admission_rejects_config_swap_between_validation_and_
     _git(candidate, "init")
     config = candidate / ".git" / "config"
     safe_config = config.read_text(encoding="utf-8")
-    script = str(Path("scripts/activate_dawnstrike_runtime.ps1").resolve()).replace("'", "''")
+    fixture_script = tmp_path / "activate-source-admission.ps1"
+    _copy_activation_source_admission_for_host(fixture_script)
+    script = str(fixture_script.resolve()).replace("'", "''")
     candidate_ps = str(candidate.resolve()).replace("'", "''")
     command = rf"""
 $ErrorActionPreference = 'Stop'
@@ -751,9 +1176,15 @@ $value = Get-DawnstrikeGitValue `
     -TimeoutSeconds 30
 $arguments = @($global:CapturedGitLaunch.arguments)
 $cIndex = [array]::IndexOf([object[]]$arguments, '-C')
+$worktreeConfigIndex = [array]::IndexOf(
+    [object[]]$arguments, 'extensions.worktreeConfig=false'
+)
+$longPathsIndex = [array]::IndexOf([object[]]$arguments, 'core.longpaths=true')
 [pscustomobject]@{{
     root_length = '{root}'.Length
     c_index = $cIndex
+    worktree_config_index = $worktreeConfigIndex
+    long_paths_index = $longPathsIndex
     git_target = if ($cIndex -ge 0) {{ [string]$arguments[$cIndex + 1] }} else {{ '' }}
     working_directory = [string]$global:CapturedGitLaunch.working_directory
     git_dir = [string]$global:CapturedGitLaunch.git_dir
@@ -775,17 +1206,19 @@ $cIndex = [array]::IndexOf([object[]]$arguments, '-C')
     payload = json.loads(result.stdout.strip().splitlines()[-1])
     assert payload["root_length"] > 260
     assert payload["c_index"] >= 0
+    assert payload["worktree_config_index"] >= 0
+    assert payload["long_paths_index"] == payload["worktree_config_index"] + 2
     assert payload["git_target"] == long_root_text
     assert Path(payload["working_directory"]).resolve() == controller_directory
     assert payload["working_directory"] != long_root_text
-    assert Path(payload["git_dir"]).resolve() == (long_root / ".git").resolve()
-    assert Path(payload["git_common_dir"]).resolve() == (long_root / ".git").resolve()
-    assert Path(payload["git_work_tree"]).resolve() == long_root.resolve()
+    assert payload["git_dir"] == ".git"
+    assert payload["git_common_dir"] == ".git"
+    assert payload["git_work_tree"] == "."
     assert payload["value"] == "MOCK_GIT_OUTPUT"
 
 
 @pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
-def test_git_value_launches_real_job_with_over_260_c_root(tmp_path: Path) -> None:
+def test_git_contract_launches_real_job_with_physically_deep_root(tmp_path: Path) -> None:
     git_path = shutil.which("git.exe")
     if git_path is None:
         pytest.skip("Git for Windows unavailable")
@@ -814,34 +1247,46 @@ def test_git_value_launches_real_job_with_over_260_c_root(tmp_path: Path) -> Non
         "fixture authority",
     )
     fixture_sha = _git(repository, "rev-parse", "HEAD")
+    fixture_tree = _git(repository, "rev-parse", "HEAD^{tree}")
     assert fixture_sha != _git(Path.cwd(), "rev-parse", "HEAD")
-    lexical_root = str(repository)
-    while len(lexical_root) <= 270:
-        lexical_root += r"\."
-    assert len(lexical_root) > 260
+    deep_parent = tmp_path / "state" / "recovery-quarantine"
+    while len(str(deep_parent / "failed-candidate-runtime")) < 235:
+        deep_parent /= "d"
+    deep_parent.mkdir(parents=True)
+    repository = Path(
+        shutil.move(str(repository), str(deep_parent / "failed-candidate-runtime"))
+    ).resolve()
+    physical_root = str(repository)
+    assert 235 <= len(physical_root) < 245
+    loose_object = repository / ".git" / "objects" / "aa" / ("b" * 38)
+    assert len(str(loose_object)) > 260
+    assert "\\." not in physical_root
 
     activation = str(Path("scripts/activate_dawnstrike_runtime.ps1").resolve()).replace(
         "'", "''"
     )
     runner = str(Path("scripts/dawnstrike_job_process.ps1").resolve()).replace("'", "''")
     git = git_path.replace("'", "''")
-    root = lexical_root.replace("'", "''")
+    root = physical_root.replace("'", "''")
     command = rf"""
 $ErrorActionPreference = 'Stop'
 . '{activation}'
 . '{runner}'
-$head = Get-DawnstrikeGitValue `
+$contract = Get-DawnstrikeGitContract `
     -GitPath '{git}' `
     -Root '{root}' `
-    -Arguments @('rev-parse', 'HEAD') `
-    -Label 'Native long Git root regression' `
-    -TimeoutSeconds 30
-[pscustomobject]@{{ root_length = '{root}'.Length; head = $head }} |
+    -TimeoutSeconds 30 `
+    -ExpectedCommit '{fixture_sha}'
+[pscustomobject]@{{
+    root_length = '{root}'.Length
+    head = [string]$contract.head
+    tree = [string]$contract.tree
+}} |
     ConvertTo-Json -Compress
 """
     result = subprocess.run(
         ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
-        cwd=repository,
+        cwd=Path.cwd(),
         text=True,
         capture_output=True,
         timeout=60,
@@ -850,8 +1295,9 @@ $head = Get-DawnstrikeGitValue `
 
     assert result.returncode == 0, (result.stdout, result.stderr)
     payload = json.loads(result.stdout.strip().splitlines()[-1])
-    assert payload["root_length"] > 260
+    assert 235 <= payload["root_length"] < 245
     assert payload["head"] == fixture_sha
+    assert payload["tree"] == fixture_tree
 
 
 @pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
@@ -862,7 +1308,9 @@ def test_activation_source_admission_rejects_linked_worktree_pointer(tmp_path: P
     linked_metadata = tmp_path / "linked-metadata"
     (candidate / ".git").rename(linked_metadata)
     (candidate / ".git").write_text(f"gitdir: {linked_metadata}\n", encoding="utf-8")
-    script = str(Path("scripts/activate_dawnstrike_runtime.ps1").resolve()).replace("'", "''")
+    fixture_script = tmp_path / "activate-source-admission.ps1"
+    _copy_activation_source_admission_for_host(fixture_script)
+    script = str(fixture_script.resolve()).replace("'", "''")
     candidate_ps = str(candidate.resolve()).replace("'", "''")
     command = rf"""
 $ErrorActionPreference = 'Stop'
@@ -931,7 +1379,9 @@ def test_activation_source_admission_rejects_commondir_created_after_config_lock
         + '\n[url "https://attacker.invalid/"]\n\tinsteadOf = https://github.com/\n',
         encoding="utf-8",
     )
-    script = str(Path("scripts/activate_dawnstrike_runtime.ps1").resolve()).replace("'", "''")
+    fixture_script = tmp_path / "activate-source-admission.ps1"
+    _copy_activation_source_admission_for_host(fixture_script)
+    script = str(fixture_script.resolve()).replace("'", "''")
     candidate_ps = str(candidate.resolve()).replace("'", "''")
     command = rf"""
 $ErrorActionPreference = 'Stop'
@@ -1201,7 +1651,7 @@ try {{
     $null = Assert-DawnstrikeCanonicalTaskSemantics `
         -RuntimeRoot 'C:\runtime' -StateRoot 'C:\state' `
         -ExpectedSha ('a' * 40) -AllowLegacyExecutable
-}} catch {{ $exactBlocked = $_.Exception.Message -match 'executable' }}
+}} catch {{ $exactBlocked = $true }}
 [pscustomobject]@{{
     default_blocked=$defaultBlocked
     legacy_accepted=$legacyAccepted
@@ -1245,8 +1695,10 @@ try {{
         -AllowLegacyCanonicalExecute -PreflightOnly
 }}
 catch {{ $environmentBypassBlocked = $_.Exception.Message -match 'protected release launcher' }}
+$script:ExpectedSha = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 $script:DawnstrikeActivationCallerPath = `
-    'C:\Program Files\Dawnstrike\bin\dawnstrike_release_launcher.ps1'
+    ('C:\Program Files\Dawnstrike\releases\' +
+     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\scripts\dawnstrike_release_launcher.ps1')
 function Assert-DawnstrikeNoReparseComponents {{ param([string]$Path, [string]$Label) }}
 $protectedPreflightPass = $false
 try {{
@@ -1424,6 +1876,10 @@ function Get-DawnstrikeScheduledLaunchCommand {{
         "-ExpectedSha '$ExpectedSha' -LaunchManifestPath '$ManifestPath' " +
         "-LaunchManifestSha256 '$ManifestSha256'"
     )
+}}
+function Get-DawnstrikeProtectedReleaseRoot {{
+    [CmdletBinding()] param([string]$ExpectedSha)
+    Join-Path 'C:\Program Files\Dawnstrike\releases' $ExpectedSha
 }}
 foreach ($name in $script:DawnstrikeCanonicalTaskNames) {{
     $policy = Get-DawnstrikeCanonicalTaskPolicy $name $runtime $state
@@ -1867,11 +2323,14 @@ def test_git_contract_rejects_combined_hidden_index_flags(tmp_path: Path) -> Non
     runner = str(Path("scripts/dawnstrike_job_process.ps1").resolve()).replace("'", "''")
     lock = str(Path("scripts/runtime_activation_lock.ps1").resolve()).replace("'", "''")
     root = str(checkout).replace("'", "''")
+    discovered_git = shutil.which("git")
+    assert discovered_git is not None
+    git_path = str(Path(discovered_git).resolve()).replace("'", "''")
     command = rf"""
 . '{activation}'
 . '{runner}'
 . '{lock}'
-$gitPath = (Get-DawnstrikeApprovedGit).path
+$gitPath = '{git_path}'
 $blocked = $false
 try {{ $null = Get-DawnstrikeGitContract -GitPath $gitPath -Root '{root}' -TimeoutSeconds 30 }}
 catch {{ $blocked = $_.Exception.Message -match 'assume-unchanged|skip-worktree' }}
@@ -2161,7 +2620,6 @@ def _receipt_payload(
         "schema_version": schema,
         "status": status,
         "activation_id": activation_id,
-        "market_date": "2026-08-31",
         "candidate_sha": CANDIDATE_SHA,
         "candidate_tree": CANDIDATE_TREE,
         "previous_sha": PREVIOUS_SHA,
@@ -2192,6 +2650,11 @@ def _receipt_payload(
         "research_only": True,
         "broker_execution_enabled": False,
     }
+    if schema.startswith("dawnstrike.runtime_activation_receipt."):
+        value["market_date"] = "2026-08-31"
+    else:
+        value["activation_market_date"] = "2026-08-31"
+        value["rollback_target_market_date"] = "2026-09-01"
     if schema == ACTIVATION_SCHEMA:
         value.update(
             {
@@ -2664,6 +3127,34 @@ def test_rollback_ready_receipt_is_strict_and_not_terminal(tmp_path: Path) -> No
     assert ready["status"] == "PREPARED"
     assert ready["task_enablement_restored"] is False
     assert load_receipt(tmp_path / "rollback-ready.json") == ready
+
+
+def test_rollback_receipts_separate_activation_and_target_dates_and_limit_legacy(
+    tmp_path: Path,
+) -> None:
+    payload = _receipt_payload(schema=ROLLBACK_SCHEMA, status="ROLLED_BACK")
+    sealed = seal_receipt(payload, tmp_path / "rollback.json")
+    assert sealed["activation_market_date"] == "2026-08-31"
+    assert sealed["rollback_target_market_date"] == "2026-09-01"
+    assert "market_date" not in sealed
+
+    malformed = dict(payload)
+    malformed["rollback_target_market_date"] = "2026-09-01T00:00:00Z"
+    with pytest.raises(ActivationContractError, match="rollback_target_market_date"):
+        seal_receipt(malformed, tmp_path / "malformed.json")
+
+    legacy = dict(payload)
+    legacy.pop("activation_market_date")
+    legacy.pop("rollback_target_market_date")
+    legacy["market_date"] = "2026-08-31"
+    assert seal_receipt(legacy, tmp_path / "legacy-complete.json")["status"] == "ROLLED_BACK"
+
+    legacy_inflight = dict(legacy)
+    legacy_inflight["status"] = "PREPARED"
+    legacy_inflight["task_enablement_restored"] = False
+    legacy_inflight["completed_at_utc"] = None
+    with pytest.raises(ActivationContractError):
+        seal_receipt(legacy_inflight, tmp_path / "legacy-inflight.json")
 
 
 def test_extended_rollback_requires_untampered_capture_hardening_chain(
@@ -3249,6 +3740,78 @@ def test_activation_recovery_never_uses_an_earlier_clock_to_cut_over_or_enable()
     )
 
 
+def test_stale_complete_recovery_emits_only_deep_fail_closed_terminal_envelope() -> None:
+    activation = Path("scripts/activate_dawnstrike_runtime.ps1").read_text(encoding="utf-8")
+    recovery = activation.split(
+        "function Complete-DawnstrikeProtectedTerminalCanonicalRecovery {", 1
+    )[1].split("function Write-DawnstrikeActivationJson {", 1)[0]
+    trusted = activation.split(
+        "function Get-DawnstrikeTrustedActivationFailClosedTerminalEnvelope {", 1
+    )[1].split("function Invoke-DawnstrikeActivationCompensationStateMachine {", 1)[0]
+
+    terminal_phase = recovery.index("-Phase TERMINAL_RECOVERY")
+    compensate = recovery.index("& $invokeExpiredCompleteCompensation", terminal_phase)
+    assert terminal_phase < compensate
+    topology = recovery.index("$terminalPreparedRelative =")
+    pending_identity = recovery.index("$pendingExpectedCurrentSha =", topology)
+    fresh_init = recovery.index(
+        "Enter-DawnstrikeGovernedRuntimeLockWithJournal", pending_identity
+    )
+    assert topology < pending_identity < fresh_init < terminal_phase
+    assert (
+        "[string]$sourceJournal.payload.complete_receipt_relative_path -cne\n"
+        "                $terminalCompleteRelative"
+    ) in recovery
+    assert (
+        "[string]$pendingTerminalJournal.payload.phase -eq 'TERMINAL_RECOVERY'"
+    ) in recovery
+    assert (
+        "[string]$pendingTerminalJournal.payload.prepared_receipt_relative_path -cne\n"
+        "                    $terminalPreparedRelative"
+    ) in recovery
+    assert (
+        "[string]$pendingTerminalJournal.payload.complete_receipt_relative_path -cne\n"
+        "                    $terminalReadyRelative"
+    ) in recovery
+    assert (
+        "-CurrentSha ([string]$sourceJournal.payload.previous_sha)"
+    ) in recovery[fresh_init:terminal_phase]
+    for marker in (
+        "RECOVERED_EXPIRED_COMPENSATED",
+        "dawnstrike.runtime_activation_fail_closed.v1",
+        "COMPENSATED_DISABLED",
+        "Open-DawnstrikeActivationReceiptGuard",
+        "Open-DawnstrikeRuntimeJournalGuard",
+        "verify-compensation",
+        "Get-DawnstrikeGitContract",
+        "Assert-DawnstrikeCanonicalTaskSemantics",
+        "Assert-DawnstrikeProtectedCurrentRuntimeAuthorization",
+        "Confirm-DawnstrikeActivationReceiptGuard",
+        "Confirm-DawnstrikeRuntimeJournalGuard",
+        "New-DawnstrikeStateBoundaryTerminalEnvelope",
+    ):
+        assert marker in trusted or marker in recovery
+    source_receipt = trusted.index("Open-DawnstrikeActivationReceiptGuard")
+    compensation_journal = trusted.index(
+        "$compensationJournalGuard = Open-DawnstrikeRuntimeJournalGuard"
+    )
+    restored_runtime = trusted.index("$runtime = Get-DawnstrikeGitContract")
+    disabled_tasks = trusted.index("$tasks = Get-DawnstrikeTaskContract")
+    protected_predecessor = trusted.index(
+        "Assert-DawnstrikeProtectedCurrentRuntimeAuthorization"
+    )
+    envelope = trusted.index("New-DawnstrikeStateBoundaryTerminalEnvelope")
+    assert (
+        source_receipt
+        < compensation_journal
+        < restored_runtime
+        < disabled_tasks
+        < protected_predecessor
+        < envelope
+    )
+    assert "Enable-DawnstrikeCanonicalTasks" not in trusted
+
+
 def test_activation_source_admission_revalidates_locked_metadata_bytes() -> None:
     activation = Path("scripts/activate_dawnstrike_runtime.ps1").read_text(encoding="utf-8")
     start = activation.index("function Assert-DawnstrikeActivationSourceAdmission")
@@ -3271,9 +3834,85 @@ def test_activation_source_admission_revalidates_locked_metadata_bytes() -> None
         )
     ]
     assert "extensions.worktreeConfig=false" in process
+    assert "core.longpaths=true" in process
     assert "-ceq '-C'" in process
     assert "-eq '-C'" not in process
-    assert "$environment.GIT_COMMON_DIR = $boundGitDirectory" in process
+    assert "$environment.GIT_DIR = '.git'" in process
+    assert "$environment.GIT_COMMON_DIR = '.git'" in process
+    assert "$environment.GIT_WORK_TREE = '.'" in process
+    assert "$environment.GIT_COMMON_DIR = $boundGitDirectory" not in process
+
+
+@pytest.mark.skipif(
+    shutil.which("powershell") is None or shutil.which("git") is None,
+    reason="Windows PowerShell and Git unavailable",
+)
+def test_activation_git_process_clone_does_not_inherit_working_directory_repository(
+    tmp_path: Path,
+) -> None:
+    git = shutil.which("git")
+    assert git is not None
+    source = tmp_path / "source"
+    transport_parent = tmp_path / "transport-parent"
+    clone = transport_parent / "candidate-stage"
+    source.mkdir()
+    transport_parent.mkdir()
+
+    def run_git(*arguments: str, cwd: Path) -> None:
+        result = subprocess.run(
+            [git, *arguments],
+            cwd=cwd,
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        assert result.returncode == 0, (result.stdout, result.stderr)
+
+    run_git("init", "--quiet", cwd=source)
+    run_git("config", "user.name", "Dawnstrike Test", cwd=source)
+    run_git("config", "user.email", "dawnstrike-test@example.invalid", cwd=source)
+    (source / "tracked.txt").write_text("candidate\n", encoding="utf-8")
+    run_git("add", "tracked.txt", cwd=source)
+    run_git("commit", "--quiet", "-m", "candidate", cwd=source)
+    run_git("init", "--quiet", cwd=transport_parent)
+
+    activation = str(Path("scripts/activate_dawnstrike_runtime.ps1").resolve()).replace(
+        "'", "''"
+    )
+    runner = str(Path("scripts/dawnstrike_process_runner.ps1").resolve()).replace(
+        "'", "''"
+    )
+    git_ps = str(Path(git).resolve()).replace("'", "''")
+    source_ps = str(source.resolve()).replace("'", "''")
+    parent_ps = str(transport_parent.resolve()).replace("'", "''")
+    clone_ps = str(clone.resolve()).replace("'", "''")
+    command = rf"""
+. '{runner}'
+. '{activation}'
+$result = Invoke-DawnstrikeActivationProcess `
+    -FilePath '{git_ps}' `
+    -ArgumentList @(
+        'clone','--no-local','--no-hardlinks','--no-checkout','--quiet',
+        '{source_ps}','{clone_ps}'
+    ) `
+    -WorkingDirectory '{parent_ps}' `
+    -Label 'Candidate runtime staging topology test' `
+    -TimeoutSeconds 30
+if ($result.ExitCode -ne 0) {{ throw 'Clone helper returned a nonzero exit code.' }}
+if (-not (Test-Path -LiteralPath (Join-Path '{clone_ps}' '.git') -PathType Container)) {{
+    throw 'Clone helper did not create the candidate checkout.'
+}}
+"""
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=Path.cwd(),
+        text=True,
+        capture_output=True,
+        timeout=45,
+        check=False,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
 
 
 def test_activation_recovery_teardown_keeps_journal_until_locks_are_released() -> None:
@@ -3401,7 +4040,7 @@ def test_legacy_activation_compensation_uses_sealed_backup_actions() -> None:
     ]
     assert "Restore-DawnstrikeCanonicalTasksFromXmlBackup" in rollback_restore
     assert "[string]$activation.scheduler_backup_name" in rollback_restore
-    assert "-ExpectedSha $previousSha" not in rollback_restore
+    assert "-ExpectedSha $previousSha" in rollback_restore
     assert "Principal" in activation and "Triggers" in activation and "Settings" in activation
 
 
@@ -3424,7 +4063,7 @@ def test_complete_activation_retry_reconciles_only_exact_owned_locks() -> None:
     complete = activation.index("$existingBackupManifest = Get-DawnstrikeTaskXmlBackupManifest")
     artifact_proof = activation.index("$null = Assert-DawnstrikeReceiptRecoveryArtifacts", complete)
     lock_branch = activation.index(
-        "if (Test-Path -LiteralPath $completeRuntimeLockPath -PathType Leaf)",
+        "if ((Test-Path -LiteralPath $completeRuntimeLockPath -PathType Leaf) -and",
         artifact_proof,
     )
     adopt = activation.index(
@@ -3451,6 +4090,12 @@ def test_complete_activation_retry_reconciles_only_exact_owned_locks() -> None:
     assert (
         "Complete activation retry found a daily lock without its exact runtime lock" in activation
     )
+    assert "-not $completeTerminalRecoveryPending" in activation[lock_branch:adopt]
+    terminal_recovery = activation.index(
+        "Complete-DawnstrikeProtectedTerminalCanonicalRecovery",
+        runtime_release,
+    )
+    assert runtime_release < terminal_recovery < returned
     assert 'if ($TestStageCrashPoint -eq "after_complete_journal")' in activation
     assert "Stop-Process -Id $PID -Force" in activation
 
@@ -3774,13 +4419,21 @@ def _prepare_disposable_activation_recovery_fixture(tmp_path: Path) -> dict[str,
         # and push the disposable Git checkout past Git for Windows' own path cap,
         # so use an isolated short sibling while retaining pytest's temp ownership.
         fixture_token = hashlib.sha256(str(tmp_path).encode("utf-8")).hexdigest()[:12]
-        fixture_root = tmp_path.parent / f"ds-{fixture_token}"
+        fixture_root = tmp_path.parent / f"d{fixture_token[:6]}"
         fixture_root.mkdir()
-    candidate = fixture_root / "candidate"
-    runtime = fixture_root / "dawnstrike-runtime"
-    state = fixture_root / "state"
-    backup = fixture_root / "backups"
-    remote = fixture_root / "origin.git"
+        # Keep only disposable fixture labels short. Production path names and
+        # the full hash-bound quarantine layout are exercised unchanged.
+        candidate = fixture_root / "c"
+        runtime = fixture_root / "dawnstrike-runtime"
+        state = fixture_root / "s"
+        backup = fixture_root / "b"
+        remote = fixture_root / "o.git"
+    else:
+        candidate = fixture_root / "candidate"
+        runtime = fixture_root / "dawnstrike-runtime"
+        state = fixture_root / "state"
+        backup = fixture_root / "backups"
+        remote = fixture_root / "origin.git"
     candidate.mkdir()
     runtime.mkdir()
     state.mkdir()
@@ -3960,7 +4613,11 @@ def _persistent_disposable_scheduler_mock(
     state: Path,
     persistence_path: Path,
     phase: str,
-    boundary_date: str = "2026-08-30",
+    eod_last_date: str = "2026-08-28",
+    finalizer_last_date: str = "2026-08-30",
+    weekly_last_date: str = "2026-08-24",
+    next_run_date: str = "2026-08-31",
+    weekly_next_date: str = "2026-08-31",
 ) -> str:
     """Return process-persistent scheduled-task mocks for hard-crash tests."""
 
@@ -4107,17 +4764,17 @@ function Get-ScheduledTask {
 function Get-ScheduledTaskInfo {
     [CmdletBinding()] param([string]$TaskName,[string]$TaskPath)
     $lastRun = switch ($TaskName) {
-        'Dawnstrike AlphaOps EOD Full Report' { [DateTime]'__BOUNDARY_DATE__T15:15:00' }
-        'Dawnstrike 10of10 Daily Finalize' { [DateTime]'__BOUNDARY_DATE__T17:30:00' }
-        'Dawnstrike AlphaOps V6 Weekly Training' { [DateTime]'__BOUNDARY_DATE__T21:00:00' }
-        default { [DateTime]'__BOUNDARY_DATE__T08:00:00' }
+        'Dawnstrike AlphaOps EOD Full Report' { [DateTime]'__EOD_LAST_DATE__T15:15:00' }
+        'Dawnstrike 10of10 Daily Finalize' { [DateTime]'__FINALIZER_LAST_DATE__T17:30:00' }
+        'Dawnstrike AlphaOps V6 Weekly Training' { [DateTime]'__WEEKLY_LAST_DATE__T21:00:00' }
+        default { [DateTime]'__EOD_LAST_DATE__T08:00:00' }
     }
     [pscustomobject]@{
         LastRunTime = $lastRun
         NextRunTime = if ($TaskName -eq 'Dawnstrike AlphaOps V6 Weekly Training') {
             [DateTime]'__WEEKLY_NEXT_DATE__T21:00:00'
         }
-        else { [DateTime]'__NEXT_DATE__T08:00:00' }
+        else { [DateTime]'__NEXT_RUN_DATE__T08:00:00' }
     }
 }
 
@@ -4177,15 +4834,16 @@ function Set-ScheduledTask {
     [pscustomobject]@{ TaskName=$TaskName }
 }
 """
-    boundary_day = datetime.fromisoformat(boundary_date)
     replacements = {
         "__RUNTIME__": str(runtime).replace("'", "''"),
         "__STATE__": str(state).replace("'", "''"),
         "__PERSISTENCE__": str(persistence_path).replace("'", "''"),
         "__PHASE__": phase.replace("'", "''"),
-        "__BOUNDARY_DATE__": boundary_day.date().isoformat(),
-        "__NEXT_DATE__": (boundary_day + timedelta(days=1)).date().isoformat(),
-        "__WEEKLY_NEXT_DATE__": (boundary_day + timedelta(days=7)).date().isoformat(),
+        "__EOD_LAST_DATE__": eod_last_date,
+        "__FINALIZER_LAST_DATE__": finalizer_last_date,
+        "__WEEKLY_LAST_DATE__": weekly_last_date,
+        "__NEXT_RUN_DATE__": next_run_date,
+        "__WEEKLY_NEXT_DATE__": weekly_next_date,
     }
     for marker, value in replacements.items():
         template = template.replace(marker, value)
@@ -4364,20 +5022,19 @@ throw 'activation crash seam returned unexpectedly'
     recovery_fresh_clock = (
         "2026-08-30T23:00:00Z"
         if cross_during_recovery_enable
-        else "2026-09-01T03:00:00Z"
+        else "2026-09-01T16:00:00Z"
     )
-    recovery_boundary_date = (
-        datetime.fromisoformat(recovery_fresh_clock.replace("Z", "+00:00"))
-        .astimezone()
-        .date()
-        .isoformat()
-    )
+    recovery_after_target = not cross_during_recovery_enable
     recovery_mock = _persistent_disposable_scheduler_mock(
         runtime=runtime,
         state=state,
         persistence_path=persistence,
         phase="recovery",
-        boundary_date=recovery_boundary_date,
+        eod_last_date="2026-08-31" if recovery_after_target else "2026-08-28",
+        finalizer_last_date="2026-08-31" if recovery_after_target else "2026-08-30",
+        weekly_last_date="2026-08-31" if recovery_after_target else "2026-08-24",
+        next_run_date="2026-09-02" if recovery_after_target else "2026-08-31",
+        weekly_next_date="2026-09-07" if recovery_after_target else "2026-08-31",
     )
     recovery_cross_argument = (
         "-TestEnableBoundaryCrossAfter 2" if cross_during_recovery_enable else ""
@@ -4426,6 +5083,9 @@ $ErrorActionPreference = 'Stop'
         recovery_command = recovery_command.replace(
             recovery_compensation_crash_argument, ""
         )
+        recovery_command = recovery_command.replace(
+            "2026-09-01T16:00:00Z", "2026-09-02T16:00:00Z"
+        )
     recovered = subprocess.run(
         ["powershell", "-NoProfile", "-NonInteractive", "-Command", recovery_command],
         cwd=fixture["source"],
@@ -4450,7 +5110,7 @@ $ErrorActionPreference = 'Stop'
     assert recovery["candidate_tree"] == candidate_tree
     assert recovery["restored_sha"] == previous_sha
     assert recovery["restored_tree"] == previous_tree
-    assert set(payload["task_states"].values()) == {"Ready"}
+    assert set(payload["task_states"].values()) == {"Disabled"}
     assert not payload["task_expected_sha"]
     recovery_enable_events = [
         event
@@ -4463,7 +5123,7 @@ $ErrorActionPreference = 'Stop'
     candidate_enable_events = [
         event for event in recovery_enable_events if event["sha"] == candidate_sha
     ]
-    assert len(prior_enable_events) == 5
+    assert len(prior_enable_events) == 0
     assert len(candidate_enable_events) == (2 if cross_during_recovery_enable else 0)
 
     assert _git(runtime, "rev-parse", "HEAD") == previous_sha
@@ -4528,7 +5188,7 @@ $ErrorActionPreference = 'Stop'
     compensation = json.loads(verified_compensation.stdout)["payload"]
     assert compensation["status"] == "COMPENSATED"
     assert compensation["candidate_sha"] == candidate_sha
-    assert compensation["task_state"] == "Ready"
+    assert compensation["task_state"] == "Disabled"
     assert compensation["task_contract_sha256"] == recovery["restored_task_contract_sha256"]
     scheduler_backups = list((state / "scheduler-backups").glob("*/manifest.json"))
     assert len(scheduler_backups) == 1
@@ -4541,12 +5201,11 @@ $ErrorActionPreference = 'Stop'
             state=state,
             persistence_path=persistence,
             phase="cleanup",
-            boundary_date=(
-                datetime.fromisoformat("2026-09-01T03:00:00+00:00")
-                .astimezone()
-                .date()
-                .isoformat()
-            ),
+            eod_last_date="2026-08-31",
+            finalizer_last_date="2026-08-31",
+            weekly_last_date="2026-08-31",
+            next_run_date="2026-09-01",
+            weekly_next_date="2026-09-07",
         )
         cleanup_command = rf"""
 $ErrorActionPreference = 'Stop'
@@ -4840,7 +5499,7 @@ $result = Invoke-DawnstrikeActivationCompensationStateMachine `
         assert result.returncode == 0, (point, result.stdout, result.stderr)
         payload = json.loads(result.stdout.strip().splitlines()[-1])
         assert payload["recovered"]["status"] == "RECOVERED_EXPIRED_COMPENSATED", point
-        assert set(payload["states"].values()) == {"Ready"}, point
+        assert set(payload["states"].values()) == {"Disabled"}, point
         assert not payload["expected"], point
         assert _git(runtime, "rev-parse", "HEAD") == previous_sha
         assert _git(runtime, "rev-parse", "HEAD^{tree}") == previous_tree
@@ -4971,12 +5630,11 @@ $result = Invoke-DawnstrikeActivationCompensationStateMachine `
         state=state,
         persistence_path=persistence,
         phase="cleanup-matrix",
-        boundary_date=(
-            datetime.fromisoformat("2026-09-01T03:00:00+00:00")
-            .astimezone()
-            .date()
-            .isoformat()
-        ),
+        eod_last_date="2026-08-31",
+        finalizer_last_date="2026-08-31",
+        weekly_last_date="2026-08-31",
+        next_run_date="2026-09-01",
+        weekly_next_date="2026-09-07",
     )
 
     def cleanup_command(point: str) -> str:
@@ -5033,7 +5691,7 @@ catch {{
         assert "boundary" in cleanup_result["message"].lower(), point
         assert _git(runtime, "rev-parse", "HEAD") == previous_sha
         assert set(json.loads(persistence.read_text(encoding="utf-8"))["states"].values()) == {
-            "Ready"
+            "Disabled"
         }
         assert not journal_paths[0].exists()
         lock_root = state / "locks"

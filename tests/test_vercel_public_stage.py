@@ -1,5 +1,37 @@
+import hashlib
 import json
 from pathlib import Path
+
+
+def test_generated_runtime_authority_is_exact_and_closed_world() -> None:
+    authority_path = Path("config/vercel_generated_runtime_authority.v1.json")
+    raw = authority_path.read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == (
+        "3629e094ef8d8c7f64e4ebd0111e76af9e848fab03cd61355d215f2d387cc4a4"
+    )
+    authority = json.loads(raw)
+    assert authority["authority_contract_sha256"] == (
+        "26d187b155c3b30486457cef3a3bd3c0830a1bf882a039c76a04e3059de198e3"
+    )
+    assert authority["generated_map_sha256"] == (
+        "9f19cbdeee79bacdc9ce2959f3bbf05cccd0b80ebcf498f36248d820d55a9818"
+    )
+    assert authority["vendor_map_sha256"] == (
+        "30b99a313bf016f9e14e291b57c3590ab766cfde0a3313f7ec53c6ac72a03904"
+    )
+    assert len(authority["generated_files"]) == 8
+    assert len(authority["vendor_files"]) == 640
+    assert {record["target"] for record in authority["generated_files"]} == {
+        ".python-version",
+        ".vercel/output/config.json",
+        ".vercel/output/functions/api/health.func/.vc-config.json",
+        ".vercel/output/functions/api/health.func/vc__handler__python.py",
+        ".vercel/output/functions/api/readiness.func/.vc-config.json",
+        ".vercel/output/functions/api/readiness.func/vc__handler__python.py",
+        "api/public_state.py",
+        "uv.lock",
+    }
+    assert all(record["kind"] == "vendor_file" for record in authority["vendor_files"])
 
 
 def test_vercel_config_is_static_and_minimal() -> None:
@@ -39,12 +71,12 @@ def test_vercel_config_is_static_and_minimal() -> None:
     }
 
 
-def test_stage_builder_declares_dependency_free_python_stage() -> None:
+def test_stage_builder_pins_the_exact_vercel_python_runtime() -> None:
     script = Path("scripts/build_vercel_public_stage.ps1").read_text(encoding="utf-8")
     assert "dawnstrike-public-stage" in script
-    assert "dependencies = []" in script
-    assert "api/public/**" in script
-    assert '$functionPublic = Join-Path $stage "api\\public"' in script
+    assert 'dependencies = ["vercel-runtime==0.22.1"]' in script
+    assert "function_public/**" in script
+    assert '$functionPublic = Join-Path $stage "function_public"' in script
     assert 'Copy-Item -Path (Join-Path $stagePublic "*") -Destination $functionPublic' in script
     assert script.count('Copy-Item -Path (Join-Path $publicSource "*")') == 1
     assert "Static and function public artifact snapshots diverged." in script
@@ -96,29 +128,30 @@ def test_candidate_verifier_reads_optional_config_fields_under_strict_mode() -> 
 
 def test_daily_vercel_publisher_builds_once_verifies_and_can_roll_back() -> None:
     script = Path("scripts/publish_vercel_public.ps1").read_text(encoding="utf-8")
-    runner = Path("scripts/dawnstrike_job_process.ps1").read_text(encoding="utf-8")
 
     assert "vercel_toolchain_contract.py" in script
     assert "$vercelEntryPath" in script
     assert "toolchain_identity_sha256" in script
-    assert '-Arguments @("build", "--yes", "--project", $ProjectId)' in script
-    assert '"--prebuilt"' in script
+    assert "New-VercelDeterministicBuiltPackage -StageRoot $stage" in script
+    assert '-Arguments @("build", "--yes", "--project", $ProjectId)' not in script
+    assert "function Invoke-VercelProcess" not in script
+    assert "No local Node, Python, uv, Vercel" in script
+    assert "&prebuilt=1" in script
+    assert "New-VercelFrozenPreviewDeployment" in script
+    assert "Get-VercelRemoteDeploymentFileAttestation" in script
     assert "verify_vercel_candidate.ps1" in script
     assert "AllowDegraded" in script
     assert "promote" in script
     assert "rollback" in script
     assert "AdditionalProductionAliases" in script
     assert "Set-VercelAlias" in script
-    assert '($AliasUrl -replace "^https?://", "").TrimEnd("/")' in script
+    assert '([string]$Value -replace "^https?://", "").TrimEnd("/")' in script
     assert "function Get-OptionalJsonProperty" in script
     assert '$InputObject.PSObject.Properties[$Name]' in script
-    assert '-Name "deployment"' in script
-    assert '-Name "originalDeploymentId"' in script
     assert "$deploymentResponse.deployment" not in script
     assert "$_.meta" not in script
     assert "$priorProduction.id" not in script
     assert "$deployment.readyState" not in script
-    assert "function Invoke-VercelProcess" in script
     assert "Assert-VercelNodeIdentity" in script
     assert "Get-Command node.exe" not in script
     assert '"node_modules\\npm\\bin\\npx-cli.js"' not in script
@@ -126,25 +159,14 @@ def test_daily_vercel_publisher_builds_once_verifies_and_can_roll_back() -> None
     assert "Invoke-DawnstrikeJobProcess" in script
     assert "VercelBuildTimeoutSeconds = 600" in script
     assert "VercelCommandTimeoutSeconds = 180" in script
-    assert 'CI = "1"' in script
-    assert 'VERCEL_TELEMETRY_DISABLED = "1"' in script
-    assert 'NPM_CONFIG_UPDATE_NOTIFIER = "false"' in script
     assert "& npx" not in script
-    assert "curl progress can otherwise be interleaved" in script
-    assert "JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE" in runner
-    assert "CREATE_SUSPENDED" in runner
-    assert "AssignProcessToJobObject" in runner
-    assert "TerminateJobObject" in runner
-    assert "QueryInformationJobObject" in runner
-    assert "QuoteArgument" in runner
-    assert "active_job_members_after_cleanup" in runner
+    assert "$handler.AllowAutoRedirect = $false" in script
     assert "taskkill.exe" not in script
-    assert "taskkill.exe" not in runner
     assert "Promoted deployment does not match the verified preview" in script
     assert "Production does not match the verified preview" in script
     assert "A timeout can occur after Vercel accepted the promotion" in script
     assert script.index("$promoted = $true") < script.index(
-        '-Arguments @("promote", $previewUrl, "--yes")'
+        "Request-VercelProductionPromotion -PreviewDeploymentId $deploymentId"
     )
     assert "foreach ($alias in $allProductionAliases)" in script
     assert "Assert-PublicationState" in script
@@ -157,17 +179,18 @@ def test_daily_vercel_publisher_builds_once_verifies_and_can_roll_back() -> None
     ).read_text(encoding="utf-8")
     assert script.count("Assert-VercelStagedSourceManifest") >= 2
     assert "Assert-RemoteVercelSourceManifest" in script
-    build_position = script.index('-Arguments @("build", "--yes", "--project", $ProjectId)')
+    build_position = script.index("New-VercelDeterministicBuiltPackage -StageRoot $stage")
     deploy_position = script.index(
-        '-Arguments @("deploy", "--prebuilt", "--project", $ProjectId, "--yes", "--json")'
+        "New-VercelFrozenPreviewDeployment `",
+        build_position,
     )
     built_positions = [
         index for index in range(len(script))
         if script.startswith("Assert-VercelBuiltPackage", index)
     ]
     assert len(built_positions) >= 3
-    # The package is checked once as soon as `vercel build` completes, again
-    # immediately before prebuilt deploy, and once more before promotion.
+    # The package is checked once as soon as direct construction completes, again
+    # immediately before the frozen CAS deploy, and once more before promotion.
     assert build_position < built_positions[0] < built_positions[1] < deploy_position
     assert built_positions[2] > deploy_position
 
@@ -181,13 +204,13 @@ def test_promotion_rollback_restores_each_alias_snapshot() -> None:
     promotion_marker = script.index("$promoted = $true")
     rollback_loop = script.index('foreach ($alias in $allProductionAliases) {', promotion_marker)
     assert snapshot_loop < promotion_marker < rollback_loop
-    assert 'Arguments @("inspect", [string]$alias, "--json")' in script
+    assert "Get-VercelAliasObservation -Alias ([string]$alias)" in script
     assert "$priorProductionAliases[[string]$alias]" in script
     assert "$priorAlias = $priorProductionAliases[[string]$alias]" in script
     assert "-DeploymentUrl ([string]$priorAlias.url)" in script
     assert "a complete per-alias production snapshot was not captured" in script
     assert "function Assert-VercelAliasRestored" in script
-    assert 'Arguments @("inspect", [string]$AliasUrl, "--json")' in script
+    assert "Get-VercelAliasObservation -Alias $AliasUrl" in script
     assert "Rollback verification for $AliasUrl resolved the wrong deployment ID" in script
     assert "Rollback verification for $AliasUrl resolved the wrong deployment URL" in script
     assert "daily-deployment-rollback-result.json" in script
@@ -195,9 +218,9 @@ def test_promotion_rollback_restores_each_alias_snapshot() -> None:
     assert 'status = if ($rollbackSucceeded) { "ROLLED_BACK" } else { "ROLLBACK_FAILED" }' in script
     assert "alias_errors = @($rollbackErrors)" in script
     assert "source_manifest_available" in script
-    assert 'Arguments @("rollback", [string]$priorPrimary.id, "--yes")' in script
+    assert "Request-VercelProductionRollback -DeploymentId ([string]$priorPrimary.id)" in script
+    assert '"--token"' not in script
     assert "primary_rollback_proof" in script
     assert "Add-VercelFunctionPublicBindings" in script
     assert "Assert-VercelNoEnvironmentArtifacts" in script
-    assert "provider diagnostics suppressed" in script
     assert "$($result.Stderr)" not in script

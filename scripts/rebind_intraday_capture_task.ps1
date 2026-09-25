@@ -9,6 +9,8 @@ param(
     [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')][string]$EntitlementReceiptSha256,
     [Parameter(Mandatory = $true)][string]$SourceConfig,
     [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')][string]$SourceConfigSha256,
+    [ValidatePattern('^$|^[0-9a-f]{32}$')][string]$StateBoundaryTaskMutationOperationId = "",
+    [switch]$StateBoundaryTerminalReconciliationRequired,
     [pscredential]$RunAsCredential,
     [string]$ReceiptPath = "",
     [switch]$Enable,
@@ -16,6 +18,10 @@ param(
     [Alias("InjectHardCrashAfterEnable")][switch]$InjectCrashAfterEnable,
     [ValidateRange(30, 1800)][int]$ProcessTimeoutSeconds = 300
 )
+
+$global:PSModuleAutoLoadingPreference = 'None'
+$env:PSModulePath = 'C:\Windows\System32\WindowsPowerShell\v1.0\Modules'
+. ([IO.Path]::Combine($PSScriptRoot, 'powershell_module_boundary.ps1'))
 
 $ErrorActionPreference = "Stop"
 if (($InjectFailureAfterMutation -or $InjectCrashAfterEnable) -and
@@ -32,14 +38,26 @@ $captureRebindRuntimeRoot = $RuntimeRoot
 $captureRebindStateRoot = $StateRoot
 $captureRebindTimeout = $ProcessTimeoutSeconds
 $captureRebindRunAsCredential = $RunAsCredential
+$captureRebindStateBoundaryOperationId = $StateBoundaryTaskMutationOperationId
+$captureRebindStateBoundaryTerminalReconciliationRequired =
+    $StateBoundaryTerminalReconciliationRequired
 . (Join-Path $PSScriptRoot "resolve_dawnstrike_task_principal.ps1")
 . (Join-Path $PSScriptRoot "activate_dawnstrike_runtime.ps1")
 . (Join-Path $PSScriptRoot "dawnstrike_job_process.ps1")
 . (Join-Path $PSScriptRoot "invoke_dawnstrike_stage.ps1")
+if ($null -eq (Get-Command Open-DawnstrikeStateBoundaryPath -ErrorAction SilentlyContinue)) {
+    . (Join-Path $PSScriptRoot "state_root_boundary.ps1")
+}
+$script:DawnstrikeCaptureRebindCodeRoot = [IO.Path]::GetFullPath(
+    (Join-Path $PSScriptRoot '..')
+).TrimEnd('\')
 $RuntimeRoot = $captureRebindRuntimeRoot
 $StateRoot = $captureRebindStateRoot
 $ProcessTimeoutSeconds = $captureRebindTimeout
 $RunAsCredential = $captureRebindRunAsCredential
+$StateBoundaryTaskMutationOperationId = $captureRebindStateBoundaryOperationId
+$StateBoundaryTerminalReconciliationRequired =
+    $captureRebindStateBoundaryTerminalReconciliationRequired
 if ($null -eq $RunAsCredential -or [string]::IsNullOrWhiteSpace($RunAsCredential.UserName)) {
     throw "Rebind requires the locally prompted RunAsCredential for the Password auxiliary task."
 }
@@ -53,6 +71,74 @@ function Get-DawnstrikePrincipalSid([string]$Value) {
         ).Value.ToUpperInvariant()
     }
     catch { throw "Unable to canonicalize the hardened auxiliary principal SID." }
+}
+
+function Assert-DawnstrikeRebindStateBoundaryTerminalRecoveryAuthorization {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$StateRoot,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$CandidateSha,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$CandidateTree,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{32}$')][string]$OperationId
+    )
+
+    foreach ($name in @(
+        'Assert-DawnstrikeStateRootBoundary',
+        'Get-DawnstrikeStateBoundaryTaskMutationIntent',
+        'Assert-DawnstrikeStateBoundaryTaskMutationIntent'
+    )) {
+        if ($null -eq (Get-Command $name -ErrorAction SilentlyContinue)) {
+            throw 'Disabled terminal rebind recovery requires the installed protected StateRoot boundary helper.'
+        }
+    }
+    $boundary = Assert-DawnstrikeStateRootBoundary `
+        -StateRoot $StateRoot `
+        -AllowedTaskMutationOperationId $OperationId `
+        -AllowTaskDefinitionDrift
+    try {
+        $intent = Get-DawnstrikeStateBoundaryTaskMutationIntent `
+            -EvidenceRoot 'C:\ProgramData\Dawnstrike'
+        if ($null -eq $intent -or [string]$intent.payload.operation_id -cne $OperationId) {
+            throw 'Disabled terminal rebind recovery has no exact protected operation identity.'
+        }
+        $null = Assert-DawnstrikeStateBoundaryTaskMutationIntent `
+            -Intent $intent -StateRoot $StateRoot -Mode RebindCapture `
+            -ExpectedSha $CandidateSha -ExpectedTree $CandidateTree
+        if (
+            [string]$boundary.candidate_sha -cne $CandidateSha -or
+            [string]$boundary.candidate_tree -cne $CandidateTree -or
+            [string]$boundary.receipt_sha256 -cne [string]$intent.payload.old_current_receipt_sha256 -or
+            [string]$boundary.receipt.task_binding_sha256 -cne [string]$intent.payload.old_task_binding_sha256 -or
+            $boundary.research_only -ne $true -or
+            $boundary.broker_execution_enabled -ne $false
+        ) {
+            throw 'Disabled terminal rebind recovery is not bound to the protected predecessor receipt.'
+        }
+        $protectedCapture = @(
+            $boundary.receipt.task_definitions_and_principals | Where-Object {
+                [string]$_.task_name -ceq $script:DawnstrikeAuxiliaryCaptureTaskName -and
+                -not [bool]$_.canonical
+            }
+        )
+        if ($protectedCapture.Count -ne 1) {
+            throw 'Disabled terminal rebind recovery has no unique protected predecessor capture task.'
+        }
+        $authorization = [pscustomobject]@{
+            operation_id = $OperationId
+            predecessor_task_path = [string]$protectedCapture[0].task_path
+            predecessor_definition_sha256 = [string]$protectedCapture[0].definition_sha256
+            predecessor_definition_contract_sha256 =
+                [string]$protectedCapture[0].definition_contract_sha256
+            predecessor_action_contract_sha256 =
+                [string]$protectedCapture[0].action_contract_sha256
+        }
+    }
+    finally {
+        foreach ($lock in @($boundary.locks)) {
+            if ($null -ne $lock) { $lock.Dispose() }
+        }
+    }
+    return $authorization
 }
 
 function Get-DawnstrikeAuxiliarySectionHash {
@@ -179,7 +265,8 @@ function Assert-DawnstrikeCaptureRebindCompleteTerminal {
         [Parameter(Mandatory = $true)][string]$SourceConfig,
         [Parameter(Mandatory = $true)][string]$SourceConfigSha256,
         [Parameter(Mandatory = $true)][int]$TimeoutSeconds,
-        [object]$HardeningReceipt
+        [object]$HardeningReceipt,
+        [switch]$AllowStateBoundaryDisabledTerminal
     )
     if ([string]$Journal.payload.operation -ne "capture_task_rebind" -or
         [string]$Journal.payload.phase -ne "COMPLETE" -or
@@ -226,11 +313,26 @@ function Assert-DawnstrikeCaptureRebindCompleteTerminal {
         (Get-DawnstrikeSha256Text $liveOrigin) -cne [string]$Receipt.runtime_origin_sha256) {
         throw "Complete capture-task rebind runtime origin is not receipt/journal-bound."
     }
-    $task = Get-DawnstrikeAuxiliaryCaptureTask $RuntimeRoot $StateRoot
-    if (-not $task.present -or [string]$task.state -ne 'Ready' -or
-        [string]$task.xml_sha256 -ne [string]$Receipt.xml_after_sha256 -or
-        [string]$task.action_contract_sha256 -ne [string]$Receipt.action_after_sha256 -or
-        [string]$task.definition_contract_sha256 -ne [string]$Receipt.definition_after_sha256) {
+    $task = Get-DawnstrikeAuxiliaryCaptureTask `
+        $RuntimeRoot $StateRoot -AllowDisabled:$AllowStateBoundaryDisabledTerminal
+    if ([string]$task.task_path -cne [string]$Original.task_path) {
+        throw "Complete capture-task rebind task path is not the activation-bound path."
+    }
+    if ($AllowStateBoundaryDisabledTerminal) {
+        if (
+            -not $task.present -or
+            [string]$task.state -cne 'Disabled' -or
+            [string]$Receipt.enablement_after -cne 'Ready' -or
+            [string]$task.action_contract_sha256 -cne [string]$Receipt.action_after_sha256 -or
+            [string]$task.definition_contract_sha256 -cne [string]$Receipt.definition_after_sha256
+        ) {
+            throw "Complete capture-task rebind Disabled recovery contract is not exact."
+        }
+    }
+    elseif (-not $task.present -or [string]$task.state -cne 'Ready' -or
+        [string]$task.xml_sha256 -cne [string]$Receipt.xml_after_sha256 -or
+        [string]$task.action_contract_sha256 -cne [string]$Receipt.action_after_sha256 -or
+        [string]$task.definition_contract_sha256 -cne [string]$Receipt.definition_after_sha256) {
         throw "Complete capture-task rebind task contract is not exact."
     }
     Assert-DawnstrikeCaptureActionTransformation `
@@ -373,7 +475,7 @@ $receiptRelative = ([System.IO.Path]::GetFullPath($receiptRecord.path).Substring
     $currentDocument.LoadXml([string]$Current.xml)
     $currentPrincipalUser = @($currentDocument.SelectNodes("//*[local-name()='Principal']/*[local-name()='UserId']"))
     if ($currentPrincipalUser.Count -ne 1) { throw "Current auxiliary task principal is ambiguous." }
-    $null = Assert-DawnstrikeCaptureTaskSafety -Xml ([string]$Current.xml) -RuntimeRoot $RuntimeRoot -StateRoot $StateRoot -ExpectedPrincipal ([string]$currentPrincipalUser[0].InnerText) -ExpectedCandidateSha $CandidateSha -ExpectedInterpreterPath ([string]$receipt.interpreter_path) -ExpectedInterpreterSha256 ([string]$receipt.interpreter_sha256) -ExpectedInterpreterSignerThumbprint ([string]$receipt.interpreter_signer_thumbprint) -ExpectedEnabled "false" -RequirePasswordPrincipal -RequireRunner
+    $null = Assert-DawnstrikeCaptureTaskSafety -Xml ([string]$Current.xml) -RuntimeRoot $RuntimeRoot -StateRoot $StateRoot -ExpectedReleaseRoot $script:DawnstrikeCaptureRebindCodeRoot -ExpectedPrincipal ([string]$currentPrincipalUser[0].InnerText) -ExpectedCandidateSha $CandidateSha -ExpectedInterpreterPath ([string]$receipt.interpreter_path) -ExpectedInterpreterSha256 ([string]$receipt.interpreter_sha256) -ExpectedInterpreterSignerThumbprint ([string]$receipt.interpreter_signer_thumbprint) -ExpectedEnabled "false" -RequirePasswordPrincipal -RequireRunner
     $records = @(Get-DawnstrikeCaptureActionRecords ([string]$Current.xml))
     if ($records.Count -ne 1) { throw "Current auxiliary task action is ambiguous." }
     $expectedBytecodePrefix = [System.IO.Path]::GetFullPath((Join-Path $StateRoot ("capture-bytecode\" + $CandidateSha)))
@@ -1056,6 +1158,31 @@ $python = (Get-DawnstrikeApprovedLockInterpreter).path
 $runtimeContract = Get-DawnstrikeGitContract $git $runtime $ProcessTimeoutSeconds
 if ([string]::IsNullOrWhiteSpace($CandidateSha)) { $CandidateSha = [string]$runtimeContract.head }
 if ($runtimeContract.head -ne $CandidateSha) { throw "Runtime HEAD is not the requested exact candidate SHA." }
+if ($StateBoundaryTaskMutationOperationId -notmatch '^[0-9a-f]{32}$') {
+    throw "Capture-task rebind requires its exact protected StateRoot operation identity."
+}
+$rebindMutationIntent = Get-DawnstrikeStateBoundaryTaskMutationIntent `
+    -EvidenceRoot 'C:\ProgramData\Dawnstrike'
+if ($null -eq $rebindMutationIntent -or
+    [string]$rebindMutationIntent.payload.operation_id -cne
+        $StateBoundaryTaskMutationOperationId) {
+    throw "Capture-task rebind has no exact protected StateRoot mutation intent."
+}
+$null = Assert-DawnstrikeStateBoundaryTaskMutationIntent `
+    -Intent $rebindMutationIntent -StateRoot $state -Mode RebindCapture `
+    -ExpectedSha $CandidateSha -ExpectedTree ([string]$runtimeContract.tree)
+$stateBoundaryTerminalRecoveryAuthorized = $false
+$stateBoundaryTerminalRecoveryAuthorization = $null
+if ($StateBoundaryTerminalReconciliationRequired) {
+    if ($StateBoundaryTaskMutationOperationId -notmatch '^[0-9a-f]{32}$') {
+        throw "Disabled terminal rebind recovery requires its exact protected StateRoot operation identity."
+    }
+    $stateBoundaryTerminalRecoveryAuthorization = Assert-DawnstrikeRebindStateBoundaryTerminalRecoveryAuthorization `
+        -StateRoot $state -CandidateSha $CandidateSha `
+        -CandidateTree ([string]$runtimeContract.tree) `
+        -OperationId $StateBoundaryTaskMutationOperationId
+    $stateBoundaryTerminalRecoveryAuthorized = $true
+}
 $origin = Get-DawnstrikeGitValue $git $runtime @("remote", "get-url", "origin") "Capture rebind origin verification" $ProcessTimeoutSeconds
 Assert-DawnstrikeSafeOrigin $origin
 $lockOrigin = Convert-DawnstrikeCanonicalOriginIdentity $origin
@@ -1144,6 +1271,18 @@ $preserveLocks = $false
 Assert-DawnstrikeNoReparseComponents $preparedPath "Capture-task prepared record"
 Assert-DawnstrikeNoReparseComponents $operationJournalPath "Capture-task operation journal"
 $original = Get-DawnstrikeCaptureOriginalFromActivationBackup $state $activationReceipt.payload
+if ($stateBoundaryTerminalRecoveryAuthorized -and (
+    [string]$original.task_path -cne
+        [string]$stateBoundaryTerminalRecoveryAuthorization.predecessor_task_path -or
+    [string]$original.xml_sha256 -cne
+        [string]$stateBoundaryTerminalRecoveryAuthorization.predecessor_definition_sha256 -or
+    [string]$original.definition_contract_sha256 -cne
+        [string]$stateBoundaryTerminalRecoveryAuthorization.predecessor_definition_contract_sha256 -or
+    [string]$original.action_contract_sha256 -cne
+        [string]$stateBoundaryTerminalRecoveryAuthorization.predecessor_action_contract_sha256
+)) {
+    throw "Disabled terminal rebind recovery activation backup is not the protected predecessor task."
+}
 $previousCandidates = @(
     (Get-DawnstrikeCaptureActionRecords ([string]$original.xml)) | ForEach-Object {
         Get-DawnstrikeCaptureBindingValue ([string]$_.arguments) "candidate-sha"
@@ -1151,6 +1290,98 @@ $previousCandidates = @(
 )
 if ($previousCandidates.Count -ne 1) { throw "Activation-bound auxiliary action candidate SHA pin is missing or ambiguous." }
 $previousSha = [string]$previousCandidates[0]
+
+function Get-DawnstrikeCaptureRebindTrustedTerminalEnvelope {
+    [CmdletBinding()]
+    param()
+
+    $receiptLease = $null
+    $journalLease = $null
+    $receiptStream = $null
+    $journalStream = $null
+    try {
+        $receiptLease = Open-DawnstrikeStateBoundaryPath `
+            -Path $receiptFull -Label 'Capture rebind terminal receipt namespace'
+        $journalLease = Open-DawnstrikeStateBoundaryPath `
+            -Path $operationJournalPath -Label 'Capture rebind terminal journal namespace'
+        $receiptStream = [System.IO.File]::Open(
+            $receiptFull, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::Read
+        )
+        $journalStream = [System.IO.File]::Open(
+            $operationJournalPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::Read
+        )
+        $receiptHash = Get-DawnstrikeHeldReceiptSha256 $receiptStream
+        $journalHash = Get-DawnstrikeHeldReceiptSha256 $journalStream
+        $journal = Get-DawnstrikeStrictRuntimeOperationJournal `
+            $operationJournalPath $lockInterpreter.path $lockInterpreter.sha256
+        if ([string]$journal.raw_file_sha256 -cne $journalHash) {
+            throw 'Capture rebind terminal journal changed during retained validation.'
+        }
+        $receiptVerification = Invoke-DawnstrikeActivationProcess $python @(
+            '-S', $captureContract, 'verify-receipt', '--receipt', $receiptFull,
+            '--candidate-sha', $CandidateSha, '--candidate-tree', $runtimeContract.tree
+        ) $PSScriptRoot 'Capture rebind retained terminal receipt validation' $ProcessTimeoutSeconds
+        try { $receiptPayload = [string]$receiptVerification.Stdout | ConvertFrom-Json }
+        catch { throw 'Capture rebind retained terminal receipt is not valid JSON.' }
+        $validation = @{
+            Journal = $journal
+            Receipt = $receiptPayload
+            ReceiptPath = $receiptFull
+            RuntimeRoot = $runtime
+            StateRoot = $state
+            GitPath = $git
+            PythonPath = $python
+            CaptureContract = $captureContract
+            CandidateSha = $CandidateSha
+            CandidateTree = [string]$runtimeContract.tree
+            OriginIdentity = $lockOrigin
+            ActivationReceipt = $activationReceipt.payload
+            ActivationReceiptName = $activationReceiptName
+            ActivationReceiptSha256 = $activationReceiptSha256
+            Original = $original
+            SymbolsManifest = $SymbolsManifest
+            SymbolsManifestSha256 = $SymbolsManifestSha256
+            EntitlementReceipt = $EntitlementReceipt
+            EntitlementReceiptSha256 = $EntitlementReceiptSha256
+            SourceConfig = $SourceConfig
+            SourceConfigSha256 = $SourceConfigSha256
+            TimeoutSeconds = $ProcessTimeoutSeconds
+        }
+        if ($null -ne $hardeningReceipt) { $validation.HardeningReceipt = $hardeningReceipt }
+        $terminal = Assert-DawnstrikeCaptureRebindCompleteTerminal @validation
+        if (
+            (Get-DawnstrikeHeldReceiptSha256 $receiptStream) -cne $receiptHash -or
+            (Get-DawnstrikeHeldReceiptSha256 $journalStream) -cne $journalHash -or
+            (Get-DawnstrikeSha256File $receiptFull) -cne $receiptHash -or
+            (Get-DawnstrikeSha256File $operationJournalPath) -cne $journalHash
+        ) { throw 'Capture rebind terminal evidence changed during retained validation.' }
+        return New-DawnstrikeStateBoundaryTerminalEnvelope `
+            -Terminal $terminal.receipt -ReceiptSha256 $receiptHash `
+            -JournalSha256 $journalHash `
+            -OperationId $StateBoundaryTaskMutationOperationId -StateRoot $state `
+            -Mode RebindCapture -ExpectedSha $CandidateSha `
+            -ExpectedTree ([string]$runtimeContract.tree)
+    }
+    finally {
+        if ($null -ne $journalStream) { $journalStream.Dispose() }
+        if ($null -ne $receiptStream) { $receiptStream.Dispose() }
+        if ($null -ne $journalLease -and $null -ne $journalLease.handle) {
+            $journalLease.handle.Dispose()
+        }
+        if ($null -ne $receiptLease -and $null -ne $receiptLease.handle) {
+            $receiptLease.handle.Dispose()
+        }
+    }
+}
+
+function Write-DawnstrikeCaptureRebindTrustedTerminalEnvelope {
+    [CmdletBinding()]
+    param()
+    Write-Output (ConvertTo-Json `
+        (Get-DawnstrikeCaptureRebindTrustedTerminalEnvelope) -Depth 12 -Compress)
+}
 
 $compensatedReceiptRecovered = $false
 if (Test-Path -LiteralPath $receiptFull -PathType Leaf) {
@@ -1297,6 +1528,27 @@ if (Test-Path -LiteralPath $receiptFull -PathType Leaf) {
             $compensatedReceiptRecovered = $true
         }
     }
+    $terminalRecoveryJournalPath = if ($stateBoundaryTerminalRecoveryAuthorized) {
+        Get-DawnstrikeTerminalRecoveryJournalPath `
+            -StateRoot $state -OperationId $StateBoundaryTaskMutationOperationId
+    }
+    else { '' }
+    $terminalRecoveryJournalPending = (
+        -not [string]::IsNullOrWhiteSpace($terminalRecoveryJournalPath) -and
+        (Test-Path -LiteralPath $terminalRecoveryJournalPath -PathType Leaf)
+    )
+    $existingReadyTerminal = (
+        [string]$auxiliary.state -ceq 'Ready' -and
+        [string]$auxiliary.action_contract_sha256 -ceq [string]$existingPayload.action_after_sha256 -and
+        [string]$auxiliary.definition_contract_sha256 -ceq [string]$existingPayload.definition_after_sha256 -and
+        (Get-DawnstrikeSha256Text ([string]$auxiliary.xml)) -ceq [string]$existingPayload.xml_after_sha256
+    )
+    $existingDisabledTerminal = (
+        $stateBoundaryTerminalRecoveryAuthorized -and
+        [string]$auxiliary.state -ceq 'Disabled' -and
+        [string]$auxiliary.action_contract_sha256 -ceq [string]$existingPayload.action_after_sha256 -and
+        [string]$auxiliary.definition_contract_sha256 -ceq [string]$existingPayload.definition_after_sha256
+    )
     if (
         [string]$existingPayload.activation_id -eq $activationId -and
         [string]$existingPayload.activation_receipt_name -eq $activationReceiptName -and
@@ -1305,9 +1557,7 @@ if (Test-Path -LiteralPath $receiptFull -PathType Leaf) {
         [string]$existingPayload.entitlement_receipt_sha256 -eq $EntitlementReceiptSha256 -and
         [string]$existingPayload.source_config_sha256 -eq $SourceConfigSha256 -and
         [string]$existingPayload.changed_field -eq "candidate_sha_and_input_bindings" -and
-        $auxiliary.state -eq "Ready" -and
-        $auxiliary.action_contract_sha256 -eq [string]$existingPayload.action_after_sha256 -and
-        (Get-DawnstrikeSha256Text ([string]$auxiliary.xml)) -eq [string]$existingPayload.xml_after_sha256
+        ($existingReadyTerminal -or $existingDisabledTerminal)
     ) {
         Assert-DawnstrikeCaptureActionTransformation `
             -OriginalXml ([string]$original.xml) -CurrentXml ([string]$auxiliary.xml) `
@@ -1319,6 +1569,9 @@ if (Test-Path -LiteralPath $receiptFull -PathType Leaf) {
             throw "Existing COMPLETE capture-task receipt has no durable operation journal."
         }
         $existingJournal = Get-DawnstrikeStrictRuntimeOperationJournal $operationJournalPath $lockInterpreter.path $lockInterpreter.sha256
+        if ($existingDisabledTerminal -and [string]$existingJournal.payload.phase -cne 'COMPLETE') {
+            throw "Disabled terminal rebind recovery requires an exact COMPLETE operation journal."
+        }
         if (-not $compensatedReceiptRecovered -and [string]$existingJournal.payload.phase -eq "POST_ENABLE") {
             # A sealed receipt may have been written immediately before the
             # COMPLETE journal transition.  It is admissible only when the
@@ -1377,55 +1630,230 @@ if (Test-Path -LiteralPath $receiptFull -PathType Leaf) {
                  -SourceConfig $SourceConfig -SourceConfigSha256 $SourceConfigSha256 -TimeoutSeconds $ProcessTimeoutSeconds
              Exit-DawnstrikeGovernedRuntimeLock -Lock $sealedRecoveryLock
             if (Test-Path -LiteralPath $preparedPath -PathType Leaf) { Remove-DawnstrikeCapturePrepared $preparedPath }
-            Write-Output ([string]$existingReceipt.Stdout).Trim()
+            Write-DawnstrikeCaptureRebindTrustedTerminalEnvelope
             return
         }
         if (-not $compensatedReceiptRecovered) {
-        if (
-            [string]$existingJournal.payload.operation -ne "capture_task_rebind" -or
-            [string]$existingJournal.payload.phase -ne "COMPLETE" -or
-            [string]$existingJournal.payload.candidate_sha -ne $CandidateSha -or
-            [string]$existingJournal.payload.candidate_tree -ne [string]$runtimeContract.tree -or
-            [string]$existingJournal.payload.origin_identity -ne $lockOrigin -or
-            [string]$existingJournal.payload.complete_receipt_relative_path -ne $journalCompleteRelativePath -or
-            [string]$existingJournal.payload.complete_receipt_sha256 -ne (Get-DawnstrikeSha256File $receiptFull)
-        ) { throw "Existing capture-task receipt is not bound to a COMPLETE operation journal." }
-        $existingLockPath = Join-Path $state "locks\dawnstrike-runtime-activation.lock"
-        if (Test-Path -LiteralPath $existingLockPath -PathType Leaf) {
-            $existingLock = Get-DawnstrikeStrictRuntimeLock $existingLockPath $lockInterpreter.path $lockInterpreter.sha256
-            $existingOrigin = Convert-DawnstrikeCanonicalOriginIdentity $origin
-            if ($existingLock.payload.operation -ne "capture_task_rebind" -or
-                $existingJournal.payload.lock_token -ne $existingLock.payload.lock_token -or
-                $existingJournal.payload.lock_file_sha256 -ne $existingLock.raw_file_sha256 -or
-                -not (Test-DawnstrikeRuntimeLockOwnerDead $existingLock.payload)) {
-                throw "Existing COMPLETE capture-task lock is live, tampered, or not journal-bound."
+            if (
+                [string]$existingJournal.payload.operation -ne "capture_task_rebind" -or
+                [string]$existingJournal.payload.phase -ne "COMPLETE" -or
+                [string]$existingJournal.payload.candidate_sha -ne $CandidateSha -or
+                [string]$existingJournal.payload.candidate_tree -ne [string]$runtimeContract.tree -or
+                [string]$existingJournal.payload.origin_identity -ne $lockOrigin -or
+                [string]$existingJournal.payload.complete_receipt_relative_path -ne $journalCompleteRelativePath -or
+                [string]$existingJournal.payload.complete_receipt_sha256 -ne (Get-DawnstrikeSha256File $receiptFull)
+            ) { throw "Existing capture-task receipt is not bound to a COMPLETE operation journal." }
+
+            $adoptedCompleteLock = $null
+            $terminalRecoveryJournalOwned = $false
+            $existingLockPath = Join-Path $state "locks\dawnstrike-runtime-activation.lock"
+            if ($terminalRecoveryJournalPending) {
+                $pendingTerminalJournal = Get-DawnstrikeStrictRuntimeOperationJournal `
+                    $terminalRecoveryJournalPath $lockInterpreter.path $lockInterpreter.sha256
+                if (
+                    [string]$pendingTerminalJournal.payload.operation -cne 'capture_task_rebind' -or
+                    [string]$pendingTerminalJournal.payload.phase -cne 'INIT' -or
+                    [string]$pendingTerminalJournal.payload.candidate_sha -cne $CandidateSha -or
+                    [string]$pendingTerminalJournal.payload.candidate_tree -cne [string]$runtimeContract.tree -or
+                    [string]$pendingTerminalJournal.payload.current_sha -cne $CandidateSha -or
+                    [string]$pendingTerminalJournal.payload.current_tree -cne [string]$runtimeContract.tree -or
+                    [string]$pendingTerminalJournal.payload.previous_sha -cne $CandidateSha -or
+                    [string]$pendingTerminalJournal.payload.previous_tree -cne [string]$runtimeContract.tree -or
+                    [string]$pendingTerminalJournal.payload.prepared_receipt_relative_path -cne $journalCompleteRelativePath -or
+                    [string]$pendingTerminalJournal.payload.complete_receipt_relative_path -cne $journalCompleteRelativePath
+                ) { throw 'Terminal capture-task recovery journal identity is not exact.' }
+                if (Test-Path -LiteralPath $existingLockPath -PathType Leaf) {
+                    $adoptedCompleteLock = Adopt-DawnstrikeGovernedRuntimeLockWithJournal `
+                        -StateRoot $state -JournalPath $terminalRecoveryJournalPath `
+                        -CandidateSha $CandidateSha -CandidateTree ([string]$runtimeContract.tree) `
+                        -OriginIdentity $lockOrigin -PythonPath $lockInterpreter.path `
+                        -PythonSha256 $lockInterpreter.sha256
+                }
+                else {
+                    # Exit is lock-then-journal. Recover an orphan INIT journal
+                    # by recreating the exact deterministic pair.
+                    $adoptedCompleteLock = Enter-DawnstrikeGovernedRuntimeLockWithJournal `
+                        -StateRoot $state -JournalPath $terminalRecoveryJournalPath `
+                        -Operation capture_task_rebind `
+                        -CandidateSha $CandidateSha -CandidateTree ([string]$runtimeContract.tree) `
+                        -CurrentSha $CandidateSha -CurrentTree ([string]$runtimeContract.tree) `
+                        -PreviousSha $CandidateSha -PreviousTree ([string]$runtimeContract.tree) `
+                        -OriginIdentity $lockOrigin -PythonPath $lockInterpreter.path `
+                        -PythonSha256 $lockInterpreter.sha256 `
+                        -PreparedReceiptRelativePath $journalCompleteRelativePath `
+                        -CompleteReceiptRelativePath $journalCompleteRelativePath `
+                        -TaskContractSha256 ([string]$pendingTerminalJournal.payload.task_contract_sha256) `
+                        -ProcessTimeoutSeconds $ProcessTimeoutSeconds
+                }
+                $terminalRecoveryJournalOwned = $true
             }
-            $adoptedCompleteLock = Adopt-DawnstrikeGovernedRuntimeLockWithJournal -StateRoot $state `
-                -JournalPath $operationJournalPath -CandidateSha $CandidateSha -CandidateTree ([string]$runtimeContract.tree) `
-                -OriginIdentity $existingOrigin -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
-            # Revalidate the exact Ready task after adoption, then release the
-            # stale lock.  A crash before this release is recoverable adoption;
-            # a crash after release leaves no lock to strand.
-             $postAdopted = Get-DawnstrikeAuxiliaryCaptureTask $runtime $state
-             if ($postAdopted.state -ne "Ready" -or $postAdopted.xml_sha256 -ne $existingPayload.xml_after_sha256) { throw "Adopted COMPLETE task identity changed." }
-             $null = Assert-DawnstrikeCaptureRebindCompleteTerminal `
-                 -Journal $existingJournal -Receipt $existingPayload -ReceiptPath $receiptFull `
-                 -RuntimeRoot $runtime -StateRoot $state -GitPath $git -PythonPath $python `
-                 -CaptureContract $captureContract -CandidateSha $CandidateSha -CandidateTree ([string]$runtimeContract.tree) `
-                 -OriginIdentity $lockOrigin -ActivationReceipt $activationReceipt.payload `
-                 -ActivationReceiptName $activationReceiptName -ActivationReceiptSha256 $activationReceiptSha256 `
-                 -Original $original -SymbolsManifest $SymbolsManifest -SymbolsManifestSha256 $SymbolsManifestSha256 `
-                 -EntitlementReceipt $EntitlementReceipt -EntitlementReceiptSha256 $EntitlementReceiptSha256 `
-                 -SourceConfig $SourceConfig -SourceConfigSha256 $SourceConfigSha256 -TimeoutSeconds $ProcessTimeoutSeconds
-             Exit-DawnstrikeGovernedRuntimeLock -Lock $adoptedCompleteLock
-            if ($env:DAWNSTRIKE_TEST_REBIND_CRASH_POINT -eq "after_complete_release") {
-                if ($env:DAWNSTRIKE_TEST_LOCK_JOURNAL -ne "1") { throw "Rebind crash injection is test-only." }
-                Stop-Process -Id $PID -Force
+            elseif (Test-Path -LiteralPath $existingLockPath -PathType Leaf) {
+                $existingLock = Get-DawnstrikeStrictRuntimeLock `
+                    $existingLockPath $lockInterpreter.path $lockInterpreter.sha256
+                $existingOrigin = Convert-DawnstrikeCanonicalOriginIdentity $origin
+                if ($existingLock.payload.operation -ne "capture_task_rebind" -or
+                    $existingJournal.payload.lock_token -ne $existingLock.payload.lock_token -or
+                    $existingJournal.payload.lock_file_sha256 -ne $existingLock.raw_file_sha256 -or
+                    -not (Test-DawnstrikeRuntimeLockOwnerDead $existingLock.payload)) {
+                    throw "Existing COMPLETE capture-task lock is live, tampered, or not journal-bound."
+                }
+                $adoptedCompleteLock = Adopt-DawnstrikeGovernedRuntimeLockWithJournal `
+                    -StateRoot $state -JournalPath $operationJournalPath `
+                    -CandidateSha $CandidateSha -CandidateTree ([string]$runtimeContract.tree) `
+                    -OriginIdentity $existingOrigin -PythonPath $lockInterpreter.path `
+                    -PythonSha256 $lockInterpreter.sha256
             }
-        }
-        if (Test-Path -LiteralPath $preparedPath -PathType Leaf) { Remove-DawnstrikeCapturePrepared $preparedPath }
-        Write-Output ([string]$existingReceipt.Stdout).Trim()
-        return
+            elseif ($existingDisabledTerminal) {
+                # The original COMPLETE lock may already have been released.
+                # A deterministic INIT journal binds a fresh lock and every
+                # later adoption to this exact protected StateRoot operation.
+                $adoptedCompleteLock = Enter-DawnstrikeGovernedRuntimeLockWithJournal `
+                    -StateRoot $state -JournalPath $terminalRecoveryJournalPath `
+                    -Operation capture_task_rebind `
+                    -CandidateSha $CandidateSha -CandidateTree ([string]$runtimeContract.tree) `
+                    -CurrentSha $CandidateSha -CurrentTree ([string]$runtimeContract.tree) `
+                    -PreviousSha $CandidateSha -PreviousTree ([string]$runtimeContract.tree) `
+                    -OriginIdentity $lockOrigin -PythonPath $lockInterpreter.path `
+                    -PythonSha256 $lockInterpreter.sha256 `
+                    -PreparedReceiptRelativePath $journalCompleteRelativePath `
+                    -CompleteReceiptRelativePath $journalCompleteRelativePath `
+                    -TaskContractSha256 ([string]$existingPayload.definition_after_sha256) `
+                    -ProcessTimeoutSeconds $ProcessTimeoutSeconds
+                $terminalRecoveryJournalOwned = $true
+            }
+
+            $terminalValidationArguments = @{
+                Journal = $existingJournal
+                Receipt = $existingPayload
+                ReceiptPath = $receiptFull
+                RuntimeRoot = $runtime
+                StateRoot = $state
+                GitPath = $git
+                PythonPath = $python
+                CaptureContract = $captureContract
+                CandidateSha = $CandidateSha
+                CandidateTree = [string]$runtimeContract.tree
+                OriginIdentity = $lockOrigin
+                ActivationReceipt = $activationReceipt.payload
+                ActivationReceiptName = $activationReceiptName
+                ActivationReceiptSha256 = $activationReceiptSha256
+                Original = $original
+                SymbolsManifest = $SymbolsManifest
+                SymbolsManifestSha256 = $SymbolsManifestSha256
+                EntitlementReceipt = $EntitlementReceipt
+                EntitlementReceiptSha256 = $EntitlementReceiptSha256
+                SourceConfig = $SourceConfig
+                SourceConfigSha256 = $SourceConfigSha256
+                TimeoutSeconds = $ProcessTimeoutSeconds
+            }
+            if ($existingDisabledTerminal -or $terminalRecoveryJournalPending) {
+                # The protected launcher isolated the writer-owned terminal
+                # definition before dispatch.  Prove every runtime, receipt,
+                # journal, activation-backup, and input binding while it is
+                # still Disabled; only then restore the receipt-bound state.
+                try {
+                    $null = Confirm-DawnstrikeGovernedRuntimeLock $adoptedCompleteLock
+                    $lockedAuxiliary = Get-DawnstrikeAuxiliaryCaptureTask $runtime $state -AllowDisabled
+                    if ([string]$lockedAuxiliary.state -ceq 'Disabled') {
+                        $null = Assert-DawnstrikeCaptureRebindCompleteTerminal `
+                            @terminalValidationArguments -AllowStateBoundaryDisabledTerminal
+                        $null = Confirm-DawnstrikeGovernedRuntimeLock $adoptedCompleteLock
+                        Enable-ScheduledTask `
+                            -TaskName $script:DawnstrikeAuxiliaryCaptureTaskName `
+                            -TaskPath ([string]$lockedAuxiliary.task_path) -ErrorAction Stop | Out-Null
+                        $null = Confirm-DawnstrikeGovernedRuntimeLock $adoptedCompleteLock
+                    }
+                    elseif ([string]$lockedAuxiliary.state -cne 'Ready') {
+                        throw 'Terminal capture-task recovery state is neither exact Ready nor Disabled.'
+                    }
+                    $postAdopted = Get-DawnstrikeAuxiliaryCaptureTask $runtime $state
+                    if (
+                        [string]$postAdopted.state -cne 'Ready' -or
+                        [string]$postAdopted.xml_sha256 -cne [string]$existingPayload.xml_after_sha256 -or
+                        [string]$postAdopted.action_contract_sha256 -cne [string]$existingPayload.action_after_sha256 -or
+                        [string]$postAdopted.definition_contract_sha256 -cne [string]$existingPayload.definition_after_sha256
+                    ) { throw "Recovered COMPLETE capture task is not the exact receipt-bound Ready definition." }
+                    $null = Assert-DawnstrikeCaptureRebindCompleteTerminal @terminalValidationArguments
+                    $null = Confirm-DawnstrikeGovernedRuntimeLock $adoptedCompleteLock
+                    $auxiliary = $postAdopted
+                }
+                catch {
+                    $terminalRecoveryFailure = $_
+                    try { $null = Disable-DawnstrikeAuxiliaryCaptureTask $runtime $state } catch { }
+                    $failedClosed = Get-DawnstrikeAuxiliaryCaptureTask $runtime $state -AllowDisabled
+                    if (-not $failedClosed.present -or [string]$failedClosed.state -cne 'Disabled') {
+                        throw "Disabled terminal rebind recovery failed and the auxiliary task could not be held Disabled."
+                    }
+                    if ($null -ne $adoptedCompleteLock) {
+                        if ($terminalRecoveryJournalOwned) {
+                            Exit-DawnstrikeGovernedTerminalRecoveryLockWithJournal `
+                                -StateRoot $state -JournalPath $terminalRecoveryJournalPath `
+                                -Lock $adoptedCompleteLock -Operation capture_task_rebind `
+                                -CandidateSha $CandidateSha -CandidateTree ([string]$runtimeContract.tree) `
+                                -OriginIdentity $lockOrigin -PythonPath $lockInterpreter.path `
+                                -PythonSha256 $lockInterpreter.sha256
+                        }
+                        else { Exit-DawnstrikeGovernedRuntimeLock -Lock $adoptedCompleteLock }
+                        $adoptedCompleteLock = $null
+                    }
+                    throw $terminalRecoveryFailure
+                }
+            }
+            else {
+                # The no-lock COMPLETE fast path must receive the same deep
+                # validation as the stale-lock adoption path.
+                $null = Assert-DawnstrikeCaptureRebindCompleteTerminal @terminalValidationArguments
+            }
+
+            try {
+                if (Test-Path -LiteralPath $preparedPath -PathType Leaf) {
+                    Remove-DawnstrikeCapturePrepared $preparedPath
+                }
+                if ($null -ne $adoptedCompleteLock) {
+                    $null = Confirm-DawnstrikeGovernedRuntimeLock $adoptedCompleteLock
+                    if ($terminalRecoveryJournalOwned) {
+                        Exit-DawnstrikeGovernedTerminalRecoveryLockWithJournal `
+                            -StateRoot $state -JournalPath $terminalRecoveryJournalPath `
+                            -Lock $adoptedCompleteLock -Operation capture_task_rebind `
+                            -CandidateSha $CandidateSha -CandidateTree ([string]$runtimeContract.tree) `
+                            -OriginIdentity $lockOrigin -PythonPath $lockInterpreter.path `
+                            -PythonSha256 $lockInterpreter.sha256
+                    }
+                    else { Exit-DawnstrikeGovernedRuntimeLock -Lock $adoptedCompleteLock }
+                    $adoptedCompleteLock = $null
+                    if ($env:DAWNSTRIKE_TEST_REBIND_CRASH_POINT -eq "after_complete_release") {
+                        if ($env:DAWNSTRIKE_TEST_LOCK_JOURNAL -ne "1") {
+                            throw "Rebind crash injection is test-only."
+                        }
+                        Stop-Process -Id $PID -Force
+                    }
+                }
+            }
+            catch {
+                $terminalCleanupFailure = $_
+                if ($existingDisabledTerminal -or $terminalRecoveryJournalPending) {
+                    try { $null = Disable-DawnstrikeAuxiliaryCaptureTask $runtime $state } catch { }
+                    $failedClosed = Get-DawnstrikeAuxiliaryCaptureTask $runtime $state -AllowDisabled
+                    if (-not $failedClosed.present -or [string]$failedClosed.state -cne 'Disabled') {
+                        throw "Disabled terminal rebind recovery cleanup failed and the auxiliary task could not be held Disabled."
+                    }
+                }
+                if ($null -ne $adoptedCompleteLock) {
+                    if ($terminalRecoveryJournalOwned) {
+                        Exit-DawnstrikeGovernedTerminalRecoveryLockWithJournal `
+                            -StateRoot $state -JournalPath $terminalRecoveryJournalPath `
+                            -Lock $adoptedCompleteLock -Operation capture_task_rebind `
+                            -CandidateSha $CandidateSha -CandidateTree ([string]$runtimeContract.tree) `
+                            -OriginIdentity $lockOrigin -PythonPath $lockInterpreter.path `
+                            -PythonSha256 $lockInterpreter.sha256
+                    }
+                    else { Exit-DawnstrikeGovernedRuntimeLock -Lock $adoptedCompleteLock }
+                    $adoptedCompleteLock = $null
+                }
+                throw $terminalCleanupFailure
+            }
+            Write-DawnstrikeCaptureRebindTrustedTerminalEnvelope
+            return
         }
     }
     if (-not $compensatedReceiptRecovered) { throw "Existing capture-task receipt does not match the current task, activation, or supplied input bindings; rebind is ambiguous." }
@@ -1608,7 +2036,7 @@ try {
                 -Original $original -SymbolsManifest $SymbolsManifest -SymbolsManifestSha256 $SymbolsManifestSha256 `
                 -EntitlementReceipt $EntitlementReceipt -EntitlementReceiptSha256 $EntitlementReceiptSha256 `
                 -SourceConfig $SourceConfig -SourceConfigSha256 $SourceConfigSha256 -TimeoutSeconds $ProcessTimeoutSeconds
-            Write-Output ([string]$postLockReceipt.Stdout).Trim()
+            Write-DawnstrikeCaptureRebindTrustedTerminalEnvelope
             return
         }
         throw "Post-lock capture-task receipt does not match the current task or supplied input bindings."
@@ -1699,7 +2127,7 @@ try {
                      -SourceConfig $SourceConfig -SourceConfigSha256 $SourceConfigSha256 -TimeoutSeconds $ProcessTimeoutSeconds `
                      -HardeningReceipt $hardeningReceipt
                  Remove-DawnstrikeCapturePrepared $preparedPath
-                [string]$sealed.Stdout | ConvertFrom-Json | ConvertTo-Json -Depth 8 -Compress
+                Write-DawnstrikeCaptureRebindTrustedTerminalEnvelope
                 return
             }
             catch {
@@ -1738,7 +2166,7 @@ try {
                         if (Test-Path -LiteralPath $preparedPath -PathType Leaf) {
                             try { Remove-DawnstrikeCapturePrepared $preparedPath } catch { }
                         }
-                        Write-Output ([System.IO.File]::ReadAllText($receiptFull, [System.Text.UTF8Encoding]::new($false)).Trim())
+                        Write-DawnstrikeCaptureRebindTrustedTerminalEnvelope
                         return
                     }
                     catch {
@@ -1940,7 +2368,7 @@ try {
         $finalDocument.LoadXml([string]$final.xml)
         $finalPrincipal = @($finalDocument.SelectNodes("//*[local-name()='Principal']/*[local-name()='UserId']"))
         if ($finalPrincipal.Count -ne 1) { throw "Final capture task principal is ambiguous." }
-        $null = Assert-DawnstrikeCaptureTaskSafety -Xml ([string]$final.xml) -RuntimeRoot $runtime -StateRoot $state -ExpectedPrincipal ([string]$finalPrincipal[0].InnerText) -ExpectedCandidateSha $CandidateSha -ExpectedInterpreterPath ([string]$hardeningReceipt.interpreter_path) -ExpectedInterpreterSha256 ([string]$hardeningReceipt.interpreter_sha256) -ExpectedInterpreterSignerThumbprint ([string]$hardeningReceipt.interpreter_signer_thumbprint) -ExpectedEnabled "true" -RequirePasswordPrincipal -RequireRunner
+        $null = Assert-DawnstrikeCaptureTaskSafety -Xml ([string]$final.xml) -RuntimeRoot $runtime -StateRoot $state -ExpectedReleaseRoot $script:DawnstrikeCaptureRebindCodeRoot -ExpectedPrincipal ([string]$finalPrincipal[0].InnerText) -ExpectedCandidateSha $CandidateSha -ExpectedInterpreterPath ([string]$hardeningReceipt.interpreter_path) -ExpectedInterpreterSha256 ([string]$hardeningReceipt.interpreter_sha256) -ExpectedInterpreterSignerThumbprint ([string]$hardeningReceipt.interpreter_signer_thumbprint) -ExpectedEnabled "true" -RequirePasswordPrincipal -RequireRunner
         if ($journalPhase -eq "PRE_ENABLE") {
             $operationJournal = Set-DawnstrikeRuntimeOperationJournalPhase -StateRoot $state -JournalPath $operationJournalPath `
                 -Lock $rebindLock -Operation capture_task_rebind -Phase POST_ENABLE `
@@ -2002,7 +2430,7 @@ try {
             Stop-Process -Id $PID -Force
         }
         Remove-DawnstrikeCapturePrepared $preparedPath
-        [string]$result.Stdout | ConvertFrom-Json | ConvertTo-Json -Depth 8 -Compress
+        Write-DawnstrikeCaptureRebindTrustedTerminalEnvelope
     }
     catch {
         $failure = $_
@@ -2038,7 +2466,7 @@ try {
                 if (Test-Path -LiteralPath $preparedPath -PathType Leaf) {
                     try { Remove-DawnstrikeCapturePrepared $preparedPath } catch { }
                 }
-                Write-Output ([System.IO.File]::ReadAllText($receiptFull, [System.Text.UTF8Encoding]::new($false)).Trim())
+                Write-DawnstrikeCaptureRebindTrustedTerminalEnvelope
                 return
             }
             catch {

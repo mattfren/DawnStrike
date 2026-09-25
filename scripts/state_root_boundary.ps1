@@ -1,8 +1,45 @@
+$global:PSModuleAutoLoadingPreference = 'None'
+$env:PSModulePath = 'C:\Windows\System32\WindowsPowerShell\v1.0\Modules'
+if ([string]::IsNullOrWhiteSpace([string]$PSScriptRoot)) {
+    if (
+        [string]$global:DawnstrikePowerShellModuleBoundary.schema_version -cne
+        'dawnstrike.powershell_module_boundary.v1'
+    ) { throw 'In-memory StateRoot helper requires an established PowerShell module boundary.' }
+    & ${function:Initialize-DawnstrikePowerShellModuleBoundary}
+    if (
+        [string]$global:DawnstrikePowerShellSupportBoundary.schema_version -cne
+        'dawnstrike.powershell_native_support.v1'
+    ) { throw 'In-memory StateRoot helper requires exact precompiled native support.' }
+    $null = & ${function:Import-DawnstrikePowerShellSupport}
+}
+else {
+    . ([IO.Path]::Combine($PSScriptRoot, 'powershell_module_boundary.ps1'))
+    . ([IO.Path]::Combine($PSScriptRoot, 'powershell_native_support.ps1'))
+}
+
 Set-StrictMode -Version Latest
 
 $script:DawnstrikeStateBoundaryFixedRoot = 'C:\r\dawnstrike-state'
 $script:DawnstrikeStateBoundaryEvidenceRoot = 'C:\ProgramData\Dawnstrike'
-$script:DawnstrikeStateBoundaryInstalledHelper = 'C:\Program Files\Dawnstrike\bin\state_root_boundary.ps1'
+$launcherLoadedBoundary = Get-Variable `
+    -Name DawnstrikeReleaseStateBoundaryPath -Scope Script -ErrorAction SilentlyContinue
+if (
+    $null -ne $launcherLoadedBoundary -and
+    [string]$launcherLoadedBoundary.Value -match `
+        '^C:\\Program Files\\Dawnstrike\\releases\\[0-9a-f]{40}\\scripts\\state_root_boundary\.ps1$'
+) {
+    # The protected launcher retains the exact source handle and evaluates its
+    # captured bytes as a ScriptBlock, for which PSScriptRoot is intentionally
+    # unavailable. Bind to the already validated protected source path.
+    $script:DawnstrikeStateBoundaryInstalledHelper = [IO.Path]::GetFullPath(
+        [string]$launcherLoadedBoundary.Value
+    )
+}
+else {
+    $script:DawnstrikeStateBoundaryInstalledHelper = [IO.Path]::GetFullPath(
+        (Join-Path $PSScriptRoot 'state_root_boundary.ps1')
+    )
+}
 $script:DawnstrikeStateBoundaryCanonicalTasks = @(
     'Dawnstrike AlphaOps Morning',
     'Dawnstrike AlphaOps Monitor 5m',
@@ -12,204 +49,9 @@ $script:DawnstrikeStateBoundaryCanonicalTasks = @(
 )
 $script:DawnstrikeStateBoundaryAuxiliaryTask = 'Dawnstrike Delayed SIP Capture'
 
+$null = & ${function:Import-DawnstrikePowerShellSupport}
 if (-not ('Dawnstrike.StateBoundary.BoundPath' -as [type])) {
-    Add-Type -TypeDefinition @'
-using System;
-using System.Collections.Generic;
-using System.ComponentModel;
-using System.IO;
-using System.Runtime.InteropServices;
-using Microsoft.Win32.SafeHandles;
-
-namespace Dawnstrike.StateBoundary {
-    [StructLayout(LayoutKind.Sequential)]
-    internal struct ByHandleFileInformation {
-        public uint FileAttributes;
-        public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
-        public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
-        public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
-        public uint VolumeSerialNumber;
-        public uint FileSizeHigh;
-        public uint FileSizeLow;
-        public uint NumberOfLinks;
-        public uint FileIndexHigh;
-        public uint FileIndexLow;
-    }
-
-    internal static class NativeMethods {
-        internal const uint GENERIC_READ = 0x80000000;
-        internal const uint OPEN_EXISTING = 3;
-        internal const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
-        internal const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
-        internal const uint FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400;
-        internal const uint MOVEFILE_REPLACE_EXISTING = 0x00000001;
-        internal const uint MOVEFILE_WRITE_THROUGH = 0x00000008;
-
-        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        internal static extern SafeFileHandle CreateFileW(
-            string fileName,
-            uint desiredAccess,
-            FileShare shareMode,
-            IntPtr securityAttributes,
-            uint creationDisposition,
-            uint flagsAndAttributes,
-            IntPtr templateFile);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        internal static extern bool GetFileInformationByHandle(
-            SafeFileHandle handle,
-            out ByHandleFileInformation information);
-
-        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        internal static extern bool MoveFileExW(
-            string existingFileName,
-            string newFileName,
-            uint flags);
-    }
-
-    public sealed class BoundPath : IDisposable {
-        public SafeFileHandle Handle { get; private set; }
-        public string Identity { get; private set; }
-        public uint Attributes { get; private set; }
-
-        private BoundPath(SafeFileHandle handle, string identity, uint attributes) {
-            Handle = handle;
-            Identity = identity;
-            Attributes = attributes;
-        }
-
-        public static BoundPath Open(string path) {
-            SafeFileHandle handle = NativeMethods.CreateFileW(
-                path,
-                // A metadata-only READ_CONTROL handle does not prevent a
-                // modern Windows directory rename. GENERIC_READ combined
-                // with a share mask that omits Delete does, while remaining
-                // available to the admitted read/execute principal.
-                NativeMethods.GENERIC_READ,
-                FileShare.Read | FileShare.Write,
-                IntPtr.Zero,
-                NativeMethods.OPEN_EXISTING,
-                NativeMethods.FILE_FLAG_BACKUP_SEMANTICS |
-                    NativeMethods.FILE_FLAG_OPEN_REPARSE_POINT,
-                IntPtr.Zero);
-            if (handle.IsInvalid) {
-                int error = Marshal.GetLastWin32Error();
-                handle.Dispose();
-                throw new Win32Exception(error, "Could not bind StateRoot path: " + path);
-            }
-            ByHandleFileInformation information;
-            if (!NativeMethods.GetFileInformationByHandle(handle, out information)) {
-                int error = Marshal.GetLastWin32Error();
-                handle.Dispose();
-                throw new Win32Exception(error, "Could not identify StateRoot path: " + path);
-            }
-            if ((information.FileAttributes & NativeMethods.FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-                handle.Dispose();
-                throw new InvalidOperationException("StateRoot boundary contains a reparse point: " + path);
-            }
-            string identity = information.VolumeSerialNumber.ToString("x8") + ":" +
-                information.FileIndexHigh.ToString("x8") +
-                information.FileIndexLow.ToString("x8");
-            return new BoundPath(handle, identity, information.FileAttributes);
-        }
-
-        public void Dispose() {
-            if (Handle != null) {
-                Handle.Dispose();
-                Handle = null;
-            }
-        }
-    }
-
-    public sealed class BoundPathChain : IDisposable {
-        private List<BoundPath> paths;
-        public string Identity { get; private set; }
-        public uint Attributes { get; private set; }
-
-        private BoundPathChain(List<BoundPath> paths) {
-            this.paths = paths;
-            BoundPath terminal = paths[paths.Count - 1];
-            Identity = terminal.Identity;
-            Attributes = terminal.Attributes;
-        }
-
-        public static BoundPathChain Open(string path) {
-            string full = Path.GetFullPath(path);
-            string root = Path.GetPathRoot(full);
-            if (String.IsNullOrEmpty(root)) {
-                throw new InvalidOperationException("StateRoot boundary path has no trusted volume anchor.");
-            }
-            List<BoundPath> opened = new List<BoundPath>();
-            try {
-                string cursor = root;
-                opened.Add(BoundPath.Open(cursor));
-                string tail = full.Substring(root.Length);
-                string[] components = tail.Split(
-                    new char[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar },
-                    StringSplitOptions.RemoveEmptyEntries);
-                foreach (string component in components) {
-                    cursor = Path.Combine(cursor, component);
-                    opened.Add(BoundPath.Open(cursor));
-                }
-                return new BoundPathChain(opened);
-            }
-            catch {
-                for (int index = opened.Count - 1; index >= 0; index--) {
-                    opened[index].Dispose();
-                }
-                throw;
-            }
-        }
-
-        public void Dispose() {
-            if (paths == null) { return; }
-            for (int index = paths.Count - 1; index >= 0; index--) {
-                paths[index].Dispose();
-            }
-            paths = null;
-        }
-    }
-
-    public sealed class DisposableGroup : IDisposable {
-        private IDisposable[] items;
-        public DisposableGroup(IDisposable[] items) { this.items = items; }
-        public void Dispose() {
-            if (items == null) { return; }
-            for (int index = items.Length - 1; index >= 0; index--) {
-                if (items[index] != null) { items[index].Dispose(); }
-            }
-            items = null;
-        }
-    }
-
-    public static class AtomicFile {
-        public static void Replace(string source, string destination) {
-            if (!NativeMethods.MoveFileExW(
-                    source,
-                    destination,
-                    NativeMethods.MOVEFILE_REPLACE_EXISTING |
-                        NativeMethods.MOVEFILE_WRITE_THROUGH)) {
-                throw new Win32Exception(
-                    Marshal.GetLastWin32Error(),
-                    "Could not atomically replace protected StateRoot evidence: " + destination);
-            }
-        }
-
-        public static void MoveNoReplace(string source, string destination) {
-            if (!NativeMethods.MoveFileExW(
-                    source,
-                    destination,
-                    NativeMethods.MOVEFILE_WRITE_THROUGH)) {
-                throw new Win32Exception(
-                    Marshal.GetLastWin32Error(),
-                    "Could not atomically create protected StateRoot evidence: " + destination);
-            }
-        }
-    }
-}
-'@
+    throw 'Precompiled Dawnstrike StateRoot support did not load.'
 }
 
 function Get-DawnstrikeStateBoundarySha256Bytes {
@@ -639,6 +481,52 @@ function Assert-DawnstrikeStateBoundaryTaskInventoryMatches {
     return $true
 }
 
+function Assert-DawnstrikeStateBoundaryFailClosedTaskInventory {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$ExpectedTasks,
+        [Parameter(Mandatory = $true)]$LiveTasks,
+        [Parameter(Mandatory = $true)][string[]]$WriterSids
+    )
+    $expected = @{}
+    foreach ($task in @($ExpectedTasks)) {
+        $name = [string]$task.task_name
+        if ([string]::IsNullOrWhiteSpace($name) -or $expected.ContainsKey($name)) {
+            throw 'Fail-closed StateRoot task inventory contains an invalid or duplicate task.'
+        }
+        $expected[$name] = $task
+    }
+    if (@($LiveTasks).Count -ne $expected.Count) {
+        throw 'Fail-closed live task set differs from the protected predecessor.'
+    }
+    foreach ($task in @($LiveTasks)) {
+        $name = [string]$task.task_name
+        $prior = if ($expected.ContainsKey($name)) { $expected[$name] } else { $null }
+        if ($null -eq $prior -or [string]$task.state -cne 'Disabled' -or
+            [string]$prior.task_path -cne [string]$task.task_path -or
+            [string]$prior.principal_sid -cne [string]$task.principal_sid -or
+            [string]$prior.logon_type -cne [string]$task.logon_type -or
+            [string]$prior.run_level -cne [string]$task.run_level -or
+            [string]$prior.definition_contract_sha256 -cne
+                [string]$task.definition_contract_sha256 -or
+            [string]$prior.action_contract_sha256 -cne
+                [string]$task.action_contract_sha256 -or
+            [string]$prior.action_section_sha256 -cne
+                [string]$task.action_section_sha256 -or
+            [bool]$prior.canonical -ne [bool]$task.canonical -or
+            [string]$task.principal_sid -notin @($WriterSids)) {
+            throw 'Fail-closed live task differs from the exact predecessor except for enablement.'
+        }
+        if ([bool]$task.canonical -and (
+            [string]$prior.canonical_task_definition_contract_sha256 -cne
+                [string]$task.canonical_task_definition_contract_sha256 -or
+            [string]$prior.canonical_task_action_contract_sha256 -cne
+                [string]$task.canonical_task_action_contract_sha256
+        )) { throw 'Fail-closed canonical aggregate differs from the protected predecessor.' }
+    }
+    return $true
+}
+
 function Get-DawnstrikeStateBoundaryTaskBindingHash {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)]$Tasks)
@@ -699,7 +587,7 @@ function Assert-DawnstrikeStateBoundaryTaskPrincipalsMatch {
 function Get-DawnstrikeStateBoundaryTaskMutationAffectedNames {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][ValidateSet(
-        'HardenCapture', 'Activate', 'RebindCapture', 'Rollback'
+        'HardenCapture', 'BootstrapBaseline', 'Activate', 'RebindCapture', 'Rollback'
     )][string]$Mode)
     if ($Mode -in @('HardenCapture', 'RebindCapture')) {
         return @($script:DawnstrikeStateBoundaryAuxiliaryTask)
@@ -719,13 +607,31 @@ function Get-DawnstrikeStateBoundaryTaskMutationIntentPath {
     return Join-Path $EvidenceRoot 'state-boundary-task-mutation-pending.json'
 }
 
+function Get-DawnstrikeStateBoundaryCandidateMigrationIntentPath {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$EvidenceRoot)
+    # Candidate migration and task resealing share one atomic no-replace
+    # sentinel so the two protected mutation classes can never race after
+    # independently observing an idle boundary.
+    return Get-DawnstrikeStateBoundaryTaskMutationIntentPath -EvidenceRoot $EvidenceRoot
+}
+
 function Get-DawnstrikeStateBoundaryTaskMutationIntent {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string]$EvidenceRoot)
     $path = Get-DawnstrikeStateBoundaryTaskMutationIntentPath -EvidenceRoot $EvidenceRoot
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
     $read = Read-DawnstrikeStateBoundaryProtectedJson -Path $path
-    try { return [pscustomobject]@{ path = $path; payload = $read.payload; sha256 = $read.sha256 } }
+    try {
+        $schema = [string]$read.payload.schema_version
+        if ($schema -ceq 'dawnstrike.state_boundary_candidate_migration_intent.v1') {
+            return $null
+        }
+        if ($schema -cne 'dawnstrike.state_boundary_task_mutation.v1') {
+            throw 'Protected StateRoot mutation sentinel has an unknown schema.'
+        }
+        return [pscustomobject]@{ path = $path; payload = $read.payload; sha256 = $read.sha256 }
+    }
     finally { $read.stream.Dispose() }
 }
 
@@ -739,19 +645,75 @@ function Assert-DawnstrikeStateBoundaryNoTaskMutation {
     return $true
 }
 
+function Get-DawnstrikeStateBoundaryCandidateMigrationIntent {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$EvidenceRoot)
+    $path = Get-DawnstrikeStateBoundaryCandidateMigrationIntentPath `
+        -EvidenceRoot $EvidenceRoot
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+    $read = Read-DawnstrikeStateBoundaryProtectedJson -Path $path
+    try {
+        $schema = [string]$read.payload.schema_version
+        if ($schema -ceq 'dawnstrike.state_boundary_task_mutation.v1') {
+            return $null
+        }
+        if ($schema -cne 'dawnstrike.state_boundary_candidate_migration_intent.v1') {
+            throw 'Protected StateRoot mutation sentinel has an unknown schema.'
+        }
+        return [pscustomobject]@{
+            path = $path
+            payload = $read.payload
+            sha256 = $read.sha256
+        }
+    }
+    finally { $read.stream.Dispose() }
+}
+
+function Assert-DawnstrikeStateBoundaryNoCandidateMigration {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$EvidenceRoot)
+    $intent = Get-DawnstrikeStateBoundaryCandidateMigrationIntent `
+        -EvidenceRoot $EvidenceRoot
+    if ($null -ne $intent) {
+        throw 'StateRoot candidate binding has an unresolved protected migration intent; dispatch is denied.'
+    }
+    return $true
+}
+
 function Assert-DawnstrikeStateBoundaryTaskMutationIntent {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]$Intent,
         [Parameter(Mandatory = $true)][string]$StateRoot,
         [Parameter(Mandatory = $true)][ValidateSet(
-            'HardenCapture', 'Activate', 'RebindCapture', 'Rollback'
+            'HardenCapture', 'BootstrapBaseline', 'Activate', 'RebindCapture', 'Rollback'
         )][string]$Mode,
         [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedSha,
         [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedTree,
         [ValidatePattern('^$|^[0-9a-f]{64}$')][string]$RequestContractSha256 = ''
     )
     $payload = $Intent.payload
+    $activationLineage = Get-DawnstrikeStateBoundaryActivationLineage -Receipt $payload
+    $currentRuntimeAuthorization = Get-DawnstrikeStateBoundaryRuntimeAuthorization `
+        -Receipt $payload -Kind current -StateRoot $StateRoot
+    $rollbackRuntimeAuthorization = Get-DawnstrikeStateBoundaryRuntimeAuthorization `
+        -Receipt $payload -Kind rollback -StateRoot $StateRoot
+    if ($Mode -eq 'Activate' -and
+        [string]$currentRuntimeAuthorization.status -cne 'AUTHORIZED') {
+        throw 'Protected activation mutation intent has no authorized current runtime.'
+    }
+    if ($Mode -eq 'BootstrapBaseline' -and (
+        [string]$currentRuntimeAuthorization.status -notin @('NONE', 'LEGACY_NONE') -or
+        [string]$rollbackRuntimeAuthorization.status -notin @('NONE', 'LEGACY_NONE') -or
+        [string]$activationLineage.status -notin @('NONE', 'LEGACY_NONE')
+    )) { throw 'Protected baseline bootstrap is restricted to the first unsealed runtime.' }
+    if ($Mode -eq 'Rollback' -and (
+        [string]$activationLineage.status -cne 'ACTIVE' -or
+        [string]$currentRuntimeAuthorization.status -cne 'AUTHORIZED' -or
+        [string]$rollbackRuntimeAuthorization.status -cne 'AUTHORIZED'
+    )) {
+        throw 'Protected rollback mutation intent has no activation lineage.'
+    }
     $expectedAffected = @(Get-DawnstrikeStateBoundaryTaskMutationAffectedNames -Mode $Mode)
     $actualAffected = @($payload.affected_tasks | ForEach-Object { [string]$_ })
     $expectedCompletionPath = Join-Path $script:DawnstrikeStateBoundaryEvidenceRoot (
@@ -814,13 +776,13 @@ function Assert-DawnstrikeStateBoundaryTerminalTaskContract {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][ValidateSet(
-            'HardenCapture', 'Activate', 'RebindCapture', 'Rollback'
+            'HardenCapture', 'BootstrapBaseline', 'Activate', 'RebindCapture', 'Rollback'
         )][string]$Mode,
         [Parameter(Mandatory = $true)]$TerminalRecord,
         [Parameter(Mandatory = $true)]$LiveTasks
     )
 
-    if ($Mode -in @('Activate', 'Rollback')) {
+    if ($Mode -in @('BootstrapBaseline', 'Activate', 'Rollback')) {
         $canonical = @()
         foreach ($name in $script:DawnstrikeStateBoundaryCanonicalTasks) {
             $matches = @($LiveTasks | Where-Object {
@@ -838,8 +800,8 @@ function Assert-DawnstrikeStateBoundaryTerminalTaskContract {
                 [string]$task.canonical_task_contract_sha256 -cne [string]$first.canonical_task_contract_sha256 -or
                 [string]$task.canonical_task_definition_contract_sha256 -cne [string]$first.canonical_task_definition_contract_sha256 -or
                 [string]$task.canonical_task_action_contract_sha256 -cne [string]$first.canonical_task_action_contract_sha256 -or
-                [string]$task.state -cne 'Ready'
-            ) { throw 'Terminal canonical task inventory is inconsistent or not Ready.' }
+                [string]$task.state -cne $(if ($Mode -eq 'BootstrapBaseline') { 'Disabled' } else { 'Ready' })
+            ) { throw 'Terminal canonical task inventory has an inconsistent state or contract.' }
         }
         if (
             [int]$TerminalRecord.task_count -ne $script:DawnstrikeStateBoundaryCanonicalTasks.Count -or
@@ -853,9 +815,9 @@ function Assert-DawnstrikeStateBoundaryTerminalTaskContract {
             task_contract_sha256 = [string]$first.canonical_task_contract_sha256
             task_definition_contract_sha256 = [string]$first.canonical_task_definition_contract_sha256
             task_action_contract_sha256 = [string]$first.canonical_task_action_contract_sha256
-            required_state = 'Ready'
+            required_state = if ($Mode -eq 'BootstrapBaseline') { 'Disabled' } else { 'Ready' }
         }
-        if ($Mode -eq 'Activate') { return [pscustomobject]$contract }
+        if ($Mode -in @('BootstrapBaseline', 'Activate')) { return [pscustomobject]$contract }
 
         if ($TerminalRecord.auxiliary_capture_present -isnot [bool] -or
             [string]::IsNullOrWhiteSpace([string]$TerminalRecord.auxiliary_capture_disposition)) {
@@ -974,12 +936,330 @@ function Copy-DawnstrikeStateBoundaryReceipt {
     return $copy
 }
 
+function Get-DawnstrikeStateBoundaryActivationLineage {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$Receipt)
+
+    $fields = @(
+        'last_activation_id',
+        'last_activation_terminal_receipt_relative_path',
+        'last_activation_terminal_receipt_sha256',
+        'last_activation_terminal_journal_relative_path',
+        'last_activation_terminal_journal_sha256'
+    )
+    $present = @($fields | Where-Object {
+        $Receipt.PSObject.Properties.Name -contains $_
+    })
+    if ($present.Count -eq 0) {
+        # Existing protected installations predate activation-lineage sealing.
+        # They may be upgraded by a governed Activate completion, but they can
+        # never authorize Rollback because no activation identity is present.
+        return [pscustomobject]@{
+            status = 'LEGACY_NONE'
+            activation_id = 'NONE'
+            receipt_relative_path = 'NONE'
+            receipt_sha256 = 'NONE'
+            journal_relative_path = 'NONE'
+            journal_sha256 = 'NONE'
+        }
+    }
+    if ($present.Count -ne $fields.Count) {
+        throw 'Protected StateRoot activation lineage is partial.'
+    }
+    $activationId = [string]$Receipt.last_activation_id
+    $receiptRelative = [string]$Receipt.last_activation_terminal_receipt_relative_path
+    $receiptSha256 = [string]$Receipt.last_activation_terminal_receipt_sha256
+    $journalRelative = [string]$Receipt.last_activation_terminal_journal_relative_path
+    $journalSha256 = [string]$Receipt.last_activation_terminal_journal_sha256
+    if ($activationId -ceq 'NONE') {
+        if ($receiptRelative -cne 'NONE' -or $receiptSha256 -cne 'NONE' -or
+            $journalRelative -cne 'NONE' -or $journalSha256 -cne 'NONE') {
+            throw 'Protected StateRoot empty activation lineage is not exact.'
+        }
+        return [pscustomobject]@{
+            status = 'NONE'
+            activation_id = 'NONE'
+            receipt_relative_path = 'NONE'
+            receipt_sha256 = 'NONE'
+            journal_relative_path = 'NONE'
+            journal_sha256 = 'NONE'
+        }
+    }
+    if ($activationId -notmatch '^[0-9a-f]{24}$' -or
+        $receiptRelative -cne "receipts/runtime-activation/runtime-activation-$activationId.json" -or
+        $journalRelative -cne "receipts/runtime-operation/runtime-activation-$activationId.json" -or
+        $receiptSha256 -notmatch '^[0-9a-f]{64}$' -or
+        $journalSha256 -notmatch '^[0-9a-f]{64}$') {
+        throw 'Protected StateRoot activation lineage identity is invalid.'
+    }
+    return [pscustomobject]@{
+        status = 'ACTIVE'
+        activation_id = $activationId
+        receipt_relative_path = $receiptRelative
+        receipt_sha256 = $receiptSha256
+        journal_relative_path = $journalRelative
+        journal_sha256 = $journalSha256
+    }
+}
+
+function Get-DawnstrikeStateBoundaryRuntimeAuthorizationMaterial {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$Material,
+        [Parameter(Mandatory = $true)][string]$StateRoot,
+        [ValidateSet('', 'ACTIVATE', 'BOOTSTRAP')][string]$ExpectedOperationType = '',
+        [string]$ExpectedSha256 = ''
+    )
+
+    $required = @(
+        'schema_version', 'operation_type', 'operation_id',
+        'request_contract_sha256', 'runtime_sha', 'runtime_tree',
+        'runtime_origin_identity', 'runtime_origin_sha256',
+        'protected_release_root', 'release_admission_path',
+        'release_admission_sha256', 'python_path', 'python_sha256',
+        'python_boundary_manifest_path', 'python_boundary_manifest_sha256',
+        'requirements_lock_sha256', 'requirements_lock_blob',
+        'dependency_root', 'dependency_manifest_path',
+        'dependency_manifest_sha256', 'launch_manifests',
+        'canonical_task_definition_contract_sha256',
+        'canonical_task_action_contract_sha256', 'research_only',
+        'broker_execution_enabled'
+    )
+    $names = @($Material.PSObject.Properties.Name | ForEach-Object { [string]$_ })
+    if (($names.Count -ne $required.Count) -or
+        (($names | Sort-Object) -join "`n") -cne (($required | Sort-Object) -join "`n")) {
+        throw 'Protected runtime authorization material has a non-exact field set.'
+    }
+    $operationType = [string]$Material.operation_type
+    $runtimeSha = [string]$Material.runtime_sha
+    $state = [IO.Path]::GetFullPath($StateRoot).TrimEnd('\')
+    $release = [IO.Path]::GetFullPath(
+        "C:\Program Files\Dawnstrike\releases\$runtimeSha"
+    ).TrimEnd('\')
+    $admission = Join-Path (Join-Path $release '.git') 'dawnstrike-host-admission-v1.json'
+    $python = 'C:\Program Files\Dawnstrike\Python313\python.exe'
+    $pythonBoundary = 'C:\Program Files\Dawnstrike\Python313\.dawnstrike-python-boundary-v1.json'
+    $dependency = [IO.Path]::GetFullPath(
+        (Join-Path 'C:\Program Files\Dawnstrike\Dependencies' `
+            ([string]$Material.requirements_lock_sha256))
+    ).TrimEnd('\')
+    $dependencyManifest = Join-Path $dependency '.dawnstrike-dependency-boundary-v1.json'
+    if (
+        [string]$Material.schema_version -cne 'dawnstrike.protected_runtime_authorization_material.v1' -or
+        $operationType -notin @('ACTIVATE', 'BOOTSTRAP') -or
+        ($ExpectedOperationType -and $operationType -cne $ExpectedOperationType) -or
+        [string]$Material.operation_id -notmatch '^[0-9a-f]{32}$' -or
+        [string]$Material.request_contract_sha256 -notmatch '^[0-9a-f]{64}$' -or
+        $runtimeSha -notmatch '^[0-9a-f]{40}$' -or
+        [string]$Material.runtime_tree -notmatch '^[0-9a-f]{40}$' -or
+        [string]::IsNullOrWhiteSpace([string]$Material.runtime_origin_identity) -or
+        [string]$Material.runtime_origin_sha256 -notmatch '^[0-9a-f]{64}$' -or
+        -not [string]::Equals(
+            [string]$Material.protected_release_root, $release,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        -not [string]::Equals(
+            [string]$Material.release_admission_path, $admission,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        [string]$Material.release_admission_sha256 -notmatch '^[0-9a-f]{64}$' -or
+        -not [string]::Equals([string]$Material.python_path, $python, [StringComparison]::OrdinalIgnoreCase) -or
+        [string]$Material.python_sha256 -notmatch '^[0-9a-f]{64}$' -or
+        -not [string]::Equals(
+            [string]$Material.python_boundary_manifest_path, $pythonBoundary,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        [string]$Material.python_boundary_manifest_sha256 -notmatch '^[0-9a-f]{64}$' -or
+        [string]$Material.requirements_lock_sha256 -notmatch '^[0-9a-f]{64}$' -or
+        [string]$Material.requirements_lock_blob -notmatch '^[0-9a-f]{40}$' -or
+        -not [string]::Equals(
+            [string]$Material.dependency_root, $dependency,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        -not [string]::Equals(
+            [string]$Material.dependency_manifest_path, $dependencyManifest,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        [string]$Material.dependency_manifest_sha256 -notmatch '^[0-9a-f]{64}$' -or
+        [string]$Material.canonical_task_definition_contract_sha256 -notmatch '^[0-9a-f]{64}$' -or
+        [string]$Material.canonical_task_action_contract_sha256 -notmatch '^[0-9a-f]{64}$' -or
+        $Material.research_only -ne $true -or
+        $Material.broker_execution_enabled -ne $false
+    ) { throw 'Protected runtime authorization material identity is invalid.' }
+    $runnerByTask = [ordered]@{
+        'Dawnstrike AlphaOps Morning' = 'run_alphaops_morning.ps1'
+        'Dawnstrike AlphaOps Monitor 5m' = 'run_alphaops_monitor.ps1'
+        'Dawnstrike AlphaOps EOD Full Report' = 'run_alphaops_eod.ps1'
+        'Dawnstrike AlphaOps V6 Weekly Training' = 'run_alphaops_weekly_training.ps1'
+        'Dawnstrike 10of10 Daily Finalize' = 'run_daily_finalize.ps1'
+    }
+    $manifests = @($Material.launch_manifests)
+    if ($manifests.Count -ne $runnerByTask.Count) {
+        throw 'Protected runtime authorization does not bind all five launch manifests.'
+    }
+    for ($index = 0; $index -lt $runnerByTask.Count; $index += 1) {
+        $taskName = @($runnerByTask.Keys)[$index]
+        $runner = [string]$runnerByTask[$taskName]
+        $entry = $manifests[$index]
+        $entryNames = @($entry.PSObject.Properties.Name | ForEach-Object { [string]$_ })
+        if ((($entryNames | Sort-Object) -join "`n") -cne
+            ((@('task_name', 'task_script', 'path', 'sha256') | Sort-Object) -join "`n")) {
+            throw 'Protected runtime launch-manifest entry has a non-exact field set.'
+        }
+        $expectedPath = Join-Path $state (
+            "receipts\scheduler-launch\$runtimeSha-$runner.json"
+        )
+        if (
+            [string]$entry.task_name -cne $taskName -or
+            [string]$entry.task_script -cne $runner -or
+            -not [string]::Equals(
+                [IO.Path]::GetFullPath([string]$entry.path),
+                [IO.Path]::GetFullPath($expectedPath),
+                [StringComparison]::OrdinalIgnoreCase
+            ) -or
+            [string]$entry.sha256 -notmatch '^[0-9a-f]{64}$'
+        ) { throw 'Protected runtime launch-manifest identity is invalid.' }
+    }
+    $materialSha256 = Get-DawnstrikeStateBoundarySha256Text (
+        ConvertTo-DawnstrikeStateBoundaryCanonicalJsonString $Material
+    )
+    if ($ExpectedSha256 -and $materialSha256 -cne $ExpectedSha256) {
+        throw 'Protected runtime authorization material hash is invalid.'
+    }
+    return [pscustomobject]@{
+        material = $Material
+        sha256 = $materialSha256
+        operation_type = $operationType
+        runtime_sha = $runtimeSha
+        runtime_tree = [string]$Material.runtime_tree
+    }
+}
+
+function Get-DawnstrikeStateBoundaryRuntimeAuthorization {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$Receipt,
+        [Parameter(Mandatory = $true)][ValidateSet('current', 'rollback')][string]$Kind,
+        [Parameter(Mandatory = $true)][string]$StateRoot
+    )
+
+    $contractName = $Kind + '_runtime_authorization_contract'
+    $hashName = $Kind + '_runtime_authorization_sha256'
+    $hasContract = $Receipt.PSObject.Properties.Name -contains $contractName
+    $hasHash = $Receipt.PSObject.Properties.Name -contains $hashName
+    if (-not $hasContract -and -not $hasHash) {
+        return [pscustomobject]@{ status = 'LEGACY_NONE'; contract = $null; sha256 = 'NONE' }
+    }
+    if ($hasContract -ne $hasHash) {
+        throw "Protected $Kind runtime authorization is partial."
+    }
+    $contract = $Receipt.$contractName
+    $expectedHash = [string]$Receipt.$hashName
+    if ($contract -is [string] -and [string]$contract -ceq 'NONE') {
+        if ($expectedHash -cne 'NONE') {
+            throw "Protected empty $Kind runtime authorization is not exact."
+        }
+        return [pscustomobject]@{ status = 'NONE'; contract = $null; sha256 = 'NONE' }
+    }
+    if ($null -eq $contract -or $expectedHash -notmatch '^[0-9a-f]{64}$') {
+        throw "Protected $Kind runtime authorization identity is invalid."
+    }
+    $required = @(
+        'schema_version', 'material', 'material_sha256', 'terminal_id',
+        'terminal_receipt_relative_path', 'terminal_receipt_sha256',
+        'terminal_journal_relative_path', 'terminal_journal_sha256'
+    )
+    $names = @($contract.PSObject.Properties.Name | ForEach-Object { [string]$_ })
+    if (($names.Count -ne $required.Count) -or
+        (($names | Sort-Object) -join "`n") -cne (($required | Sort-Object) -join "`n")) {
+        throw "Protected $Kind runtime authorization has a non-exact field set."
+    }
+    $terminalId = [string]$contract.terminal_id
+    if (
+        [string]$contract.schema_version -cne 'dawnstrike.protected_runtime_authorization.v1' -or
+        $terminalId -notmatch '^[0-9a-f]{24}$' -or
+        [string]$contract.terminal_receipt_relative_path -cne
+            "receipts/runtime-activation/runtime-activation-$terminalId.json" -or
+        [string]$contract.terminal_journal_relative_path -cne
+            "receipts/runtime-operation/runtime-activation-$terminalId.json" -or
+        [string]$contract.terminal_receipt_sha256 -notmatch '^[0-9a-f]{64}$' -or
+        [string]$contract.terminal_journal_sha256 -notmatch '^[0-9a-f]{64}$'
+    ) { throw "Protected $Kind runtime authorization terminal identity is invalid." }
+    $material = Get-DawnstrikeStateBoundaryRuntimeAuthorizationMaterial `
+        -Material $contract.material -StateRoot $StateRoot `
+        -ExpectedSha256 ([string]$contract.material_sha256)
+    $actualHash = Get-DawnstrikeStateBoundarySha256Text (
+        ConvertTo-DawnstrikeStateBoundaryCanonicalJsonString $contract
+    )
+    if ($actualHash -cne $expectedHash) {
+        throw "Protected $Kind runtime authorization contract hash is invalid."
+    }
+    return [pscustomobject]@{
+        status = 'AUTHORIZED'
+        contract = $contract
+        sha256 = $actualHash
+        material = $material.material
+        operation_type = $material.operation_type
+        runtime_sha = $material.runtime_sha
+        runtime_tree = $material.runtime_tree
+        terminal_id = $terminalId
+    }
+}
+
+function New-DawnstrikeStateBoundaryRuntimeAuthorization {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$Material,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')]
+        [string]$MaterialSha256,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{24}$')]
+        [string]$TerminalId,
+        [Parameter(Mandatory = $true)][string]$TerminalReceiptRelativePath,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')]
+        [string]$TerminalReceiptSha256,
+        [Parameter(Mandatory = $true)][string]$TerminalJournalRelativePath,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')]
+        [string]$TerminalJournalSha256,
+        [Parameter(Mandatory = $true)][string]$StateRoot
+    )
+
+    $null = Get-DawnstrikeStateBoundaryRuntimeAuthorizationMaterial `
+        -Material $Material -StateRoot $StateRoot -ExpectedSha256 $MaterialSha256
+    $contract = [pscustomobject][ordered]@{
+        schema_version = 'dawnstrike.protected_runtime_authorization.v1'
+        material = $Material
+        material_sha256 = $MaterialSha256.ToLowerInvariant()
+        terminal_id = $TerminalId.ToLowerInvariant()
+        terminal_receipt_relative_path = $TerminalReceiptRelativePath
+        terminal_receipt_sha256 = $TerminalReceiptSha256.ToLowerInvariant()
+        terminal_journal_relative_path = $TerminalJournalRelativePath
+        terminal_journal_sha256 = $TerminalJournalSha256.ToLowerInvariant()
+    }
+    $hash = Get-DawnstrikeStateBoundarySha256Text (
+        ConvertTo-DawnstrikeStateBoundaryCanonicalJsonString $contract
+    )
+    $probe = [pscustomobject]@{
+        current_runtime_authorization_contract = $contract
+        current_runtime_authorization_sha256 = $hash
+    }
+    $verified = Get-DawnstrikeStateBoundaryRuntimeAuthorization `
+        -Receipt $probe -Kind current -StateRoot $StateRoot
+    return [pscustomobject]@{
+        status = 'AUTHORIZED'
+        contract = $verified.contract
+        sha256 = $verified.sha256
+        runtime_sha = $verified.runtime_sha
+        runtime_tree = $verified.runtime_tree
+        operation_type = $verified.operation_type
+    }
+}
+
 function Get-DawnstrikeStateBoundaryTaskMutationTerminalEvidence {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$StateRoot,
         [Parameter(Mandatory = $true)][ValidateSet(
-            'HardenCapture', 'Activate', 'RebindCapture', 'Rollback'
+            'HardenCapture', 'BootstrapBaseline', 'Activate', 'RebindCapture', 'Rollback'
         )][string]$Mode,
         [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedSha,
         [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedTree,
@@ -1022,6 +1302,17 @@ function Get-DawnstrikeStateBoundaryTaskMutationTerminalEvidence {
         'Activate' {
             if ($receiptRelative -notmatch '^receipts/runtime-activation/runtime-activation-([0-9a-f]{24})\.json$') {
                 throw 'Activation task-mutation receipt path is not canonical.'
+            }
+            $activationId = [string]$Matches[1]
+            $expectedReceiptRelative = "receipts/runtime-activation/runtime-activation-$activationId.json"
+            $expectedJournalRelative = "receipts/runtime-operation/runtime-activation-$activationId.json"
+            $expectedSchema = 'dawnstrike.runtime_activation_receipt.v2'
+            $expectedStatus = 'COMPLETE'
+            $expectedOperation = 'runtime_activation'
+        }
+        'BootstrapBaseline' {
+            if ($receiptRelative -notmatch '^receipts/runtime-activation/runtime-activation-([0-9a-f]{24})\.json$') {
+                throw 'Baseline bootstrap task-mutation receipt path is not canonical.'
             }
             $activationId = [string]$Matches[1]
             $expectedReceiptRelative = "receipts/runtime-activation/runtime-activation-$activationId.json"
@@ -1094,8 +1385,43 @@ function Get-DawnstrikeStateBoundaryTaskMutationTerminalEvidence {
             $receiptPayload.research_only -ne $true -or
             $receiptPayload.broker_execution_enabled -ne $false
         ) { throw 'Task-mutation terminal receipt safety identity is invalid.' }
+        if ($Mode -in @('BootstrapBaseline', 'Activate')) {
+            if (
+                [string]$receiptPayload.activation_id -cne $activationId -or
+                [string]$receiptPayload.previous_sha -notmatch '^[0-9a-f]{40}$' -or
+                [string]$receiptPayload.previous_tree -notmatch '^[0-9a-f]{40}$' -or
+                [string]$receiptPayload.market_date -notmatch '^\d{4}-\d{2}-\d{2}$' -or
+                [string]$receiptPayload.scheduler_backup_manifest_sha256 -notmatch '^[0-9a-f]{64}$'
+            ) { throw 'Terminal activation receipt rollback identity is incomplete.' }
+            try {
+                $parsedMarketDate = [DateTime]::ParseExact(
+                    [string]$receiptPayload.market_date,
+                    'yyyy-MM-dd',
+                    [Globalization.CultureInfo]::InvariantCulture,
+                    [Globalization.DateTimeStyles]::None
+                )
+                if ($parsedMarketDate.ToString('yyyy-MM-dd') -cne [string]$receiptPayload.market_date) {
+                    throw 'noncanonical'
+                }
+            }
+            catch { throw 'Terminal activation receipt market date is invalid.' }
+            $expectedBaseline = $Mode -eq 'BootstrapBaseline'
+            if ($receiptPayload.bootstrap_baseline -isnot [bool] -or
+                [bool]$receiptPayload.bootstrap_baseline -ne $expectedBaseline) {
+                throw 'Terminal activation receipt baseline disposition is invalid.'
+            }
+            $material = Get-DawnstrikeStateBoundaryRuntimeAuthorizationMaterial `
+                -Material $receiptPayload.runtime_authorization_material `
+                -StateRoot $StateRoot `
+                -ExpectedOperationType $(if ($expectedBaseline) { 'BOOTSTRAP' } else { 'ACTIVATE' }) `
+                -ExpectedSha256 ([string]$receiptPayload.runtime_authorization_material_sha256)
+            if (
+                [string]$material.runtime_sha -cne $ExpectedSha.ToLowerInvariant() -or
+                [string]$material.runtime_tree -cne $ExpectedTree.ToLowerInvariant()
+            ) { throw 'Terminal runtime authorization material belongs to another release.' }
+        }
         $terminalTaskContract = [ordered]@{ mode = $Mode }
-        if ($Mode -in @('Activate', 'Rollback')) {
+        if ($Mode -in @('BootstrapBaseline', 'Activate', 'Rollback')) {
             if (
                 $receiptPayload.task_count -isnot [int] -or
                 [int]$receiptPayload.task_count -ne $script:DawnstrikeStateBoundaryCanonicalTasks.Count -or
@@ -1178,7 +1504,8 @@ function Get-DawnstrikeStateBoundaryTaskMutationTerminalEvidence {
         if (
             [string]$journalPayload.schema_version -notin @(
                 'dawnstrike.runtime_operation_journal.v1',
-                'dawnstrike.runtime_operation_journal.v2'
+                'dawnstrike.runtime_operation_journal.v2',
+                'dawnstrike.runtime_operation_journal.v3'
             ) -or
             [string]$journalPayload.operation -cne $expectedOperation -or
             [string]$journalPayload.phase -cne 'COMPLETE' -or
@@ -1189,6 +1516,20 @@ function Get-DawnstrikeStateBoundaryTaskMutationTerminalEvidence {
             $journalPayload.research_only -ne $true -or
             $journalPayload.broker_execution_enabled -ne $false
         ) { throw 'Task-mutation terminal journal is not COMPLETE and bound to the exact receipt.' }
+        if ($Mode -in @('BootstrapBaseline', 'Activate') -and (
+            [string]$journalPayload.schema_version -cne 'dawnstrike.runtime_operation_journal.v2' -or
+            [string]$journalPayload.current_sha -cne [string]$receiptPayload.candidate_sha -or
+            [string]$journalPayload.current_tree -cne [string]$receiptPayload.candidate_tree -or
+            [string]$journalPayload.previous_sha -cne [string]$receiptPayload.previous_sha -or
+            [string]$journalPayload.previous_tree -cne [string]$receiptPayload.previous_tree -or
+            [string]$journalPayload.prepared_receipt_relative_path -cne
+                "receipts/runtime-activation/runtime-activation-$activationId.prepared.json" -or
+            [string]$journalPayload.prepared_receipt_sha256 -notmatch '^[0-9a-f]{64}$' -or
+            [string]$journalPayload.backup_contract_sha256 -cne
+                [string]$receiptPayload.scheduler_backup_manifest_sha256 -or
+            [string]$journalPayload.task_contract_sha256 -cne
+                [string]$receiptPayload.task_contract_sha256
+        )) { throw 'Terminal activation receipt and journal rollback identities do not agree.' }
         return [pscustomobject]@{
             record = [pscustomobject][ordered]@{
                 mode = $Mode
@@ -1199,6 +1540,25 @@ function Get-DawnstrikeStateBoundaryTaskMutationTerminalEvidence {
                 journal_operation = $expectedOperation
                 journal_phase = 'COMPLETE'
                 task_contract = [pscustomobject]$terminalTaskContract
+                activation_id = if ($Mode -in @('BootstrapBaseline', 'Activate')) { $activationId } else { 'NONE' }
+                receipt_relative_path = $receiptRelative
+                journal_relative_path = $journalRelative
+                previous_sha = if ($Mode -in @('BootstrapBaseline', 'Activate')) {
+                    [string]$receiptPayload.previous_sha
+                }
+                else { 'NONE' }
+                previous_tree = if ($Mode -in @('BootstrapBaseline', 'Activate')) {
+                    [string]$receiptPayload.previous_tree
+                }
+                else { 'NONE' }
+                runtime_authorization_material = if ($Mode -in @('BootstrapBaseline', 'Activate')) {
+                    $material.material
+                }
+                else { $null }
+                runtime_authorization_material_sha256 = if ($Mode -in @('BootstrapBaseline', 'Activate')) {
+                    $material.sha256
+                }
+                else { 'NONE' }
             }
             locks = @($locks)
         }
@@ -1209,12 +1569,96 @@ function Get-DawnstrikeStateBoundaryTaskMutationTerminalEvidence {
     }
 }
 
+function Assert-DawnstrikeStateBoundaryActivationLineage {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$StateRoot,
+        [string]$EvidenceRoot = $script:DawnstrikeStateBoundaryEvidenceRoot,
+        [Parameter(Mandatory = $true)][string]$ActivationReceiptPath,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')]
+        [string]$ActivationReceiptSha256,
+        [ValidatePattern('^$|^[0-9a-f]{24}$')][string]$ExpectedActivationId = ''
+    )
+
+    $fixed = Assert-DawnstrikeStateBoundaryFixedPath `
+        -StateRoot $StateRoot -EvidenceRoot $EvidenceRoot
+    $state = [string]$fixed.state_root
+    $currentPath = Join-Path ([string]$fixed.evidence_root) 'state-boundary-current.json'
+    $currentRead = Read-DawnstrikeStateBoundaryProtectedJson -Path $currentPath
+    $terminal = $null
+    try {
+        $current = $currentRead.payload
+        if ([string]$current.schema_version -cne 'dawnstrike.state_boundary_installation.v2' -or
+            [string]$current.status -cne 'PASS' -or
+            [string]$current.state_root -cne $state -or
+            [string]$current.candidate_sha -notmatch '^[0-9a-f]{40}$' -or
+            [string]$current.candidate_tree -notmatch '^[0-9a-f]{40}$' -or
+            $current.research_only -ne $true -or
+            $current.broker_execution_enabled -ne $false) {
+            throw 'Protected StateRoot activation lineage owner receipt is invalid.'
+        }
+        $lineage = Get-DawnstrikeStateBoundaryActivationLineage -Receipt $current
+        if ([string]$lineage.status -cne 'ACTIVE') {
+            throw 'Protected StateRoot has no rollback-authorizing activation lineage.'
+        }
+        if ($ExpectedActivationId -and
+            [string]$lineage.activation_id -cne $ExpectedActivationId.ToLowerInvariant()) {
+            throw 'Protected StateRoot activation lineage belongs to another activation.'
+        }
+        $expectedReceiptPath = [IO.Path]::GetFullPath(
+            (Join-Path $state ([string]$lineage.receipt_relative_path).Replace('/', '\'))
+        )
+        $expectedJournalPath = [IO.Path]::GetFullPath(
+            (Join-Path $state ([string]$lineage.journal_relative_path).Replace('/', '\'))
+        )
+        if (-not [string]::Equals(
+            [IO.Path]::GetFullPath($ActivationReceiptPath),
+            $expectedReceiptPath,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or [string]$lineage.receipt_sha256 -cne $ActivationReceiptSha256.ToLowerInvariant()) {
+            throw 'Supplied activation receipt does not match protected StateRoot lineage.'
+        }
+        $terminal = Get-DawnstrikeStateBoundaryTaskMutationTerminalEvidence `
+            -StateRoot $state -Mode Activate `
+            -ExpectedSha ([string]$current.candidate_sha) `
+            -ExpectedTree ([string]$current.candidate_tree) `
+            -ReceiptPath $expectedReceiptPath -JournalPath $expectedJournalPath `
+            -ExpectedReceiptSha256 ([string]$lineage.receipt_sha256) `
+            -ExpectedJournalSha256 ([string]$lineage.journal_sha256)
+        if ([string]$terminal.record.activation_id -cne [string]$lineage.activation_id -or
+            [string]$terminal.record.receipt_relative_path -cne [string]$lineage.receipt_relative_path -or
+            [string]$terminal.record.journal_relative_path -cne [string]$lineage.journal_relative_path) {
+            throw 'Protected StateRoot activation lineage terminal identity is inconsistent.'
+        }
+        return [pscustomobject]@{
+            status = 'PASS'
+            activation_id = [string]$lineage.activation_id
+            receipt_path = $expectedReceiptPath
+            receipt_sha256 = [string]$lineage.receipt_sha256
+            journal_path = $expectedJournalPath
+            journal_sha256 = [string]$lineage.journal_sha256
+            current_receipt_path = $currentPath
+            current_receipt_sha256 = [string]$currentRead.sha256
+            candidate_sha = [string]$current.candidate_sha
+            candidate_tree = [string]$current.candidate_tree
+            research_only = $true
+            broker_execution_enabled = $false
+        }
+    }
+    finally {
+        if ($null -ne $terminal) {
+            foreach ($lock in @($terminal.locks)) { if ($null -ne $lock) { $lock.Dispose() } }
+        }
+        $currentRead.stream.Dispose()
+    }
+}
+
 function Get-DawnstrikeStateBoundaryTerminalCandidatePaths {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$StateRoot,
         [Parameter(Mandatory = $true)][ValidateSet(
-            'HardenCapture', 'Activate', 'RebindCapture', 'Rollback'
+            'HardenCapture', 'BootstrapBaseline', 'Activate', 'RebindCapture', 'Rollback'
         )][string]$Mode,
         [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedSha
     )
@@ -1227,8 +1671,9 @@ function Get-DawnstrikeStateBoundaryTerminalCandidatePaths {
             journal = Join-Path $state "receipts\runtime-operation\capture-task-rebind-$ExpectedSha.json"
         })
     }
-    $receiptFolderName = if ($Mode -eq 'Activate') { 'runtime-activation' } else { 'runtime-rollback' }
-    $receiptStem = if ($Mode -eq 'Activate') { 'runtime-activation-' } else { 'runtime-rollback-' }
+    $activationMode = $Mode -in @('BootstrapBaseline', 'Activate')
+    $receiptFolderName = if ($activationMode) { 'runtime-activation' } else { 'runtime-rollback' }
+    $receiptStem = if ($activationMode) { 'runtime-activation-' } else { 'runtime-rollback-' }
     $receiptFolder = Join-Path $state ("receipts\" + $receiptFolderName)
     if (-not (Test-Path -LiteralPath $receiptFolder)) { return @() }
     $folderLease = Open-DawnstrikeStateBoundaryPath `
@@ -1258,7 +1703,7 @@ function Get-DawnstrikeStateBoundaryTerminalEvidencePairs {
     param(
         [Parameter(Mandatory = $true)][string]$StateRoot,
         [Parameter(Mandatory = $true)][ValidateSet(
-            'HardenCapture', 'Activate', 'RebindCapture', 'Rollback'
+            'HardenCapture', 'BootstrapBaseline', 'Activate', 'RebindCapture', 'Rollback'
         )][string]$Mode,
         [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedSha
     )
@@ -1287,104 +1732,6 @@ function Get-DawnstrikeStateBoundaryTerminalEvidencePairs {
         }
     }
     return @($pairs | Sort-Object -Unique)
-}
-
-function Find-DawnstrikeStateBoundaryExactTerminalEvidence {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)][string]$StateRoot,
-        [Parameter(Mandatory = $true)][ValidateSet(
-            'HardenCapture', 'Activate', 'RebindCapture', 'Rollback'
-        )][string]$Mode,
-        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedSha,
-        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedTree,
-        [Parameter(Mandatory = $true)]$LiveTasks,
-        [string[]]$ExcludedEvidencePairs = @()
-    )
-
-    # Hardening intentionally has no automatic adoption path: its recovery
-    # contract remains fail-closed Disabled until the governed mode reruns.
-    if ($Mode -eq 'HardenCapture') { return $null }
-    $state = [IO.Path]::GetFullPath($StateRoot).TrimEnd('\')
-    $candidates = @(Get-DawnstrikeStateBoundaryTerminalCandidatePaths `
-        -StateRoot $state -Mode $Mode -ExpectedSha $ExpectedSha)
-
-    $matches = @()
-    foreach ($candidate in @($candidates)) {
-        if (-not (Test-Path -LiteralPath ([string]$candidate.receipt) -PathType Leaf) -or
-            -not (Test-Path -LiteralPath ([string]$candidate.journal) -PathType Leaf)) {
-            continue
-        }
-        try {
-            $evidence = Get-DawnstrikeStateBoundaryTaskMutationTerminalEvidence `
-                -StateRoot $state -Mode $Mode -ExpectedSha $ExpectedSha -ExpectedTree $ExpectedTree `
-                -ReceiptPath ([string]$candidate.receipt) -JournalPath ([string]$candidate.journal)
-            try {
-                $evidencePair = [string]$evidence.record.receipt_sha256 + ':' +
-                    [string]$evidence.record.journal_sha256
-                if ($evidencePair -in @($ExcludedEvidencePairs)) { continue }
-                $null = Assert-DawnstrikeStateBoundaryTerminalTaskContract `
-                    -Mode $Mode -TerminalRecord $evidence.record.task_contract `
-                    -LiveTasks $LiveTasks
-                $matches += [pscustomobject]@{
-                    receipt_path = [string]$candidate.receipt
-                    journal_path = [string]$candidate.journal
-                    receipt_sha256 = [string]$evidence.record.receipt_sha256
-                    journal_sha256 = [string]$evidence.record.journal_sha256
-                }
-            }
-            finally {
-                foreach ($lock in @($evidence.locks)) { if ($null -ne $lock) { $lock.Dispose() } }
-            }
-        }
-        catch {
-            # Only an exact, fully self-bound receipt+journal+live-task tuple is
-            # adoptable. Invalid or partial crash artifacts remain fail-closed.
-        }
-    }
-    if ($matches.Count -gt 1) {
-        throw 'Multiple exact terminal task-mutation evidence tuples are ambiguous.'
-    }
-    if ($matches.Count -eq 1) { return $matches[0] }
-    return $null
-}
-
-function Complete-DawnstrikeStateBoundaryExistingTerminal {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)][string]$StateRoot,
-        [string]$EvidenceRoot = $script:DawnstrikeStateBoundaryEvidenceRoot,
-        [Parameter(Mandatory = $true)][ValidateSet(
-            'Activate', 'RebindCapture', 'Rollback'
-        )][string]$Mode,
-        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedSha,
-        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedTree,
-        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{32}$')][string]$OperationId,
-        [Parameter(Mandatory = $true)]$Terminal
-    )
-    $completion = Complete-DawnstrikeStateBoundaryTaskMutation `
-        -StateRoot $StateRoot -EvidenceRoot $EvidenceRoot -Mode $Mode `
-        -ExpectedSha $ExpectedSha -ExpectedTree $ExpectedTree -OperationId $OperationId `
-        -TerminalReceiptPath ([string]$Terminal.receipt_path) `
-        -TerminalJournalPath ([string]$Terminal.journal_path)
-    $sealed = Assert-DawnstrikeStateRootBoundary `
-        -StateRoot $StateRoot -EvidenceRoot $EvidenceRoot
-    return [pscustomobject]@{
-        status = 'ADOPTED_EXISTING_TERMINAL'
-        operation_id = $OperationId
-        mode = $Mode
-        already_completed = $true
-        resumed = $true
-        receipt_path = [string]$sealed.receipt_path
-        receipt_sha256 = [string]$completion.receipt_sha256
-        completion_path = [string]$completion.completion_path
-        terminal_receipt_path = [string]$Terminal.receipt_path
-        terminal_journal_path = [string]$Terminal.journal_path
-        writer_sids = @($sealed.writer_sids)
-        locks = @($sealed.locks)
-        research_only = $true
-        broker_execution_enabled = $false
-    }
 }
 
 function Complete-DawnstrikeStateBoundaryTaskMutationAdoption {
@@ -1447,6 +1794,73 @@ function Complete-DawnstrikeStateBoundaryTaskMutationAdoption {
         [string]$newReceipt.task_binding_terminal_journal_sha256 -cne [string]$terminalRecord.journal_sha256) {
         throw 'Protected task-mutation completion does not bind its terminal mode evidence.'
     }
+    $intentActivationLineage = Get-DawnstrikeStateBoundaryActivationLineage `
+        -Receipt $intentPayload
+    $newActivationLineage = Get-DawnstrikeStateBoundaryActivationLineage `
+        -Receipt $newReceipt
+    $mode = [string]$intentPayload.mode
+    if ($mode -eq 'Activate') {
+        if ([string]$newActivationLineage.status -cne 'ACTIVE' -or
+            [string]$newActivationLineage.activation_id -cne [string]$terminalRecord.activation_id -or
+            [string]$newActivationLineage.receipt_relative_path -cne [string]$terminalRecord.receipt_relative_path -or
+            [string]$newActivationLineage.receipt_sha256 -cne [string]$terminalRecord.receipt_sha256 -or
+            [string]$newActivationLineage.journal_relative_path -cne [string]$terminalRecord.journal_relative_path -or
+            [string]$newActivationLineage.journal_sha256 -cne [string]$terminalRecord.journal_sha256) {
+            throw 'Protected activation completion did not advance exact activation lineage.'
+        }
+    }
+    elseif ($mode -eq 'Rollback') {
+        if ([string]$intentActivationLineage.status -cne 'ACTIVE' -or
+            [string]$newActivationLineage.status -cne 'NONE') {
+            throw 'Protected rollback completion did not consume exact activation lineage.'
+        }
+    }
+    elseif (
+        [string]$newActivationLineage.activation_id -cne [string]$intentActivationLineage.activation_id -or
+        [string]$newActivationLineage.receipt_relative_path -cne [string]$intentActivationLineage.receipt_relative_path -or
+        [string]$newActivationLineage.receipt_sha256 -cne [string]$intentActivationLineage.receipt_sha256 -or
+        [string]$newActivationLineage.journal_relative_path -cne [string]$intentActivationLineage.journal_relative_path -or
+        [string]$newActivationLineage.journal_sha256 -cne [string]$intentActivationLineage.journal_sha256
+    ) { throw 'Protected capture mutation changed activation lineage.' }
+    $intentCurrentRuntimeAuthorization = Get-DawnstrikeStateBoundaryRuntimeAuthorization `
+        -Receipt $intentPayload -Kind current -StateRoot $StateRoot
+    $intentRollbackRuntimeAuthorization = Get-DawnstrikeStateBoundaryRuntimeAuthorization `
+        -Receipt $intentPayload -Kind rollback -StateRoot $StateRoot
+    $newCurrentRuntimeAuthorization = Get-DawnstrikeStateBoundaryRuntimeAuthorization `
+        -Receipt $newReceipt -Kind current -StateRoot $StateRoot
+    $newRollbackRuntimeAuthorization = Get-DawnstrikeStateBoundaryRuntimeAuthorization `
+        -Receipt $newReceipt -Kind rollback -StateRoot $StateRoot
+    if ($mode -eq 'Activate') {
+        if (
+            [string]$intentCurrentRuntimeAuthorization.status -cne 'AUTHORIZED' -or
+            [string]$newCurrentRuntimeAuthorization.status -cne 'AUTHORIZED' -or
+            [string]$newCurrentRuntimeAuthorization.operation_type -cne 'ACTIVATE' -or
+            [string]$newRollbackRuntimeAuthorization.sha256 -cne
+                [string]$intentCurrentRuntimeAuthorization.sha256
+        ) { throw 'Protected activation completion has an invalid runtime-authorization transition.' }
+    }
+    elseif ($mode -eq 'BootstrapBaseline') {
+        if (
+            [string]$intentCurrentRuntimeAuthorization.status -notin @('NONE', 'LEGACY_NONE') -or
+            [string]$newCurrentRuntimeAuthorization.status -cne 'AUTHORIZED' -or
+            [string]$newCurrentRuntimeAuthorization.operation_type -cne 'BOOTSTRAP' -or
+            [string]$newRollbackRuntimeAuthorization.status -cne 'NONE'
+        ) { throw 'Protected baseline completion has an invalid runtime-authorization transition.' }
+    }
+    elseif ($mode -eq 'Rollback') {
+        if (
+            [string]$intentRollbackRuntimeAuthorization.status -cne 'AUTHORIZED' -or
+            [string]$newCurrentRuntimeAuthorization.sha256 -cne
+                [string]$intentRollbackRuntimeAuthorization.sha256 -or
+            [string]$newRollbackRuntimeAuthorization.status -cne 'NONE'
+        ) { throw 'Protected rollback completion has an invalid runtime-authorization transition.' }
+    }
+    elseif (
+        [string]$newCurrentRuntimeAuthorization.sha256 -cne
+            [string]$intentCurrentRuntimeAuthorization.sha256 -or
+        [string]$newRollbackRuntimeAuthorization.sha256 -cne
+            [string]$intentRollbackRuntimeAuthorization.sha256
+    ) { throw 'Protected capture mutation changed runtime authorization.' }
     $terminalEvidence = Get-DawnstrikeStateBoundaryTaskMutationTerminalEvidence `
         -StateRoot $StateRoot -Mode ([string]$intentPayload.mode) `
         -ExpectedSha ([string]$intentPayload.expected_sha) `
@@ -1455,10 +1869,28 @@ function Complete-DawnstrikeStateBoundaryTaskMutationAdoption {
         -JournalPath ([string]$terminalRecord.journal_path) `
         -ExpectedReceiptSha256 ([string]$terminalRecord.receipt_sha256) `
         -ExpectedJournalSha256 ([string]$terminalRecord.journal_sha256)
+    $terminalActivationIdentityChanged = $mode -in @('BootstrapBaseline', 'Activate') -and (
+        [string]$terminalRecord.activation_id -cne [string]$terminalEvidence.record.activation_id -or
+        [string]$terminalRecord.receipt_relative_path -cne
+            [string]$terminalEvidence.record.receipt_relative_path -or
+        [string]$terminalRecord.journal_relative_path -cne
+            [string]$terminalEvidence.record.journal_relative_path
+    )
     if (
         (([pscustomobject]$terminalRecord.task_contract | ConvertTo-Json -Compress) -cne
-            ($terminalEvidence.record.task_contract | ConvertTo-Json -Compress))
+            ($terminalEvidence.record.task_contract | ConvertTo-Json -Compress)) -or
+        $terminalActivationIdentityChanged
     ) { throw 'Protected completion terminal task contract differs from the exact terminal receipt.' }
+    if ($mode -in @('BootstrapBaseline', 'Activate') -and (
+        [string]$newCurrentRuntimeAuthorization.terminal_id -cne
+            [string]$terminalEvidence.record.activation_id -or
+        [string]$newCurrentRuntimeAuthorization.contract.terminal_receipt_sha256 -cne
+            [string]$terminalEvidence.record.receipt_sha256 -or
+        [string]$newCurrentRuntimeAuthorization.contract.terminal_journal_sha256 -cne
+            [string]$terminalEvidence.record.journal_sha256 -or
+        [string]$newCurrentRuntimeAuthorization.contract.material_sha256 -cne
+            [string]$terminalEvidence.record.runtime_authorization_material_sha256
+    )) { throw 'Protected completion runtime authorization differs from the terminal evidence.' }
     $operationId = [string]$intentPayload.operation_id
     try {
         $boundary = Assert-DawnstrikeStateRootBoundary `
@@ -1567,13 +1999,448 @@ function Complete-DawnstrikeStateBoundaryTaskMutationAdoption {
     }
 }
 
+function Complete-DawnstrikeStateBoundaryTaskMutationFailClosedAdoption {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$Intent,
+        [Parameter(Mandatory = $true)]$Completion,
+        [Parameter(Mandatory = $true)][string]$StateRoot,
+        [Parameter(Mandatory = $true)][string]$EvidenceRoot,
+        [switch]$ValidationOnly,
+        [ValidateSet('', 'after_completion', 'after_current')]
+        [string]$TestCrashPoint = ''
+    )
+    $intentPayload = $Intent.payload
+    $payload = $Completion.payload
+    $newReceipt = $payload.new_current_receipt
+    if ([string]$intentPayload.mode -cne 'Activate' -or
+        [string]$payload.schema_version -cne
+            'dawnstrike.state_boundary_task_mutation_fail_closed.v1' -or
+        [string]$payload.status -cne 'COMPENSATED_DISABLED' -or
+        [string]$payload.operation_id -cne [string]$intentPayload.operation_id -or
+        [string]$payload.expected_sha -cne [string]$intentPayload.expected_sha -or
+        [string]$payload.expected_tree -cne [string]$intentPayload.expected_tree -or
+        [string]$payload.request_contract_sha256 -cne
+            [string]$intentPayload.request_contract_sha256 -or
+        [string]$payload.old_current_receipt_sha256 -cne
+            [string]$intentPayload.old_current_receipt_sha256 -or
+        [string]$payload.source_activation_id -notmatch '^[0-9a-f]{24}$' -or
+        [string]$payload.source_terminal_receipt_sha256 -notmatch '^[0-9a-f]{64}$' -or
+        [string]$payload.source_terminal_journal_sha256 -notmatch '^[0-9a-f]{64}$' -or
+        [string]$payload.compensation_receipt_sha256 -notmatch '^[0-9a-f]{64}$' -or
+        [string]$payload.compensation_journal_sha256 -notmatch '^[0-9a-f]{64}$' -or
+        [string]$payload.new_current_receipt_sha256 -notmatch '^[0-9a-f]{64}$' -or
+        $payload.research_only -ne $true -or
+        $payload.broker_execution_enabled -ne $false) {
+        throw 'Protected fail-closed task-mutation completion is invalid.'
+    }
+    $operationId = [string]$intentPayload.operation_id
+    $state = [IO.Path]::GetFullPath($StateRoot).TrimEnd('\')
+    $sourceActivationId = [string]$payload.source_activation_id
+    $sourceReceiptPath = Join-Path $state (
+        "receipts\runtime-activation\runtime-activation-$sourceActivationId.json"
+    )
+    $sourceJournalPath = Join-Path $state (
+        "receipts\runtime-operation\runtime-activation-$sourceActivationId.json"
+    )
+    $expectedJournalPath = Join-Path $state "receipts\runtime-operation\terminal-recovery-$operationId.json"
+    $receiptPath = [IO.Path]::GetFullPath([string]$payload.compensation_receipt_path)
+    $journalPath = [IO.Path]::GetFullPath([string]$payload.compensation_journal_path)
+    if (-not [string]::Equals(
+            $journalPath, $expectedJournalPath, [StringComparison]::OrdinalIgnoreCase
+        ) -or -not $receiptPath.StartsWith(
+            ($state + '\receipts\runtime-activation\'),
+            [StringComparison]::OrdinalIgnoreCase
+        )) { throw 'Protected fail-closed evidence paths are outside their exact namespace.' }
+    $receiptEvidence = Open-DawnstrikeStateBoundaryExactFile `
+        -Path $receiptPath `
+        -ExpectedSha256 ([string]$payload.compensation_receipt_sha256) `
+        -Label 'Activation fail-closed compensation receipt'
+    $journalEvidence = $null
+    $sourceTerminalEvidence = $null
+    $authorizationEvidence = $null
+    $boundary = $null
+    try {
+        $journalEvidence = Open-DawnstrikeStateBoundaryExactFile `
+            -Path $journalPath `
+            -ExpectedSha256 ([string]$payload.compensation_journal_sha256) `
+            -Label 'Activation fail-closed compensation journal'
+        try {
+            $compensation = [Text.Encoding]::UTF8.GetString(
+                $receiptEvidence.bytes
+            ) | ConvertFrom-Json
+            $journal = [Text.Encoding]::UTF8.GetString(
+                $journalEvidence.bytes
+            ) | ConvertFrom-Json
+        }
+        catch { throw 'Activation fail-closed evidence is invalid JSON.' }
+        $relativeReceipt = [string]$journal.compensation_receipt_relative_path
+        $boundReceiptPath = Join-Path $state ($relativeReceipt.Replace('/', '\'))
+        $currentAuthorization = Get-DawnstrikeStateBoundaryRuntimeAuthorization `
+            -Receipt $intentPayload -Kind current -StateRoot $state
+        if ([string]$currentAuthorization.status -cne 'AUTHORIZED') {
+            throw 'Activation fail-closed predecessor has no protected runtime authorization.'
+        }
+        $sourceTerminalEvidence = Get-DawnstrikeStateBoundaryTaskMutationTerminalEvidence `
+            -StateRoot $state -Mode Activate `
+            -ExpectedSha ([string]$intentPayload.expected_sha) `
+            -ExpectedTree ([string]$intentPayload.expected_tree) `
+            -ReceiptPath $sourceReceiptPath -JournalPath $sourceJournalPath `
+            -ExpectedReceiptSha256 ([string]$payload.source_terminal_receipt_sha256) `
+            -ExpectedJournalSha256 ([string]$payload.source_terminal_journal_sha256)
+        $sourceTerminal = $sourceTerminalEvidence.record
+        if ([string]$sourceTerminal.activation_id -cne $sourceActivationId -or
+            [string]$sourceTerminal.previous_sha -cne [string]$currentAuthorization.runtime_sha -or
+            [string]$sourceTerminal.previous_tree -cne [string]$currentAuthorization.runtime_tree) {
+            throw 'Activation fail-closed source terminal does not name the protected predecessor.'
+        }
+        $authorizationEvidence = Open-DawnstrikeStateBoundaryRuntimeAuthorizationEvidence `
+            -Authorization $currentAuthorization -StateRoot $state `
+            -ExpectedOperationType ([string]$currentAuthorization.operation_type) `
+            -ExpectedSha ([string]$currentAuthorization.runtime_sha) `
+            -ExpectedTree ([string]$currentAuthorization.runtime_tree)
+        if ([string]$currentAuthorization.status -cne 'AUTHORIZED' -or
+            [string]$compensation.schema_version -cne
+                'dawnstrike.runtime_compensation_receipt.v2' -or
+            [string]$compensation.status -cne 'COMPENSATED' -or
+            [string]$compensation.operation -cne 'runtime_activation' -or
+            [string]$compensation.candidate_sha -cne [string]$intentPayload.expected_sha -or
+            [string]$compensation.candidate_tree -cne [string]$intentPayload.expected_tree -or
+            [string]$compensation.task_state -cne 'Disabled' -or
+            [string]$journal.schema_version -cne 'dawnstrike.runtime_operation_journal.v2' -or
+            [string]$journal.operation -cne 'runtime_activation' -or
+            [string]$journal.phase -cne 'COMPENSATED' -or
+            [string]$journal.candidate_sha -cne [string]$intentPayload.expected_sha -or
+            [string]$journal.candidate_tree -cne [string]$intentPayload.expected_tree -or
+            [string]$journal.current_sha -cne [string]$currentAuthorization.runtime_sha -or
+            [string]$journal.current_tree -cne [string]$currentAuthorization.runtime_tree -or
+            [string]$journal.previous_sha -cne [string]$currentAuthorization.runtime_sha -or
+            [string]$journal.previous_tree -cne [string]$currentAuthorization.runtime_tree -or
+            [string]$journal.task_contract_sha256 -cne
+                [string]$compensation.task_contract_sha256 -or
+            [string]$journal.prior_journal_file_sha256 -cne
+                [string]$compensation.prior_journal_file_sha256 -or
+            [string]$journal.compensation_receipt_sha256 -cne
+                [string]$payload.compensation_receipt_sha256 -or
+            -not [string]::Equals(
+                [IO.Path]::GetFullPath($boundReceiptPath), $receiptPath,
+                [StringComparison]::OrdinalIgnoreCase
+            )) { throw 'Activation fail-closed evidence does not restore the protected predecessor.' }
+        if ($null -eq $newReceipt -or
+            [string]$newReceipt.schema_version -cne 'dawnstrike.state_boundary_installation.v2' -or
+            [string]$newReceipt.status -cne 'PASS' -or
+            [string]$newReceipt.candidate_sha -cne [string]$intentPayload.candidate_sha -or
+            [string]$newReceipt.candidate_tree -cne [string]$intentPayload.candidate_tree -or
+            [string]$newReceipt.task_binding_operation_id -cne $operationId -or
+            [string]$newReceipt.task_binding_mode -cne 'ActivateFailClosed' -or
+            [string]$newReceipt.task_binding_release_sha -cne
+                [string]$currentAuthorization.runtime_sha -or
+            [string]$newReceipt.task_binding_release_tree -cne
+                [string]$currentAuthorization.runtime_tree -or
+            [string]$newReceipt.task_binding_request_contract_sha256 -cne
+                [string]$intentPayload.request_contract_sha256 -or
+            [string]$newReceipt.canonical_task_disposition -cne
+                'DISABLED_BY_GOVERNED_ACTIVATION_CANCELLATION' -or
+            [string]$newReceipt.fail_closed_compensation_receipt_sha256 -cne
+                [string]$payload.compensation_receipt_sha256 -or
+            [string]$newReceipt.fail_closed_compensation_journal_sha256 -cne
+                [string]$payload.compensation_journal_sha256 -or
+            [string]$newReceipt.fail_closed_source_activation_id -cne $sourceActivationId -or
+            [string]$newReceipt.fail_closed_source_terminal_receipt_sha256 -cne
+                [string]$payload.source_terminal_receipt_sha256 -or
+            [string]$newReceipt.fail_closed_source_terminal_journal_sha256 -cne
+                [string]$payload.source_terminal_journal_sha256 -or
+            [string]$newReceipt.task_binding_predecessor_terminal_evidence_sha256 -cne
+                [string]$intentPayload.predecessor_terminal_evidence_sha256 -or
+            $newReceipt.research_only -ne $true -or
+            $newReceipt.broker_execution_enabled -ne $false) {
+            throw 'Protected fail-closed current receipt identity is invalid.'
+        }
+        $newJson = $newReceipt | ConvertTo-Json -Depth 20
+        $newHash = Get-DawnstrikeStateBoundarySha256Text ($newJson + "`r`n")
+        if ($newHash -cne [string]$payload.new_current_receipt_sha256 -or
+            (Get-DawnstrikeStateBoundaryTaskBindingHash `
+                -Tasks $newReceipt.task_definitions_and_principals) -cne
+                [string]$newReceipt.task_binding_sha256) {
+            throw 'Protected fail-closed current receipt hash is invalid.'
+        }
+        $priorLineage = Get-DawnstrikeStateBoundaryActivationLineage -Receipt $intentPayload
+        $nextLineage = Get-DawnstrikeStateBoundaryActivationLineage -Receipt $newReceipt
+        $priorRollback = Get-DawnstrikeStateBoundaryRuntimeAuthorization `
+            -Receipt $intentPayload -Kind rollback -StateRoot $state
+        $nextCurrent = Get-DawnstrikeStateBoundaryRuntimeAuthorization `
+            -Receipt $newReceipt -Kind current -StateRoot $state
+        $nextRollback = Get-DawnstrikeStateBoundaryRuntimeAuthorization `
+            -Receipt $newReceipt -Kind rollback -StateRoot $state
+        if ([string]$nextCurrent.sha256 -cne [string]$currentAuthorization.sha256 -or
+            [string]$nextRollback.sha256 -cne [string]$priorRollback.sha256 -or
+            [string]$nextLineage.status -cne [string]$priorLineage.status -or
+            [string]$nextLineage.activation_id -cne [string]$priorLineage.activation_id -or
+            [string]$nextLineage.receipt_relative_path -cne
+                [string]$priorLineage.receipt_relative_path -or
+            [string]$nextLineage.receipt_sha256 -cne [string]$priorLineage.receipt_sha256 -or
+            [string]$nextLineage.journal_relative_path -cne
+                [string]$priorLineage.journal_relative_path -or
+            [string]$nextLineage.journal_sha256 -cne [string]$priorLineage.journal_sha256) {
+            throw 'Fail-closed activation cancellation changed protected authorization or lineage.'
+        }
+        $boundary = Assert-DawnstrikeStateRootBoundary `
+            -StateRoot $state -EvidenceRoot $EvidenceRoot `
+            -AllowedTaskMutationOperationId $operationId -AllowTaskDefinitionDrift
+        if ([string]$boundary.receipt_sha256 -notin @(
+            [string]$intentPayload.old_current_receipt_sha256, $newHash
+        )) { throw 'Fail-closed current receipt is outside its protected lineage.' }
+        $immutableProperties = @(
+            'schema_version', 'status', 'operation_id', 'installed_at_utc',
+            'candidate_sha', 'candidate_tree', 'state_root',
+            'state_root_identity', 'state_root_sddl', 'state_root_sddl_sha256',
+            'locks_root', 'locks_root_identity', 'locks_root_sddl', 'locks_root_sddl_sha256',
+            'state_entry_count', 'state_identity_contract_sha256',
+            'rollback_manifest_path', 'rollback_manifest_sha256',
+            'installed_helper_path', 'installed_helper_sha256'
+        )
+        foreach ($name in $immutableProperties) {
+            if ([string]$newReceipt.$name -cne [string]$boundary.receipt.$name) {
+                throw 'Fail-closed completion changed immutable StateRoot receipt identity.'
+            }
+        }
+        $newWriterSet = @($newReceipt.writer_sids | ForEach-Object { [string]$_ } | Sort-Object -Unique)
+        $oldWriterSet = @($boundary.receipt.writer_sids | ForEach-Object { [string]$_ } | Sort-Object -Unique)
+        if (($newWriterSet -join "`n") -cne ($oldWriterSet -join "`n")) {
+            throw 'Fail-closed completion changed the StateRoot writer SID set.'
+        }
+        $live = @(Get-DawnstrikeStateBoundaryTaskInventory)
+        $null = Assert-DawnstrikeStateBoundaryFailClosedTaskInventory `
+            -ExpectedTasks $intentPayload.task_definitions_and_principals `
+            -LiveTasks $live -WriterSids @($intentPayload.writer_sids)
+        $null = Assert-DawnstrikeStateBoundaryTaskInventoryMatches `
+            -ExpectedTasks $newReceipt.task_definitions_and_principals `
+            -LiveTasks $live -WriterSids @($newReceipt.writer_sids)
+        $canonical = @($live | Where-Object { [bool]$_.canonical })
+        if ($canonical.Count -ne $script:DawnstrikeStateBoundaryCanonicalTasks.Count -or
+            [string]$canonical[0].canonical_task_definition_contract_sha256 -cne
+                [string]$compensation.task_definition_contract_sha256 -or
+            [string]$canonical[0].canonical_task_action_contract_sha256 -cne
+                [string]$compensation.task_action_contract_sha256 -or
+            [string]$canonical[0].canonical_task_definition_contract_sha256 -cne
+                [string]$currentAuthorization.material.canonical_task_definition_contract_sha256 -or
+            [string]$canonical[0].canonical_task_action_contract_sha256 -cne
+                [string]$currentAuthorization.material.canonical_task_action_contract_sha256) {
+            throw 'Fail-closed compensation task contract differs from the live predecessor.'
+        }
+        $completionPath = [IO.Path]::GetFullPath([string]$Intent.payload.completion_path)
+        if (-not [string]::Equals(
+                [IO.Path]::GetFullPath([string]$Completion.path), $completionPath,
+                [StringComparison]::OrdinalIgnoreCase
+            )) { throw 'Fail-closed completion path is not the protected intent destination.' }
+        $completionJson = $payload | ConvertTo-Json -Depth 20
+        $completionHash = Get-DawnstrikeStateBoundarySha256Text ($completionJson + "`r`n")
+        if ([string]$Completion.sha256 -cne $completionHash) {
+            throw 'Fail-closed completion file hash is invalid.'
+        }
+        if ($ValidationOnly -and [string]$boundary.receipt_sha256 -cne $newHash) {
+            throw 'Fail-closed read admission is not the exact new current receipt.'
+        }
+        if (-not $ValidationOnly) {
+            $completionWrite = Write-DawnstrikeStateBoundaryProtectedJson `
+                -Payload $payload -Path $completionPath -NoReplace
+            if ([string]$completionWrite.sha256 -cne $completionHash) {
+                throw 'Fail-closed protected completion write did not read back exactly.'
+            }
+            if ($TestCrashPoint -ceq 'after_completion') {
+                throw 'TEST_CRASH_AFTER_FAIL_CLOSED_COMPLETION'
+            }
+        }
+        if (-not $ValidationOnly -and [string]$boundary.receipt_sha256 -cne $newHash) {
+            $currentPath = Join-Path $EvidenceRoot 'state-boundary-current.json'
+            $boundary.locks[0].Dispose()
+            $boundary.locks = @($boundary.locks | Select-Object -Skip 1)
+            $write = Write-DawnstrikeStateBoundaryProtectedJson `
+                -Payload $newReceipt -Path $currentPath
+            if ([string]$write.sha256 -cne $newHash) {
+                throw 'Fail-closed StateRoot current receipt write did not read back exactly.'
+            }
+        }
+        $sealed = Assert-DawnstrikeStateRootBoundary `
+            -StateRoot $state -EvidenceRoot $EvidenceRoot `
+            -AllowedTaskMutationOperationId $operationId
+        try {
+            if ([string]$sealed.receipt_sha256 -cne $newHash) {
+                throw 'Fail-closed StateRoot reseal did not converge.'
+            }
+        }
+        finally {
+            foreach ($lock in @($sealed.locks)) { if ($null -ne $lock) { $lock.Dispose() } }
+        }
+        if (-not $ValidationOnly -and $TestCrashPoint -ceq 'after_current') {
+            throw 'TEST_CRASH_AFTER_FAIL_CLOSED_CURRENT'
+        }
+        if (-not $ValidationOnly) {
+            Remove-Item -LiteralPath ([string]$Intent.path) -Force -ErrorAction Stop
+        }
+        return [pscustomobject]@{
+            status = $(if ($ValidationOnly) {
+                'VALIDATED_FAIL_CLOSED'
+            } else { 'COMPENSATED_DISABLED' })
+            operation_id = $operationId
+            mode = 'Activate'
+            already_completed = $true
+            receipt_sha256 = $newHash
+            writer_sids = @($newReceipt.writer_sids)
+            locks = @($boundary.locks)
+            research_only = $true
+            broker_execution_enabled = $false
+        }
+    }
+    catch {
+        if ($null -ne $boundary) {
+            foreach ($lock in @($boundary.locks)) { if ($null -ne $lock) { $lock.Dispose() } }
+        }
+        throw
+    }
+    finally {
+        if ($null -ne $authorizationEvidence) {
+            foreach ($lock in @($authorizationEvidence.locks)) {
+                if ($null -ne $lock) { $lock.Dispose() }
+            }
+        }
+        if ($null -ne $sourceTerminalEvidence) {
+            foreach ($lock in @($sourceTerminalEvidence.locks)) {
+                if ($null -ne $lock) { $lock.Dispose() }
+            }
+        }
+        if ($null -ne $journalEvidence) {
+            $journalEvidence.stream.Dispose()
+            $journalEvidence.lease.Dispose()
+        }
+        $receiptEvidence.stream.Dispose()
+        $receiptEvidence.lease.Dispose()
+    }
+}
+
+function Complete-DawnstrikeStateBoundaryTaskMutationFailClosed {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$StateRoot,
+        [string]$EvidenceRoot = $script:DawnstrikeStateBoundaryEvidenceRoot,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedSha,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedTree,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{32}$')][string]$OperationId,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')]
+        [string]$RequestContractSha256,
+        [Parameter(Mandatory = $true)][string]$CompensationReceiptPath,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')]
+        [string]$CompensationReceiptSha256,
+        [Parameter(Mandatory = $true)][string]$CompensationJournalPath,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')]
+        [string]$CompensationJournalSha256,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{24}$')]
+        [string]$SourceActivationId,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')]
+        [string]$SourceTerminalReceiptSha256,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')]
+        [string]$SourceTerminalJournalSha256,
+        [ValidateSet('', 'after_completion', 'after_current')]
+        [string]$TestCrashPoint = ''
+    )
+    $intent = Get-DawnstrikeStateBoundaryTaskMutationIntent -EvidenceRoot $EvidenceRoot
+    if ($null -eq $intent -or
+        [string]$intent.payload.operation_id -cne $OperationId) {
+        throw 'Protected fail-closed mutation intent is missing or changed.'
+    }
+    $null = Assert-DawnstrikeStateBoundaryTaskMutationIntent `
+        -Intent $intent -StateRoot $StateRoot -Mode Activate `
+        -ExpectedSha $ExpectedSha -ExpectedTree $ExpectedTree `
+        -RequestContractSha256 $RequestContractSha256
+    $boundary = Assert-DawnstrikeStateRootBoundary `
+        -StateRoot $StateRoot -EvidenceRoot $EvidenceRoot `
+        -AllowedTaskMutationOperationId $OperationId -AllowTaskDefinitionDrift
+    try {
+        if ([string]$boundary.receipt_sha256 -cne
+                [string]$intent.payload.old_current_receipt_sha256 -or
+            [string]$boundary.receipt.task_binding_sha256 -cne
+                [string]$intent.payload.old_task_binding_sha256) {
+            throw 'Protected fail-closed completion predecessor changed.'
+        }
+        $live = @(Get-DawnstrikeStateBoundaryTaskInventory)
+        $null = Assert-DawnstrikeStateBoundaryFailClosedTaskInventory `
+            -ExpectedTasks $boundary.receipt.task_definitions_and_principals `
+            -LiveTasks $live -WriterSids @($boundary.writer_sids)
+        $currentAuthorization = Get-DawnstrikeStateBoundaryRuntimeAuthorization `
+            -Receipt $intent.payload -Kind current -StateRoot $StateRoot
+        $newReceipt = Copy-DawnstrikeStateBoundaryReceipt -Receipt $boundary.receipt
+        $newReceipt['task_definitions_and_principals'] = @($live)
+        $newReceipt['task_binding_sha256'] =
+            Get-DawnstrikeStateBoundaryTaskBindingHash -Tasks $live
+        $newReceipt['task_binding_operation_id'] = $OperationId
+        $newReceipt['task_binding_mode'] = 'ActivateFailClosed'
+        $newReceipt['task_binding_release_sha'] = [string]$currentAuthorization.runtime_sha
+        $newReceipt['task_binding_release_tree'] = [string]$currentAuthorization.runtime_tree
+        $newReceipt['task_binding_request_contract_sha256'] =
+            $RequestContractSha256.ToLowerInvariant()
+        $newReceipt['canonical_task_disposition'] =
+            'DISABLED_BY_GOVERNED_ACTIVATION_CANCELLATION'
+        $capture = @($live | Where-Object { -not [bool]$_.canonical })
+        $newReceipt['auxiliary_capture_disposition'] = if ($capture.Count -eq 0) {
+            'ABSENT_BY_GOVERNED_ACTIVATION_CANCELLATION'
+        } else { 'DISABLED_BY_GOVERNED_ACTIVATION_CANCELLATION' }
+        $newReceipt['fail_closed_compensation_receipt_sha256'] =
+            $CompensationReceiptSha256.ToLowerInvariant()
+        $newReceipt['fail_closed_compensation_journal_sha256'] =
+            $CompensationJournalSha256.ToLowerInvariant()
+        $newReceipt['fail_closed_source_activation_id'] =
+            $SourceActivationId.ToLowerInvariant()
+        $newReceipt['fail_closed_source_terminal_receipt_sha256'] =
+            $SourceTerminalReceiptSha256.ToLowerInvariant()
+        $newReceipt['fail_closed_source_terminal_journal_sha256'] =
+            $SourceTerminalJournalSha256.ToLowerInvariant()
+        $newReceipt['task_binding_predecessor_terminal_evidence_sha256'] =
+            [string]$intent.payload.predecessor_terminal_evidence_sha256
+        $newJson = $newReceipt | ConvertTo-Json -Depth 20
+        $newHash = Get-DawnstrikeStateBoundarySha256Text ($newJson + "`r`n")
+        $completionPayload = [ordered]@{
+            schema_version = 'dawnstrike.state_boundary_task_mutation_fail_closed.v1'
+            status = 'COMPENSATED_DISABLED'
+            operation_id = $OperationId
+            expected_sha = $ExpectedSha.ToLowerInvariant()
+            expected_tree = $ExpectedTree.ToLowerInvariant()
+            request_contract_sha256 = $RequestContractSha256.ToLowerInvariant()
+            old_current_receipt_sha256 = [string]$intent.payload.old_current_receipt_sha256
+            source_activation_id = $SourceActivationId.ToLowerInvariant()
+            source_terminal_receipt_sha256 = $SourceTerminalReceiptSha256.ToLowerInvariant()
+            source_terminal_journal_sha256 = $SourceTerminalJournalSha256.ToLowerInvariant()
+            compensation_receipt_path = [IO.Path]::GetFullPath($CompensationReceiptPath)
+            compensation_receipt_sha256 = $CompensationReceiptSha256.ToLowerInvariant()
+            compensation_journal_path = [IO.Path]::GetFullPath($CompensationJournalPath)
+            compensation_journal_sha256 = $CompensationJournalSha256.ToLowerInvariant()
+            new_current_receipt_sha256 = $newHash
+            new_current_receipt = $newReceipt
+            research_only = $true
+            broker_execution_enabled = $false
+        }
+    }
+    finally {
+        foreach ($lock in @($boundary.locks)) { if ($null -ne $lock) { $lock.Dispose() } }
+    }
+    $completionJson = $completionPayload | ConvertTo-Json -Depth 20
+    $completion = [pscustomobject]@{
+        path = [string]$intent.payload.completion_path
+        payload = [pscustomobject]$completionPayload
+        sha256 = Get-DawnstrikeStateBoundarySha256Text ($completionJson + "`r`n")
+    }
+    return Complete-DawnstrikeStateBoundaryTaskMutationFailClosedAdoption `
+        -Intent $intent -Completion $completion `
+        -StateRoot $StateRoot -EvidenceRoot $EvidenceRoot `
+        -TestCrashPoint $TestCrashPoint
+}
+
 function Get-DawnstrikeStateBoundaryTaskMutationReadAdmission {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$StateRoot,
         [string]$EvidenceRoot = $script:DawnstrikeStateBoundaryEvidenceRoot,
         [Parameter(Mandatory = $true)][ValidateSet(
-            'HardenCapture', 'Activate', 'RebindCapture', 'Rollback'
+            'HardenCapture', 'BootstrapBaseline', 'Activate', 'RebindCapture', 'Rollback'
         )][string]$Mode,
         [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedSha,
         [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedTree
@@ -1621,9 +2488,19 @@ function Get-DawnstrikeStateBoundaryTaskMutationReadAdmission {
                 }
             }
             finally { $completionRead.stream.Dispose() }
-            $validatedCompletion = Complete-DawnstrikeStateBoundaryTaskMutationAdoption `
-                -Intent $intent -Completion $completion `
-                -StateRoot $state -EvidenceRoot $evidence -ValidationOnly
+            $validatedCompletion = if (
+                [string]$completion.payload.schema_version -ceq
+                    'dawnstrike.state_boundary_task_mutation_fail_closed.v1'
+            ) {
+                Complete-DawnstrikeStateBoundaryTaskMutationFailClosedAdoption `
+                    -Intent $intent -Completion $completion `
+                    -StateRoot $state -EvidenceRoot $evidence -ValidationOnly
+            }
+            else {
+                Complete-DawnstrikeStateBoundaryTaskMutationAdoption `
+                    -Intent $intent -Completion $completion `
+                    -StateRoot $state -EvidenceRoot $evidence -ValidationOnly
+            }
             try {
                 if ([string]$validatedCompletion.receipt_sha256 -cne [string]$boundary.receipt_sha256) {
                     throw 'StateRoot task-mutation request admission completion receipt changed.'
@@ -1649,7 +2526,7 @@ function Enter-DawnstrikeStateBoundaryTaskMutation {
         [Parameter(Mandatory = $true)][string]$StateRoot,
         [string]$EvidenceRoot = $script:DawnstrikeStateBoundaryEvidenceRoot,
         [Parameter(Mandatory = $true)][ValidateSet(
-            'HardenCapture', 'Activate', 'RebindCapture', 'Rollback'
+            'HardenCapture', 'BootstrapBaseline', 'Activate', 'RebindCapture', 'Rollback'
         )][string]$Mode,
         [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedSha,
         [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedTree,
@@ -1681,6 +2558,25 @@ function Enter-DawnstrikeStateBoundaryTaskMutation {
                 Get-DawnstrikeStateBoundaryTerminalEvidencePairs `
                     -StateRoot $state -Mode $Mode -ExpectedSha $ExpectedSha
             )
+            $predecessorActivationLineage = Get-DawnstrikeStateBoundaryActivationLineage `
+                -Receipt $boundary.receipt
+            $predecessorCurrentRuntimeAuthorization = Get-DawnstrikeStateBoundaryRuntimeAuthorization `
+                -Receipt $boundary.receipt -Kind current -StateRoot $state
+            $predecessorRollbackRuntimeAuthorization = Get-DawnstrikeStateBoundaryRuntimeAuthorization `
+                -Receipt $boundary.receipt -Kind rollback -StateRoot $state
+            if ($Mode -eq 'Activate' -and
+                [string]$predecessorCurrentRuntimeAuthorization.status -cne 'AUTHORIZED') {
+                throw 'Activation requires an exact protected current-runtime authorization.'
+            }
+            if ($Mode -eq 'BootstrapBaseline' -and (
+                [string]$predecessorCurrentRuntimeAuthorization.status -notin @('NONE', 'LEGACY_NONE') -or
+                [string]$predecessorRollbackRuntimeAuthorization.status -notin @('NONE', 'LEGACY_NONE') -or
+                [string]$predecessorActivationLineage.status -notin @('NONE', 'LEGACY_NONE')
+            )) { throw 'Baseline bootstrap is restricted to the first protected runtime authorization.' }
+            if ($Mode -eq 'Rollback' -and (
+                [string]$predecessorCurrentRuntimeAuthorization.status -cne 'AUTHORIZED' -or
+                [string]$predecessorRollbackRuntimeAuthorization.status -cne 'AUTHORIZED'
+            )) { throw 'Rollback requires exact protected current and predecessor runtime authorizations.' }
             $completionPath = Join-Path $evidence (
                 'state-boundary-task-mutation-completion-' + $operationId + '.json'
             )
@@ -1694,6 +2590,27 @@ function Enter-DawnstrikeStateBoundaryTaskMutation {
                 state_root = $state
                 old_current_receipt_sha256 = [string]$boundary.receipt_sha256
                 old_task_binding_sha256 = [string]$boundary.receipt.task_binding_sha256
+                last_activation_id = [string]$predecessorActivationLineage.activation_id
+                last_activation_terminal_receipt_relative_path =
+                    [string]$predecessorActivationLineage.receipt_relative_path
+                last_activation_terminal_receipt_sha256 =
+                    [string]$predecessorActivationLineage.receipt_sha256
+                last_activation_terminal_journal_relative_path =
+                    [string]$predecessorActivationLineage.journal_relative_path
+                last_activation_terminal_journal_sha256 =
+                    [string]$predecessorActivationLineage.journal_sha256
+                current_runtime_authorization_contract = if (
+                    [string]$predecessorCurrentRuntimeAuthorization.status -eq 'AUTHORIZED'
+                ) { $predecessorCurrentRuntimeAuthorization.contract } else { 'NONE' }
+                current_runtime_authorization_sha256 = if (
+                    [string]$predecessorCurrentRuntimeAuthorization.status -eq 'AUTHORIZED'
+                ) { [string]$predecessorCurrentRuntimeAuthorization.sha256 } else { 'NONE' }
+                rollback_runtime_authorization_contract = if (
+                    [string]$predecessorRollbackRuntimeAuthorization.status -eq 'AUTHORIZED'
+                ) { $predecessorRollbackRuntimeAuthorization.contract } else { 'NONE' }
+                rollback_runtime_authorization_sha256 = if (
+                    [string]$predecessorRollbackRuntimeAuthorization.status -eq 'AUTHORIZED'
+                ) { [string]$predecessorRollbackRuntimeAuthorization.sha256 } else { 'NONE' }
                 request_contract_sha256 = $RequestContractSha256.ToLowerInvariant()
                 predecessor_terminal_evidence_pairs = @($predecessorTerminalEvidencePairs)
                 predecessor_terminal_evidence_sha256 = Get-DawnstrikeStateBoundarySha256Text (
@@ -1736,8 +2653,15 @@ function Enter-DawnstrikeStateBoundaryTaskMutation {
         $completionRead = Read-DawnstrikeStateBoundaryProtectedJson -Path $completionPath
         try { $completionObject = [pscustomobject]@{ path = $completionPath; payload = $completionRead.payload; sha256 = $completionRead.sha256 } }
         finally { $completionRead.stream.Dispose() }
+        if ([string]$completionObject.payload.schema_version -ceq
+            'dawnstrike.state_boundary_task_mutation_fail_closed.v1') {
+            return Complete-DawnstrikeStateBoundaryTaskMutationFailClosedAdoption `
+                -Intent $intent -Completion $completionObject `
+                -StateRoot $state -EvidenceRoot $evidence
+        }
         return Complete-DawnstrikeStateBoundaryTaskMutationAdoption `
-            -Intent $intent -Completion $completionObject -StateRoot $state -EvidenceRoot $evidence
+            -Intent $intent -Completion $completionObject `
+            -StateRoot $state -EvidenceRoot $evidence
     }
     $operationId = [string]$intent.payload.operation_id
     $boundary = Assert-DawnstrikeStateRootBoundary `
@@ -1753,21 +2677,6 @@ function Enter-DawnstrikeStateBoundaryTaskMutation {
         $null = Assert-DawnstrikeStateBoundaryTaskMutationScope `
             -ExpectedTasks $boundary.receipt.task_definitions_and_principals `
             -LiveTasks $liveTasks -AffectedTasks $affected
-        # A task-mutating mode may have durably sealed its terminal receipt and
-        # journal immediately before the launcher was killed. Prove and adopt
-        # that exact live terminal tuple before any fail-safe disable or rerun.
-        $existingTerminal = Find-DawnstrikeStateBoundaryExactTerminalEvidence `
-            -StateRoot $state -Mode $Mode -ExpectedSha $ExpectedSha `
-            -ExpectedTree $ExpectedTree -LiveTasks $liveTasks `
-            -ExcludedEvidencePairs @($intent.payload.predecessor_terminal_evidence_pairs)
-        if ($null -ne $existingTerminal) {
-            foreach ($lock in @($boundary.locks)) { if ($null -ne $lock) { $lock.Dispose() } }
-            $boundary.locks = @()
-            return Complete-DawnstrikeStateBoundaryExistingTerminal `
-                -StateRoot $state -EvidenceRoot $evidence -Mode $Mode `
-                -ExpectedSha $ExpectedSha -ExpectedTree $ExpectedTree `
-                -OperationId $operationId -Terminal $existingTerminal
-        }
         $drift = @($liveTasks | Where-Object {
             $live = $_
             $expected = @($boundary.receipt.task_definitions_and_principals | Where-Object {
@@ -1781,6 +2690,18 @@ function Enter-DawnstrikeStateBoundaryTaskMutation {
         if ($drift.Count -ne 0) {
             Disable-DawnstrikeStateBoundaryAffectedTasks -TaskNames $affected
         }
+        # StateRoot writers can create, self-hash, or make terminal-named files
+        # unreadable. They are never authentication and are inspected only
+        # after every changed affected task has been isolated. Thus a hostile
+        # file-open failure cannot bypass fail-closed task disablement.
+        $currentTerminalPairs = @(
+            Get-DawnstrikeStateBoundaryTerminalEvidencePairs `
+                -StateRoot $state -Mode $Mode -ExpectedSha $ExpectedSha
+        )
+        $postIntentTerminalPairs = @($currentTerminalPairs | Where-Object {
+            $_ -notin @($intent.payload.predecessor_terminal_evidence_pairs)
+        })
+        $terminalReconciliationRequired = $postIntentTerminalPairs.Count -gt 0
         return [pscustomobject]@{
             status = 'RESUME_REQUIRED'
             operation_id = $operationId
@@ -1789,6 +2710,7 @@ function Enter-DawnstrikeStateBoundaryTaskMutation {
             intent_sha256 = [string]$intent.sha256
             already_completed = $false
             resumed = $true
+            terminal_reconciliation_required = $terminalReconciliationRequired
             writer_sids = @($boundary.writer_sids)
             locks = @($boundary.locks)
         }
@@ -1805,13 +2727,16 @@ function Complete-DawnstrikeStateBoundaryTaskMutation {
         [Parameter(Mandatory = $true)][string]$StateRoot,
         [string]$EvidenceRoot = $script:DawnstrikeStateBoundaryEvidenceRoot,
         [Parameter(Mandatory = $true)][ValidateSet(
-            'HardenCapture', 'Activate', 'RebindCapture', 'Rollback'
+            'HardenCapture', 'BootstrapBaseline', 'Activate', 'RebindCapture', 'Rollback'
         )][string]$Mode,
         [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedSha,
         [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedTree,
         [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{32}$')][string]$OperationId,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')][string]$RequestContractSha256,
         [Parameter(Mandatory = $true)][string]$TerminalReceiptPath,
-        [Parameter(Mandatory = $true)][string]$TerminalJournalPath
+        [Parameter(Mandatory = $true)][string]$TerminalJournalPath,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')][string]$TerminalReceiptSha256,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')][string]$TerminalJournalSha256
     )
     $intent = Get-DawnstrikeStateBoundaryTaskMutationIntent -EvidenceRoot $EvidenceRoot
     if ($null -eq $intent -or [string]$intent.payload.operation_id -cne $OperationId) {
@@ -1819,10 +2744,13 @@ function Complete-DawnstrikeStateBoundaryTaskMutation {
     }
     $null = Assert-DawnstrikeStateBoundaryTaskMutationIntent `
         -Intent $intent -StateRoot $StateRoot -Mode $Mode `
-        -ExpectedSha $ExpectedSha -ExpectedTree $ExpectedTree
+        -ExpectedSha $ExpectedSha -ExpectedTree $ExpectedTree `
+        -RequestContractSha256 $RequestContractSha256
     $terminalEvidence = Get-DawnstrikeStateBoundaryTaskMutationTerminalEvidence `
         -StateRoot $StateRoot -Mode $Mode -ExpectedSha $ExpectedSha -ExpectedTree $ExpectedTree `
-        -ReceiptPath $TerminalReceiptPath -JournalPath $TerminalJournalPath
+        -ReceiptPath $TerminalReceiptPath -JournalPath $TerminalJournalPath `
+        -ExpectedReceiptSha256 $TerminalReceiptSha256.ToLowerInvariant() `
+        -ExpectedJournalSha256 $TerminalJournalSha256.ToLowerInvariant()
     try {
         $boundary = Assert-DawnstrikeStateRootBoundary `
             -StateRoot $StateRoot -EvidenceRoot $EvidenceRoot `
@@ -1868,6 +2796,106 @@ function Complete-DawnstrikeStateBoundaryTaskMutation {
         $newReceipt['task_binding_terminal_receipt_sha256'] = [string]$terminalEvidence.record.receipt_sha256
         $newReceipt['task_binding_terminal_journal_sha256'] = [string]$terminalEvidence.record.journal_sha256
         $newReceipt['task_binding_terminal_task_contract_sha256'] = $terminalLiveContractHash
+        $priorCurrentRuntimeAuthorization = Get-DawnstrikeStateBoundaryRuntimeAuthorization `
+            -Receipt $intent.payload -Kind current -StateRoot $StateRoot
+        $priorRollbackRuntimeAuthorization = Get-DawnstrikeStateBoundaryRuntimeAuthorization `
+            -Receipt $intent.payload -Kind rollback -StateRoot $StateRoot
+        $nextCurrentRuntimeAuthorization = $null
+        $nextRollbackRuntimeAuthorization = $null
+        if ($Mode -in @('BootstrapBaseline', 'Activate')) {
+            $material = $terminalEvidence.record.runtime_authorization_material
+            if (
+                [string]$material.operation_id -cne $OperationId -or
+                [string]$material.request_contract_sha256 -cne
+                    [string]$intent.payload.request_contract_sha256 -or
+                [string]$material.canonical_task_definition_contract_sha256 -cne
+                    [string]$terminalEvidence.record.task_contract.task_definition_contract_sha256 -or
+                [string]$material.canonical_task_action_contract_sha256 -cne
+                    [string]$terminalEvidence.record.task_contract.task_action_contract_sha256
+            ) { throw 'Terminal runtime authorization is not bound to this exact protected mutation.' }
+            if ($Mode -eq 'Activate' -and (
+                [string]$priorCurrentRuntimeAuthorization.status -cne 'AUTHORIZED' -or
+                [string]$priorCurrentRuntimeAuthorization.runtime_sha -cne
+                    [string]$terminalEvidence.record.previous_sha -or
+                [string]$priorCurrentRuntimeAuthorization.runtime_tree -cne
+                    [string]$terminalEvidence.record.previous_tree
+            )) { throw 'Activation terminal does not consume the exact authorized predecessor runtime.' }
+            if ($Mode -eq 'BootstrapBaseline' -and
+                [string]$priorCurrentRuntimeAuthorization.status -notin @('NONE', 'LEGACY_NONE')) {
+                throw 'Baseline bootstrap cannot replace an already authorized runtime.'
+            }
+            $nextCurrentRuntimeAuthorization = New-DawnstrikeStateBoundaryRuntimeAuthorization `
+                -Material $material `
+                -MaterialSha256 ([string]$terminalEvidence.record.runtime_authorization_material_sha256) `
+                -TerminalId ([string]$terminalEvidence.record.activation_id) `
+                -TerminalReceiptRelativePath ([string]$terminalEvidence.record.receipt_relative_path) `
+                -TerminalReceiptSha256 ([string]$terminalEvidence.record.receipt_sha256) `
+                -TerminalJournalRelativePath ([string]$terminalEvidence.record.journal_relative_path) `
+                -TerminalJournalSha256 ([string]$terminalEvidence.record.journal_sha256) `
+                -StateRoot $StateRoot
+            $nextRollbackRuntimeAuthorization = if ($Mode -eq 'Activate') {
+                $priorCurrentRuntimeAuthorization
+            }
+            else { [pscustomobject]@{ status = 'NONE' } }
+        }
+        elseif ($Mode -eq 'Rollback') {
+            if (
+                [string]$priorCurrentRuntimeAuthorization.status -cne 'AUTHORIZED' -or
+                [string]$priorRollbackRuntimeAuthorization.status -cne 'AUTHORIZED' -or
+                [string]$priorRollbackRuntimeAuthorization.material.canonical_task_definition_contract_sha256 -cne
+                    [string]$terminalEvidence.record.task_contract.task_definition_contract_sha256 -or
+                [string]$priorRollbackRuntimeAuthorization.material.canonical_task_action_contract_sha256 -cne
+                    [string]$terminalEvidence.record.task_contract.task_action_contract_sha256
+            ) { throw 'Rollback terminal does not restore the exact protected predecessor runtime contract.' }
+            $nextCurrentRuntimeAuthorization = $priorRollbackRuntimeAuthorization
+            $nextRollbackRuntimeAuthorization = [pscustomobject]@{ status = 'NONE' }
+        }
+        else {
+            $nextCurrentRuntimeAuthorization = $priorCurrentRuntimeAuthorization
+            $nextRollbackRuntimeAuthorization = $priorRollbackRuntimeAuthorization
+        }
+        $newReceipt['current_runtime_authorization_contract'] = if (
+            [string]$nextCurrentRuntimeAuthorization.status -eq 'AUTHORIZED'
+        ) { $nextCurrentRuntimeAuthorization.contract } else { 'NONE' }
+        $newReceipt['current_runtime_authorization_sha256'] = if (
+            [string]$nextCurrentRuntimeAuthorization.status -eq 'AUTHORIZED'
+        ) { [string]$nextCurrentRuntimeAuthorization.sha256 } else { 'NONE' }
+        $newReceipt['rollback_runtime_authorization_contract'] = if (
+            [string]$nextRollbackRuntimeAuthorization.status -eq 'AUTHORIZED'
+        ) { $nextRollbackRuntimeAuthorization.contract } else { 'NONE' }
+        $newReceipt['rollback_runtime_authorization_sha256'] = if (
+            [string]$nextRollbackRuntimeAuthorization.status -eq 'AUTHORIZED'
+        ) { [string]$nextRollbackRuntimeAuthorization.sha256 } else { 'NONE' }
+        $priorActivationLineage = Get-DawnstrikeStateBoundaryActivationLineage `
+            -Receipt $intent.payload
+        $nextActivationLineage = if ($Mode -eq 'Activate') {
+            [pscustomobject]@{
+                activation_id = [string]$terminalEvidence.record.activation_id
+                receipt_relative_path = [string]$terminalEvidence.record.receipt_relative_path
+                receipt_sha256 = [string]$terminalEvidence.record.receipt_sha256
+                journal_relative_path = [string]$terminalEvidence.record.journal_relative_path
+                journal_sha256 = [string]$terminalEvidence.record.journal_sha256
+            }
+        }
+        elseif ($Mode -eq 'Rollback') {
+            [pscustomobject]@{
+                activation_id = 'NONE'
+                receipt_relative_path = 'NONE'
+                receipt_sha256 = 'NONE'
+                journal_relative_path = 'NONE'
+                journal_sha256 = 'NONE'
+            }
+        }
+        else { $priorActivationLineage }
+        $newReceipt['last_activation_id'] = [string]$nextActivationLineage.activation_id
+        $newReceipt['last_activation_terminal_receipt_relative_path'] =
+            [string]$nextActivationLineage.receipt_relative_path
+        $newReceipt['last_activation_terminal_receipt_sha256'] =
+            [string]$nextActivationLineage.receipt_sha256
+        $newReceipt['last_activation_terminal_journal_relative_path'] =
+            [string]$nextActivationLineage.journal_relative_path
+        $newReceipt['last_activation_terminal_journal_sha256'] =
+            [string]$nextActivationLineage.journal_sha256
         if ($Mode -in @('Activate', 'Rollback')) {
             $canonical = @($liveTasks | Where-Object { [bool]$_.canonical })
             if ($canonical.Count -ne $script:DawnstrikeStateBoundaryCanonicalTasks.Count -or
@@ -1875,6 +2903,15 @@ function Complete-DawnstrikeStateBoundaryTaskMutation {
                 throw 'Governed activation/rollback did not leave every canonical task Ready.'
             }
             $newReceipt['canonical_task_disposition'] = 'ENABLED_BY_GOVERNED_' + $Mode.ToUpperInvariant() + '_RESEAL'
+        }
+        elseif ($Mode -eq 'BootstrapBaseline') {
+            $canonical = @($liveTasks | Where-Object { [bool]$_.canonical })
+            if ($canonical.Count -ne $script:DawnstrikeStateBoundaryCanonicalTasks.Count -or
+                @($canonical | Where-Object { [string]$_.state -ne 'Disabled' }).Count -ne 0) {
+                throw 'Governed baseline bootstrap did not leave every canonical task Disabled.'
+            }
+            $newReceipt['canonical_task_disposition'] =
+                'DISABLED_BY_GOVERNED_BOOTSTRAP_BASELINE_RESEAL'
         }
         $capture = @($liveTasks | Where-Object {
             [string]$_.task_name -ceq $script:DawnstrikeStateBoundaryAuxiliaryTask
@@ -1972,20 +3009,23 @@ function Cancel-DawnstrikeStateBoundaryTaskMutationIfUnchanged {
             $null = Assert-DawnstrikeStateBoundaryTaskMutationScope `
                 -ExpectedTasks $boundary.receipt.task_definitions_and_principals `
                 -LiveTasks $live -AffectedTasks $affected
-            $exactTerminal = Find-DawnstrikeStateBoundaryExactTerminalEvidence `
-                -StateRoot $StateRoot -Mode ([string]$intent.payload.mode) `
-                -ExpectedSha ([string]$intent.payload.expected_sha) `
-                -ExpectedTree ([string]$intent.payload.expected_tree) -LiveTasks $live `
-                -ExcludedEvidencePairs @($intent.payload.predecessor_terminal_evidence_pairs)
-            if ($null -ne $exactTerminal) {
-                # Preserve the protected intent and exact terminal task state.
-                # Enter will seal it (or adopt an already-written completion)
-                # on the next launcher admission instead of disabling/rerunning.
-                return $false
-            }
             $null = Assert-DawnstrikeStateBoundaryTaskInventoryMatches `
                 -ExpectedTasks $boundary.receipt.task_definitions_and_principals `
                 -LiveTasks $live -WriterSids @($boundary.writer_sids)
+            $currentTerminalPairs = @(
+                Get-DawnstrikeStateBoundaryTerminalEvidencePairs `
+                    -StateRoot $StateRoot -Mode ([string]$intent.payload.mode) `
+                    -ExpectedSha ([string]$intent.payload.expected_sha)
+            )
+            $postIntentTerminalPairs = @($currentTerminalPairs | Where-Object {
+                $_ -notin @($intent.payload.predecessor_terminal_evidence_pairs)
+            })
+            if ($postIntentTerminalPairs.Count -gt 0) {
+                # A terminal-named tuple can only preserve this intent. The
+                # next launcher admission must dispatch the exact governed
+                # mode; no writer-owned tuple is promoted or treated as proof.
+                return $false
+            }
             Remove-Item -LiteralPath ([string]$intent.path) -Force -ErrorAction Stop
             return $true
         }
@@ -2285,7 +3325,18 @@ function Assert-DawnstrikeStateBoundaryEvidenceAcl {
 
     $null = Assert-DawnstrikeStateBoundaryNoReparse -Path $Path -Label 'Protected StateRoot evidence'
     $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
-    if ([string]$acl.Owner -notmatch '(?i)(^|\\)(SYSTEM|Administrators|TrustedInstaller)$') {
+    $protectedPrincipalSids = @{
+        'S-1-5-18' = $true
+        'S-1-5-32-544' = $true
+        'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464' = $true
+    }
+    try {
+        $ownerSid = [string]([Security.Principal.NTAccount]::new(
+            [string]$acl.Owner
+        )).Translate([Security.Principal.SecurityIdentifier]).Value
+    }
+    catch { throw 'Protected StateRoot evidence owner cannot be translated to an exact SID.' }
+    if (-not $protectedPrincipalSids.ContainsKey($ownerSid)) {
         throw 'Protected StateRoot evidence is not administrator-owned.'
     }
     if (-not $acl.AreAccessRulesProtected) { throw 'Protected StateRoot evidence inherits its DACL.' }
@@ -2298,9 +3349,15 @@ function Assert-DawnstrikeStateBoundaryEvidenceAcl {
         [Security.AccessControl.FileSystemRights]::TakeOwnership
     )
     foreach ($rule in @($acl.Access)) {
+        try {
+            $ruleSid = [string]$rule.IdentityReference.Translate(
+                [Security.Principal.SecurityIdentifier]
+            ).Value
+        }
+        catch { throw 'Protected StateRoot evidence access principal cannot be translated to an exact SID.' }
         if (
             $rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
-            [string]$rule.IdentityReference -notmatch '(?i)(^|\\)(SYSTEM|Administrators|TrustedInstaller)$' -and
+            -not $protectedPrincipalSids.ContainsKey($ruleSid) -and
             ($rule.FileSystemRights -band $unsafe) -ne 0
         ) {
             throw 'Protected StateRoot evidence grants non-administrator write authority.'
@@ -2427,6 +3484,1045 @@ function Read-DawnstrikeStateBoundaryProtectedJson {
         if ($null -ne $stream) { $stream.Dispose() }
         $pathLease.handle.Dispose()
         throw
+    }
+}
+
+function Open-DawnstrikeStateBoundaryExactFile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')]
+        [string]$ExpectedSha256,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    $lease = Open-DawnstrikeStateBoundaryPath -Path $Path -Label $Label
+    $stream = $null
+    try {
+        if ($lease.is_directory) { throw "$Label is not a regular file." }
+        $stream = [IO.File]::Open(
+            [string]$lease.path,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Read,
+            [IO.FileShare]::Read
+        )
+        $memory = [IO.MemoryStream]::new()
+        try { $stream.CopyTo($memory); $bytes = $memory.ToArray() }
+        finally { $memory.Dispose(); $stream.Position = 0 }
+        if (
+            (Get-DawnstrikeStateBoundarySha256Bytes $bytes) -cne
+                $ExpectedSha256.ToLowerInvariant() -or
+            (Get-DawnstrikeStateBoundarySha256File -Path ([string]$lease.path)) -cne
+                $ExpectedSha256.ToLowerInvariant()
+        ) { throw "$Label hash differs from its sealed identity." }
+        $result = [pscustomobject]@{
+            path = [string]$lease.path
+            bytes = $bytes
+            stream = $stream
+            lease = $lease.handle
+        }
+        $stream = $null
+        $lease = $null
+        return $result
+    }
+    finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+        if ($null -ne $lease -and $null -ne $lease.handle) {
+            $lease.handle.Dispose()
+        }
+    }
+}
+
+function Open-DawnstrikeStateBoundaryRuntimeAuthorizationEvidence {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$Authorization,
+        [Parameter(Mandatory = $true)][string]$StateRoot,
+        [Parameter(Mandatory = $true)][ValidateSet('BOOTSTRAP', 'ACTIVATE')]
+        [string]$ExpectedOperationType,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')]
+        [string]$ExpectedSha,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')]
+        [string]$ExpectedTree
+    )
+
+    if (
+        [string]$Authorization.status -cne 'AUTHORIZED' -or
+        [string]$Authorization.operation_type -cne $ExpectedOperationType -or
+        [string]$Authorization.runtime_sha -cne $ExpectedSha.ToLowerInvariant() -or
+        [string]$Authorization.runtime_tree -cne $ExpectedTree.ToLowerInvariant()
+    ) { throw 'Protected runtime authorization is not the exact baseline predecessor.' }
+    $material = $Authorization.material
+    $state = [IO.Path]::GetFullPath($StateRoot).TrimEnd('\')
+    $statePrefix = $state + '\'
+    $release = [IO.Path]::GetFullPath([string]$material.protected_release_root).TrimEnd('\')
+    $dependency = [IO.Path]::GetFullPath([string]$material.dependency_root).TrimEnd('\')
+    $locks = @()
+    try {
+        foreach ($directoryContract in @(
+            [pscustomobject]@{ path = $release; label = 'Authorized baseline release root' },
+            [pscustomobject]@{ path = $dependency; label = 'Authorized baseline dependency root' }
+        )) {
+            Assert-DawnstrikeStateBoundaryEvidenceAcl -Path ([string]$directoryContract.path)
+            $directoryLease = Open-DawnstrikeStateBoundaryPath `
+                -Path ([string]$directoryContract.path) `
+                -Label ([string]$directoryContract.label)
+            if (-not $directoryLease.is_directory) {
+                $directoryLease.handle.Dispose()
+                throw "$([string]$directoryContract.label) is not a directory."
+            }
+            $locks += $directoryLease.handle
+        }
+        $fileContracts = @(
+            [pscustomobject]@{
+                path = [string]$material.release_admission_path
+                sha256 = [string]$material.release_admission_sha256
+                label = 'Authorized baseline release admission'
+                protected = $true
+            },
+            [pscustomobject]@{
+                path = [string]$material.python_path
+                sha256 = [string]$material.python_sha256
+                label = 'Authorized baseline Python executable'
+                protected = $true
+            },
+            [pscustomobject]@{
+                path = [string]$material.python_boundary_manifest_path
+                sha256 = [string]$material.python_boundary_manifest_sha256
+                label = 'Authorized baseline Python boundary manifest'
+                protected = $true
+            },
+            [pscustomobject]@{
+                path = [string]$material.dependency_manifest_path
+                sha256 = [string]$material.dependency_manifest_sha256
+                label = 'Authorized baseline dependency manifest'
+                protected = $true
+            }
+        )
+        foreach ($manifest in @($material.launch_manifests)) {
+            $fileContracts += [pscustomobject]@{
+                path = [string]$manifest.path
+                sha256 = [string]$manifest.sha256
+                label = 'Authorized baseline launch manifest'
+                protected = $false
+            }
+        }
+        foreach ($terminalContract in @(
+            [pscustomobject]@{
+                relative = [string]$Authorization.contract.terminal_receipt_relative_path
+                sha256 = [string]$Authorization.contract.terminal_receipt_sha256
+                label = 'Authorized baseline terminal receipt'
+            },
+            [pscustomobject]@{
+                relative = [string]$Authorization.contract.terminal_journal_relative_path
+                sha256 = [string]$Authorization.contract.terminal_journal_sha256
+                label = 'Authorized baseline terminal journal'
+            }
+        )) {
+            $terminalPath = [IO.Path]::GetFullPath(
+                (Join-Path $state ([string]$terminalContract.relative -replace '/', '\'))
+            )
+            if (-not $terminalPath.StartsWith($statePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                throw 'Authorized baseline terminal evidence escaped StateRoot.'
+            }
+            $fileContracts += [pscustomobject]@{
+                path = $terminalPath
+                sha256 = [string]$terminalContract.sha256
+                label = [string]$terminalContract.label
+                protected = $false
+            }
+        }
+        $releaseAdmission = $null
+        foreach ($contract in $fileContracts) {
+            if ([bool]$contract.protected) {
+                Assert-DawnstrikeStateBoundaryEvidenceAcl -Path ([string]$contract.path)
+            }
+            $opened = Open-DawnstrikeStateBoundaryExactFile `
+                -Path ([string]$contract.path) -ExpectedSha256 ([string]$contract.sha256) `
+                -Label ([string]$contract.label)
+            $locks += @($opened.stream, $opened.lease)
+            if ([string]$contract.label -ceq 'Authorized baseline release admission') {
+                try {
+                    $releaseAdmission = [Text.Encoding]::UTF8.GetString($opened.bytes) |
+                        ConvertFrom-Json
+                }
+                catch { throw 'Authorized baseline release admission is invalid JSON.' }
+            }
+        }
+        if (
+            [string]$releaseAdmission.schema_version -cne 'dawnstrike.release_admission.v1' -or
+            [string]$releaseAdmission.candidate_sha -cne $ExpectedSha.ToLowerInvariant() -or
+            [string]$releaseAdmission.candidate_tree -cne $ExpectedTree.ToLowerInvariant() -or
+            $releaseAdmission.research_only -ne $true -or
+            $releaseAdmission.broker_execution_enabled -ne $false
+        ) { throw 'Authorized baseline release admission identity is invalid.' }
+        return [pscustomobject]@{ locks = @($locks) }
+    }
+    catch {
+        foreach ($lock in @($locks)) { if ($null -ne $lock) { $lock.Dispose() } }
+        throw
+    }
+}
+
+function Open-DawnstrikeStateBoundaryCandidateMigrationBoundary {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$StateRoot,
+        [Parameter(Mandatory = $true)][string]$EvidenceRoot,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')]
+        [string]$ExpectedBoundarySha,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')]
+        [string]$ExpectedBoundaryTree,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')]
+        [string]$ExpectedRuntimeSha,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')]
+        [string]$ExpectedRuntimeTree,
+        [Parameter(Mandatory = $true)][string]$ExpectedHelperPath,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')]
+        [string]$ExpectedHelperSha256,
+        [string]$ExpectedReceiptSha256 = ''
+    )
+
+    $fixed = Assert-DawnstrikeStateBoundaryFixedPath `
+        -StateRoot $StateRoot -EvidenceRoot $EvidenceRoot
+    $state = [string]$fixed.state_root
+    $evidence = [string]$fixed.evidence_root
+    Assert-DawnstrikeStateBoundaryQuiescent -StateRoot $state
+    $currentPath = Join-Path $evidence 'state-boundary-current.json'
+    $read = Read-DawnstrikeStateBoundaryProtectedJson -Path $currentPath
+    $locks = @($read.stream)
+    try {
+        $receipt = $read.payload
+        if ($ExpectedReceiptSha256 -and $read.sha256 -cne $ExpectedReceiptSha256) {
+            throw 'StateRoot candidate migration current receipt hash changed.'
+        }
+        if (
+            [string]$receipt.schema_version -cne 'dawnstrike.state_boundary_installation.v2' -or
+            [string]$receipt.status -cne 'PASS' -or
+            [string]$receipt.candidate_sha -cne $ExpectedBoundarySha.ToLowerInvariant() -or
+            [string]$receipt.candidate_tree -cne $ExpectedBoundaryTree.ToLowerInvariant() -or
+            [string]$receipt.state_root -cne $state -or
+            $receipt.research_only -ne $true -or
+            $receipt.broker_execution_enabled -ne $false
+        ) { throw 'StateRoot candidate migration boundary identity is invalid.' }
+        $activationLineage = Get-DawnstrikeStateBoundaryActivationLineage -Receipt $receipt
+        $currentAuthorization = Get-DawnstrikeStateBoundaryRuntimeAuthorization `
+            -Receipt $receipt -Kind current -StateRoot $state
+        $rollbackAuthorization = Get-DawnstrikeStateBoundaryRuntimeAuthorization `
+            -Receipt $receipt -Kind rollback -StateRoot $state
+        if ([string]$currentAuthorization.status -cne 'AUTHORIZED' -or
+            [string]$currentAuthorization.runtime_sha -cne $ExpectedRuntimeSha.ToLowerInvariant() -or
+            [string]$currentAuthorization.runtime_tree -cne $ExpectedRuntimeTree.ToLowerInvariant()) {
+            throw 'StateRoot candidate migration current runtime authorization is not exact.'
+        }
+        $bootstrapAuthorization =
+            [string]$currentAuthorization.operation_type -ceq 'BOOTSTRAP' -and
+            [string]$activationLineage.status -ceq 'NONE' -and
+            [string]$rollbackAuthorization.status -ceq 'NONE'
+        $activeAuthorization =
+            [string]$currentAuthorization.operation_type -ceq 'ACTIVATE' -and
+            [string]$activationLineage.status -ceq 'ACTIVE' -and
+            [string]$rollbackAuthorization.status -ceq 'AUTHORIZED' -and
+            [string]$activationLineage.activation_id -ceq
+                [string]$currentAuthorization.terminal_id -and
+            [string]$activationLineage.receipt_relative_path -ceq
+                [string]$currentAuthorization.contract.terminal_receipt_relative_path -and
+            [string]$activationLineage.receipt_sha256 -ceq
+                [string]$currentAuthorization.contract.terminal_receipt_sha256 -and
+            [string]$activationLineage.journal_relative_path -ceq
+                [string]$currentAuthorization.contract.terminal_journal_relative_path -and
+            [string]$activationLineage.journal_sha256 -ceq
+                [string]$currentAuthorization.contract.terminal_journal_sha256
+        if (-not $bootstrapAuthorization -and -not $activeAuthorization) {
+            throw 'StateRoot candidate migration requires an exact bootstrap or active runtime lineage.'
+        }
+        $authorizationState = if ($bootstrapAuthorization) { 'BOOTSTRAP_DISABLED' }
+            else { 'ACTIVE_READY' }
+        $expectedHelper = [IO.Path]::GetFullPath($ExpectedHelperPath)
+        $receiptHelper = [IO.Path]::GetFullPath([string]$receipt.installed_helper_path)
+        $canonicalHelper = [IO.Path]::GetFullPath(
+            "C:\Program Files\Dawnstrike\releases\$($ExpectedBoundarySha.ToLowerInvariant())\scripts\state_root_boundary.ps1"
+        )
+        if (
+            -not [string]::Equals($expectedHelper, $canonicalHelper, [StringComparison]::OrdinalIgnoreCase) -or
+            -not [string]::Equals($receiptHelper, $expectedHelper, [StringComparison]::OrdinalIgnoreCase) -or
+            [string]$receipt.installed_helper_sha256 -cne $ExpectedHelperSha256.ToLowerInvariant()
+        ) { throw 'StateRoot candidate migration helper identity is invalid.' }
+        Assert-DawnstrikeStateBoundaryEvidenceAcl -Path $expectedHelper
+        $helper = Open-DawnstrikeStateBoundaryExactFile `
+            -Path $expectedHelper -ExpectedSha256 $ExpectedHelperSha256 `
+            -Label 'Protected candidate-boundary helper'
+        $locks += @($helper.stream, $helper.lease)
+        $runtimeHelperPath = if (
+            $ExpectedBoundarySha -ceq $ExpectedRuntimeSha
+        ) { $expectedHelper } else {
+            [IO.Path]::GetFullPath([string]$receipt.candidate_migration_runtime_helper_path)
+        }
+        $runtimeHelperSha256 = if (
+            $ExpectedBoundarySha -ceq $ExpectedRuntimeSha
+        ) { $ExpectedHelperSha256.ToLowerInvariant() } else {
+            [string]$receipt.candidate_migration_runtime_helper_sha256
+        }
+        $expectedRuntimeHelperPath = [IO.Path]::GetFullPath(
+            "C:\Program Files\Dawnstrike\releases\$($ExpectedRuntimeSha.ToLowerInvariant())\scripts\state_root_boundary.ps1"
+        )
+        if (
+            -not [string]::Equals(
+                $runtimeHelperPath, $expectedRuntimeHelperPath,
+                [StringComparison]::OrdinalIgnoreCase
+            ) -or
+            $runtimeHelperSha256 -notmatch '^[0-9a-f]{64}$' -or
+            ($ExpectedBoundarySha -cne $ExpectedRuntimeSha -and (
+                [string]$receipt.candidate_migration_runtime_sha -cne
+                    $ExpectedRuntimeSha.ToLowerInvariant() -or
+                [string]$receipt.candidate_migration_runtime_tree -cne
+                    $ExpectedRuntimeTree.ToLowerInvariant()
+            ))
+        ) { throw 'StateRoot candidate migration runtime helper identity is invalid.' }
+        if ($ExpectedBoundarySha -cne $ExpectedRuntimeSha) {
+            Assert-DawnstrikeStateBoundaryEvidenceAcl -Path $runtimeHelperPath
+            $runtimeHelper = Open-DawnstrikeStateBoundaryExactFile `
+                -Path $runtimeHelperPath -ExpectedSha256 $runtimeHelperSha256 `
+                -Label 'Protected authorized-runtime helper'
+            $locks += @($runtimeHelper.stream, $runtimeHelper.lease)
+        }
+
+        $writerSids = @($receipt.writer_sids | ForEach-Object { [string]$_ } | Sort-Object -Unique)
+        if ($writerSids.Count -lt 1 -or
+            @($writerSids | Where-Object { $_ -notmatch '^S-1-' }).Count -ne 0) {
+            throw 'StateRoot candidate migration writer SID set is invalid.'
+        }
+        $rootBound = Open-DawnstrikeStateBoundaryPath -Path $state -Label 'Production StateRoot'
+        $locksRoot = Join-Path $state 'locks'
+        $locksBound = Open-DawnstrikeStateBoundaryPath `
+            -Path $locksRoot -Label 'Production StateRoot lock root'
+        $locks += @($rootBound.handle, $locksBound.handle)
+        $rootSddl = Assert-DawnstrikeStateBoundaryPathAcl -Path $state -Directory $true `
+            -WriterSids $writerSids -AnchorDirectory
+        $locksSddl = Assert-DawnstrikeStateBoundaryPathAcl -Path $locksRoot -Directory $true `
+            -WriterSids $writerSids -AnchorDirectory
+        if (
+            [string]$rootBound.identity -cne [string]$receipt.state_root_identity -or
+            [string]$locksBound.identity -cne [string]$receipt.locks_root_identity -or
+            (Get-DawnstrikeStateBoundarySha256Text $rootSddl) -cne
+                [string]$receipt.state_root_sddl_sha256 -or
+            (Get-DawnstrikeStateBoundarySha256Text $locksSddl) -cne
+                [string]$receipt.locks_root_sddl_sha256
+        ) { throw 'StateRoot candidate migration root identity or DACL changed.' }
+        if ((Get-DawnstrikeStateBoundaryTaskBindingHash `
+                -Tasks $receipt.task_definitions_and_principals) -cne
+                [string]$receipt.task_binding_sha256) {
+            throw 'StateRoot candidate migration task binding hash is invalid.'
+        }
+        $liveTasks = @(Get-DawnstrikeStateBoundaryTaskInventory)
+        $null = Assert-DawnstrikeStateBoundaryTaskInventoryMatches `
+            -ExpectedTasks $receipt.task_definitions_and_principals `
+            -LiveTasks $liveTasks -WriterSids $writerSids
+        $canonical = @($liveTasks | Where-Object { [bool]$_.canonical })
+        $expectedTaskState = if ($bootstrapAuthorization) { 'Disabled' } else { 'Ready' }
+        $expectedTaskDisposition = if ($bootstrapAuthorization) {
+            'DISABLED_BY_GOVERNED_BOOTSTRAP_BASELINE_RESEAL'
+        }
+        else { 'ENABLED_BY_GOVERNED_ACTIVATE_RESEAL' }
+        if (
+            $canonical.Count -ne $script:DawnstrikeStateBoundaryCanonicalTasks.Count -or
+            @($canonical | Where-Object {
+                [string]$_.state -cne $expectedTaskState
+            }).Count -ne 0 -or
+            [string]$receipt.canonical_task_disposition -cne $expectedTaskDisposition -or
+            [string]$canonical[0].canonical_task_definition_contract_sha256 -cne
+                [string]$currentAuthorization.material.canonical_task_definition_contract_sha256 -or
+            [string]$canonical[0].canonical_task_action_contract_sha256 -cne
+                [string]$currentAuthorization.material.canonical_task_action_contract_sha256
+        ) { throw 'StateRoot candidate migration task contract is not exact for its runtime lineage.' }
+        $authorizationEvidence = Open-DawnstrikeStateBoundaryRuntimeAuthorizationEvidence `
+            -Authorization $currentAuthorization -StateRoot $state `
+            -ExpectedOperationType ([string]$currentAuthorization.operation_type) `
+            -ExpectedSha $ExpectedRuntimeSha `
+            -ExpectedTree $ExpectedRuntimeTree
+        $locks += @($authorizationEvidence.locks)
+        if ($activeAuthorization) {
+            $rollbackEvidence = Open-DawnstrikeStateBoundaryRuntimeAuthorizationEvidence `
+                -Authorization $rollbackAuthorization -StateRoot $state `
+                -ExpectedOperationType ([string]$rollbackAuthorization.operation_type) `
+                -ExpectedSha ([string]$rollbackAuthorization.runtime_sha) `
+                -ExpectedTree ([string]$rollbackAuthorization.runtime_tree)
+            $locks += @($rollbackEvidence.locks)
+        }
+        return [pscustomobject]@{
+            receipt = $receipt
+            receipt_sha256 = [string]$read.sha256
+            receipt_path = $currentPath
+            current_runtime_authorization = $currentAuthorization
+            rollback_runtime_authorization = $rollbackAuthorization
+            activation_lineage = $activationLineage
+            authorization_state = $authorizationState
+            runtime_helper_path = $runtimeHelperPath
+            runtime_helper_sha256 = $runtimeHelperSha256
+            live_tasks = @($liveTasks)
+            writer_sids = @($writerSids)
+            locks = @($locks)
+        }
+    }
+    catch {
+        foreach ($lock in @($locks)) { if ($null -ne $lock) { $lock.Dispose() } }
+        throw
+    }
+}
+
+function Assert-DawnstrikeStateBoundaryCandidateMigrationIntent {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$Intent,
+        [Parameter(Mandatory = $true)][string]$StateRoot,
+        [Parameter(Mandatory = $true)][string]$EvidenceRoot,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')]
+        [string]$ExpectedBoundarySha,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')]
+        [string]$ExpectedBoundaryTree,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')]
+        [string]$ExpectedRuntimeSha,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')]
+        [string]$ExpectedRuntimeTree,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')]
+        [string]$CandidateSha,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')]
+        [string]$CandidateTree,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')]
+        [string]$RequestContractSha256,
+        [Parameter(Mandatory = $true)][string]$InstalledHelperPath,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')]
+        [string]$InstalledHelperSha256,
+        [Parameter(Mandatory = $true)][string]$CandidateAdmissionPath,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')]
+        [string]$CandidateAdmissionSha256
+    )
+
+    $payload = $Intent.payload
+    $required = @(
+        'schema_version', 'operation_id', 'created_at_utc', 'state_root',
+        'from_candidate_sha', 'from_candidate_tree', 'runtime_sha', 'runtime_tree',
+        'candidate_sha', 'candidate_tree',
+        'request_contract_sha256', 'old_current_receipt_sha256',
+        'authorization_state', 'current_runtime_authorization_sha256',
+        'rollback_runtime_authorization_sha256', 'activation_lineage_id',
+        'predecessor_helper_path', 'predecessor_helper_sha256',
+        'runtime_helper_path', 'runtime_helper_sha256',
+        'installed_helper_path',
+        'installed_helper_sha256', 'candidate_admission_path',
+        'candidate_admission_sha256', 'new_current_receipt_sha256',
+        'new_current_receipt', 'completion_path', 'historical_receipt_path',
+        'research_only', 'broker_execution_enabled'
+    )
+    $names = @($payload.PSObject.Properties.Name | ForEach-Object { [string]$_ })
+    $operationId = [string]$payload.operation_id
+    $expectedCompletionPath = Join-Path $EvidenceRoot (
+        "state-boundary-candidate-migration-$operationId.json"
+    )
+    $expectedHistoricalPath = Join-Path $EvidenceRoot (
+        'state-boundary-' + $CandidateSha.ToLowerInvariant() + '.json'
+    )
+    $newReceiptHash = Get-DawnstrikeStateBoundarySha256Text (
+        ($payload.new_current_receipt | ConvertTo-Json -Depth 20) + "`r`n"
+    )
+    $newReceipt = $payload.new_current_receipt
+    if (
+        ($names.Count -ne $required.Count) -or
+        (($names | Sort-Object) -join "`n") -cne (($required | Sort-Object) -join "`n") -or
+        [string]$payload.schema_version -cne
+            'dawnstrike.state_boundary_candidate_migration_intent.v1' -or
+        $operationId -notmatch '^[0-9a-f]{32}$' -or
+        [string]$payload.state_root -cne [IO.Path]::GetFullPath($StateRoot).TrimEnd('\') -or
+        [string]$payload.from_candidate_sha -cne $ExpectedBoundarySha.ToLowerInvariant() -or
+        [string]$payload.from_candidate_tree -cne $ExpectedBoundaryTree.ToLowerInvariant() -or
+        [string]$payload.runtime_sha -cne $ExpectedRuntimeSha.ToLowerInvariant() -or
+        [string]$payload.runtime_tree -cne $ExpectedRuntimeTree.ToLowerInvariant() -or
+        [string]$payload.candidate_sha -cne $CandidateSha.ToLowerInvariant() -or
+        [string]$payload.candidate_tree -cne $CandidateTree.ToLowerInvariant() -or
+        [string]$payload.request_contract_sha256 -cne $RequestContractSha256.ToLowerInvariant() -or
+        [string]$payload.old_current_receipt_sha256 -notmatch '^[0-9a-f]{64}$' -or
+        [string]$payload.authorization_state -notin @('BOOTSTRAP_DISABLED', 'ACTIVE_READY') -or
+        [string]$payload.current_runtime_authorization_sha256 -notmatch '^[0-9a-f]{64}$' -or
+        [string]$payload.rollback_runtime_authorization_sha256 -notmatch
+            '^(?:NONE|[0-9a-f]{64})$' -or
+        [string]$payload.activation_lineage_id -notmatch '^(?:NONE|[0-9a-f]{24})$' -or
+        ([string]$payload.authorization_state -ceq 'BOOTSTRAP_DISABLED' -and (
+            [string]$payload.rollback_runtime_authorization_sha256 -cne 'NONE' -or
+            [string]$payload.activation_lineage_id -cne 'NONE'
+        )) -or
+        ([string]$payload.authorization_state -ceq 'ACTIVE_READY' -and (
+            [string]$payload.rollback_runtime_authorization_sha256 -notmatch '^[0-9a-f]{64}$' -or
+            [string]$payload.activation_lineage_id -notmatch '^[0-9a-f]{24}$'
+        )) -or
+        -not [string]::Equals(
+            [IO.Path]::GetFullPath([string]$payload.predecessor_helper_path),
+            [IO.Path]::GetFullPath(
+                "C:\Program Files\Dawnstrike\releases\$($ExpectedBoundarySha.ToLowerInvariant())\scripts\state_root_boundary.ps1"
+            ),
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        [string]$payload.predecessor_helper_sha256 -notmatch '^[0-9a-f]{64}$' -or
+        -not [string]::Equals(
+            [IO.Path]::GetFullPath([string]$payload.runtime_helper_path),
+            [IO.Path]::GetFullPath(
+                "C:\Program Files\Dawnstrike\releases\$($ExpectedRuntimeSha.ToLowerInvariant())\scripts\state_root_boundary.ps1"
+            ),
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        [string]$payload.runtime_helper_sha256 -notmatch '^[0-9a-f]{64}$' -or
+        -not [string]::Equals(
+            [IO.Path]::GetFullPath([string]$payload.installed_helper_path),
+            [IO.Path]::GetFullPath($InstalledHelperPath),
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        [string]$payload.installed_helper_sha256 -cne
+            $InstalledHelperSha256.ToLowerInvariant() -or
+        -not [string]::Equals(
+            [IO.Path]::GetFullPath([string]$payload.candidate_admission_path),
+            [IO.Path]::GetFullPath($CandidateAdmissionPath),
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        [string]$payload.candidate_admission_sha256 -cne
+            $CandidateAdmissionSha256.ToLowerInvariant() -or
+        [string]$payload.new_current_receipt_sha256 -cne $newReceiptHash -or
+        [string]$payload.completion_path -cne $expectedCompletionPath -or
+        [string]$payload.historical_receipt_path -cne $expectedHistoricalPath -or
+        [string]$newReceipt.candidate_sha -cne $CandidateSha.ToLowerInvariant() -or
+        [string]$newReceipt.candidate_tree -cne $CandidateTree.ToLowerInvariant() -or
+        [string]$newReceipt.current_runtime_authorization_sha256 -cne
+            [string]$payload.current_runtime_authorization_sha256 -or
+        [string]$newReceipt.rollback_runtime_authorization_sha256 -cne
+            [string]$payload.rollback_runtime_authorization_sha256 -or
+        [string]$newReceipt.last_activation_id -cne
+            [string]$payload.activation_lineage_id -or
+        [string]$newReceipt.candidate_migration_operation_id -cne $operationId -or
+        [string]$newReceipt.candidate_migration_request_contract_sha256 -cne
+            $RequestContractSha256.ToLowerInvariant() -or
+        [string]$newReceipt.candidate_migration_predecessor_receipt_sha256 -cne
+            [string]$payload.old_current_receipt_sha256 -or
+        -not [string]::Equals(
+            [IO.Path]::GetFullPath(
+                [string]$newReceipt.candidate_migration_predecessor_helper_path
+            ),
+            [IO.Path]::GetFullPath([string]$payload.predecessor_helper_path),
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        [string]$newReceipt.candidate_migration_predecessor_helper_sha256 -cne
+            [string]$payload.predecessor_helper_sha256 -or
+        [string]$newReceipt.candidate_migration_runtime_sha -cne
+            $ExpectedRuntimeSha.ToLowerInvariant() -or
+        [string]$newReceipt.candidate_migration_runtime_tree -cne
+            $ExpectedRuntimeTree.ToLowerInvariant() -or
+        -not [string]::Equals(
+            [IO.Path]::GetFullPath([string]$newReceipt.candidate_migration_runtime_helper_path),
+            [IO.Path]::GetFullPath([string]$payload.runtime_helper_path),
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        [string]$newReceipt.candidate_migration_runtime_helper_sha256 -cne
+            [string]$payload.runtime_helper_sha256 -or
+        [string]$newReceipt.candidate_migration_authorization_state -cne
+            [string]$payload.authorization_state -or
+        $payload.research_only -ne $true -or
+        $payload.broker_execution_enabled -ne $false
+    ) { throw 'Protected StateRoot candidate-migration intent is invalid or remapped.' }
+    return $true
+}
+
+function Complete-DawnstrikeStateBoundaryCandidateMigrationFileTransition {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$Intent,
+        [Parameter(Mandatory = $true)][string]$EvidenceRoot,
+        [Parameter(Mandatory = $true)][string]$CurrentReceiptPath,
+        [ValidateSet('', 'after_completion', 'after_current')]
+        [string]$TestCrashPoint = '',
+        [switch]$KeepIntent
+    )
+
+    $payload = $Intent.payload
+    $currentRead = Read-DawnstrikeStateBoundaryProtectedJson -Path $CurrentReceiptPath
+    try { $currentHash = [string]$currentRead.sha256 }
+    finally { $currentRead.stream.Dispose() }
+    if ($currentHash -notin @(
+        [string]$payload.old_current_receipt_sha256,
+        [string]$payload.new_current_receipt_sha256
+    )) { throw 'Candidate migration current receipt is outside the sealed transition.' }
+    $completionPayload = [ordered]@{
+        schema_version = 'dawnstrike.state_boundary_candidate_migration_completion.v1'
+        operation_id = [string]$payload.operation_id
+        completed_at_utc = [string]$payload.created_at_utc
+        state_root = [string]$payload.state_root
+        from_candidate_sha = [string]$payload.from_candidate_sha
+        from_candidate_tree = [string]$payload.from_candidate_tree
+        runtime_sha = [string]$payload.runtime_sha
+        runtime_tree = [string]$payload.runtime_tree
+        candidate_sha = [string]$payload.candidate_sha
+        candidate_tree = [string]$payload.candidate_tree
+        request_contract_sha256 = [string]$payload.request_contract_sha256
+        intent_sha256 = [string]$Intent.sha256
+        old_current_receipt_sha256 = [string]$payload.old_current_receipt_sha256
+        new_current_receipt_sha256 = [string]$payload.new_current_receipt_sha256
+        authorization_state = [string]$payload.authorization_state
+        current_runtime_authorization_sha256 =
+            [string]$payload.current_runtime_authorization_sha256
+        rollback_runtime_authorization_sha256 =
+            [string]$payload.rollback_runtime_authorization_sha256
+        activation_lineage_id = [string]$payload.activation_lineage_id
+        predecessor_helper_path = [string]$payload.predecessor_helper_path
+        predecessor_helper_sha256 = [string]$payload.predecessor_helper_sha256
+        runtime_helper_path = [string]$payload.runtime_helper_path
+        runtime_helper_sha256 = [string]$payload.runtime_helper_sha256
+        installed_helper_path = [string]$payload.installed_helper_path
+        installed_helper_sha256 = [string]$payload.installed_helper_sha256
+        candidate_admission_path = [string]$payload.candidate_admission_path
+        candidate_admission_sha256 = [string]$payload.candidate_admission_sha256
+        research_only = $true
+        broker_execution_enabled = $false
+    }
+    $completionWrite = Write-DawnstrikeStateBoundaryProtectedJson `
+        -Payload $completionPayload -Path ([string]$payload.completion_path) -NoReplace
+    if ($TestCrashPoint -eq 'after_completion') {
+        throw 'DAWNSTRIKE_TEST_CANDIDATE_MIGRATION_CRASH:after_completion'
+    }
+    $historicalWrite = Write-DawnstrikeStateBoundaryProtectedJson `
+        -Payload $payload.new_current_receipt `
+        -Path ([string]$payload.historical_receipt_path) -NoReplace
+    if ($historicalWrite.sha256 -cne [string]$payload.new_current_receipt_sha256) {
+        throw 'StateRoot candidate migration historical receipt hash mismatch.'
+    }
+    if ($currentHash -ceq [string]$payload.old_current_receipt_sha256) {
+        $currentWrite = Write-DawnstrikeStateBoundaryProtectedJson `
+            -Payload $payload.new_current_receipt -Path $CurrentReceiptPath
+        if ($currentWrite.sha256 -cne [string]$payload.new_current_receipt_sha256) {
+            throw 'StateRoot candidate migration current receipt hash mismatch.'
+        }
+    }
+    if ($TestCrashPoint -eq 'after_current') {
+        throw 'DAWNSTRIKE_TEST_CANDIDATE_MIGRATION_CRASH:after_current'
+    }
+    foreach ($receiptPath in @(
+        $CurrentReceiptPath,
+        [string]$payload.historical_receipt_path
+    )) {
+        $sealedRead = Read-DawnstrikeStateBoundaryProtectedJson -Path $receiptPath
+        try {
+            if ($sealedRead.sha256 -cne [string]$payload.new_current_receipt_sha256) {
+                throw 'Candidate migration receipt did not converge on the sealed target.'
+            }
+        }
+        finally { $sealedRead.stream.Dispose() }
+    }
+    if (-not $KeepIntent) {
+        Remove-Item -LiteralPath ([string]$Intent.path) -Force -ErrorAction Stop
+    }
+    return [pscustomobject]@{
+        completion_path = [string]$payload.completion_path
+        completion_sha256 = [string]$completionWrite.sha256
+        current_receipt_sha256 = [string]$payload.new_current_receipt_sha256
+    }
+}
+
+function Migrate-DawnstrikeStateRootBoundaryCandidate {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$StateRoot,
+        [string]$EvidenceRoot = $script:DawnstrikeStateBoundaryEvidenceRoot,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')]
+        [string]$ExpectedBoundarySha,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')]
+        [string]$ExpectedBoundaryTree,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')]
+        [string]$ExpectedRuntimeSha,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')]
+        [string]$ExpectedRuntimeTree,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')]
+        [string]$CandidateSha,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')]
+        [string]$CandidateTree,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')]
+        [string]$RequestContractSha256,
+        [Parameter(Mandatory = $true)][string]$InstalledHelperPath,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')]
+        [string]$InstalledHelperSha256,
+        [Parameter(Mandatory = $true)][string]$CandidateAdmissionPath,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')]
+        [string]$CandidateAdmissionSha256
+    )
+
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        throw 'StateRoot candidate migration requires an elevated administrator process.'
+    }
+    if ($ExpectedBoundarySha -ceq $CandidateSha) {
+        throw 'StateRoot candidate migration requires distinct predecessor and candidate SHAs.'
+    }
+    $fixed = Assert-DawnstrikeStateBoundaryFixedPath `
+        -StateRoot $StateRoot -EvidenceRoot $EvidenceRoot
+    $state = [string]$fixed.state_root
+    $evidence = [string]$fixed.evidence_root
+    $expectedBoundaryHelperPath = [IO.Path]::GetFullPath(
+        "C:\Program Files\Dawnstrike\releases\$($ExpectedBoundarySha.ToLowerInvariant())\scripts\state_root_boundary.ps1"
+    )
+    $candidateRelease = [IO.Path]::GetFullPath(
+        "C:\Program Files\Dawnstrike\releases\$($CandidateSha.ToLowerInvariant())"
+    ).TrimEnd('\')
+    $candidateHelper = [IO.Path]::GetFullPath($InstalledHelperPath)
+    $expectedCandidateHelper = Join-Path $candidateRelease 'scripts\state_root_boundary.ps1'
+    $candidateAdmission = [IO.Path]::GetFullPath($CandidateAdmissionPath)
+    $expectedCandidateAdmission = Join-Path `
+        (Join-Path $candidateRelease '.git') 'dawnstrike-host-admission-v1.json'
+    if (
+        -not [string]::Equals(
+            $candidateHelper, $expectedCandidateHelper,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        -not [string]::Equals(
+            $candidateAdmission, $expectedCandidateAdmission,
+            [StringComparison]::OrdinalIgnoreCase
+        )
+    ) { throw 'StateRoot candidate migration target paths are not canonical.' }
+    $null = Assert-DawnstrikeStateBoundaryNoPendingRecovery -EvidenceRoot $evidence
+    $null = Assert-DawnstrikeStateBoundaryNoTaskMutation -EvidenceRoot $evidence
+
+    $intent = Get-DawnstrikeStateBoundaryCandidateMigrationIntent `
+        -EvidenceRoot $evidence
+    $probePath = Join-Path $evidence 'state-boundary-current.json'
+    $probe = Read-DawnstrikeStateBoundaryProtectedJson -Path $probePath
+    try {
+        $probeSha = [string]$probe.payload.candidate_sha
+        $probeTree = [string]$probe.payload.candidate_tree
+        $probeHash = [string]$probe.sha256
+    }
+    finally { $probe.stream.Dispose() }
+
+    if ($null -eq $intent -and $probeSha -ceq $CandidateSha.ToLowerInvariant() -and
+        $probeTree -ceq $CandidateTree.ToLowerInvariant()) {
+        $completed = Open-DawnstrikeStateBoundaryCandidateMigrationBoundary `
+            -StateRoot $state -EvidenceRoot $evidence `
+            -ExpectedBoundarySha $CandidateSha -ExpectedBoundaryTree $CandidateTree `
+            -ExpectedRuntimeSha $ExpectedRuntimeSha -ExpectedRuntimeTree $ExpectedRuntimeTree `
+            -ExpectedHelperPath $candidateHelper `
+            -ExpectedHelperSha256 $InstalledHelperSha256 `
+            -ExpectedReceiptSha256 $probeHash
+        try {
+            $receipt = $completed.receipt
+            if (
+                [string]$receipt.candidate_migration_from_sha -cne
+                    $ExpectedBoundarySha.ToLowerInvariant() -or
+                [string]$receipt.candidate_migration_from_tree -cne
+                    $ExpectedBoundaryTree.ToLowerInvariant() -or
+                [string]$receipt.candidate_migration_runtime_sha -cne
+                    $ExpectedRuntimeSha.ToLowerInvariant() -or
+                [string]$receipt.candidate_migration_runtime_tree -cne
+                    $ExpectedRuntimeTree.ToLowerInvariant() -or
+                [string]$receipt.candidate_migration_request_contract_sha256 -cne
+                    $RequestContractSha256.ToLowerInvariant() -or
+                [string]$receipt.candidate_migration_target_admission_sha256 -cne
+                    $CandidateAdmissionSha256.ToLowerInvariant()
+            ) { throw 'Completed StateRoot candidate migration belongs to another request.' }
+            $historicalPath = Join-Path $evidence (
+                'state-boundary-' + $CandidateSha.ToLowerInvariant() + '.json'
+            )
+            $historical = Read-DawnstrikeStateBoundaryProtectedJson -Path $historicalPath
+            try {
+                if ($historical.sha256 -cne $completed.receipt_sha256) {
+                    throw 'Completed candidate migration historical/current receipts diverged.'
+                }
+            }
+            finally { $historical.stream.Dispose() }
+            return [pscustomobject]@{
+                status = 'COMPLETE'
+                operation_id = [string]$receipt.candidate_migration_operation_id
+                already_completed = $true
+                receipt = $receipt
+                receipt_path = $historicalPath
+                receipt_sha256 = [string]$completed.receipt_sha256
+                current_receipt_path = $probePath
+                research_only = $true
+                broker_execution_enabled = $false
+            }
+        }
+        finally {
+            foreach ($lock in @($completed.locks)) { if ($null -ne $lock) { $lock.Dispose() } }
+        }
+    }
+    if ($null -eq $intent -and (
+        $probeSha -cne $ExpectedBoundarySha.ToLowerInvariant() -or
+        $probeTree -cne $ExpectedBoundaryTree.ToLowerInvariant()
+    )) { throw 'StateRoot candidate migration predecessor is neither exact source nor exact completed target.' }
+
+    $source = $null
+    $currentReceiptSha = $probeHash
+    if ($null -eq $intent) {
+        $source = Open-DawnstrikeStateBoundaryCandidateMigrationBoundary `
+            -StateRoot $state -EvidenceRoot $evidence `
+            -ExpectedBoundarySha $ExpectedBoundarySha `
+            -ExpectedBoundaryTree $ExpectedBoundaryTree `
+            -ExpectedRuntimeSha $ExpectedRuntimeSha -ExpectedRuntimeTree $ExpectedRuntimeTree `
+            -ExpectedHelperPath $expectedBoundaryHelperPath `
+            -ExpectedHelperSha256 ([string]$probe.payload.installed_helper_sha256) `
+            -ExpectedReceiptSha256 $probeHash
+        try {
+            Assert-DawnstrikeStateBoundaryEvidenceAcl -Path $candidateRelease
+            Assert-DawnstrikeStateBoundaryEvidenceAcl -Path $candidateHelper
+            Assert-DawnstrikeStateBoundaryEvidenceAcl -Path $candidateAdmission
+            $candidateReleaseLease = Open-DawnstrikeStateBoundaryPath `
+                -Path $candidateRelease -Label 'Candidate migration target release root'
+            $source.locks += $candidateReleaseLease.handle
+            $candidateHelperOpen = Open-DawnstrikeStateBoundaryExactFile `
+                -Path $candidateHelper -ExpectedSha256 $InstalledHelperSha256 `
+                -Label 'Candidate migration target helper'
+            $source.locks += @($candidateHelperOpen.stream, $candidateHelperOpen.lease)
+            $candidateAdmissionOpen = Open-DawnstrikeStateBoundaryExactFile `
+                -Path $candidateAdmission -ExpectedSha256 $CandidateAdmissionSha256 `
+                -Label 'Candidate migration target admission'
+            $source.locks += @($candidateAdmissionOpen.stream, $candidateAdmissionOpen.lease)
+            try {
+                $candidateAdmissionPayload = [Text.Encoding]::UTF8.GetString(
+                    $candidateAdmissionOpen.bytes
+                ) | ConvertFrom-Json
+            }
+            catch { throw 'Candidate migration target admission is invalid JSON.' }
+            if (
+                [string]$candidateAdmissionPayload.schema_version -cne
+                    'dawnstrike.release_admission.v1' -or
+                [string]$candidateAdmissionPayload.candidate_sha -cne
+                    $CandidateSha.ToLowerInvariant() -or
+                [string]$candidateAdmissionPayload.candidate_tree -cne
+                    $CandidateTree.ToLowerInvariant() -or
+                $candidateAdmissionPayload.research_only -ne $true -or
+                $candidateAdmissionPayload.broker_execution_enabled -ne $false
+            ) { throw 'Candidate migration target admission identity is invalid.' }
+            $operationId = [Guid]::NewGuid().ToString('N')
+            $createdAt = [DateTime]::UtcNow.ToString('o')
+            $newReceipt = Copy-DawnstrikeStateBoundaryReceipt -Receipt $source.receipt
+            $newReceipt['candidate_sha'] = $CandidateSha.ToLowerInvariant()
+            $newReceipt['candidate_tree'] = $CandidateTree.ToLowerInvariant()
+            $newReceipt['installed_helper_path'] = $candidateHelper
+            $newReceipt['installed_helper_sha256'] = $InstalledHelperSha256.ToLowerInvariant()
+            $newReceipt['candidate_migration_schema_version'] =
+                'dawnstrike.state_boundary_candidate_migration.v1'
+            $newReceipt['candidate_migration_operation_id'] = $operationId
+            $newReceipt['candidate_migration_completed_at_utc'] = $createdAt
+            $newReceipt['candidate_migration_from_sha'] = $ExpectedBoundarySha.ToLowerInvariant()
+            $newReceipt['candidate_migration_from_tree'] = $ExpectedBoundaryTree.ToLowerInvariant()
+            $newReceipt['candidate_migration_runtime_sha'] = $ExpectedRuntimeSha.ToLowerInvariant()
+            $newReceipt['candidate_migration_runtime_tree'] = $ExpectedRuntimeTree.ToLowerInvariant()
+            $newReceipt['candidate_migration_request_contract_sha256'] =
+                $RequestContractSha256.ToLowerInvariant()
+            $newReceipt['candidate_migration_predecessor_receipt_sha256'] =
+                [string]$source.receipt_sha256
+            $newReceipt['candidate_migration_predecessor_helper_path'] =
+                [IO.Path]::GetFullPath([string]$source.receipt.installed_helper_path)
+            $newReceipt['candidate_migration_predecessor_helper_sha256'] =
+                [string]$source.receipt.installed_helper_sha256
+            $newReceipt['candidate_migration_authorization_state'] =
+                [string]$source.authorization_state
+            $newReceipt['candidate_migration_runtime_helper_path'] =
+                [string]$source.runtime_helper_path
+            $newReceipt['candidate_migration_runtime_helper_sha256'] =
+                [string]$source.runtime_helper_sha256
+            $newReceipt['candidate_migration_target_admission_path'] = $candidateAdmission
+            $newReceipt['candidate_migration_target_admission_sha256'] =
+                $CandidateAdmissionSha256.ToLowerInvariant()
+            $newReceiptJson = $newReceipt | ConvertTo-Json -Depth 20
+            $newReceiptHash = Get-DawnstrikeStateBoundarySha256Text ($newReceiptJson + "`r`n")
+            $completionPath = Join-Path $evidence (
+                "state-boundary-candidate-migration-$operationId.json"
+            )
+            $historicalPath = Join-Path $evidence (
+                'state-boundary-' + $CandidateSha.ToLowerInvariant() + '.json'
+            )
+            $intentPayload = [ordered]@{
+                schema_version = 'dawnstrike.state_boundary_candidate_migration_intent.v1'
+                operation_id = $operationId
+                created_at_utc = $createdAt
+                state_root = $state
+                from_candidate_sha = $ExpectedBoundarySha.ToLowerInvariant()
+                from_candidate_tree = $ExpectedBoundaryTree.ToLowerInvariant()
+                runtime_sha = $ExpectedRuntimeSha.ToLowerInvariant()
+                runtime_tree = $ExpectedRuntimeTree.ToLowerInvariant()
+                candidate_sha = $CandidateSha.ToLowerInvariant()
+                candidate_tree = $CandidateTree.ToLowerInvariant()
+                request_contract_sha256 = $RequestContractSha256.ToLowerInvariant()
+                old_current_receipt_sha256 = [string]$source.receipt_sha256
+                authorization_state = [string]$source.authorization_state
+                current_runtime_authorization_sha256 =
+                    [string]$source.current_runtime_authorization.sha256
+                rollback_runtime_authorization_sha256 = if (
+                    [string]$source.rollback_runtime_authorization.status -ceq 'AUTHORIZED'
+                ) { [string]$source.rollback_runtime_authorization.sha256 } else { 'NONE' }
+                activation_lineage_id = [string]$source.activation_lineage.activation_id
+                predecessor_helper_path =
+                    [IO.Path]::GetFullPath([string]$source.receipt.installed_helper_path)
+                predecessor_helper_sha256 = [string]$source.receipt.installed_helper_sha256
+                runtime_helper_path = [string]$source.runtime_helper_path
+                runtime_helper_sha256 = [string]$source.runtime_helper_sha256
+                installed_helper_path = $candidateHelper
+                installed_helper_sha256 = $InstalledHelperSha256.ToLowerInvariant()
+                candidate_admission_path = $candidateAdmission
+                candidate_admission_sha256 = $CandidateAdmissionSha256.ToLowerInvariant()
+                new_current_receipt_sha256 = $newReceiptHash
+                new_current_receipt = $newReceipt
+                completion_path = $completionPath
+                historical_receipt_path = $historicalPath
+                research_only = $true
+                broker_execution_enabled = $false
+            }
+            $intentPath = Get-DawnstrikeStateBoundaryCandidateMigrationIntentPath `
+                -EvidenceRoot $evidence
+            $null = Write-DawnstrikeStateBoundaryProtectedJson `
+                -Payload $intentPayload -Path $intentPath -NoReplace
+            $intent = Get-DawnstrikeStateBoundaryCandidateMigrationIntent `
+                -EvidenceRoot $evidence
+        }
+        finally {
+            foreach ($lock in @($source.locks)) { if ($null -ne $lock) { $lock.Dispose() } }
+            $source = $null
+        }
+    }
+
+    $null = Assert-DawnstrikeStateBoundaryCandidateMigrationIntent `
+        -Intent $intent -StateRoot $state -EvidenceRoot $evidence `
+        -ExpectedBoundarySha $ExpectedBoundarySha -ExpectedBoundaryTree $ExpectedBoundaryTree `
+        -ExpectedRuntimeSha $ExpectedRuntimeSha -ExpectedRuntimeTree $ExpectedRuntimeTree `
+        -CandidateSha $CandidateSha -CandidateTree $CandidateTree `
+        -RequestContractSha256 $RequestContractSha256 `
+        -InstalledHelperPath $candidateHelper -InstalledHelperSha256 $InstalledHelperSha256 `
+        -CandidateAdmissionPath $candidateAdmission `
+        -CandidateAdmissionSha256 $CandidateAdmissionSha256
+    $payload = $intent.payload
+    $currentReceiptSha = [string]$payload.old_current_receipt_sha256
+    $boundarySha = if ($probeHash -ceq [string]$payload.new_current_receipt_sha256) {
+        $CandidateSha
+    }
+    elseif ($probeHash -ceq [string]$payload.old_current_receipt_sha256) {
+        $ExpectedBoundarySha
+    }
+    else { throw 'StateRoot candidate migration current receipt is outside its sealed transition.' }
+    $boundaryTree = if ($boundarySha -ceq $CandidateSha) {
+        $CandidateTree
+    }
+    else { $ExpectedBoundaryTree }
+    $boundaryHelper = if ($boundarySha -ceq $CandidateSha) {
+        $candidateHelper
+    }
+    else { $expectedBoundaryHelperPath }
+    $boundaryHelperHash = if ($boundarySha -ceq $CandidateSha) {
+        $InstalledHelperSha256
+    }
+    else { [string]$probe.payload.installed_helper_sha256 }
+    $boundary = Open-DawnstrikeStateBoundaryCandidateMigrationBoundary `
+        -StateRoot $state -EvidenceRoot $evidence `
+        -ExpectedBoundarySha $boundarySha -ExpectedBoundaryTree $boundaryTree `
+        -ExpectedRuntimeSha $ExpectedRuntimeSha -ExpectedRuntimeTree $ExpectedRuntimeTree `
+        -ExpectedHelperPath $boundaryHelper -ExpectedHelperSha256 $boundaryHelperHash `
+        -ExpectedReceiptSha256 $probeHash
+    try {
+        if ([string]$boundary.current_runtime_authorization.sha256 -cne
+            [string]$payload.current_runtime_authorization_sha256) {
+            throw 'StateRoot candidate migration runtime authorization changed under recovery.'
+        }
+        $boundaryRollbackSha = if (
+            [string]$boundary.rollback_runtime_authorization.status -ceq 'AUTHORIZED'
+        ) { [string]$boundary.rollback_runtime_authorization.sha256 } else { 'NONE' }
+        if (
+            [string]$boundary.authorization_state -cne [string]$payload.authorization_state -or
+            $boundaryRollbackSha -cne [string]$payload.rollback_runtime_authorization_sha256 -or
+            [string]$boundary.activation_lineage.activation_id -cne
+                [string]$payload.activation_lineage_id -or
+            -not [string]::Equals(
+                [IO.Path]::GetFullPath([string]$boundary.runtime_helper_path),
+                [IO.Path]::GetFullPath([string]$payload.runtime_helper_path),
+                [StringComparison]::OrdinalIgnoreCase
+            ) -or
+            [string]$boundary.runtime_helper_sha256 -cne
+                [string]$payload.runtime_helper_sha256
+        ) { throw 'StateRoot candidate migration protected lineage changed under recovery.' }
+        if ($boundarySha -ceq $ExpectedBoundarySha -and (
+            -not [string]::Equals(
+                [IO.Path]::GetFullPath([string]$boundary.receipt.installed_helper_path),
+                [IO.Path]::GetFullPath([string]$payload.predecessor_helper_path),
+                [StringComparison]::OrdinalIgnoreCase
+            ) -or
+            [string]$boundary.receipt.installed_helper_sha256 -cne
+                [string]$payload.predecessor_helper_sha256
+        )) { throw 'StateRoot candidate migration predecessor helper changed under recovery.' }
+        Assert-DawnstrikeStateBoundaryEvidenceAcl -Path $candidateRelease
+        Assert-DawnstrikeStateBoundaryEvidenceAcl -Path $candidateHelper
+        Assert-DawnstrikeStateBoundaryEvidenceAcl -Path $candidateAdmission
+        $candidateReleaseLease = Open-DawnstrikeStateBoundaryPath `
+            -Path $candidateRelease -Label 'Candidate migration target release root'
+        $boundary.locks += $candidateReleaseLease.handle
+        $candidateHelperOpen = Open-DawnstrikeStateBoundaryExactFile `
+            -Path $candidateHelper -ExpectedSha256 $InstalledHelperSha256 `
+            -Label 'Candidate migration target helper'
+        $boundary.locks += @($candidateHelperOpen.stream, $candidateHelperOpen.lease)
+        $candidateAdmissionOpen = Open-DawnstrikeStateBoundaryExactFile `
+            -Path $candidateAdmission -ExpectedSha256 $CandidateAdmissionSha256 `
+            -Label 'Candidate migration target admission'
+        $boundary.locks += @($candidateAdmissionOpen.stream, $candidateAdmissionOpen.lease)
+        # Once the shared mutation sentinel is durable, every newly launched
+        # scheduled writer fails its StateRoot admission. Reprove that no task
+        # admitted before the sentinel remains active immediately before the
+        # protected current-pointer transition.
+        Assert-DawnstrikeStateBoundaryQuiescent -StateRoot $state
+        $boundary.locks[0].Dispose()
+        $boundary.locks = @($boundary.locks | Select-Object -Skip 1)
+        $transition = Complete-DawnstrikeStateBoundaryCandidateMigrationFileTransition `
+            -Intent $intent -EvidenceRoot $evidence `
+            -CurrentReceiptPath $probePath -KeepIntent
+        $sealed = Open-DawnstrikeStateBoundaryCandidateMigrationBoundary `
+            -StateRoot $state -EvidenceRoot $evidence `
+            -ExpectedBoundarySha $CandidateSha -ExpectedBoundaryTree $CandidateTree `
+            -ExpectedRuntimeSha $ExpectedRuntimeSha -ExpectedRuntimeTree $ExpectedRuntimeTree `
+            -ExpectedHelperPath $candidateHelper `
+            -ExpectedHelperSha256 $InstalledHelperSha256 `
+            -ExpectedReceiptSha256 ([string]$payload.new_current_receipt_sha256)
+        try {
+            if ([string]$sealed.current_runtime_authorization.sha256 -cne
+                [string]$payload.current_runtime_authorization_sha256) {
+                throw 'StateRoot candidate migration did not preserve exact runtime authorization.'
+            }
+            $sealedRollbackSha = if (
+                [string]$sealed.rollback_runtime_authorization.status -ceq 'AUTHORIZED'
+            ) { [string]$sealed.rollback_runtime_authorization.sha256 } else { 'NONE' }
+            if (
+                [string]$sealed.authorization_state -cne [string]$payload.authorization_state -or
+                $sealedRollbackSha -cne [string]$payload.rollback_runtime_authorization_sha256 -or
+                [string]$sealed.activation_lineage.activation_id -cne
+                    [string]$payload.activation_lineage_id -or
+                -not [string]::Equals(
+                    [IO.Path]::GetFullPath([string]$sealed.runtime_helper_path),
+                    [IO.Path]::GetFullPath([string]$payload.runtime_helper_path),
+                    [StringComparison]::OrdinalIgnoreCase
+                ) -or
+                [string]$sealed.runtime_helper_sha256 -cne
+                    [string]$payload.runtime_helper_sha256
+            ) { throw 'StateRoot candidate migration did not preserve exact rollback/activation lineage.' }
+        }
+        finally {
+            foreach ($lock in @($sealed.locks)) { if ($null -ne $lock) { $lock.Dispose() } }
+        }
+        Assert-DawnstrikeStateBoundaryQuiescent -StateRoot $state
+        Remove-Item -LiteralPath ([string]$intent.path) -Force -ErrorAction Stop
+        return [pscustomobject]@{
+            status = 'COMPLETE'
+            operation_id = [string]$payload.operation_id
+            already_completed = $false
+            receipt = $payload.new_current_receipt
+            receipt_path = [string]$payload.historical_receipt_path
+            receipt_sha256 = [string]$payload.new_current_receipt_sha256
+            current_receipt_path = $probePath
+            completion_path = [string]$payload.completion_path
+            completion_sha256 = [string]$transition.completion_sha256
+            research_only = $true
+            broker_execution_enabled = $false
+        }
+    }
+    finally {
+        foreach ($lock in @($boundary.locks)) { if ($null -ne $lock) { $lock.Dispose() } }
     }
 }
 
@@ -2718,6 +4814,10 @@ function Install-DawnstrikeStateRootBoundary {
     $null = Assert-DawnstrikeStateBoundaryNoReparse -Path $evidence -Label 'Protected StateRoot evidence root'
     $null = Invoke-DawnstrikeStateBoundaryPendingRecovery -StateRoot $state -EvidenceRoot $evidence
     $null = Assert-DawnstrikeStateBoundaryNoTaskMutation -EvidenceRoot $evidence
+    $null = Assert-DawnstrikeStateBoundaryNoCandidateMigration -EvidenceRoot $evidence
+    if (Test-Path -LiteralPath (Join-Path $evidence 'state-boundary-current.json') -PathType Leaf) {
+        throw 'An existing protected StateRoot boundary requires explicit candidate migration; reinstall is denied.'
+    }
     Assert-DawnstrikeStateBoundaryQuiescent -StateRoot $state
     $locksRoot = Join-Path $state 'locks'
     if (-not (Test-Path -LiteralPath $locksRoot -PathType Container)) {
@@ -2879,6 +4979,15 @@ function Install-DawnstrikeStateRootBoundary {
                 installed_helper_sha256 = $InstalledHelperSha256.ToLowerInvariant()
                 canonical_task_disposition = 'DISABLED_PENDING_GOVERNED_ACTIVATE_RESEAL'
                 auxiliary_capture_disposition = 'DISABLED_PENDING_GOVERNED_HARDEN_CAPTURE_REBIND'
+                last_activation_id = 'NONE'
+                last_activation_terminal_receipt_relative_path = 'NONE'
+                last_activation_terminal_receipt_sha256 = 'NONE'
+                last_activation_terminal_journal_relative_path = 'NONE'
+                last_activation_terminal_journal_sha256 = 'NONE'
+                current_runtime_authorization_contract = 'NONE'
+                current_runtime_authorization_sha256 = 'NONE'
+                rollback_runtime_authorization_contract = 'NONE'
+                rollback_runtime_authorization_sha256 = 'NONE'
                 research_only = $true
                 broker_execution_enabled = $false
             }
@@ -2977,6 +5086,7 @@ function Assert-DawnstrikeStateRootBoundary {
     $state = [string]$fixed.state_root
     $evidence = [string]$fixed.evidence_root
     $null = Assert-DawnstrikeStateBoundaryNoPendingRecovery -EvidenceRoot $evidence
+    $null = Assert-DawnstrikeStateBoundaryNoCandidateMigration -EvidenceRoot $evidence
     $taskMutation = Get-DawnstrikeStateBoundaryTaskMutationIntent -EvidenceRoot $evidence
     if ($null -ne $taskMutation) {
         if (
@@ -3001,13 +5111,70 @@ function Assert-DawnstrikeStateRootBoundary {
             $receipt.research_only -ne $true -or
             $receipt.broker_execution_enabled -ne $false
         ) { throw 'StateRoot installation receipt safety identity is invalid.' }
+        $activationLineage = Get-DawnstrikeStateBoundaryActivationLineage -Receipt $receipt
+        $currentRuntimeAuthorization = Get-DawnstrikeStateBoundaryRuntimeAuthorization `
+            -Receipt $receipt -Kind current -StateRoot $state
+        $rollbackRuntimeAuthorization = Get-DawnstrikeStateBoundaryRuntimeAuthorization `
+            -Receipt $receipt -Kind rollback -StateRoot $state
         $writerSids = @($receipt.writer_sids | ForEach-Object { [string]$_ } | Sort-Object -Unique)
         if ($writerSids.Count -lt 1 -or @($writerSids | Where-Object { $_ -notmatch '^S-1-' }).Count -ne 0) {
             throw 'StateRoot installation receipt writer SID set is invalid.'
         }
         $installedHelper = [IO.Path]::GetFullPath([string]$receipt.installed_helper_path)
-        if (-not [string]::Equals($installedHelper, $script:DawnstrikeStateBoundaryInstalledHelper, [StringComparison]::OrdinalIgnoreCase)) {
-            throw 'StateRoot installation receipt does not bind the protected helper path.'
+        $loadedHelper = [IO.Path]::GetFullPath($script:DawnstrikeStateBoundaryInstalledHelper)
+        $loadedIsInstalled = [string]::Equals(
+            $installedHelper, $loadedHelper, [StringComparison]::OrdinalIgnoreCase
+        )
+        if (-not $loadedIsInstalled) {
+            $authorizedRuntimeHelper = [IO.Path]::GetFullPath(
+                [string]$receipt.candidate_migration_runtime_helper_path
+            )
+            $preservedBootstrap =
+                [string]$receipt.candidate_migration_authorization_state -ceq
+                    'BOOTSTRAP_DISABLED' -and
+                [string]$currentRuntimeAuthorization.operation_type -ceq 'BOOTSTRAP' -and
+                [string]$rollbackRuntimeAuthorization.status -ceq 'NONE' -and
+                [string]$activationLineage.status -ceq 'NONE'
+            $preservedActive =
+                [string]$receipt.candidate_migration_authorization_state -ceq
+                    'ACTIVE_READY' -and
+                [string]$currentRuntimeAuthorization.operation_type -ceq 'ACTIVATE' -and
+                [string]$rollbackRuntimeAuthorization.status -ceq 'AUTHORIZED' -and
+                [string]$activationLineage.status -ceq 'ACTIVE' -and
+                [string]$activationLineage.activation_id -ceq
+                    [string]$currentRuntimeAuthorization.terminal_id
+            if (
+                [string]$receipt.candidate_migration_schema_version -cne
+                    'dawnstrike.state_boundary_candidate_migration.v1' -or
+                [string]$receipt.candidate_migration_operation_id -notmatch '^[0-9a-f]{32}$' -or
+                [string]$receipt.candidate_migration_request_contract_sha256 -notmatch
+                    '^[0-9a-f]{64}$' -or
+                [string]$receipt.candidate_migration_predecessor_receipt_sha256 -notmatch
+                    '^[0-9a-f]{64}$' -or
+                [string]$receipt.candidate_migration_predecessor_helper_sha256 -notmatch
+                    '^[0-9a-f]{64}$' -or
+                [string]$receipt.candidate_migration_runtime_helper_sha256 -notmatch
+                    '^[0-9a-f]{64}$' -or
+                [string]$receipt.candidate_migration_target_admission_sha256 -notmatch
+                    '^[0-9a-f]{64}$' -or
+                [string]$currentRuntimeAuthorization.status -cne 'AUTHORIZED' -or
+                [string]$currentRuntimeAuthorization.runtime_sha -cne
+                    [string]$receipt.candidate_migration_runtime_sha -or
+                [string]$currentRuntimeAuthorization.runtime_tree -cne
+                    [string]$receipt.candidate_migration_runtime_tree -or
+                (-not $preservedBootstrap -and -not $preservedActive) -or
+                -not [string]::Equals(
+                    $authorizedRuntimeHelper, $loadedHelper,
+                    [StringComparison]::OrdinalIgnoreCase
+                )
+            ) {
+                throw 'StateRoot installation receipt does not authorize the loaded protected helper.'
+            }
+            Assert-DawnstrikeStateBoundaryEvidenceAcl -Path $loadedHelper
+            if ((Get-DawnstrikeStateBoundarySha256File $loadedHelper) -cne
+                [string]$receipt.candidate_migration_runtime_helper_sha256) {
+                throw 'Loaded authorized-runtime StateRoot helper bytes changed after candidate migration.'
+            }
         }
         Assert-DawnstrikeStateBoundaryEvidenceAcl -Path $installedHelper
         if ((Get-DawnstrikeStateBoundarySha256File $installedHelper) -cne [string]$receipt.installed_helper_sha256) {

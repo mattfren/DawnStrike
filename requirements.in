@@ -1,5 +1,7 @@
 # Direct development, research, and runtime inputs. Generate requirements.lock
-# with: py -m piptools compile --generate-hashes --output-file requirements.lock requirements.in
+# with: py -3.13 -m piptools compile --upgrade --generate-hashes --allow-unsafe
+#       --strip-extras --index-url=https://pypi.org/simple
+#       --output-file=requirements.lock requirements.in
 streamlit>=1.32
 mypy>=1.8
 pytest>=8.0
@@ -12,3 +14,4 @@ bandit>=1.9
 detect-secrets>=1.5
 defusedxml>=0.7
 openai>=2.0
+setuptools==84.0.0

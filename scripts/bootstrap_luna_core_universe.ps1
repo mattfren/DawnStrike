@@ -7,9 +7,16 @@ param(
     [switch]$ProtectedLauncherGrant
 )
 
+$global:PSModuleAutoLoadingPreference = 'None'
+$env:PSModulePath = 'C:\Windows\System32\WindowsPowerShell\v1.0\Modules'
+. ([IO.Path]::Combine($PSScriptRoot, 'powershell_module_boundary.ps1'))
+
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
-$protectedLauncher = 'C:\Program Files\Dawnstrike\bin\dawnstrike_release_launcher.ps1'
+$protectedLauncher = [IO.Path]::GetFullPath((Join-Path `
+    (Join-Path 'C:\Program Files\Dawnstrike\releases' $ExpectedSha) `
+    'scripts\dawnstrike_release_launcher.ps1'
+))
 $callerPath = [string]$MyInvocation.ScriptName
 if (
     -not $ProtectedLauncherGrant -or
@@ -29,18 +36,19 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 }
 
 $runtime = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $RuntimeRoot).Path).TrimEnd('\')
-$executingRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')).TrimEnd('\')
-if (-not [string]::Equals($runtime, $executingRoot, [StringComparison]::OrdinalIgnoreCase)) {
-    throw 'Core-universe bootstrap must execute from the exact mounted runtime root.'
-}
+$codeRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')).TrimEnd('\')
 $state = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $StateRoot).Path).TrimEnd('\')
 
 . (Join-Path $PSScriptRoot 'dawnstrike_process_runner.ps1')
 . (Join-Path $PSScriptRoot 'invoke_dawnstrike_stage.ps1')
 . (Join-Path $PSScriptRoot 'protected_operation_contract.ps1')
 $null = ConvertTo-DawnstrikeExactMarketDate -Value $MarketDate
+$expectedCodeRoot = Get-DawnstrikeProtectedReleaseRoot -ExpectedSha $ExpectedSha
+if (-not [string]::Equals($codeRoot, $expectedCodeRoot, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Core-universe bootstrap must execute from the protected exact-SHA release root.'
+}
 $null = Assert-DawnstrikeProcessSourceBoundToHead `
-    -ReleaseRoot $runtime `
+    -ReleaseRoot $codeRoot `
     -ExpectedSha $ExpectedSha `
     -EntryScript $PSCommandPath `
         -AdditionalSourceFiles (@(

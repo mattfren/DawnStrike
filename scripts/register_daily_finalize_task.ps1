@@ -2,7 +2,9 @@
 param(
     [string]$RuntimeRoot = "C:\r\dawnstrike-runtime",
     [string]$StateRoot = "C:\r\dawnstrike-state",
-    [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedSha,
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern('^[0-9a-f]{40}$')]
+    [string]$ExpectedSha,
     [string]$TaskName = "Dawnstrike 10of10 Daily Finalize",
     [datetime]$StartTime = (Get-Date -Hour 17 -Minute 30 -Second 0),
     [ValidateSet("LocalOnly", "Preview", "Production")]
@@ -14,86 +16,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$powershellExecutable = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
-if (-not (Test-Path -LiteralPath $powershellExecutable -PathType Leaf)) { throw "Pinned Windows PowerShell executable is missing." }
-$runtime = (Resolve-Path $RuntimeRoot).Path
-$processRunner = Join-Path $runtime "scripts\dawnstrike_process_runner.ps1"
-if (-not (Test-Path -LiteralPath $processRunner -PathType Leaf)) { throw "Runtime process runner is missing." }
-. $processRunner
-$null = Assert-DawnstrikeProcessSourceBoundToHead -ReleaseRoot $runtime -ExpectedSha $ExpectedSha -EntryScript $PSCommandPath
-. (Join-Path $runtime "scripts\resolve_dawnstrike_task_principal.ps1")
-New-Item -ItemType Directory -Path $StateRoot -Force | Out-Null
-$state = (Resolve-Path $StateRoot).Path
-if ($null -eq $RunAsCredential -or [string]::IsNullOrWhiteSpace($RunAsCredential.UserName)) {
-    throw (
-        "RunAsCredential is required. Register finalization with a password-logon " +
-        "Windows identity that can reach the network, encrypted Vercel credentials, " +
-        "the Dawnstrike state root, and Telegram. Do not use S4U."
-    )
-}
-$taskPrincipal = Resolve-DawnstrikeTaskPrincipal -Credential $RunAsCredential
-$taskPassword = $RunAsCredential.GetNetworkCredential().Password
-if ([string]::IsNullOrWhiteSpace($taskPassword)) {
-    throw "RunAsCredential must contain a non-empty Windows password."
-}
-$runner = Join-Path $runtime "scripts\run_daily_finalize.ps1"
-if (-not (Test-Path -LiteralPath $runner -PathType Leaf)) {
-    throw "Daily finalize runner not found: $runner"
-}
-if (-not $BackupRoot) {
-    $BackupRoot = Join-Path $state (
-        "scheduler-backups\" +
-        (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssZ")
-    )
-}
-New-Item -ItemType Directory -Path $BackupRoot -Force | Out-Null
-
-$existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-if ($existing -and -not $ReplaceExisting) {
-    throw "Scheduled task already exists; inspect it before replacement: $TaskName"
-}
-if ($existing) {
-    $safeName = $TaskName -replace "[^A-Za-z0-9._-]", "_"
-    Export-ScheduledTask -TaskName $TaskName |
-        Set-Content -LiteralPath (Join-Path $BackupRoot "$safeName.xml") -Encoding Unicode
-}
-
-$manifest = New-DawnstrikeScheduledLaunchManifest `
-    -RuntimeRoot $runtime -StateRoot $state -ExpectedSha $ExpectedSha `
-    -TaskScript "run_daily_finalize.ps1"
-$command = Get-DawnstrikeScheduledLaunchCommand `
-    -Runner $runner -RuntimeRoot $runtime -StateRoot $state -ExpectedSha $ExpectedSha `
-    -ManifestPath $manifest.path -ManifestSha256 $manifest.sha256 `
-    -PublicationMode $PublicationMode -VercelProjectId $VercelProjectId
-$arguments = "-NoProfile -ExecutionPolicy Bypass -Command `"$command`""
-$action = New-ScheduledTaskAction `
-    -Execute $powershellExecutable `
-    -Argument $arguments `
-    -WorkingDirectory $runtime
-$trigger = New-ScheduledTaskTrigger -Daily -At $StartTime
-$settings = New-ScheduledTaskSettingsSet `
-    -AllowStartIfOnBatteries `
-    -DontStopIfGoingOnBatteries `
-    -StartWhenAvailable `
-    -WakeToRun `
-    -MultipleInstances IgnoreNew `
-    -RestartCount 2 `
-    -RestartInterval (New-TimeSpan -Minutes 15) `
-    -ExecutionTimeLimit (New-TimeSpan -Hours 3)
-
-Register-ScheduledTask `
-    -TaskName $TaskName `
-    -Action $action `
-    -Trigger $trigger `
-    -Settings $settings `
-    -User $taskPrincipal `
-    -Password $taskPassword `
-    -RunLevel Limited `
-    -Description "Dawnstrike V6 canonical performance, Calendar, readiness, and publication. Research-only; no broker execution." `
-    -Force | Out-Null
-
-Write-Output (
-    "Registered $TaskName for $($StartTime.ToString('HH:mm')) local time " +
-    "from $runtime against $state with publication mode $PublicationMode."
+throw (
+    "Dawnstrike direct daily-finalize task registration is disabled. " +
+    "Invoke the administrator-installed protected release launcher with " +
+    "BootstrapBaseline or Activate; only the governed scheduler transaction " +
+    "may create or replace canonical tasks."
 )
-Write-Output "Rollback task XML saved under $BackupRoot."

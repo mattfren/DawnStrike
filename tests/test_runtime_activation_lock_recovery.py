@@ -47,10 +47,43 @@ def payload() -> dict[str, object]:
     }
 
 
+def rollback_payload() -> dict[str, object]:
+    value = payload()
+    value.update(
+        schema_version="dawnstrike.runtime_activation_lock.v3",
+        operation="runtime_rollback",
+        rollback_target_market_date="2026-09-08",
+    )
+    return value
+
+
 def test_strict_lock_accepts_exact_contract_and_preserves_raw_hash():
     raw = json.dumps(payload(), separators=(",", ":")).encode()
     assert load_contract().validate(raw)["operation"] == "capture_task_hardening"
     assert hashlib.sha256(raw).hexdigest() != hashlib.sha256(raw + b"\n").hexdigest()
+
+
+def test_runtime_rollback_lock_requires_exact_immutable_target() -> None:
+    contract = load_contract()
+    exact = rollback_payload()
+    assert contract.validate(json.dumps(exact, separators=(",", ":")).encode())[
+        "rollback_target_market_date"
+    ] == "2026-09-08"
+
+    missing = rollback_payload()
+    missing.pop("rollback_target_market_date")
+    with pytest.raises(ValueError, match="no exact target"):
+        contract.validate(json.dumps(missing, separators=(",", ":")).encode())
+
+    malformed = rollback_payload()
+    malformed["rollback_target_market_date"] = "2026-09-09T00:00:00Z"
+    with pytest.raises(ValueError, match="target market date"):
+        contract.validate(json.dumps(malformed, separators=(",", ":")).encode())
+
+    foreign_operation = payload()
+    foreign_operation["rollback_target_market_date"] = "2026-09-08"
+    with pytest.raises(ValueError, match="carries rollback target"):
+        contract.validate(json.dumps(foreign_operation, separators=(",", ":")).encode())
 
 
 def test_strict_lock_cli_accepts_only_explicit_captured_bytes() -> None:

@@ -33,14 +33,16 @@ AUXILIARY_BOOTSTRAP_PRELOADER = (
     "exec(compile(b,p,'exec'),{'__name__':'__main__','__file__':p})"
 )
 AUXILIARY_INTERPRETER = Path(r"C:\Program Files\Dawnstrike\Python313\python.exe")
-AUXILIARY_INTERPRETER_SHA256 = "ef8f51028ac5329641985112f8efb1c2d4c47c86b8011ddf7e6fae21e2b4e5a1"
-AUXILIARY_INTERPRETER_VERSION = "3.13.14"
+AUXILIARY_INTERPRETER_SHA256 = "85b71d8c6ec1905935f74be0c9869aae198d00e98f39df699ec66f9c5a84cecd"
+AUXILIARY_INTERPRETER_VERSION = "3.13.15"
 AUXILIARY_INTERPRETER_SIGNER_SUBJECT = (
     "CN=Python Software Foundation, O=Python Software Foundation, L=Beaverton, S=Oregon, C=US"
 )
-AUXILIARY_INTERPRETER_SIGNER_THUMBPRINT = "9BA3C2E210C7E8296C5056515BFC0B0BBA78AC48"
-APPROVED_GIT_PATH = Path(r"C:\Program Files\Git\cmd\git.exe")
-APPROVED_GIT_SHA256 = "37c5725818d602e951ba2563b870d62763322956b73373da4c33a0b566a80bc9"
+AUXILIARY_INTERPRETER_SIGNER_THUMBPRINT = "847785B686B2D3879731FA9AA3F1F5D48E85D99E"
+APPROVED_GIT_PATH = Path(r"C:\Program Files\Dawnstrike\Git-2.55.0.5\cmd\git.exe")
+APPROVED_GIT_SHA256 = "78211c7ed73988da93a6d8a33d47ec6187f464d7ea2a9a00c182bbd7a1ecf30f"
+PROTECTED_RELEASES_ROOT = Path(r"C:\Program Files\Dawnstrike\releases")
+PROTECTED_STATE_BOUNDARY_ROOT = Path(r"C:\ProgramData\Dawnstrike")
 AUXILIARY_REQUIRED_OPTION_ORDER = (
     "--candidate-sha",
     "--repo-root",
@@ -190,14 +192,21 @@ def _scheduler_doctor_with_held_authorities(
         if runtime_identity_before is not None
         else ""
     )
+    protected_release = PROTECTED_RELEASES_ROOT / (
+        expected_runtime_sha
+        if GIT_SHA_PATTERN.fullmatch(expected_runtime_sha)
+        else "__invalid_runtime_sha__"
+    )
     required = {
-        "morning_runner": runtime / "scripts" / "run_alphaops_morning.ps1",
-        "monitor_runner": runtime / "scripts" / "run_alphaops_monitor.ps1",
-        "eod_runner": runtime / "scripts" / "run_alphaops_eod.ps1",
-        "daily_runner": runtime / "scripts" / "run_daily_finalize.ps1",
-        "alpha_registration": runtime / "scripts" / "register_alphaops_tasks.ps1",
-        "finalize_registration": (runtime / "scripts" / "register_daily_finalize_task.ps1"),
-        "rollback": runtime / "scripts" / "restore_dawnstrike_tasks.ps1",
+        "morning_runner": protected_release / "scripts" / "run_alphaops_morning.ps1",
+        "monitor_runner": protected_release / "scripts" / "run_alphaops_monitor.ps1",
+        "eod_runner": protected_release / "scripts" / "run_alphaops_eod.ps1",
+        "daily_runner": protected_release / "scripts" / "run_daily_finalize.ps1",
+        "alpha_registration": protected_release / "scripts" / "register_alphaops_tasks.ps1",
+        "finalize_registration": (
+            protected_release / "scripts" / "register_daily_finalize_task.ps1"
+        ),
+        "rollback": protected_release / "scripts" / "restore_dawnstrike_tasks.ps1",
         "durable_source_config": state / "config" / "web_sources.yaml",
     }
     present = {name: path.is_file() for name, path in required.items()}
@@ -224,8 +233,26 @@ def _scheduler_doctor_with_held_authorities(
     queried = _query_scheduled_tasks()
     task_rows = _normalize_task_rows(queried)
     observation_date = datetime.now(SCHEDULE_TIMEZONE).date()
-    activation_completed_at = _load_exact_activation_completion(
-        runtime, state, held=held_authorities
+    protected_task_authority = _load_protected_scheduler_authority(runtime, state)
+    current_task_contract = _canonical_task_contract_snapshot(task_rows)
+    canonical_action_contract_matches = bool(
+        protected_task_authority is not None
+        and current_task_contract is not None
+        and current_task_contract["task_action_contract_sha256"]
+        == protected_task_authority["task_action_contract_sha256"]
+    )
+    canonical_definition_contract_matches = bool(
+        protected_task_authority is not None
+        and current_task_contract is not None
+        and current_task_contract["task_definition_contract_sha256"]
+        == protected_task_authority["task_definition_contract_sha256"]
+    )
+    activation_completed_at = (
+        _parse_aware_datetime(
+            str(protected_task_authority.get("completed_at_utc") or "")
+        )
+        if protected_task_authority is not None
+        else None
     )
     by_name: dict[str, dict[str, Any]] = {}
     for row in task_rows:
@@ -239,7 +266,7 @@ def _scheduler_doctor_with_held_authorities(
         checks.append(
             _task_check(
                 task,
-                expected_runner=runtime / "scripts" / script_name,
+                expected_runner=protected_release / "scripts" / script_name,
                 runtime_root=runtime,
                 state_root=state,
                 expected_start=EXPECTED_TASK_STARTS[name],
@@ -248,6 +275,8 @@ def _scheduler_doctor_with_held_authorities(
                 expected_execution_limit=EXPECTED_EXECUTION_LIMITS[name],
                 observation_date=observation_date,
                 activation_completed_at=activation_completed_at,
+                action_contract_authorized=canonical_action_contract_matches,
+                definition_contract_authorized=canonical_definition_contract_matches,
             )
         )
     auxiliary_rows = [row for row in task_rows if str(row.get("name") or "") == AUXILIARY_TASK_NAME]
@@ -343,6 +372,7 @@ def _scheduler_doctor_with_held_authorities(
         "schema_version": "dawnstrike.scheduler_doctor.v4",
         "status": status,
         "runtime_root": str(runtime),
+        "protected_release_root": str(protected_release),
         "state_root": str(state),
         "runtime_identity_status": ("LOCAL_VERIFIED" if runtime_identity_stable else "FAILED"),
         "runtime_identity_stable": runtime_identity_stable,
@@ -363,6 +393,10 @@ def _scheduler_doctor_with_held_authorities(
             if runtime_identity_stable and runtime_identity_before is not None
             else None
         ),
+        "protected_task_authority": protected_task_authority,
+        "current_task_contract": current_task_contract,
+        "canonical_task_action_contract_matches": canonical_action_contract_matches,
+        "canonical_task_definition_contract_matches": canonical_definition_contract_matches,
         "required_files": present,
         "durable_source_config": source_config,
         "expected_task_names": expected_task_names,
@@ -395,6 +429,8 @@ def _task_check(
     expected_execution_limit: str,
     observation_date: date,
     activation_completed_at: datetime | None,
+    action_contract_authorized: bool,
+    definition_contract_authorized: bool,
 ) -> dict[str, Any]:
     task_name = str(task.get("name") or "")
     state = str(task.get("state") or "unknown")
@@ -410,20 +446,11 @@ def _task_check(
     )
     runner_ok = str(expected_runner).lower() in arguments.lower()
     executable_ok = execute.casefold() == EXPECTED_TASK_EXECUTABLE.casefold()
-    expected_arguments = _expected_action_arguments(
-        task_name,
-        expected_runner=expected_runner,
-        runtime_root=runtime_root,
-        state_root=state_root,
-        expected_sha=expected_sha,
+    guarded_command_shape = (
+        arguments.startswith("-NoProfile -ExecutionPolicy Bypass -Command ")
+        and " -file " not in arguments.casefold()
     )
-    action_arguments_match = arguments == expected_arguments or _scheduled_guard_action_matches(
-        arguments,
-        expected_runner=expected_runner,
-        runtime_root=runtime_root,
-        state_root=state_root,
-        expected_sha=expected_sha,
-    )
+    action_arguments_match = action_contract_authorized and guarded_command_shape
     action_count = task.get("action_count")
     action_count_matches = type(action_count) is int and action_count == 1
     trigger_count = task.get("trigger_count")
@@ -509,6 +536,7 @@ def _task_check(
             healthy_state,
             executable_ok,
             action_arguments_match,
+            definition_contract_authorized,
             action_count_matches,
             trigger_count_matches,
             runner_ok,
@@ -545,8 +573,10 @@ def _task_check(
         "expected_runner": str(expected_runner),
         "expected_executable": EXPECTED_TASK_EXECUTABLE,
         "executable_matches": executable_ok,
-        "expected_arguments": expected_arguments,
         "action_arguments_match": action_arguments_match,
+        "guarded_command_shape_matches": guarded_command_shape,
+        "action_contract_authorized": action_contract_authorized,
+        "definition_contract_authorized": definition_contract_authorized,
         "action_count_matches": action_count_matches,
         "trigger_count_matches": trigger_count_matches,
         "runner_matches": runner_ok,
@@ -1652,6 +1682,12 @@ def _validate_auxiliary_action(
         )
     )
     candidate_format_valid = GIT_SHA_PATTERN.fullmatch(candidate or "") is not None
+    contract_candidate_sha = str(contract.get("candidate_sha") or "")
+    protected_release = PROTECTED_RELEASES_ROOT / (
+        contract_candidate_sha
+        if GIT_SHA_PATTERN.fullmatch(contract_candidate_sha)
+        else "__invalid_candidate_sha__"
+    )
     required_options_present = (
         not duplicate_options
         and not unknown_options
@@ -1692,7 +1728,7 @@ def _validate_auxiliary_action(
             and repo_root is not None
             and Path(repo_root).resolve() == runtime
             and release_root is not None
-            and Path(release_root).resolve() == runtime
+            and Path(release_root).resolve() == protected_release.resolve()
         )
         external_values = [option_values.get(name, "") for name in external_path_options]
         external_paths = [Path(value).resolve() for value in external_values]
@@ -1727,7 +1763,7 @@ def _validate_auxiliary_action(
         )
         bootstrap_matches = (
             bootstrap is not None
-            and Path(bootstrap).resolve() == runtime / AUXILIARY_PYTHON_BOOTSTRAP
+            and Path(bootstrap).resolve() == protected_release / AUXILIARY_PYTHON_BOOTSTRAP
             and _safe_regular_path(Path(bootstrap))
         )
         bootstrap_sha_matches = bootstrap is not None and _safe_file_sha256(
@@ -1735,7 +1771,7 @@ def _validate_auxiliary_action(
         )
         runner_matches = (
             runner is not None
-            and Path(runner).resolve() == runtime / AUXILIARY_CAPTURE_RUNNER
+            and Path(runner).resolve() == protected_release / AUXILIARY_CAPTURE_RUNNER
             and _safe_regular_path(Path(runner))
         )
         env_file_matches = (
@@ -1829,55 +1865,44 @@ def _validate_auxiliary_action(
     }
 
 
-def _expected_action_arguments(
-    task_name: str,
-    *,
-    expected_runner: Path,
-    runtime_root: Path,
-    state_root: Path,
-    expected_sha: str = "",
-) -> str:
-    arguments = (
-        f'-NoProfile -ExecutionPolicy Bypass -File "{expected_runner}" '
-        f'-RuntimeRoot "{runtime_root}" -StateRoot "{state_root}" -ExpectedSha "{expected_sha}"'
-    )
-    if task_name == CANONICAL_TASK_NAME:
-        arguments += f' -PublicationMode Production -VercelProjectId "{EXPECTED_VERCEL_PROJECT_ID}"'
-    return arguments
+def _canonical_task_contract_snapshot(
+    task_rows: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Hash the exact live canonical action/definition set like activation does."""
 
-
-def _scheduled_guard_action_matches(
-    arguments: str,
-    *,
-    expected_runner: Path,
-    runtime_root: Path,
-    state_root: Path,
-    expected_sha: str,
-) -> bool:
-    """Recognize the immutable inline task guard without executing its text."""
-
-    normalized = arguments.casefold()
-    required = (
-        "-command",
-        "scheduled launch manifest",
-        str(expected_runner).casefold(),
-        str(runtime_root).casefold(),
-        str(state_root).casefold(),
-        expected_sha.casefold(),
-        "-launchmanifestpath",
-        "-launchmanifestsha256",
-        "[io.file]::open",
-        "[io.fileshare]::read",
-        "sha256",
-    )
-    if any(marker not in normalized for marker in required):
-        return False
-    # A guarded action must never retain a mutable -File entry point. The
-    # inline command owns the byte lock and invokes the entry only afterwards.
-    if " -file " in normalized:
-        return False
-    manifest_prefix = str(state_root).casefold().rstrip("\\/") + "\\receipts\\scheduler-launch\\"
-    return manifest_prefix in normalized
+    definition_records: list[str] = []
+    action_records: list[str] = []
+    for task_name in EXPECTED_TASKS:
+        matches = [
+            row
+            for row in task_rows
+            if str(row.get("name") or "") == task_name
+            and str(row.get("task_path") or "\\") == "\\"
+        ]
+        if len(matches) != 1:
+            return None
+        row = matches[0]
+        definition_sha = str(row.get("definition_contract_sha256") or "")
+        if (
+            row.get("action_count") != 1
+            or SHA256_PATTERN.fullmatch(definition_sha) is None
+        ):
+            return None
+        action_text = "|".join(
+            str(row.get(field) or "")
+            for field in ("execute", "arguments", "working_directory")
+        )
+        definition_records.append(f"{task_name}\0{definition_sha}\n")
+        action_records.append(f"{task_name}\0\\\0{action_text}\n")
+    return {
+        "task_count": len(EXPECTED_TASKS),
+        "task_definition_contract_sha256": hashlib.sha256(
+            "".join(definition_records).encode("utf-8")
+        ).hexdigest(),
+        "task_action_contract_sha256": hashlib.sha256(
+            "".join(action_records).encode("utf-8")
+        ).hexdigest(),
+    }
 
 
 def _optional_int_matches(value: Any, expected: int | None) -> bool:
@@ -2124,73 +2149,274 @@ def _load_exact_activation_completion(
     *,
     held: list[tuple[Path, Any, tuple[int, ...]]] | None = None,
 ) -> datetime | None:
-    """Load one strict COMPLETE receipt that supersedes prior task history.
+    """Return only activation time anchored by protected runtime authority."""
 
-    A missing, malformed, stale, or ambiguous receipt is deliberately treated
-    as no supersession.  This keeps a preserved failed task result blocking
-    until the runtime activation itself provides a fresh, exact proof.
-    """
+    del held
+    authority = _load_protected_scheduler_authority(runtime, state)
+    if authority is None:
+        return None
+    return _parse_aware_datetime(str(authority.get("completed_at_utc") or ""))
+
+
+def _powershell_single_quote(value: str | Path) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _load_protected_scheduler_authority(
+    runtime: Path,
+    state: Path,
+) -> dict[str, Any] | None:
+    """Reprove the admin-protected current runtime and its terminal evidence."""
 
     runtime_contract = _runtime_git_contract(runtime)
     if runtime_contract is None:
         return None
-    runtime_sha = runtime_contract["candidate_sha"]
-    runtime_tree = runtime_contract["candidate_tree"]
-    runtime_origin_sha = runtime_contract["runtime_origin_sha256"]
+    runtime_sha = str(runtime_contract.get("candidate_sha") or "")
+    runtime_tree = str(runtime_contract.get("candidate_tree") or "")
+    runtime_origin_sha = str(runtime_contract.get("runtime_origin_sha256") or "")
+    if (
+        GIT_SHA_PATTERN.fullmatch(runtime_sha) is None
+        or GIT_SHA_PATTERN.fullmatch(runtime_tree) is None
+        or SHA256_PATTERN.fullmatch(runtime_origin_sha) is None
+    ):
+        return None
+    helper = PROTECTED_RELEASES_ROOT / runtime_sha / "scripts" / "state_root_boundary.ps1"
+    if not _safe_regular_path(helper):
+        return None
+    quoted_helper = _powershell_single_quote(helper)
+    quoted_state = _powershell_single_quote(state)
+    quoted_evidence = _powershell_single_quote(PROTECTED_STATE_BOUNDARY_ROOT)
+    quoted_sha = _powershell_single_quote(runtime_sha)
+    quoted_tree = _powershell_single_quote(runtime_tree)
+    script = "\n".join(
+        (
+            "$ErrorActionPreference='Stop'",
+            "$ProgressPreference='SilentlyContinue'",
+            f". {quoted_helper}",
+            "$boundary=$null",
+            "$authorizationEvidence=$null",
+            "$terminal=$null",
+            "try {",
+            (
+                "$boundary=Assert-DawnstrikeStateRootBoundary "
+                f"-StateRoot {quoted_state} -EvidenceRoot {quoted_evidence}"
+            ),
+            (
+                "$authorization=Get-DawnstrikeStateBoundaryRuntimeAuthorization "
+                f"-Receipt $boundary.receipt -Kind current -StateRoot {quoted_state}"
+            ),
+            "$lineage=Get-DawnstrikeStateBoundaryActivationLineage -Receipt $boundary.receipt",
+            (
+                "if ([string]$authorization.status -cne 'AUTHORIZED' -or "
+                "[string]$authorization.operation_type -cne 'ACTIVATE' -or "
+                f"[string]$authorization.runtime_sha -cne {quoted_sha} -or "
+                f"[string]$authorization.runtime_tree -cne {quoted_tree}) "
+                "{ throw 'Current protected runtime authorization is not exact.' }"
+            ),
+            (
+                "if ([string]$lineage.status -cne 'ACTIVE' -or "
+                "[string]$lineage.activation_id -cne [string]$authorization.terminal_id -or "
+                "[string]$lineage.receipt_relative_path -cne "
+                "[string]$authorization.contract.terminal_receipt_relative_path -or "
+                "[string]$lineage.receipt_sha256 -cne "
+                "[string]$authorization.contract.terminal_receipt_sha256 -or "
+                "[string]$lineage.journal_relative_path -cne "
+                "[string]$authorization.contract.terminal_journal_relative_path -or "
+                "[string]$lineage.journal_sha256 -cne "
+                "[string]$authorization.contract.terminal_journal_sha256) "
+                "{ throw 'Protected activation lineage differs from current authorization.' }"
+            ),
+            (
+                "$authorizationEvidence=Open-DawnstrikeStateBoundaryRuntimeAuthorizationEvidence "
+                f"-Authorization $authorization -StateRoot {quoted_state} "
+                f"-ExpectedOperationType ACTIVATE -ExpectedSha {quoted_sha} "
+                f"-ExpectedTree {quoted_tree}"
+            ),
+            (
+                "$terminalPath=[IO.Path]::GetFullPath((Join-Path "
+                f"{quoted_state} ([string]$authorization.contract.terminal_receipt_relative_path "
+                "-replace '/', '\\')))"
+            ),
+            (
+                "$terminal=Open-DawnstrikeStateBoundaryExactFile -Path $terminalPath "
+                "-ExpectedSha256 ([string]$authorization.contract.terminal_receipt_sha256) "
+                "-Label 'Current authorized activation receipt'"
+            ),
+            (
+                "$terminalPayload=[Text.Encoding]::UTF8.GetString($terminal.bytes) | "
+                "ConvertFrom-Json"
+            ),
+            "$material=$authorization.material",
+            (
+                "if ([string]$terminalPayload.schema_version -cne "
+                "'dawnstrike.runtime_activation_receipt.v2' -or "
+                "[string]$terminalPayload.status -cne 'COMPLETE' -or "
+                "[string]$terminalPayload.activation_id -cne [string]$authorization.terminal_id "
+                f"-or [string]$terminalPayload.candidate_sha -cne {quoted_sha} "
+                f"-or [string]$terminalPayload.candidate_tree -cne {quoted_tree} -or "
+                "[string]$terminalPayload.task_definition_contract_sha256 -cne "
+                "[string]$material.canonical_task_definition_contract_sha256 -or "
+                "[string]$terminalPayload.task_action_contract_sha256 -cne "
+                "[string]$material.canonical_task_action_contract_sha256 -or "
+                "$terminalPayload.task_enablement_restored -ne $true -or "
+                "$terminalPayload.research_only -ne $true -or "
+                "$terminalPayload.broker_execution_enabled -ne $false) "
+                "{ throw 'Authorized activation receipt contract is invalid.' }"
+            ),
+            (
+                "if ([string]$boundary.receipt.task_binding_mode -cne 'Activate' -or "
+                f"[string]$boundary.receipt.task_binding_release_sha -cne {quoted_sha} -or "
+                f"[string]$boundary.receipt.task_binding_release_tree -cne {quoted_tree} -or "
+                "[string]$boundary.receipt.canonical_task_disposition -cne "
+                "'ENABLED_BY_GOVERNED_ACTIVATE_RESEAL' -or "
+                "[string]$boundary.receipt.task_binding_terminal_receipt_sha256 -cne "
+                "[string]$authorization.contract.terminal_receipt_sha256 -or "
+                "[string]$boundary.receipt.task_binding_terminal_journal_sha256 -cne "
+                "[string]$authorization.contract.terminal_journal_sha256) "
+                "{ throw 'Protected StateRoot terminal task binding is invalid.' }"
+            ),
+            (
+                "$canonical=@($boundary.receipt.task_definitions_and_principals | "
+                "Where-Object { [bool]$_.canonical })"
+            ),
+            (
+                "if ($canonical.Count -ne 5 -or @($canonical | Where-Object { "
+                "[string]$_.state -cne 'Ready' -or "
+                "[string]$_.canonical_task_definition_contract_sha256 -cne "
+                "[string]$material.canonical_task_definition_contract_sha256 -or "
+                "[string]$_.canonical_task_action_contract_sha256 -cne "
+                "[string]$material.canonical_task_action_contract_sha256 }).Count -ne 0) "
+                "{ throw 'Protected canonical task aggregate is invalid.' }"
+            ),
+            (
+                "$completed=[DateTimeOffset]::Parse([string]$terminalPayload.completed_at_utc, "
+                "[Globalization.CultureInfo]::InvariantCulture)"
+            ),
+            "$result=[ordered]@{",
+            "schema_version='dawnstrike.scheduler_protected_authority.v1'",
+            "status='AUTHORIZED'",
+            "runtime_sha=[string]$authorization.runtime_sha",
+            "runtime_tree=[string]$authorization.runtime_tree",
+            "runtime_origin_sha256=[string]$material.runtime_origin_sha256",
+            "operation_type=[string]$authorization.operation_type",
+            "terminal_id=[string]$authorization.terminal_id",
+            (
+                "terminal_receipt_sha256="
+                "[string]$authorization.contract.terminal_receipt_sha256"
+            ),
+            (
+                "terminal_journal_sha256="
+                "[string]$authorization.contract.terminal_journal_sha256"
+            ),
+            (
+                "task_definition_contract_sha256="
+                "[string]$material.canonical_task_definition_contract_sha256"
+            ),
+            (
+                "task_action_contract_sha256="
+                "[string]$material.canonical_task_action_contract_sha256"
+            ),
+            "completed_at_utc=$completed.ToString('o')",
+            "state_boundary_receipt_sha256=[string]$boundary.receipt_sha256",
+            "runtime_authorization_sha256=[string]$authorization.sha256",
+            "research_only=$true",
+            "broker_execution_enabled=$false",
+            "}",
+            "$result | ConvertTo-Json -Compress",
+            "}",
+            "finally {",
+            (
+                "if ($null -ne $terminal) { $terminal.stream.Dispose(); "
+                "$terminal.lease.Dispose() }"
+            ),
+            (
+                "if ($null -ne $authorizationEvidence) { foreach ($lock in "
+                "@($authorizationEvidence.locks)) { if ($null -ne $lock) { $lock.Dispose() } } }"
+            ),
+            (
+                "if ($null -ne $boundary) { foreach ($lock in @($boundary.locks)) { "
+                "if ($null -ne $lock) { $lock.Dispose() } } }"
+            ),
+            "}",
+        )
+    )
     try:
-        from scripts.runtime_activation_contract import _assert_no_reparse_components
-    except ImportError:
+        completed = subprocess.run(  # nosec B603
+            [
+                EXPECTED_TASK_EXECUTABLE,
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=SCHEDULER_QUERY_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
         return None
-    owns_receipt_guards = held is None
-    receipt_guards = [] if held is None else held
-    matches: list[datetime] = []
-    receipt_root = state / "receipts" / "runtime-activation"
+    if completed.returncode != 0 or len(completed.stdout) > 64 * 1024:
+        return None
     try:
-        paths = sorted(receipt_root.glob("runtime-activation-*.json"))
-    except OSError:
+        payload = json.loads(completed.stdout)
+    except (json.JSONDecodeError, TypeError):
         return None
-    if len(paths) > MAX_AUXILIARY_ACTIVATION_RECEIPTS:
+    expected_keys = {
+        "schema_version",
+        "status",
+        "runtime_sha",
+        "runtime_tree",
+        "runtime_origin_sha256",
+        "operation_type",
+        "terminal_id",
+        "terminal_receipt_sha256",
+        "terminal_journal_sha256",
+        "task_definition_contract_sha256",
+        "task_action_contract_sha256",
+        "completed_at_utc",
+        "state_boundary_receipt_sha256",
+        "runtime_authorization_sha256",
+        "research_only",
+        "broker_execution_enabled",
+    }
+    if not isinstance(payload, dict) or set(payload) != expected_keys:
         return None
-    try:
-        for path in paths:
-            name_match = re.fullmatch(r"runtime-activation-([0-9a-f]{24})\.json", path.name)
-            if name_match is None:
-                # Prepared, failure, compensation, and other governed sidecars are
-                # not activation-completion receipts and must not poison exact
-                # COMPLETE-history supersession.
-                continue
-            _assert_no_reparse_components(path)
-            raw = _read_identity_locked_bytes(
-                path,
-                label="activation history receipt",
-                max_bytes=MAX_AUXILIARY_ACTIVATION_RECEIPT_BYTES,
-                held=receipt_guards,
-            )
-            payload = _validate_activation_receipt_bytes(raw)
-            activation_id = name_match.group(1)
-            if str(payload.get("activation_id") or "") != activation_id:
-                return None
-            if (
-                payload.get("status") != "COMPLETE"
-                or payload.get("candidate_sha") != runtime_sha
-                or payload.get("candidate_tree") != runtime_tree
-            ):
-                continue
-            if payload.get("runtime_origin_sha256") != runtime_origin_sha:
-                continue
-            completed = _parse_aware_datetime(str(payload.get("completed_at_utc") or ""))
-            if completed is None:
-                return None
-            matches.append(completed)
-        if _runtime_git_contract(runtime) != runtime_contract:
-            return None
-        _assert_identity_locked_files_unchanged(receipt_guards)
-        return matches[0] if len(matches) == 1 else None
-    except (OSError, TypeError, ValueError):
+    completed_at = _parse_aware_datetime(str(payload.get("completed_at_utc") or ""))
+    hash_fields = (
+        "runtime_origin_sha256",
+        "terminal_receipt_sha256",
+        "terminal_journal_sha256",
+        "task_definition_contract_sha256",
+        "task_action_contract_sha256",
+        "state_boundary_receipt_sha256",
+        "runtime_authorization_sha256",
+    )
+    if (
+        payload.get("schema_version") != "dawnstrike.scheduler_protected_authority.v1"
+        or payload.get("status") != "AUTHORIZED"
+        or payload.get("operation_type") != "ACTIVATE"
+        or payload.get("runtime_sha") != runtime_sha
+        or payload.get("runtime_tree") != runtime_tree
+        or payload.get("runtime_origin_sha256") != runtime_origin_sha
+        or re.fullmatch(r"[0-9a-f]{24}", str(payload.get("terminal_id") or "")) is None
+        or any(
+            SHA256_PATTERN.fullmatch(str(payload.get(field) or "")) is None
+            for field in hash_fields
+        )
+        or completed_at is None
+        or payload.get("research_only") is not True
+        or payload.get("broker_execution_enabled") is not False
+        or _runtime_git_contract(runtime) != runtime_contract
+    ):
         return None
-    finally:
-        if owns_receipt_guards:
-            _close_identity_locked_files(receipt_guards)
+    # Keep the public authority document JSON-native.  Parse the timestamp at
+    # the point where temporal comparison is required rather than leaking a
+    # datetime into scheduler-doctor's JSON result.
+    return payload
 
 
 def _parse_aware_datetime(value: str) -> datetime | None:

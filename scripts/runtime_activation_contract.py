@@ -178,7 +178,8 @@ _ROLLBACK_RECEIPT_KEYS = frozenset(
         "schema_version",
         "status",
         "activation_id",
-        "market_date",
+        "activation_market_date",
+        "rollback_target_market_date",
         "candidate_sha",
         "candidate_tree",
         "previous_sha",
@@ -207,6 +208,11 @@ _ROLLBACK_RECEIPT_KEYS = frozenset(
         "broker_execution_enabled",
         "receipt_sha256",
     }
+)
+_ROLLBACK_RECEIPT_KEYS_LEGACY = (
+    _ROLLBACK_RECEIPT_KEYS
+    - {"activation_market_date", "rollback_target_market_date"}
+    | {"market_date"}
 )
 
 # Receipts created for the one-percent sidecar carry an explicit state
@@ -269,20 +275,27 @@ _PRIOR_RUNTIME_AUTHORIZATION_KEYS = frozenset(
         "previous_runtime_authorization_journal_sha256",
     }
 )
+_PROTECTED_RUNTIME_AUTHORIZATION_KEYS = frozenset(
+    {
+        "runtime_authorization_material",
+        "runtime_authorization_material_sha256",
+    }
+)
+_BOOTSTRAP_BASELINE_KEYS = frozenset({"bootstrap_baseline"})
 _CAPTURE_INTERPRETER_DECLARATION = {
     "capture_interpreter_path": (
         r"C:\Program Files\Dawnstrike\Python313\python.exe"
     ),
-    "capture_interpreter_version": "3.13.14",
+    "capture_interpreter_version": "3.13.15",
     "capture_interpreter_sha256": (
-        "ef8f51028ac5329641985112f8efb1c2d4c47c86b8011ddf7e6fae21e2b4e5a1"
+        "85b71d8c6ec1905935f74be0c9869aae198d00e98f39df699ec66f9c5a84cecd"
     ),
     "capture_interpreter_signer_subject": (
         "CN=Python Software Foundation, O=Python Software Foundation, "
         "L=Beaverton, S=Oregon, C=US"
     ),
     "capture_interpreter_signer_thumbprint": (
-        "9BA3C2E210C7E8296C5056515BFC0B0BBA78AC48"
+        "847785B686B2D3879731FA9AA3F1F5D48E85D99E"
     ),
 }
 _STATE_PREPARATION_DECLARATION_KEYS = frozenset(
@@ -832,6 +845,10 @@ def validate_receipt(payload: Mapping[str, Any]) -> dict[str, Any]:
     authorization_present = any(
         field in payload for field in _PRIOR_RUNTIME_AUTHORIZATION_KEYS
     )
+    protected_authorization_present = any(
+        field in payload for field in _PROTECTED_RUNTIME_AUTHORIZATION_KEYS
+    )
+    baseline_present = "bootstrap_baseline" in payload
     base_keys = (
         _ACTIVATION_RECEIPT_KEYS
         if schema in {ACTIVATION_SCHEMA, ACTIVATION_SCHEMA_LEGACY}
@@ -848,7 +865,21 @@ def validate_receipt(payload: Mapping[str, Any]) -> dict[str, Any]:
         if authorization_present
         else base_keys
     )
-    _require_exact_keys(payload, expected_keys, "runtime receipt")
+    if protected_authorization_present:
+        expected_keys = expected_keys | _PROTECTED_RUNTIME_AUTHORIZATION_KEYS
+    if baseline_present:
+        expected_keys = expected_keys | _BOOTSTRAP_BASELINE_KEYS
+    legacy_rollback_receipt = (
+        schema == ROLLBACK_SCHEMA
+        and payload.get("status") == "ROLLED_BACK"
+        and frozenset(payload) in {
+            _ROLLBACK_RECEIPT_KEYS_LEGACY,
+            _ROLLBACK_RECEIPT_KEYS_LEGACY | _EXTENDED_RECEIPT_KEYS,
+            _ROLLBACK_RECEIPT_KEYS_LEGACY | _PRIOR_RUNTIME_AUTHORIZATION_KEYS,
+        }
+    )
+    if not legacy_rollback_receipt:
+        _require_exact_keys(payload, expected_keys, "runtime receipt")
     if payload.get("receipt_sha256") != self_hash(payload, "receipt_sha256"):
         raise ActivationContractError("runtime receipt self-hash mismatch")
     if not _ACTIVATION_ID.fullmatch(str(payload.get("activation_id") or "")):
@@ -861,14 +892,23 @@ def validate_receipt(payload: Mapping[str, Any]) -> dict[str, Any]:
         raise ActivationContractError("runtime receipt previous SHA is invalid")
     if not _GIT_SHA.fullmatch(str(payload.get("previous_tree") or "")):
         raise ActivationContractError("runtime receipt previous tree is invalid")
-    market_date = str(payload.get("market_date") or "")
-    if not _MARKET_DATE.fullmatch(market_date):
-        raise ActivationContractError("runtime receipt market date is invalid")
-    try:
-        if date.fromisoformat(market_date).isoformat() != market_date:
-            raise ValueError
-    except ValueError as exc:
-        raise ActivationContractError("runtime receipt market date is invalid") from exc
+    date_fields = (
+        ("market_date",)
+        if schema in {ACTIVATION_SCHEMA, ACTIVATION_SCHEMA_LEGACY}
+        or legacy_rollback_receipt
+        else ("activation_market_date", "rollback_target_market_date")
+    )
+    for field in date_fields:
+        market_date = str(payload.get(field) or "")
+        if not _MARKET_DATE.fullmatch(market_date):
+            raise ActivationContractError(f"runtime receipt {field} is invalid")
+        try:
+            if date.fromisoformat(market_date).isoformat() != market_date:
+                raise ValueError
+        except ValueError as exc:
+            raise ActivationContractError(
+                f"runtime receipt {field} is invalid"
+            ) from exc
     for field in (
         "ci_evidence_sha256",
         "sol_evidence_sha256",
@@ -899,6 +939,26 @@ def validate_receipt(payload: Mapping[str, Any]) -> dict[str, Any]:
         raise ActivationContractError("runtime receipt is not research-only")
     if payload.get("broker_execution_enabled") is not False:
         raise ActivationContractError("runtime receipt enables broker execution")
+    if baseline_present and not isinstance(payload.get("bootstrap_baseline"), bool):
+        raise ActivationContractError("runtime receipt baseline disposition is invalid")
+    if protected_authorization_present:
+        if not all(field in payload for field in _PROTECTED_RUNTIME_AUTHORIZATION_KEYS):
+            raise ActivationContractError(
+                "runtime receipt protected authorization fields are incomplete"
+            )
+        material = payload.get("runtime_authorization_material")
+        material_hash = str(payload.get("runtime_authorization_material_sha256") or "")
+        if not isinstance(material, dict) or not _SHA256.fullmatch(material_hash):
+            raise ActivationContractError(
+                "runtime receipt protected authorization material is invalid"
+            )
+        normalized = json.dumps(material, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+        if hashlib.sha256(normalized).hexdigest() != material_hash:
+            raise ActivationContractError(
+                "runtime receipt protected authorization material hash mismatch"
+            )
     if extended:
         _validate_extended_receipt(payload)
     elif authorization_present:
@@ -944,8 +1004,18 @@ def validate_receipt(payload: Mapping[str, Any]) -> dict[str, Any]:
         if payload.get("status") == "COMPLETE":
             if _parse_utc(completed_at) < prepared_at:
                 raise ActivationContractError("activation completion predates preparation")
-            if payload.get("task_enablement_restored") is not True:
+            baseline = payload.get("bootstrap_baseline") is True
+            if baseline:
+                if payload.get("task_enablement_restored") is not False:
+                    raise ActivationContractError(
+                        "complete baseline bootstrap enabled canonical tasks"
+                    )
+            elif payload.get("task_enablement_restored") is not True:
                 raise ActivationContractError("complete activation did not restore task enablement")
+            if baseline and not protected_authorization_present:
+                raise ActivationContractError(
+                    "complete baseline bootstrap lacks protected runtime authorization material"
+                )
     else:
         if schema == ROLLBACK_READY_SCHEMA:
             if payload.get("status") not in {"PREPARED", "ROLLED_BACK"}:
@@ -991,7 +1061,12 @@ def _validate_prior_runtime_authorization(payload: Mapping[str, Any]) -> None:
     if payload.get("previous_runtime_rollback_authorized") not in {True, False}:
         raise ActivationContractError("runtime receipt prior-runtime authorization flag is invalid")
     disposition = payload.get("previous_runtime_disposition")
-    if disposition not in {"AUTHORIZED_COMPLETE_CHAIN", "QUARANTINED_UNAUTHORIZED"}:
+    if disposition not in {
+        "AUTHORIZED_COMPLETE_CHAIN",
+        "AUTHORIZED_PROTECTED_CURRENT_RUNTIME",
+        "BOOTSTRAP_BASELINE_UNSEALED_PREDECESSOR",
+        "QUARANTINED_UNAUTHORIZED",
+    }:
         raise ActivationContractError("runtime receipt prior-runtime disposition is invalid")
     for field in (
         "previous_runtime_authorization_receipt_sha256",
@@ -1000,13 +1075,19 @@ def _validate_prior_runtime_authorization(payload: Mapping[str, Any]) -> None:
         if not _SHA256.fullmatch(str(payload.get(field) or "")):
             raise ActivationContractError(f"runtime receipt {field} is invalid")
     if payload.get("previous_runtime_rollback_authorized") is True:
-        if disposition != "AUTHORIZED_COMPLETE_CHAIN":
+        if disposition not in {
+            "AUTHORIZED_COMPLETE_CHAIN",
+            "AUTHORIZED_PROTECTED_CURRENT_RUNTIME",
+        }:
             raise ActivationContractError("authorized prior runtime has an invalid disposition")
         if payload.get("previous_runtime_authorization_receipt_sha256") == _EMPTY_SHA256:
             raise ActivationContractError("authorized prior runtime lacks its receipt binding")
         if payload.get("previous_runtime_authorization_journal_sha256") == _EMPTY_SHA256:
             raise ActivationContractError("authorized prior runtime lacks its journal binding")
-    elif disposition != "QUARANTINED_UNAUTHORIZED":
+    elif disposition not in {
+        "BOOTSTRAP_BASELINE_UNSEALED_PREDECESSOR",
+        "QUARANTINED_UNAUTHORIZED",
+    }:
         raise ActivationContractError("unauthorized prior runtime has an invalid disposition")
 
 
@@ -1293,6 +1374,92 @@ def _json_summary(value: Mapping[str, Any]) -> str:
     return json.dumps(dict(value), sort_keys=True, separators=(",", ":"))
 
 
+def activation_session_contract(market_date: str) -> dict[str, Any]:
+    """Resolve an open target session and its immediately preceding open date."""
+
+    normalized = str(market_date).strip()
+    try:
+        requested = date.fromisoformat(normalized)
+    except ValueError as exc:
+        raise ActivationContractError("activation session market date is invalid") from exc
+    if requested.isoformat() != normalized:
+        raise ActivationContractError("activation session market date is invalid")
+    try:
+        target = market_session(requested)
+    except Exception as exc:
+        raise ActivationContractError("activation session calendar is unavailable") from exc
+    if not target.is_trading_day:
+        raise ActivationContractError("activation target is not an open session")
+
+    prior = requested - timedelta(days=1)
+    for _ in range(370):
+        try:
+            if market_session(prior).is_trading_day:
+                return {
+                    "status": "PASS",
+                    "market_date": normalized,
+                    "required_completed_market_date": prior.isoformat(),
+                    "research_only": True,
+                    "broker_execution_enabled": False,
+                }
+        except Exception as exc:
+            raise ActivationContractError("activation session calendar is unavailable") from exc
+        prior -= timedelta(days=1)
+    raise ActivationContractError("activation preceding open session is unavailable")
+
+
+def rollback_session_contract(*, now: datetime) -> dict[str, Any]:
+    """Resolve the only fresh rollback target admitted by the live calendar.
+
+    A rollback is a forward-looking runtime change just like activation: it may
+    begin before Morning for the current open session, or after the current
+    session/closed day for the next open session.  The caller does not supply a
+    date, so a stale or remapped command line cannot select the daily lock.
+    Recovery deliberately does not use this function; its target comes only
+    from the protected in-flight journal/receipt and is checked separately with
+    :func:`activation_session_contract`.
+    """
+
+    observed = now
+    if observed.tzinfo is None or observed.utcoffset() is None:
+        raise ActivationContractError("rollback session clock must include timezone")
+    observed = observed.astimezone(UTC)
+    try:
+        session = session_for_timestamp(observed)
+        market_day = date.fromisoformat(session.market_date)
+        local_et = observed.astimezone(MARKET_TIMEZONE)
+        morning = datetime.combine(market_day, _MORNING_START_ET, tzinfo=MARKET_TIMEZONE)
+        if session.status != MarketSessionStatus.CLOSED and local_et < morning:
+            target = market_day
+            window = "PRE_MORNING"
+        elif core_session_phase(observed) in {"after_core_session", "market_closed"}:
+            target = next_market_day(market_day + timedelta(days=1))
+            window = "POST_SESSION_NEXT_SESSION"
+        else:
+            raise ActivationContractError(
+                "rollback requires the governed pre-Morning or post-session window"
+            )
+        target_contract = activation_session_contract(target.isoformat())
+    except ActivationContractError:
+        raise
+    except Exception as exc:
+        raise ActivationContractError("rollback session calendar is unavailable") from exc
+    return {
+        "status": "PASS",
+        "rollback_target_market_date": target.isoformat(),
+        "required_completed_market_date": target_contract[
+            "required_completed_market_date"
+        ],
+        "current_market_date": session.market_date,
+        "current_session_status": session.status.value,
+        "window": window,
+        "calendar_id": session.calendar_id,
+        "calendar_authority": session.calendar_authority,
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+
+
 def activation_boundary(
     market_date: str,
     *,
@@ -1327,6 +1494,7 @@ def activation_boundary(
     observed = observed.astimezone(UTC)
     current: dict[str, Any] = {}
     expected_date: date | None = None
+    required_completed_market_date: str | None = None
     if requested is not None and not errors:
         try:
             session = session_for_timestamp(observed)
@@ -1358,9 +1526,15 @@ def activation_boundary(
 
     if requested is not None and not errors:
         try:
-            target = market_session(requested)
-            if not target.is_trading_day:
+            target_contract = activation_session_contract(normalized)
+            required_completed_market_date = str(
+                target_contract["required_completed_market_date"]
+            )
+        except ActivationContractError as exc:
+            if str(exc) == "activation target is not an open session":
                 errors.append("activation_target_is_not_open_session")
+            else:
+                errors.append(f"calendar_target_unavailable:{type(exc).__name__}")
         except Exception as exc:
             errors.append(f"calendar_target_unavailable:{type(exc).__name__}")
         if expected_date is None or requested != expected_date:
@@ -1387,6 +1561,7 @@ def activation_boundary(
         "current_session_status": current.get("status"),
         "current_session_reason": current.get("reason"),
         "expected_market_date": expected_date.isoformat() if expected_date else None,
+        "required_completed_market_date": required_completed_market_date,
         "window": window,
         "calendar_id": current.get("calendar_id"),
         "calendar_authority": current.get("calendar_authority"),
@@ -1565,6 +1740,12 @@ def main(argv: list[str] | None = None) -> int:
     boundary.add_argument("--state-root", default=None)
     boundary.add_argument("--runtime-root", default=None)
 
+    session = subparsers.add_parser("resolve-activation-session")
+    session.add_argument("--market-date", required=True)
+
+    rollback_session = subparsers.add_parser("resolve-rollback-session")
+    rollback_session.add_argument("--now-utc", required=True)
+
     args = parser.parse_args(argv)
     try:
         if args.command == "validate-evidence":
@@ -1603,6 +1784,14 @@ def main(argv: list[str] | None = None) -> int:
             if result["ready"] is not True:
                 print(_json_summary(result))
                 return 4
+        elif args.command == "resolve-activation-session":
+            result = activation_session_contract(args.market_date)
+        elif args.command == "resolve-rollback-session":
+            try:
+                observed = datetime.fromisoformat(args.now_utc.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise ActivationContractError("rollback session clock is invalid") from exc
+            result = rollback_session_contract(now=observed)
         else:
             result = load_receipt(args.receipt)
             if args.expected_status and result.get("status") != args.expected_status:

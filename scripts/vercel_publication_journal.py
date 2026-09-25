@@ -17,8 +17,10 @@ from urllib.parse import urlsplit
 
 LEGACY_SCHEMA = "dawnstrike.vercel_publication_journal.v1"
 LEGACY_COMPENSATED_SCHEMA = "dawnstrike.vercel_publication_journal.v2"
-SCHEMA = "dawnstrike.vercel_publication_journal.v3"
-COMPENSATED_SCHEMA = "dawnstrike.vercel_publication_journal.v4"
+PRE_CAS_SCHEMA = "dawnstrike.vercel_publication_journal.v3"
+PRE_CAS_COMPENSATED_SCHEMA = "dawnstrike.vercel_publication_journal.v4"
+SCHEMA = "dawnstrike.vercel_publication_journal.v7"
+COMPENSATED_SCHEMA = "dawnstrike.vercel_publication_journal.v8"
 LEGACY_COMPENSATION_SCHEMA = "dawnstrike.vercel_publication_compensation.v1"
 COMPENSATION_SCHEMA = "dawnstrike.vercel_publication_compensation.v2"
 LOCK_SCHEMA = "dawnstrike.vercel_publication_lock.v1"
@@ -90,7 +92,7 @@ PINNED_LEGACY_ALIASES = {
     "https://dawnstrike-command-center-x3-mattfrens-projects.vercel.app",
     "https://dawnstrike-command-center-x3-mattfren-mattfrens-projects.vercel.app",
 }
-KEYS = {
+PRE_CAS_KEYS = {
     "schema_version",
     "operation",
     "phase",
@@ -125,6 +127,19 @@ KEYS = {
     "research_only",
     "broker_execution_enabled",
     "journal_self_sha256",
+}
+KEYS = PRE_CAS_KEYS | {
+    "provider_team_id",
+    "candidate_deployment_operation_id",
+    "candidate_deployment_request_sha256",
+    "candidate_package_map_sha256",
+    "candidate_remote_file_attestation_sha256",
+    "promoted_remote_file_attestation_sha256",
+}
+PRE_CAS_AUTHORIZATION_KEYS = PRE_CAS_KEYS | {
+    "expected_market_date",
+    "prepublication_authorization_id",
+    "daily_ledger_authorization_id",
 }
 AUTHORIZATION_KEYS = KEYS | {
     "expected_market_date",
@@ -630,18 +645,40 @@ def validate(
         value = json.loads(raw.decode("utf-8"), object_pairs_hook=_pairs)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise ValueError(f"invalid strict journal JSON: {exc}") from exc
-    if not isinstance(value, dict) or set(value) not in (KEYS, AUTHORIZATION_KEYS):
+    if not isinstance(value, dict) or set(value) not in (
+        PRE_CAS_KEYS,
+        PRE_CAS_AUTHORIZATION_KEYS,
+        KEYS,
+        AUTHORIZATION_KEYS,
+    ):
         raise ValueError("journal keys are not exact")
-    has_authorization = set(value) == AUTHORIZATION_KEYS
+    value_keys = set(value)
+    frozen_value_keys = frozenset(value_keys)
+    has_authorization = frozen_value_keys in {
+        frozenset(PRE_CAS_AUTHORIZATION_KEYS),
+        frozenset(AUTHORIZATION_KEYS),
+    }
     schema = value["schema_version"]
     if schema not in {
         LEGACY_SCHEMA,
         LEGACY_COMPENSATED_SCHEMA,
+        PRE_CAS_SCHEMA,
+        PRE_CAS_COMPENSATED_SCHEMA,
         SCHEMA,
         COMPENSATED_SCHEMA,
     }:
         raise ValueError("journal schema is invalid")
-    current_schema = schema in {SCHEMA, COMPENSATED_SCHEMA}
+    current_schema = schema in {
+        PRE_CAS_SCHEMA,
+        PRE_CAS_COMPENSATED_SCHEMA,
+        SCHEMA,
+        COMPENSATED_SCHEMA,
+    }
+    cas_schema = schema in {SCHEMA, COMPENSATED_SCHEMA}
+    if cas_schema != (
+        frozen_value_keys in {frozenset(KEYS), frozenset(AUTHORIZATION_KEYS)}
+    ):
+        raise ValueError("journal schema does not match its CAS evidence fields")
     if value["operation"] != "vercel_publication":
         raise ValueError("journal operation is invalid")
     phase = value["phase"]
@@ -653,11 +690,21 @@ def validate(
         raise ValueError("journal phase sequence is invalid")
     if phase == "COMPENSATED" and schema not in {
         LEGACY_COMPENSATED_SCHEMA,
+        PRE_CAS_COMPENSATED_SCHEMA,
         COMPENSATED_SCHEMA,
     }:
         raise ValueError("compensation requires a compensated journal schema")
-    if phase != "COMPENSATED" and schema not in {LEGACY_SCHEMA, SCHEMA}:
+    if phase != "COMPENSATED" and schema not in {
+        LEGACY_SCHEMA,
+        PRE_CAS_SCHEMA,
+        SCHEMA,
+    }:
         raise ValueError("non-compensated journal requires an active journal schema")
+    if schema in {PRE_CAS_SCHEMA, PRE_CAS_COMPENSATED_SCHEMA} and phase not in {
+        "COMPLETE",
+        "COMPENSATED",
+    }:
+        raise ValueError("pre-CAS nonterminal publication journals cannot be resumed")
     for field in ("candidate_source_sha", "candidate_source_tree"):
         _identity(value[field], field)
     for field in (
@@ -673,6 +720,26 @@ def validate(
         "journal_self_sha256",
     ):
         _hash(value[field], field)
+    if cas_schema:
+        if value["provider_team_id"] != "team_b6Z9qvhxLpInBs2kGeP5Nb8X":
+            raise ValueError("journal provider team ID is invalid")
+        if not isinstance(value["candidate_deployment_operation_id"], str) or not re.fullmatch(
+            r"[0-9a-f]{32}", value["candidate_deployment_operation_id"]
+        ):
+            raise ValueError("candidate deployment operation ID is invalid")
+        _hash(
+            value["candidate_deployment_request_sha256"],
+            "candidate_deployment_request_sha256",
+        )
+        _hash(value["candidate_package_map_sha256"], "candidate_package_map_sha256")
+        _hash(
+            value["candidate_remote_file_attestation_sha256"],
+            "candidate_remote_file_attestation_sha256",
+        )
+        _hash(
+            value["promoted_remote_file_attestation_sha256"],
+            "promoted_remote_file_attestation_sha256",
+        )
     if not isinstance(value["project_id"], str) or not value["project_id"]:
         raise ValueError("project ID is invalid")
     if not isinstance(value["project_name"], str) or not value["project_name"]:
@@ -764,6 +831,8 @@ def validate(
             raise ValueError("PRE_MUTATION carries promoted identity")
         if value["production_result_sha256"] != EMPTY_SHA256 or value["result_payload"] is not None:
             raise ValueError("PRE_MUTATION carries result proof")
+        if cas_schema and value["promoted_remote_file_attestation_sha256"] != EMPTY_SHA256:
+            raise ValueError("PRE_MUTATION carries promoted file attestation")
     elif phase == "COMPENSATED":
         if (value["promoted_deployment_id"] is None) != (value["promoted_deployment_url"] is None):
             raise ValueError("compensated promoted identity is incomplete")
@@ -824,6 +893,8 @@ def validate(
                 provider_scope=value["provider_scope"],
             )
     if phase in {"POST_ALIASES", "COMPLETE"}:
+        if cas_schema and value["promoted_remote_file_attestation_sha256"] == EMPTY_SHA256:
+            raise ValueError("promoted deployment file attestation is missing")
         if (
             not isinstance(value["result_payload"], dict)
             or value["production_result_sha256"] == EMPTY_SHA256
@@ -867,6 +938,27 @@ def validate(
             "research_only": True,
             "status": "PRODUCTION_VERIFIED",
         }
+        if cas_schema:
+            bindings.update(
+                {
+                    "provider_team_id": value["provider_team_id"],
+                    "vercel_deployment_operation_id": value[
+                        "candidate_deployment_operation_id"
+                    ],
+                    "vercel_deployment_request_sha256": value[
+                        "candidate_deployment_request_sha256"
+                    ],
+                    "vercel_package_map_sha256": value[
+                        "candidate_package_map_sha256"
+                    ],
+                    "vercel_remote_file_attestation_sha256": value[
+                        "candidate_remote_file_attestation_sha256"
+                    ],
+                    "vercel_promoted_remote_file_attestation_sha256": value[
+                        "promoted_remote_file_attestation_sha256"
+                    ],
+                }
+            )
         # COMPLETE is only valid for the production promotion invocation.
         # Bind every identity and safety field that the deployment receipt
         # exposes, so a self-consistent but different receipt cannot be
@@ -1644,12 +1736,6 @@ def transition(
     runtime_root: Path | None = None,
 ) -> dict[str, Any]:
     value = json.loads(_read_regular(source).decode("utf-8"), object_pairs_hook=_pairs)
-    input_keys = set(value) if isinstance(value, dict) else None
-    if input_keys not in (
-        KEYS - {"journal_self_sha256"},
-        AUTHORIZATION_KEYS - {"journal_self_sha256"},
-    ):
-        raise ValueError("journal transition keys are not exact")
     prior_raw = _read_regular(previous)
     prior = validate(
         prior_raw,
@@ -1657,11 +1743,19 @@ def transition(
         journal_path=previous,
         runtime_root=runtime_root,
     )
+    prior_is_current = prior["schema_version"] in {SCHEMA, COMPENSATED_SCHEMA}
+    input_keys = set(value) if isinstance(value, dict) else None
+    permitted_keys = (
+        (KEYS, AUTHORIZATION_KEYS)
+        if prior_is_current
+        else (PRE_CAS_KEYS, PRE_CAS_AUTHORIZATION_KEYS)
+    )
+    if input_keys not in tuple(keys - {"journal_self_sha256"} for keys in permitted_keys):
+        raise ValueError("journal transition keys are not exact")
     if value["prior_journal_file_sha256"] != hashlib.sha256(prior_raw).hexdigest():
         raise ValueError("journal prior raw hash mismatch")
     if value["operation"] != prior["operation"]:
         raise ValueError("journal operation changed")
-    prior_is_current = prior["schema_version"] in {SCHEMA, COMPENSATED_SCHEMA}
     expected_schema = (
         (COMPENSATED_SCHEMA if value["phase"] == "COMPENSATED" else SCHEMA)
         if prior_is_current
@@ -1684,6 +1778,7 @@ def transition(
             "sequence",
             "promoted_deployment_id",
             "promoted_deployment_url",
+            "promoted_remote_file_attestation_sha256",
             "production_result_sha256",
             "result_payload",
             "prior_journal_file_sha256",
@@ -1697,6 +1792,11 @@ def transition(
     for key in immutable:
         if value.get(key) != prior.get(key):
             raise ValueError(f"journal immutable field changed: {key}")
+    if not (prior["phase"] == "PRE_MUTATION" and value["phase"] == "POST_ALIASES") and (
+        value.get("promoted_remote_file_attestation_sha256")
+        != prior.get("promoted_remote_file_attestation_sha256")
+    ):
+        raise ValueError("journal promoted file attestation changed outside promotion sealing")
     if value["phase"] != "COMPENSATED" and (
         prior.get("result_payload") is not None or value.get("result_payload") is not None
     ):
@@ -1709,12 +1809,16 @@ def transition(
         ):
             if key in prior_result and next_result.get(key) != prior_result.get(key):
                 raise ValueError(f"journal authorization identity changed: {key}")
-    return seal(
-        source,
-        target,
+    value["journal_self_sha256"] = hashlib.sha256(canonical_json(value)).hexdigest()
+    raw = canonical_json(value)
+    validate(
+        raw,
         state_root=state_root,
+        journal_path=target,
         runtime_root=runtime_root,
     )
+    _atomic_write(target, raw)
+    return {"payload": value, "raw_file_sha256": hashlib.sha256(raw).hexdigest()}
 
 
 def main() -> int:

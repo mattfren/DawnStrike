@@ -5,6 +5,7 @@ param(
     [string]$ProjectId = "prj_5pef3EZF1u5YadebEz3dFjnkWOXy",
     [string]$ProjectName = "dawnstrike-command-center-x3",
     [string]$ProviderScope = "mattfrens-projects",
+    [string]$ProviderTeamId = "team_b6Z9qvhxLpInBs2kGeP5Nb8X",
     [string]$ProductionAlias = "https://dawnstrike-command-center-x3.vercel.app",
     [string[]]$AdditionalProductionAliases = @(
         "https://dawnstrike-command-center-x3-mattfrens-projects.vercel.app",
@@ -48,6 +49,7 @@ if (($Promote -or $RecoveryOnly) -and [string]::IsNullOrWhiteSpace($StateRoot)) 
 $governedProjectId = "prj_5pef3EZF1u5YadebEz3dFjnkWOXy"
 $governedProjectName = "dawnstrike-command-center-x3"
 $governedProviderScope = "mattfrens-projects"
+$governedProviderTeamId = "team_b6Z9qvhxLpInBs2kGeP5Nb8X"
 $governedProductionAlias = "https://dawnstrike-command-center-x3.vercel.app"
 $governedAdditionalAliases = @(
     "https://dawnstrike-command-center-x3-mattfrens-projects.vercel.app",
@@ -67,10 +69,14 @@ $pinnedLegacyArtifactTotalBytes = 3286836
 $pinnedLegacyAttestationSha256 = '6846a6dd24bc905fee86d2b1c541140d2da3420cc5101c57c0793959b9efaa30' # pragma: allowlist secret
 $pinnedLegacyReadinessReason = 'public_integrity_check_failed'
 $pinnedLegacyFailedChecks = @('calendar_freshness_stale_by_clock', 'market_date_stale')
+if ($ProjectId -cne $governedProjectId -or
+    $ProjectName -cne $governedProjectName -or
+    $ProviderScope -cne $governedProviderScope -or
+    $ProviderTeamId -cne $governedProviderTeamId) {
+    throw "Vercel publication target differs from the governed project/team tuple."
+}
 if ($Promote -or $RecoveryOnly) {
-    if ($ProjectId -cne $governedProjectId -or
-        $ProjectName -cne $governedProjectName -or
-        $ProviderScope -cne $governedProviderScope -or
+    if (
         $ProductionAlias -cne $governedProductionAlias -or
         (ConvertTo-Json @($AdditionalProductionAliases) -Compress) -cne
             (ConvertTo-Json @($governedAdditionalAliases) -Compress)) {
@@ -109,10 +115,10 @@ function Assert-VercelRecoveryBootstrapSource {
         [Parameter(Mandatory = $true)][string]$Root,
         [Parameter(Mandatory = $true)][string]$AllowedStageRoot
     )
-    $bootstrapGit = 'C:\Program Files\Git\cmd\git.exe'
-    $bootstrapGitSha256 = '37c5725818d602e951ba2563b870d62763322956b73373da4c33a0b566a80bc9'
-    $bootstrapGitSubject = 'CN=Johannes Schindelin, O=Johannes Schindelin, S=Nordrhein-Westfalen, C=DE'
-    $bootstrapGitThumbprint = '3EB14A3AEF84B7153E139397F0A49E2FAC662B0E'
+    $bootstrapGit = 'C:\Program Files\Dawnstrike\Git-2.55.0.5\cmd\git.exe'
+    $bootstrapGitSha256 = '78211c7ed73988da93a6d8a33d47ec6187f464d7ea2a9a00c182bbd7a1ecf30f'
+    $bootstrapGitSubject = 'CN=Johannes Schindelin, O=Johannes Schindelin, L=Bruehl, C=DE'
+    $bootstrapGitThumbprint = '2A1E97CBF0DFCDA15B0DA0AC9745014F989D4AD0'
     $cursor = [System.IO.Path]::GetFullPath($bootstrapGit)
     while ($true) {
         $item = Get-Item -LiteralPath $cursor -Force -ErrorAction Stop
@@ -269,36 +275,45 @@ function Assert-VercelRecoveryBootstrapSource {
 }
 
 $resolvedRoot = (Resolve-Path $ProjectRoot).Path
-$executingRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')).TrimEnd('\')
-if (-not [string]::Equals(
-    [System.IO.Path]::GetFullPath($resolvedRoot).TrimEnd('\'),
-    $executingRoot,
-    [System.StringComparison]::OrdinalIgnoreCase
-)) {
-    throw "Vercel publisher must execute from the exact ProjectRoot being admitted."
-}
+$codeRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')).TrimEnd('\')
 $bootstrapStage = Join-Path $resolvedRoot $StageRoot
 $bootstrapSource = Assert-VercelRecoveryBootstrapSource `
     -Root $resolvedRoot -AllowedStageRoot $bootstrapStage
 . (Join-Path $PSScriptRoot "dawnstrike_job_process.ps1")
 . (Join-Path $PSScriptRoot "dawnstrike_process_runner.ps1")
-$null = Assert-DawnstrikeProcessSourceBoundToHead -ReleaseRoot $resolvedRoot -ExpectedSha $ExpectedSha -EntryScript $PSCommandPath
-. (Join-Path $resolvedRoot "scripts\vercel_source_contract.ps1")
+$expectedCodeRoot = Get-DawnstrikeProtectedReleaseRoot -ExpectedSha $ExpectedSha
+if (-not [string]::Equals($codeRoot, $expectedCodeRoot, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Vercel publisher must execute from the protected exact-SHA release root."
+}
+$null = Assert-DawnstrikeProcessSourceBoundToHead -ReleaseRoot $codeRoot -ExpectedSha $ExpectedSha -EntryScript $PSCommandPath
+. (Join-Path $PSScriptRoot "vercel_source_contract.ps1")
 $approvedPython = Get-DawnstrikeApprovedLockInterpreter
 $approvedGit = Get-DawnstrikeApprovedGit
-$toolchainHelper = Join-Path $resolvedRoot "scripts\vercel_toolchain_contract.py"
-$expectedNodePath = 'C:\Program Files\nodejs\node.exe'
-$expectedNodeSha256 = '58e74bf02fc5bbacc41dcb8bef089961cd5bddd37830b87784e4fc624d145d1f'
+$toolchainHelper = Join-Path $codeRoot "scripts\vercel_toolchain_contract.py"
+$expectedNodeRoot = 'C:\Program Files\Dawnstrike\Node-24.20.0'
+$expectedNodePath = Join-Path $expectedNodeRoot 'node.exe'
+$expectedNodeBoundaryManifest = Join-Path $expectedNodeRoot '.dawnstrike-node-boundary-v1.json'
+$expectedNodeSha256 = '5c976096e04e5c2c1f091938926234cc9fbebfe9787ddd149351b3b0ecc707b5'
+$expectedNodeLength = 93381448L
 $expectedNodeSubject = 'CN=OpenJS Foundation, O=OpenJS Foundation, L=San Francisco, S=California, C=US'
-$expectedNodeThumbprint = 'C293811538EEFF337F0AD4F2DCB7E7B388CDA38B'
-$expectedCurlPath = 'C:\Windows\System32\curl.exe'
-$expectedCurlSha256 = '73d24149ff289afc49ec41f08918ef9faa727d39ad993e929757dc2ddafab805'
-$expectedCurlSubject = 'CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'
-$expectedCurlThumbprint = 'DC91E564D5BC1E3A8E02D6A8508682ABEA8A2443'
+$expectedNodeThumbprint = 'D1DC7755FAB17F01224CCCEA1C2FAEDC6F963E12'
+$expectedVercelTreeSha256 = '3bfb7509c4bf6a8fec920566c290a385c8160b9851b2350a655f0fd8b6c9e069'
+$expectedVercelRoot = 'C:\Program Files\Dawnstrike\VercelCli-' + $expectedVercelTreeSha256
+$expectedVercelEntry = Join-Path $expectedVercelRoot 'node_modules\vercel\dist\vc.js'
+$expectedVercelEntrySha256 = '2dd6e7c273a24bf4317af867d9b7bacb4db35487b42ea77912e2e7c33fa0c152'
+$expectedVercelBoundaryManifest = Join-Path $expectedVercelRoot '.dawnstrike-vercel-cli-boundary-v1.json'
 
 function Assert-VercelNodeIdentity {
+    $null = Assert-DawnstrikeProcessProtectedPath -Path $expectedNodeRoot
+    $null = Assert-DawnstrikeProcessProtectedPath -Path $expectedNodeBoundaryManifest
+    $null = Assert-DawnstrikeProcessProtectedPath -Path $expectedNodePath
+    Assert-DawnstrikeSharedLockNoReparse $expectedNodeRoot "Approved Vercel Node root"
+    Assert-DawnstrikeSharedLockNoReparse $expectedNodeBoundaryManifest `
+        "Approved Vercel Node boundary manifest"
     Assert-DawnstrikeSharedLockNoReparse $expectedNodePath "Approved Vercel Node executable"
     if (-not (Test-Path -LiteralPath $expectedNodePath -PathType Leaf) -or
+        (Get-Item -LiteralPath $expectedNodePath -Force -ErrorAction Stop).Length -ne
+            $expectedNodeLength -or
         (Get-DawnstrikeRuntimeLockHash $expectedNodePath) -cne $expectedNodeSha256) {
         throw "Approved Vercel Node executable identity changed."
     }
@@ -310,26 +325,14 @@ function Assert-VercelNodeIdentity {
     }
 }
 
-function Assert-VercelCurlIdentity {
-    Assert-DawnstrikeSharedLockNoReparse $expectedCurlPath "Approved Vercel curl executable"
-    if (-not (Test-Path -LiteralPath $expectedCurlPath -PathType Leaf) -or
-        (Get-DawnstrikeRuntimeLockHash $expectedCurlPath) -cne $expectedCurlSha256) {
-        throw "Approved Vercel curl executable identity changed."
-    }
-    $signature = Get-AuthenticodeSignature -LiteralPath $expectedCurlPath -ErrorAction Stop
-    if ([string]$signature.Status -cne 'Valid' -or $null -eq $signature.SignerCertificate -or
-        [string]$signature.SignerCertificate.Subject -cne $expectedCurlSubject -or
-        [string]$signature.SignerCertificate.Thumbprint -cne $expectedCurlThumbprint) {
-        throw "Approved Vercel curl executable signer changed."
-    }
-}
-
 function Get-VercelPublicationToolchain {
     $null = Get-DawnstrikeApprovedLockInterpreter
     $null = Get-DawnstrikeApprovedGit
     Assert-VercelNodeIdentity
-    Assert-VercelCurlIdentity
     Assert-DawnstrikeSharedLockNoReparse $toolchainHelper "Vercel toolchain contract"
+    $null = Assert-DawnstrikeProcessProtectedPath -Path $expectedVercelRoot
+    $null = Assert-DawnstrikeProcessProtectedPath -Path $expectedVercelBoundaryManifest
+    $null = Assert-DawnstrikeProcessProtectedPath -Path $expectedVercelEntry
     $environment = @{
         PYTHONHOME = ""
         PYTHONPATH = ""
@@ -354,8 +357,39 @@ function Get-VercelPublicationToolchain {
         [string]$payload.git.sha256 -cne [string]$approvedGit.sha256 -or
         [string]$payload.node.path -cne $expectedNodePath -or
         [string]$payload.node.sha256 -cne $expectedNodeSha256 -or
-        [string]$payload.curl.path -cne $expectedCurlPath -or
-        [string]$payload.curl.sha256 -cne $expectedCurlSha256 -or
+        [long]$payload.node.byte_count -ne $expectedNodeLength -or
+        -not [string]::Equals(
+            [string]$payload.node.root,
+            $expectedNodeRoot,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        -not [string]::Equals(
+            [string]$payload.node.boundary_manifest_path,
+            $expectedNodeBoundaryManifest,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        [string]$payload.node.boundary_manifest_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        [string]$payload.node.version -cne '24.20.0' -or
+        -not [string]::Equals(
+            [string]$payload.vercel_cli.root,
+            $expectedVercelRoot,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        -not [string]::Equals(
+            [string]$payload.vercel_cli.entry_path,
+            $expectedVercelEntry,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        [string]$payload.vercel_cli.entry_sha256 -cne $expectedVercelEntrySha256 -or
+        [string]$payload.vercel_cli.tree_sha256 -cne $expectedVercelTreeSha256 -or
+        [string]$payload.vercel_cli.version -cne '59.11.2' -or
+        [int]$payload.vercel_cli.file_count -ne 7131 -or
+        -not [string]::Equals(
+            [string]$payload.vercel_cli.boundary_manifest_path,
+            $expectedVercelBoundaryManifest,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        [string]$payload.vercel_cli.boundary_manifest_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
         [string]$payload.provider_execution.mode -cne 'javascript' -or
         [string]$payload.provider_execution.global_config_policy -cne 'fresh_isolated_directory_per_provider_call' -or
         [string]$payload.provider_execution.network_trust_policy -cne 'direct_node_bundled_ca_no_proxy' -or
@@ -443,7 +477,7 @@ $journalPath = Join-Path $journalRoot "vercel-publication-operation.json"
 $publicationLockPath = Join-Path $journalHistoryRoot "vercel-publication-operation.lock"
 $publicationLockOwner = [guid]::NewGuid().ToString("N")
 $publicationLockAcquired = $false
-$journalHelper = Join-Path $resolvedRoot "scripts\vercel_publication_journal.py"
+$journalHelper = Join-Path $codeRoot "scripts\vercel_publication_journal.py"
 $resultNamespace = if ($Promote -or $RecoveryOnly) {
     "vercel-publication"
 }
@@ -452,16 +486,16 @@ else {
 }
 $resultRelativePath = "outputs/daily_finalize/$resultNamespace/$journalMarketKey/daily-deployment-result.json"
 $resultPath = Join-Path $resolvedStateRoot ($resultRelativePath -replace '/', '\')
-$vercel = @("--scope", $ProviderScope)
-$vercelAuth = @()
-if (-not [string]::IsNullOrWhiteSpace($env:VERCEL_TOKEN)) {
-    $vercelAuth = @("--token", $env:VERCEL_TOKEN)
-}
 $promoted = $false
 $priorProduction = $null
 $priorProductionAliases = @{}
 $promotedDeployment = $null
 $packageManifestSha256 = $null
+$packageMapSha256 = $null
+$remoteFileAttestationSha256 = $null
+$promotedRemoteFileAttestationSha256 = $null
+$deploymentCasOperationId = $null
+$deploymentCasRequestSha256 = $null
 $pinnedLegacyRollbackConsumed = $false
 $allProductionAliases = @($ProductionAlias) + @($AdditionalProductionAliases) |
     Select-Object -Unique | Sort-Object
@@ -492,160 +526,897 @@ function Convert-VercelJson {
     }
 }
 
+function Invoke-VercelBoundedPublicGet {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Url,
+        [ValidateRange(1, 3600)][int]$TimeoutSeconds = 180,
+        [ValidateRange(1, 67108864)][int]$MaximumResponseBytes = 4194304
+    )
+
+    try { $uri = [Uri]::new($Url, [UriKind]::Absolute) }
+    catch { throw 'Vercel public-proof URI is invalid.' }
+    $hostName = $uri.DnsSafeHost.ToLowerInvariant()
+    $governedAliasHosts = @($allProductionAliases | ForEach-Object {
+        ([Uri]::new([string]$_, [UriKind]::Absolute)).DnsSafeHost.ToLowerInvariant()
+    })
+    $deploymentHostPattern = '^' + [Regex]::Escape($governedProjectName) +
+        '(?:-[a-z0-9-]+)?-' + [Regex]::Escape($governedProviderScope) +
+        '\.vercel\.app$'
+    if ($uri.Scheme -cne 'https' -or -not $uri.IsDefaultPort -or
+        $uri.UserInfo -or $uri.Fragment -or
+        ($hostName -notin $governedAliasHosts -and
+            $hostName -cnotmatch $deploymentHostPattern)) {
+        throw 'Vercel public-proof request escaped the governed HTTPS origins.'
+    }
+    $bypass = [string]$env:VERCEL_AUTOMATION_BYPASS_SECRET
+    if ($bypass -and ($bypass.Length -gt 4096 -or $bypass -match '[\x00-\x20\x7f]')) {
+        throw 'Vercel deployment-protection bypass is malformed.'
+    }
+
+    Add-Type -AssemblyName System.Net.Http -ErrorAction Stop
+    $handler = [Net.Http.HttpClientHandler]::new()
+    $client = $null
+    $request = $null
+    $response = $null
+    $responseStream = $null
+    $memory = $null
+    try {
+        $handler.AllowAutoRedirect = $false
+        $handler.UseProxy = $false
+        $handler.UseCookies = $false
+        $handler.UseDefaultCredentials = $false
+        $handler.CheckCertificateRevocationList = $true
+        if ($null -ne $handler.PSObject.Properties['SslProtocols']) {
+            $handler.SslProtocols = [Security.Authentication.SslProtocols]::Tls12
+        }
+        $handler.MaxResponseHeadersLength = 64
+        $client = [Net.Http.HttpClient]::new($handler, $false)
+        $client.Timeout = [TimeSpan]::FromSeconds($TimeoutSeconds)
+        $client.DefaultRequestHeaders.ExpectContinue = $false
+        $client.DefaultRequestHeaders.Accept.Clear()
+        $client.DefaultRequestHeaders.Accept.Add(
+            [Net.Http.Headers.MediaTypeWithQualityHeaderValue]::new('application/json')
+        )
+        $client.DefaultRequestHeaders.UserAgent.ParseAdd('dawnstrike-vercel-proof/1')
+        $request = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Get, $uri)
+        $request.Version = [Version]::new(1, 1)
+        if ($bypass -and
+            -not $request.Headers.TryAddWithoutValidation(
+                'x-vercel-protection-bypass', $bypass
+            )) {
+            throw 'Vercel deployment-protection header could not be applied.'
+        }
+        try {
+            $response = $client.SendAsync(
+                $request,
+                [Net.Http.HttpCompletionOption]::ResponseHeadersRead
+            ).GetAwaiter().GetResult()
+        }
+        catch { throw 'Vercel public-proof request failed before a complete response.' }
+        $declaredLength = $response.Content.Headers.ContentLength
+        if ($null -ne $declaredLength -and [long]$declaredLength -gt $MaximumResponseBytes) {
+            throw 'Vercel public-proof response exceeds the bounded response limit.'
+        }
+        $responseStream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+        $memory = [IO.MemoryStream]::new()
+        [byte[]]$buffer = New-Object byte[] 65536
+        while (($read = $responseStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            if ($memory.Length + $read -gt $MaximumResponseBytes) {
+                throw 'Vercel public-proof response exceeds the bounded response limit.'
+            }
+            $memory.Write($buffer, 0, $read)
+        }
+        return [pscustomobject]@{
+            status_code = [int]$response.StatusCode
+            body_bytes = [byte[]]$memory.ToArray()
+        }
+    }
+    finally {
+        if ($null -ne $memory) { $memory.Dispose() }
+        if ($null -ne $responseStream) { $responseStream.Dispose() }
+        if ($null -ne $response) { $response.Dispose() }
+        if ($null -ne $request) { $request.Dispose() }
+        if ($null -ne $client) { $client.Dispose() }
+        if ($null -ne $handler) { $handler.Dispose() }
+    }
+}
+
 function Invoke-VercelJson {
     param(
         [string[]]$Arguments,
         [string]$Label
     )
-    # Vercel and its bundled curl write banners, warnings, and transfer
-    # progress to stderr even when the command succeeds. The bounded runner
-    # keeps stderr separate: curl progress can otherwise be interleaved inside
-    # a multiline JSON body.
-    $result = Invoke-VercelProcess `
-        -Arguments $Arguments `
-        -Label $Label `
+    if ($Arguments.Count -ne 2 -or $Arguments[0] -cne 'curl') {
+        throw "$Label attempted a retired Vercel CLI operation."
+    }
+    $response = Invoke-VercelBoundedPublicGet `
+        -Url ([string]$Arguments[1]) `
         -TimeoutSeconds $VercelCommandTimeoutSeconds
-    return Convert-VercelJson -Output @($result.Stdout) -Label $Label
+    if ([int]$response.status_code -lt 200 -or [int]$response.status_code -ge 300) {
+        throw "$Label returned HTTP status $([int]$response.status_code)."
+    }
+    return ConvertFrom-VercelApiJsonBytes -Bytes $response.body_bytes -Label $Label
 }
 
-function Invoke-VercelProcess {
+function Invoke-VercelBoundedApiRequest {
+    [CmdletBinding()]
     param(
-        [string[]]$Arguments,
-        [string]$Label,
-        [int]$TimeoutSeconds
+        [Parameter(Mandatory = $true)][ValidateSet('GET', 'POST')][string]$Method,
+        [Parameter(Mandatory = $true)][string]$RelativeUri,
+        [byte[]]$Body = $null,
+        [string]$ContentType = '',
+        [string]$DigestSha1 = '',
+        [ValidateRange(1, 3600)][int]$TimeoutSeconds = 180,
+        [ValidateRange(1, 134217728)][int]$MaximumResponseBytes = 4194304
     )
-    Assert-VercelPublicationSourceStable
-    Assert-VercelPublicationToolchainStable
-    # Global Vercel authentication must precede the command. Asset downloads
-    # use ``--`` to pass native curl flags; appending auth would leak --token
-    # into curl's argv and make authenticated raw-byte verification fail.
-    Assert-VercelContainedPathNoReparse `
-        -Root $resolvedStateRoot -Target $providerConfigRoot `
-        -Label "Vercel isolated provider-config root"
-    New-Item -ItemType Directory -Path $providerConfigRoot -Force | Out-Null
-    Assert-VercelContainedPathNoReparse `
-        -Root $resolvedStateRoot -Target $providerConfigRoot `
-        -Label "Vercel isolated provider-config root"
-    $callConfigRoot = Join-Path $providerConfigRoot ([guid]::NewGuid().ToString('N'))
-    Assert-VercelContainedPathNoReparse `
-        -Root $resolvedStateRoot -Target $callConfigRoot `
-        -Label "Vercel isolated provider config"
-    New-Item -ItemType Directory -Path $callConfigRoot -ErrorAction Stop | Out-Null
-    Assert-VercelContainedPathNoReparse `
-        -Root $resolvedStateRoot -Target $callConfigRoot `
-        -Label "Vercel isolated provider config"
-    if (@(Get-ChildItem -LiteralPath $callConfigRoot -Force).Count -ne 0) {
-        throw "Fresh Vercel provider config directory is not empty."
+
+    $escapedTeam = [Regex]::Escape($governedProviderTeamId)
+    $escapedProject = [Regex]::Escape($governedProjectId)
+    $allowedApiPath = '^(?:' +
+        '/v2/files\?teamId=' + $escapedTeam + '|' +
+        '/v13/deployments\?teamId=' + $escapedTeam + '&prebuilt=1|' +
+        '/v13/deployments\?teamId=' + $escapedTeam + '|' +
+        '/v13/deployments/dpl_[A-Za-z0-9]+\?teamId=' + $escapedTeam + '|' +
+        '/v7/deployments\?projectId=' + $escapedProject +
+            '&target=production&limit=20&teamId=' + $escapedTeam + '|' +
+        '/v4/aliases/[a-z0-9.-]+\?projectId=' + $escapedProject +
+            '&teamId=' + $escapedTeam + '|' +
+        '/v2/deployments/dpl_[A-Za-z0-9]+/aliases\?teamId=' + $escapedTeam + '|' +
+        '/v10/projects/' + $escapedProject + '/promote/dpl_[A-Za-z0-9]+' +
+            '\?teamId=' + $escapedTeam + '|' +
+        '/v1/projects/' + $escapedProject + '/rollback/dpl_[A-Za-z0-9]+' +
+            '\?teamId=' + $escapedTeam + '|' +
+        '/v6/deployments/dpl_[A-Za-z0-9]+/files\?teamId=' + $escapedTeam + '|' +
+        '/v8/deployments/dpl_[A-Za-z0-9]+/files/[A-Za-z0-9_-]+\?teamId=' +
+            $escapedTeam + ')$'
+    if ($RelativeUri -cnotmatch $allowedApiPath) {
+        throw 'Vercel API request escaped the governed endpoint/team boundary.'
     }
-    $allArguments = @($vercelEntryPath) + @("--global-config", $callConfigRoot) +
-        $vercel + $vercelAuth + $Arguments
-    $trustedWindowsRoot = 'C:\Windows'
-    $trustedPathEntries = @(
-        (Split-Path -Parent $gitPath),
-        (Split-Path -Parent ([string]$approvedPython.path)),
-        (Split-Path -Parent $uvPath),
-        (Join-Path $trustedWindowsRoot 'System32'),
-        (Join-Path $trustedWindowsRoot 'System32\WindowsPowerShell\v1.0')
-    ) -join ';'
-    foreach ($entry in @($trustedPathEntries -split ';')) {
-        Assert-DawnstrikeSharedLockNoReparse $entry "Vercel child PATH entry"
+    $token = [string]$env:VERCEL_TOKEN
+    if ([string]::IsNullOrWhiteSpace($token) -or $token.Length -gt 4096 -or
+        $token -match '[\x00-\x20\x7f]') {
+        throw 'Vercel API authentication is unavailable or malformed.'
     }
-    $expectedResolution = @{
-        'git.exe' = $gitPath
-        'python.exe' = [string]$approvedPython.path
-        'uv.exe' = $uvPath
-        'cmd.exe' = (Join-Path $trustedWindowsRoot 'System32\cmd.exe')
-        'curl.exe' = $expectedCurlPath
-        'powershell.exe' = (Join-Path $trustedWindowsRoot 'System32\WindowsPowerShell\v1.0\powershell.exe')
+    if ($Method -eq 'GET' -and ($null -ne $Body -or $ContentType -or $DigestSha1)) {
+        throw 'Vercel API GET requests cannot carry upload material.'
     }
-    foreach ($leaf in $expectedResolution.Keys) {
-        $matches = @($trustedPathEntries -split ';' | ForEach-Object {
-            $candidate = Join-Path $_ $leaf
-            if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-                [System.IO.Path]::GetFullPath($candidate)
-            }
-        })
-        if (-not $matches.Count -or
-            -not [string]::Equals($matches[0], [string]$expectedResolution[$leaf],
-                [System.StringComparison]::OrdinalIgnoreCase)) {
-            throw "Vercel child PATH resolves an unapproved $leaf."
-        }
+    if ($Method -eq 'POST' -and $null -eq $Body) {
+        throw 'Vercel API POST request body is missing.'
     }
-    $trustedPath = $trustedPathEntries
-    $environment = @{
-        CI = "1"
-        NO_COLOR = "1"
-        FORCE_COLOR = "0"
-        VERCEL_TELEMETRY_DISABLED = "1"
-        VERCEL_CLI_USE_NATIVE_BINARY = "0"
-        VERCEL_VC_NATIVE = "0"
-        NPM_CONFIG_UPDATE_NOTIFIER = "false"
-        NPM_CONFIG_FUND = "false"
-        NPM_CONFIG_AUDIT = "false"
-        NPM_CONFIG_YES = "true"
-        PATH = $trustedPath
-        NODE_OPTIONS = ""
-        NODE_PATH = ""
-        NPM_CONFIG_PREFIX = ""
-        PYTHONHOME = ""
-        PYTHONPATH = ""
-        PYTHONSTARTUP = ""
-        PYTHONDONTWRITEBYTECODE = "1"
-        UV_PYTHON = [string]$approvedPython.path
-        UV_NO_MODIFY_PATH = "1"
-        GIT_CONFIG_NOSYSTEM = "1"
-        GIT_CONFIG_GLOBAL = "NUL"
-        XDG_CONFIG_HOME = $callConfigRoot
-        XDG_CONFIG_DIRS = $callConfigRoot
-        HOME = $callConfigRoot
-        USERPROFILE = $callConfigRoot
-        APPDATA = $callConfigRoot
-        LOCALAPPDATA = $callConfigRoot
-        HTTP_PROXY = ""
-        HTTPS_PROXY = ""
-        ALL_PROXY = ""
-        NO_PROXY = ""
-        NODE_EXTRA_CA_CERTS = ""
-        NODE_TLS_REJECT_UNAUTHORIZED = ""
-        SSL_CERT_FILE = ""
-        SSL_CERT_DIR = ""
-        CURL_CA_BUNDLE = ""
-        REQUESTS_CA_BUNDLE = ""
-        VERCEL_ORG_ID = ""
-        VERCEL_PROJECT_ID = ""
-        VERCEL_TEAM_ID = ""
-        VERCEL_OIDC_TOKEN = ""
-        TURBO_TOKEN = ""
-        VERCEL_TOKEN = ""
+    if ($DigestSha1 -and $DigestSha1 -cnotmatch '^[0-9a-f]{40}$') {
+        throw 'Vercel API upload digest is invalid.'
     }
-    foreach ($entry in @(Get-ChildItem Env: | Where-Object { $_.Name -like 'GIT_*' })) {
-        if ($entry.Name -notin @('GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_GLOBAL')) {
-            $environment[$entry.Name] = ""
-        }
+    if ($DigestSha1 -and $ContentType -cne 'application/octet-stream') {
+        throw 'Vercel API upload content type is invalid.'
     }
+
+    Add-Type -AssemblyName System.Net.Http -ErrorAction Stop
+    $handler = [Net.Http.HttpClientHandler]::new()
+    $client = $null
+    $request = $null
+    $response = $null
+    $responseStream = $null
+    $memory = $null
     try {
-        $result = Invoke-DawnstrikeJobProcess `
-            -FilePath $nodePath `
-            -ArgumentList $allArguments `
-            -WorkingDirectory ([string](Get-Location).Path) `
-            -Label $Label `
-            -TimeoutSeconds $TimeoutSeconds `
-            -OutputDrainTimeoutSeconds 5 `
-            -EnvironmentOverrides $environment
+        $handler.AllowAutoRedirect = $false
+        $handler.UseProxy = $false
+        $handler.UseCookies = $false
+        $handler.UseDefaultCredentials = $false
+        $handler.CheckCertificateRevocationList = $true
+        if ($null -ne $handler.PSObject.Properties['SslProtocols']) {
+            $handler.SslProtocols = [Security.Authentication.SslProtocols]::Tls12
+        }
+        $handler.MaxResponseHeadersLength = 64
+        $client = [Net.Http.HttpClient]::new($handler, $false)
+        $client.Timeout = [TimeSpan]::FromSeconds($TimeoutSeconds)
+        $client.DefaultRequestHeaders.ExpectContinue = $false
+        $client.DefaultRequestHeaders.Authorization =
+            [Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer', $token)
+        $client.DefaultRequestHeaders.Accept.Clear()
+        $client.DefaultRequestHeaders.Accept.Add(
+            [Net.Http.Headers.MediaTypeWithQualityHeaderValue]::new('application/json')
+        )
+        $client.DefaultRequestHeaders.UserAgent.ParseAdd('dawnstrike-vercel-cas/1')
+
+        $uri = [Uri]::new('https://api.vercel.com' + $RelativeUri, [UriKind]::Absolute)
+        if ($uri.Scheme -cne 'https' -or $uri.Host -cne 'api.vercel.com' -or
+            -not $uri.IsDefaultPort -or $uri.UserInfo -or $uri.Fragment) {
+            throw 'Vercel API URI is not the exact governed HTTPS origin.'
+        }
+        $request = [Net.Http.HttpRequestMessage]::new(
+            [Net.Http.HttpMethod]::new($Method),
+            $uri
+        )
+        $request.Version = [Version]::new(1, 1)
+        if ($Method -eq 'POST') {
+            $request.Content = [Net.Http.ByteArrayContent]::new($Body)
+            $request.Content.Headers.ContentType = [Net.Http.Headers.MediaTypeHeaderValue]::new(
+                $ContentType
+            )
+            $request.Content.Headers.ContentLength = [long]$Body.LongLength
+            if ($DigestSha1) {
+                if (-not $request.Headers.TryAddWithoutValidation('x-vercel-digest', $DigestSha1)) {
+                    throw 'Vercel API upload digest header could not be applied.'
+                }
+            }
+        }
+        try {
+            $response = $client.SendAsync(
+                $request,
+                [Net.Http.HttpCompletionOption]::ResponseHeadersRead
+            ).GetAwaiter().GetResult()
+        }
+        catch {
+            throw 'Vercel API request failed before a complete response was received.'
+        }
+        $declaredLength = $response.Content.Headers.ContentLength
+        if ($null -ne $declaredLength -and [long]$declaredLength -gt $MaximumResponseBytes) {
+            throw 'Vercel API response exceeds the bounded response limit.'
+        }
+        $responseStream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+        $memory = [IO.MemoryStream]::new()
+        [byte[]]$buffer = New-Object byte[] 65536
+        while (($read = $responseStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            if ($memory.Length + $read -gt $MaximumResponseBytes) {
+                throw 'Vercel API response exceeds the bounded response limit.'
+            }
+            $memory.Write($buffer, 0, $read)
+        }
+        return [pscustomobject]@{
+            status_code = [int]$response.StatusCode
+            body_bytes = [byte[]]$memory.ToArray()
+        }
     }
     finally {
-        Assert-VercelContainedPathNoReparse `
-            -Root $resolvedStateRoot -Target $callConfigRoot `
-            -Label "Vercel isolated provider config cleanup"
-        if (Test-Path -LiteralPath $callConfigRoot -PathType Container) {
-            Remove-Item -LiteralPath $callConfigRoot -Recurse -Force -ErrorAction SilentlyContinue
+        if ($null -ne $memory) { $memory.Dispose() }
+        if ($null -ne $responseStream) { $responseStream.Dispose() }
+        if ($null -ne $response) { $response.Dispose() }
+        if ($null -ne $request) { $request.Dispose() }
+        if ($null -ne $client) { $client.Dispose() }
+        if ($null -ne $handler) { $handler.Dispose() }
+    }
+}
+
+function ConvertFrom-VercelApiJsonBytes {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][byte[]]$Bytes,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    try {
+        $strictUtf8 = [Text.UTF8Encoding]::new($false, $true)
+        $raw = $strictUtf8.GetString($Bytes)
+    }
+    catch { throw "$Label returned non-UTF-8 JSON." }
+    Assert-VercelJsonObjectKeysUnique -RawJson $raw
+    try { return ($raw | ConvertFrom-Json) }
+    catch { throw "$Label returned invalid JSON." }
+}
+
+function Invoke-VercelApiReadJson {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$RelativeUri,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [ValidateRange(1, 134217728)][int]$MaximumResponseBytes = 4194304
+    )
+
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            $response = Invoke-VercelBoundedApiRequest `
+                -Method GET -RelativeUri $RelativeUri `
+                -TimeoutSeconds $VercelCommandTimeoutSeconds `
+                -MaximumResponseBytes $MaximumResponseBytes
+        }
+        catch {
+            if ($attempt -eq 3) { throw }
+            Start-Sleep -Seconds $attempt
+            continue
+        }
+        if ([int]$response.status_code -eq 200) {
+            return ConvertFrom-VercelApiJsonBytes -Bytes $response.body_bytes -Label $Label
+        }
+        if ([int]$response.status_code -ne 429 -and
+            ([int]$response.status_code -lt 500 -or [int]$response.status_code -gt 599)) {
+            throw "$Label failed with HTTP status $([int]$response.status_code)."
+        }
+        if ($attempt -eq 3) {
+            throw "$Label did not converge after bounded transient responses."
+        }
+        Start-Sleep -Seconds $attempt
+    }
+    throw "$Label did not return a response."
+}
+
+function Request-VercelProductionPromotion {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$PreviewDeploymentId)
+
+    if ($PreviewDeploymentId -cnotmatch '^dpl_[A-Za-z0-9]{20,64}$') {
+        throw 'Vercel promotion preview deployment ID is invalid.'
+    }
+    $body = [Text.Encoding]::UTF8.GetBytes((ConvertTo-VercelCanonicalJson ([ordered]@{
+        deploymentId = $PreviewDeploymentId
+        name = $governedProjectName
+        target = 'production'
+        meta = [ordered]@{ action = 'promote' }
+    })))
+    # Production creation is attempted exactly once. Recovery identifies at
+    # most one server-side clone by action + originalDeploymentId before any
+    # further provider mutation.
+    $response = Invoke-VercelBoundedApiRequest `
+        -Method POST -RelativeUri "/v13/deployments?teamId=$governedProviderTeamId" `
+        -Body $body -ContentType 'application/json' `
+        -TimeoutSeconds $VercelCommandTimeoutSeconds -MaximumResponseBytes 8388608
+    if ([int]$response.status_code -notin @(200, 201, 202)) {
+        throw "Vercel promotion request failed with HTTP status $([int]$response.status_code)."
+    }
+    if ($response.body_bytes.Length -eq 0) { return $null }
+    return ConvertFrom-VercelApiJsonBytes `
+        -Bytes $response.body_bytes -Label 'Vercel production promotion'
+}
+
+function Request-VercelProductionRollback {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$DeploymentId)
+
+    if ($DeploymentId -cnotmatch '^dpl_[A-Za-z0-9]{20,64}$') {
+        throw 'Vercel rollback deployment ID is invalid.'
+    }
+    $response = Invoke-VercelBoundedApiRequest `
+        -Method POST `
+        -RelativeUri ("/v1/projects/$governedProjectId/rollback/$DeploymentId" +
+            "?teamId=$governedProviderTeamId") `
+        -Body ([byte[]]@()) -ContentType 'application/json' `
+        -TimeoutSeconds $VercelCommandTimeoutSeconds
+    if ([int]$response.status_code -notin @(200, 201, 202, 409)) {
+        throw "Vercel rollback request failed with HTTP status $([int]$response.status_code)."
+    }
+}
+
+function Publish-VercelFrozenDeploymentFiles {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$Boundary)
+
+    foreach ($file in @($Boundary.unique_uploads)) {
+        $uploaded = $false
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            $null = Assert-VercelDeploymentPackageBoundaryStable -Boundary $Boundary
+            $null = Assert-VercelFrozenDeploymentFileStable -File $file
+            try {
+                $response = Invoke-VercelBoundedApiRequest `
+                    -Method POST `
+                    -RelativeUri "/v2/files?teamId=$governedProviderTeamId" `
+                    -Body ([byte[]]$file.data) `
+                    -ContentType 'application/octet-stream' `
+                    -DigestSha1 ([string]$file.sha1) `
+                    -TimeoutSeconds $VercelCommandTimeoutSeconds `
+                    -MaximumResponseBytes 1048576
+            }
+            catch {
+                if ($attempt -eq 3) { throw }
+                Start-Sleep -Seconds $attempt
+                continue
+            }
+            $null = Assert-VercelFrozenDeploymentFileStable -File $file
+            if ([int]$response.status_code -eq 200) {
+                $uploaded = $true
+                break
+            }
+            if ([int]$response.status_code -ne 429 -and
+                ([int]$response.status_code -lt 500 -or [int]$response.status_code -gt 599)) {
+                throw "Vercel CAS upload failed with HTTP status $([int]$response.status_code)."
+            }
+            if ($attempt -lt 3) { Start-Sleep -Seconds $attempt }
+        }
+        if (-not $uploaded) { throw 'Vercel CAS upload did not converge.' }
+    }
+    $null = Assert-VercelDeploymentPackageBoundaryStable -Boundary $Boundary
+}
+
+function New-VercelFrozenDeploymentRequest {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$Boundary,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{32}$')][string]$OperationId,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$SourceSha,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$SourceTree
+    )
+
+    $configPath = Join-Path $codeRoot 'vercel.json'
+    Assert-DawnstrikeSharedLockNoReparse $configPath 'Protected Vercel request configuration'
+    $rawConfig = Get-Content -Raw -LiteralPath $configPath -ErrorAction Stop
+    Assert-VercelJsonObjectKeysUnique -RawJson $rawConfig
+    try { $config = $rawConfig | ConvertFrom-Json }
+    catch { throw 'Protected Vercel request configuration is invalid.' }
+    $configKeys = @($config.PSObject.Properties | ForEach-Object { [string]$_.Name } | Sort-Object)
+    $expectedConfigKeys = @('$schema', 'functions', 'git', 'headers', 'outputDirectory', 'version')
+    if (@(Compare-Object $expectedConfigKeys $configKeys).Count -ne 0 -or
+        [int]$config.version -ne 2 -or
+        [string]$config.outputDirectory -cne 'build/public' -or
+        $config.git.deploymentEnabled -ne $false) {
+        throw 'Protected Vercel request configuration differs from the governed prebuilt contract.'
+    }
+    $request = [ordered]@{}
+    foreach ($property in @($config.PSObject.Properties)) {
+        if ([string]$property.Name -notin @('images', 'scope', 'github', 'public')) {
+            $request[[string]$property.Name] = $property.Value
         }
     }
-    if ($result.ExitCode -ne 0) {
-        $detail = if ($result.Stderr) { " provider diagnostics suppressed" } else { "" }
-        throw "$Label failed with exit code $($result.ExitCode).$detail"
+    $request['env'] = [ordered]@{}
+    $request['build'] = [ordered]@{ env = [ordered]@{} }
+    $request['name'] = $governedProjectName
+    $request['project'] = $governedProjectId
+    $request['meta'] = [ordered]@{
+        dawnstrike_operation_id = $OperationId
+        dawnstrike_source_sha = $SourceSha
+        dawnstrike_source_tree = $SourceTree
+        dawnstrike_package_map_sha256 = [string]$Boundary.map_sha256
     }
-    return $result
+    $request['projectSettings'] = [ordered]@{
+        sourceFilesOutsideRootDirectory = $true
+        outputDirectory = 'build/public'
+    }
+    $request['source'] = 'cli'
+    $request['autoAssignCustomDomains'] = $false
+    $request['version'] = 2
+    $request['files'] = @($Boundary.api_files)
+    return $request
+}
+
+function Assert-VercelFrozenDeploymentIdentity {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$Deployment,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{32}$')][string]$OperationId,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$SourceSha,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$SourceTree,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')][string]$MapSha256,
+        [switch]$RequireReady
+    )
+
+    $deploymentId = [string](Get-OptionalJsonProperty -InputObject $Deployment -Name 'id')
+    $readyState = [string](Get-OptionalJsonProperty -InputObject $Deployment -Name 'readyState')
+    $meta = Get-OptionalJsonProperty -InputObject $Deployment -Name 'meta'
+    $team = Get-OptionalJsonProperty -InputObject $Deployment -Name 'team'
+    $project = Get-OptionalJsonProperty -InputObject $Deployment -Name 'project'
+    if ($deploymentId -cnotmatch '^dpl_[A-Za-z0-9]{20,64}$' -or
+        $readyState -notin @('QUEUED', 'INITIALIZING', 'BUILDING', 'READY') -or
+        ($RequireReady -and $readyState -cne 'READY') -or
+        [string](Get-OptionalJsonProperty -InputObject $Deployment -Name 'ownerId') -cne
+            $governedProviderTeamId -or
+        [string](Get-OptionalJsonProperty -InputObject $team -Name 'id') -cne
+            $governedProviderTeamId -or
+        [string](Get-OptionalJsonProperty -InputObject $Deployment -Name 'projectId') -cne
+            $governedProjectId -or
+        [string](Get-OptionalJsonProperty -InputObject $project -Name 'id') -cne
+            $governedProjectId -or
+        [string](Get-OptionalJsonProperty -InputObject $Deployment -Name 'name') -cne
+            $governedProjectName -or
+        [string](Get-OptionalJsonProperty -InputObject $project -Name 'name') -cne
+            $governedProjectName -or
+        [string](Get-OptionalJsonProperty -InputObject $Deployment -Name 'source') -cne 'cli' -or
+        [int](Get-OptionalJsonProperty -InputObject $Deployment -Name 'version') -ne 2 -or
+        (Get-OptionalJsonProperty -InputObject $Deployment -Name 'prebuilt') -ne $true -or
+        (Get-OptionalJsonProperty -InputObject $Deployment -Name 'autoAssignCustomDomains') -ne $false -or
+        $null -ne (Get-OptionalJsonProperty -InputObject $Deployment -Name 'target') -or
+        (Get-OptionalJsonProperty -InputObject $Deployment -Name 'aliasAssigned') -ne $false -or
+        [string](Get-OptionalJsonProperty -InputObject $meta -Name 'dawnstrike_operation_id') -cne
+            $OperationId -or
+        [string](Get-OptionalJsonProperty -InputObject $meta -Name 'dawnstrike_source_sha') -cne
+            $SourceSha -or
+        [string](Get-OptionalJsonProperty -InputObject $meta -Name 'dawnstrike_source_tree') -cne
+            $SourceTree -or
+        [string](Get-OptionalJsonProperty -InputObject $meta -Name 'dawnstrike_package_map_sha256') -cne
+            $MapSha256) {
+        throw 'Vercel preview deployment identity differs from its frozen request.'
+    }
+    foreach ($field in @('alias', 'automaticAliases', 'userAliases')) {
+        $aliases = Get-OptionalJsonProperty -InputObject $Deployment -Name $field
+        if ($null -ne $aliases -and @($aliases).Count -ne 0) {
+            throw 'Vercel preview unexpectedly received an alias.'
+        }
+    }
+    foreach ($field in @('aliasError', 'errorCode', 'errorMessage')) {
+        if ($null -ne (Get-OptionalJsonProperty -InputObject $Deployment -Name $field)) {
+            throw 'Vercel preview deployment carries a provider error.'
+        }
+    }
+    $url = [string](Get-OptionalJsonProperty -InputObject $Deployment -Name 'url')
+    if ($url -cnotmatch '^dawnstrike-command-center-x3-[a-z0-9]+-mattfrens-projects\.vercel\.app$') {
+        throw 'Vercel preview deployment URL is outside the governed project/team namespace.'
+    }
+    return $deploymentId
+}
+
+function Get-VercelFrozenDeployment {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][ValidatePattern('^dpl_[A-Za-z0-9]{20,64}$')][string]$DeploymentId)
+
+    return Invoke-VercelApiReadJson `
+        -RelativeUri "/v13/deployments/$DeploymentId`?teamId=$governedProviderTeamId" `
+        -Label 'Vercel frozen preview inspection' -MaximumResponseBytes 8388608
+}
+
+function Wait-VercelFrozenDeploymentReady {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][ValidatePattern('^dpl_[A-Za-z0-9]{20,64}$')][string]$DeploymentId,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{32}$')][string]$OperationId,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$SourceSha,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$SourceTree,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')][string]$MapSha256
+    )
+
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds($VercelCommandTimeoutSeconds)
+    do {
+        $deployment = Get-VercelFrozenDeployment -DeploymentId $DeploymentId
+        $state = [string](Get-OptionalJsonProperty -InputObject $deployment -Name 'readyState')
+        if ($state -in @('ERROR', 'CANCELED')) {
+            throw 'Vercel frozen preview entered a terminal failure state.'
+        }
+        $null = Assert-VercelFrozenDeploymentIdentity `
+            -Deployment $deployment -OperationId $OperationId `
+            -SourceSha $SourceSha -SourceTree $SourceTree -MapSha256 $MapSha256 `
+            -RequireReady:($state -eq 'READY')
+        if ($state -eq 'READY') { return $deployment }
+        if ([DateTimeOffset]::UtcNow -ge $deadline) { break }
+        Start-Sleep -Seconds 2
+    } while ($true)
+    throw 'Vercel frozen preview did not reach READY within the bounded timeout.'
+}
+
+function Add-VercelRemoteDeploymentTreeEntries {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Nodes,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Prefix,
+        [Parameter(Mandatory = $true)]$Directories,
+        [Parameter(Mandatory = $true)]$Files,
+        [Parameter(Mandatory = $true)]$CaseFoldedPaths,
+        [ValidateRange(0, 64)][int]$Depth = 0
+    )
+
+    if ($Depth -ge 64) { throw 'Vercel deployment file tree exceeds the depth limit.' }
+    foreach ($node in @($Nodes)) {
+        $properties = @($node.PSObject.Properties | ForEach-Object { [string]$_.Name })
+        if (-not $properties.Count -or
+            @($properties | Where-Object {
+                $_ -notin @('name', 'type', 'uid', 'children', 'contentType', 'mode')
+            }).Count -ne 0) {
+            throw 'Vercel deployment file tree contains an unexpected field.'
+        }
+        $name = [string](Get-OptionalJsonProperty -InputObject $node -Name 'name')
+        $type = [string](Get-OptionalJsonProperty -InputObject $node -Name 'type')
+        $modeValue = Get-OptionalJsonProperty -InputObject $node -Name 'mode'
+        if (-not $name -or $name.Length -gt 255 -or $name -in @('.', '..') -or
+            $name -match '[\\/\x00-\x1f]' -or $null -eq $modeValue -or
+            [double]$modeValue -ne [Math]::Truncate([double]$modeValue) -or
+            [int64]$modeValue -lt 0 -or [int64]$modeValue -gt [int]::MaxValue) {
+            throw 'Vercel deployment file tree contains an invalid entry.'
+        }
+        $path = if ($Prefix) { "$Prefix/$name" } else { $name }
+        if ($path.Length -gt 1024 -or -not $CaseFoldedPaths.Add($path)) {
+            throw 'Vercel deployment file tree contains a duplicate or case-colliding path.'
+        }
+        if ($type -ceq 'directory') {
+            $children = Get-OptionalJsonProperty -InputObject $node -Name 'children'
+            if ($null -eq $children -or
+                $null -ne (Get-OptionalJsonProperty -InputObject $node -Name 'uid')) {
+                throw 'Vercel deployment directory entry is invalid.'
+            }
+            $Directories.Add([pscustomobject]@{
+                relative_path = $path
+                mode = [int]$modeValue
+            }) | Out-Null
+            Add-VercelRemoteDeploymentTreeEntries `
+                -Nodes @($children) -Prefix $path `
+                -Directories $Directories -Files $Files `
+                -CaseFoldedPaths $CaseFoldedPaths -Depth ($Depth + 1)
+            continue
+        }
+        if ($type -cne 'file') {
+            throw 'Vercel deployment file tree contains a non-file primitive.'
+        }
+        $uid = [string](Get-OptionalJsonProperty -InputObject $node -Name 'uid')
+        $children = Get-OptionalJsonProperty -InputObject $node -Name 'children'
+        if ($uid -cnotmatch '^[A-Za-z0-9_-]{1,128}$' -or
+            ($null -ne $children -and @($children).Count -ne 0)) {
+            throw 'Vercel deployment file entry has invalid retrieval identity.'
+        }
+        $Files.Add([pscustomobject]@{
+            relative_path = $path
+            mode = [int]$modeValue
+            uid = $uid
+        }) | Out-Null
+        if ($Files.Count -gt 10000) {
+            throw 'Vercel deployment file tree exceeds the file-count limit.'
+        }
+    }
+}
+
+function Get-VercelRemoteDeploymentFileAttestation {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$Deployment,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')][string]$ExpectedMapSha256,
+        [ValidatePattern('^$|^[0-9a-f]{64}$')][string]$ExpectedAttestationSha256 = '',
+        [AllowNull()]$Boundary = $null
+    )
+
+    $deploymentId = [string](Get-OptionalJsonProperty -InputObject $Deployment -Name 'id')
+    if ($deploymentId -cnotmatch '^dpl_[A-Za-z0-9]{20,64}$') {
+        throw 'Vercel deployment file attestation received an invalid deployment ID.'
+    }
+    $tree = Invoke-VercelApiReadJson `
+        -RelativeUri "/v6/deployments/$deploymentId/files`?teamId=$governedProviderTeamId" `
+        -Label 'Vercel deployment file tree' -MaximumResponseBytes 16777216
+    if ($null -eq $tree) { throw 'Vercel deployment file tree is empty.' }
+
+    $directories = [Collections.Generic.List[object]]::new()
+    $files = [Collections.Generic.List[object]]::new()
+    $caseFolded = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    Add-VercelRemoteDeploymentTreeEntries `
+        -Nodes @($tree) -Prefix '' -Directories $directories -Files $files `
+        -CaseFoldedPaths $caseFolded
+    if ($files.Count -lt 1) { throw 'Vercel deployment file tree contains no files.' }
+
+    $expectedByPath = $null
+    if ($null -ne $Boundary) {
+        $expectedByPath = [Collections.Generic.Dictionary[string, object]]::new(
+            [StringComparer]::Ordinal
+        )
+        foreach ($file in @($Boundary.files)) {
+            $expectedByPath.Add([string]$file.relative_path, $file)
+        }
+        $expectedDirectories = @(
+            $Boundary.provider_directories | ForEach-Object { [string]$_ }
+        )
+        $remoteDirectories = @($directories | ForEach-Object { [string]$_.relative_path })
+        if (@(Compare-Object `
+                -ReferenceObject ($expectedDirectories | Sort-Object -CaseSensitive) `
+                -DifferenceObject ($remoteDirectories | Sort-Object -CaseSensitive) `
+                -CaseSensitive).Count -ne 0 -or $files.Count -ne $expectedByPath.Count) {
+            throw 'Vercel deployment file tree differs from the frozen package namespace.'
+        }
+    }
+
+    $contentByUid = [Collections.Generic.Dictionary[string, object]]::new(
+        [StringComparer]::Ordinal
+    )
+    $attestedFiles = [Collections.Generic.List[object]]::new()
+    [long]$totalBytes = 0
+    foreach ($remoteFile in @($files | Sort-Object relative_path -CaseSensitive)) {
+        $expected = $null
+        if ($null -ne $expectedByPath) {
+            if (-not $expectedByPath.TryGetValue([string]$remoteFile.relative_path, [ref]$expected)) {
+                throw 'Vercel deployment file path differs from the frozen package map.'
+            }
+            if ([int]$remoteFile.mode -ne [int]$expected.mode) {
+                throw 'Vercel deployment file mode differs from the frozen package map.'
+            }
+        }
+        $content = $null
+        if (-not $contentByUid.TryGetValue([string]$remoteFile.uid, [ref]$content)) {
+            $payload = Invoke-VercelApiReadJson `
+                -RelativeUri ("/v8/deployments/$deploymentId/files/" +
+                    [string]$remoteFile.uid + "?teamId=$governedProviderTeamId") `
+                -Label 'Vercel deployment file contents' `
+                -MaximumResponseBytes 100663296
+            $payloadKeys = @($payload.PSObject.Properties | ForEach-Object { [string]$_.Name })
+            $encoded = [string](Get-OptionalJsonProperty -InputObject $payload -Name 'data')
+            if ($payloadKeys.Count -ne 1 -or $payloadKeys[0] -cne 'data' -or
+                -not $encoded -or $encoded.Length -gt 89478488 -or
+                $encoded -cnotmatch '^[A-Za-z0-9+/]*={0,2}$' -or $encoded.Length % 4 -ne 0) {
+                throw 'Vercel deployment file contents are not canonical bounded base64.'
+            }
+            try { [byte[]]$contentBytes = [Convert]::FromBase64String($encoded) }
+            catch { throw 'Vercel deployment file contents are not valid base64.' }
+            if ([Convert]::ToBase64String($contentBytes) -cne $encoded -or
+                $contentBytes.LongLength -gt 67108864) {
+                throw 'Vercel deployment file contents exceed or violate the canonical byte boundary.'
+            }
+            $content = [pscustomobject]@{
+                bytes = $contentBytes
+                length = [long]$contentBytes.LongLength
+                sha1 = Get-VercelDeploymentBytesHash -Bytes $contentBytes -Algorithm SHA1
+                sha256 = Get-VercelDeploymentBytesHash -Bytes $contentBytes -Algorithm SHA256
+            }
+            $contentByUid.Add([string]$remoteFile.uid, $content)
+        }
+        if ($null -ne $expected -and (
+            [long]$content.length -ne [long]$expected.length -or
+            [string]$content.sha1 -cne [string]$expected.sha1 -or
+            [string]$content.sha256 -cne [string]$expected.sha256
+        )) {
+            throw 'Vercel deployment file bytes differ from the frozen package map.'
+        }
+        $totalBytes += [long]$content.length
+        if ($totalBytes -gt 536870912) {
+            throw 'Vercel deployment file attestation exceeds the aggregate byte limit.'
+        }
+        $attestedFiles.Add([pscustomobject]@{
+            relative_path = [string]$remoteFile.relative_path
+            mode = [int]$remoteFile.mode
+            uid = [string]$remoteFile.uid
+            length = [long]$content.length
+            sha1 = [string]$content.sha1
+            sha256 = [string]$content.sha256
+        }) | Out-Null
+    }
+    $mapHash = Get-VercelDeploymentFrozenMapHash -Files @($attestedFiles)
+    if ($mapHash -cne $ExpectedMapSha256) {
+        throw 'Vercel deployment source-byte map differs from the frozen package map.'
+    }
+    $attestationLines = @(
+        $directories | Sort-Object relative_path -CaseSensitive | ForEach-Object {
+            'D|' + [string]$_.relative_path + '|' + [string][int]$_.mode
+        }
+        $attestedFiles | Sort-Object relative_path -CaseSensitive | ForEach-Object {
+            'F|' + [string]$_.relative_path + '|' + [string][int]$_.mode + '|' +
+                [string]$_.uid + '|' + [string][long]$_.length + '|' +
+                [string]$_.sha1 + '|' + [string]$_.sha256
+        }
+    )
+    $attestationHash = Get-Sha256Hex ($attestationLines -join "`n")
+    if ($ExpectedAttestationSha256 -and $attestationHash -cne $ExpectedAttestationSha256) {
+        throw 'Vercel deployment source-file attestation changed after publication.'
+    }
+    return [pscustomobject]@{
+        deployment_id = $deploymentId
+        package_map_sha256 = $mapHash
+        remote_file_attestation_sha256 = $attestationHash
+        file_count = $attestedFiles.Count
+        total_bytes = $totalBytes
+    }
+}
+
+function New-VercelFrozenPreviewDeployment {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$Boundary,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$SourceSha,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$SourceTree
+    )
+
+    Publish-VercelFrozenDeploymentFiles -Boundary $Boundary
+    $operationId = [guid]::NewGuid().ToString('N')
+    $requestPayload = New-VercelFrozenDeploymentRequest `
+        -Boundary $Boundary -OperationId $operationId `
+        -SourceSha $SourceSha -SourceTree $SourceTree
+    $requestJson = $requestPayload | ConvertTo-Json -Depth 60 -Compress
+    [byte[]]$requestBytes = [Text.UTF8Encoding]::new($false).GetBytes($requestJson)
+    if ($requestBytes.LongLength -gt 8388608) {
+        throw 'Vercel frozen deployment request exceeds the bounded request limit.'
+    }
+    $null = Assert-VercelDeploymentPackageBoundaryStable -Boundary $Boundary
+    # Creation is intentionally attempted exactly once. If the response is
+    # lost, the unaliased preview is an orphan and this invocation fails closed.
+    $createResponse = Invoke-VercelBoundedApiRequest `
+        -Method POST `
+        -RelativeUri "/v13/deployments?teamId=$governedProviderTeamId&prebuilt=1" `
+        -Body $requestBytes -ContentType 'application/json' `
+        -TimeoutSeconds $VercelCommandTimeoutSeconds `
+        -MaximumResponseBytes 8388608
+    if ([int]$createResponse.status_code -ne 200) {
+        throw "Vercel frozen preview creation failed with HTTP status $([int]$createResponse.status_code)."
+    }
+    $created = ConvertFrom-VercelApiJsonBytes `
+        -Bytes $createResponse.body_bytes -Label 'Vercel frozen preview creation'
+    $deploymentId = [string](Get-OptionalJsonProperty -InputObject $created -Name 'id')
+    if ($deploymentId -cnotmatch '^dpl_[A-Za-z0-9]{20,64}$' -or
+        $null -ne (Get-OptionalJsonProperty -InputObject $created -Name 'target') -or
+        (Get-OptionalJsonProperty -InputObject $created -Name 'aliasAssigned') -ne $false) {
+        throw 'Vercel frozen preview creation returned an invalid or aliased identity.'
+    }
+    $deployment = Wait-VercelFrozenDeploymentReady `
+        -DeploymentId $deploymentId -OperationId $operationId `
+        -SourceSha $SourceSha -SourceTree $SourceTree `
+        -MapSha256 ([string]$Boundary.map_sha256)
+    $attestation = Get-VercelRemoteDeploymentFileAttestation `
+        -Deployment $deployment -ExpectedMapSha256 ([string]$Boundary.map_sha256) `
+        -Boundary $Boundary
+    $finalDeployment = Get-VercelFrozenDeployment -DeploymentId $deploymentId
+    $null = Assert-VercelFrozenDeploymentIdentity `
+        -Deployment $finalDeployment -OperationId $operationId `
+        -SourceSha $SourceSha -SourceTree $SourceTree `
+        -MapSha256 ([string]$Boundary.map_sha256) -RequireReady
+    $null = Assert-VercelDeploymentPackageBoundaryStable -Boundary $Boundary
+    return [pscustomobject]@{
+        deployment = $finalDeployment
+        operation_id = $operationId
+        request_sha256 = Get-Sha256Hex $requestJson
+        package_map_sha256 = [string]$Boundary.map_sha256
+        remote_file_attestation_sha256 = [string]$attestation.remote_file_attestation_sha256
+        file_count = [int]$attestation.file_count
+        total_bytes = [long]$attestation.total_bytes
+    }
+}
+
+function Assert-VercelJournalFrozenPreviewEvidence {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$Journal)
+
+    if ([string]$Journal.schema_version -notin @(
+        'dawnstrike.vercel_publication_journal.v7',
+        'dawnstrike.vercel_publication_journal.v8'
+    )) {
+        throw 'Recoverable Vercel publication journal lacks frozen CAS evidence.'
+    }
+    $deploymentId = [string]$Journal.candidate_preview_deployment_id
+    $deployment = Get-VercelFrozenDeployment -DeploymentId $deploymentId
+    if ([string](Get-OptionalJsonProperty -InputObject $deployment -Name 'id') -cne $deploymentId -or
+        (Normalize-VercelDeploymentUrl (
+            Get-OptionalJsonProperty -InputObject $deployment -Name 'url'
+        )) -cne (Normalize-VercelDeploymentUrl $Journal.candidate_preview_url)) {
+        throw 'Recovered Vercel preview identity differs from the sealed journal.'
+    }
+    $null = Assert-VercelFrozenDeploymentIdentity `
+        -Deployment $deployment `
+        -OperationId ([string]$Journal.candidate_deployment_operation_id) `
+        -SourceSha ([string]$Journal.candidate_source_sha) `
+        -SourceTree ([string]$Journal.candidate_source_tree) `
+        -MapSha256 ([string]$Journal.candidate_package_map_sha256) `
+        -RequireReady
+    $null = Get-VercelRemoteDeploymentFileAttestation `
+        -Deployment $deployment `
+        -ExpectedMapSha256 ([string]$Journal.candidate_package_map_sha256) `
+        -ExpectedAttestationSha256 `
+            ([string]$Journal.candidate_remote_file_attestation_sha256)
+    return $deployment
+}
+
+function Assert-VercelPromotedDeploymentFileEvidence {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^dpl_[A-Za-z0-9]{20,64}$')][string]$DeploymentId,
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^dpl_[A-Za-z0-9]{20,64}$')][string]$PreviewDeploymentId,
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[0-9a-f]{64}$')][string]$PackageMapSha256,
+        [ValidatePattern('^$|^[0-9a-f]{64}$')]
+        [string]$ExpectedAttestationSha256 = ''
+    )
+
+    $deployment = Get-VercelFrozenDeployment -DeploymentId $DeploymentId
+    $metadata = Get-OptionalJsonProperty -InputObject $deployment -Name 'meta'
+    if ([string](Get-OptionalJsonProperty -InputObject $deployment -Name 'id') -cne
+            $DeploymentId -or
+        [string](Get-OptionalJsonProperty -InputObject $deployment -Name 'ownerId') -cne
+            $governedProviderTeamId -or
+        [string](Get-OptionalJsonProperty -InputObject $deployment -Name 'projectId') -cne
+            $governedProjectId -or
+        [string](Get-OptionalJsonProperty -InputObject $deployment -Name 'target') -cne
+            'production' -or
+        [string](Get-OptionalJsonProperty -InputObject $deployment -Name 'readyState') -cne
+            'READY' -or
+        [string](Get-OptionalJsonProperty -InputObject $metadata -Name 'action') -cne
+            'promote' -or
+        [string](Get-OptionalJsonProperty -InputObject $metadata -Name 'originalDeploymentId') -cne
+            $PreviewDeploymentId) {
+        throw 'Promoted Vercel deployment identity is not the exact governed preview clone.'
+    }
+    foreach ($field in @('aliasError', 'errorCode', 'errorMessage')) {
+        if ($null -ne (Get-OptionalJsonProperty -InputObject $deployment -Name $field)) {
+            throw 'Promoted Vercel deployment carries a provider error.'
+        }
+    }
+    $url = Get-VercelImmutableDeploymentBaseUrl -DeploymentUrl ([string](
+        Get-OptionalJsonProperty -InputObject $deployment -Name 'url'
+    ))
+    $attestation = Get-VercelRemoteDeploymentFileAttestation `
+        -Deployment $deployment -ExpectedMapSha256 $PackageMapSha256 `
+        -ExpectedAttestationSha256 $ExpectedAttestationSha256
+    return [pscustomobject]@{
+        deployment = $deployment
+        deployment_id = $DeploymentId
+        deployment_url = $url
+        remote_file_attestation_sha256 = `
+            [string]$attestation.remote_file_attestation_sha256
+    }
 }
 
 function Assert-RemoteVercelSourceManifest {
@@ -653,14 +1424,19 @@ function Assert-RemoteVercelSourceManifest {
         [Parameter(Mandatory = $true)][string]$Url,
         [Parameter(Mandatory = $true)][string]$Label
     )
-    $remote = Invoke-VercelProcess `
-        -Arguments @("curl", $Url) `
-        -Label "$Label source manifest" `
-        -TimeoutSeconds $VercelCommandTimeoutSeconds
+    $response = Invoke-VercelBoundedPublicGet `
+        -Url $Url -TimeoutSeconds $VercelCommandTimeoutSeconds
+    if ([int]$response.status_code -ne 200) {
+        throw "$Label source manifest returned HTTP status $([int]$response.status_code)."
+    }
+    try {
+        $remote = [Text.UTF8Encoding]::new($false, $true).GetString($response.body_bytes)
+    }
+    catch { throw "$Label source manifest returned non-UTF-8 bytes." }
     $expectedCanonical = Get-VercelSourceManifestCanonicalJson `
         -Path (Join-Path $stage "vercel-source-manifest.json")
     Assert-VercelSourceManifestJson `
-        -RawJson ([string]$remote.Stdout) `
+        -RawJson $remote `
         -ExpectedCanonicalJson $expectedCanonical `
         -Label $Label
 }
@@ -698,16 +1474,45 @@ function Get-OptionalJsonProperty {
 
 function Set-VercelAlias {
     param(
-        [string]$DeploymentUrl,
-        [string]$AliasUrl,
-        [string]$Label
+        [Parameter(Mandatory = $true)][string]$DeploymentId,
+        [Parameter(Mandatory = $true)][string]$DeploymentUrl,
+        [Parameter(Mandatory = $true)][string]$AliasUrl,
+        [Parameter(Mandatory = $true)][string]$Label
     )
-    $deploymentHost = ($DeploymentUrl -replace "^https?://", "").TrimEnd("/")
-    $aliasHost = ($AliasUrl -replace "^https?://", "").TrimEnd("/")
-    $null = Invoke-VercelProcess `
-        -Arguments @("alias", "set", $deploymentHost, $aliasHost) `
-        -Label $Label `
+    if ($DeploymentId -cnotmatch '^dpl_[A-Za-z0-9]{20,64}$' -or
+        $AliasUrl -notin $allProductionAliases) {
+        throw "$Label escaped the governed deployment/alias boundary."
+    }
+    $expectedDeployment = Get-VercelFrozenDeployment -DeploymentId $DeploymentId
+    $expectedUrl = Get-VercelImmutableDeploymentBaseUrl -DeploymentUrl ([string](
+        Get-OptionalJsonProperty -InputObject $expectedDeployment -Name 'url'
+    ))
+    if ($expectedUrl -cne (Get-VercelImmutableDeploymentBaseUrl -DeploymentUrl $DeploymentUrl) -or
+        [string](Get-OptionalJsonProperty -InputObject $expectedDeployment -Name 'ownerId') -cne
+            $governedProviderTeamId -or
+        [string](Get-OptionalJsonProperty -InputObject $expectedDeployment -Name 'projectId') -cne
+            $governedProjectId -or
+        [string](Get-OptionalJsonProperty -InputObject $expectedDeployment -Name 'readyState') -cne
+            'READY') {
+        throw "$Label target deployment is not the exact governed READY deployment."
+    }
+    $aliasHost = ([Uri]::new($AliasUrl, [UriKind]::Absolute)).DnsSafeHost.ToLowerInvariant()
+    $bodyJson = ConvertTo-VercelCanonicalJson ([ordered]@{ alias = $aliasHost })
+    $body = [Text.Encoding]::UTF8.GetBytes($bodyJson)
+    $response = Invoke-VercelBoundedApiRequest `
+        -Method POST `
+        -RelativeUri "/v2/deployments/$DeploymentId/aliases`?teamId=$governedProviderTeamId" `
+        -Body $body -ContentType 'application/json' `
         -TimeoutSeconds $VercelCommandTimeoutSeconds
+    if ([int]$response.status_code -notin @(200, 409)) {
+        throw "$Label failed with HTTP status $([int]$response.status_code)."
+    }
+    $observed = Get-VercelAliasObservation -Alias $AliasUrl
+    if ([string]$observed.id -cne $DeploymentId -or
+        (Normalize-VercelDeploymentUrl $observed.url) -cne
+            (Normalize-VercelDeploymentUrl $expectedUrl)) {
+        throw "$Label did not converge to the exact governed deployment."
+    }
 }
 
 function Normalize-VercelDeploymentUrl {
@@ -730,9 +1535,7 @@ function Assert-VercelPriorAliasSnapshotsCurrent {
         if ($null -eq $prior -or -not $prior.id -or -not $prior.url) {
             throw "Prior production snapshot is incomplete for $alias."
         }
-        $current = Invoke-VercelJson `
-            -Arguments @("inspect", [string]$alias, "--json") `
-            -Label "Prior production compare-and-swap inspect for $alias"
+        $current = Get-VercelAliasObservation -Alias ([string]$alias)
         $currentId = [string](Get-OptionalJsonProperty -InputObject $current -Name "id")
         $currentUrl = [string](Get-OptionalJsonProperty -InputObject $current -Name "url")
         if ($currentId -cne [string]$prior.id -or
@@ -749,9 +1552,7 @@ function Assert-VercelAliasRestored {
         [Parameter(Mandatory = $true)][object]$PriorAlias,
         [Parameter(Mandatory = $true)][int64]$CacheBuster
     )
-    $restored = Invoke-VercelJson `
-        -Arguments @("inspect", [string]$AliasUrl, "--json") `
-        -Label "Rollback verification inspect for $AliasUrl"
+    $restored = Get-VercelAliasObservation -Alias ([string]$AliasUrl)
     $restoredId = [string](Get-OptionalJsonProperty -InputObject $restored -Name "id")
     $restoredUrlRaw = [string](Get-OptionalJsonProperty -InputObject $restored -Name "url")
     $restoredUrl = if ($restoredUrlRaw) {
@@ -892,35 +1693,10 @@ function Get-VercelRemoteHttpStatus {
         $RelativePath.StartsWith('/') -or $RelativePath.Contains('\')) {
         throw "$Label remote status path is unsafe."
     }
-    $temporary = Join-Path $journalRoot ('.http-status-' + [guid]::NewGuid().ToString('N') + '.bin')
-    Assert-VercelContainedNonReparsePath -RootPath $resolvedStateRoot -TargetPath $temporary
-    New-Item -ItemType Directory -Path $journalRoot -Force | Out-Null
-    Assert-VercelContainedNonReparsePath -RootPath $resolvedStateRoot -TargetPath $temporary
-    try {
-        $result = Invoke-VercelProcess `
-            -Arguments @(
-                'curl',
-                "$($BaseUrl.TrimEnd('/'))/$RelativePath?status_verify=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())",
-                '--', '--silent', '--show-error', '--max-filesize', '1048576',
-                '--output', $temporary, '--write-out', '%{http_code}'
-            ) `
-            -Label "$Label HTTP status" `
-            -TimeoutSeconds $VercelCommandTimeoutSeconds
-        $statusText = ([string]$result.Stdout).Trim()
-        if ($statusText -cnotmatch '^\d{3}$') {
-            throw "$Label HTTP status output is invalid."
-        }
-        if (-not (Test-Path -LiteralPath $temporary -PathType Leaf) -or
-            (Get-Item -LiteralPath $temporary).Length -gt 1048576) {
-            throw "$Label HTTP response body is unavailable or oversized."
-        }
-        return [int]$statusText
-    }
-    finally {
-        if (Test-Path -LiteralPath $temporary -PathType Leaf) {
-            Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
-        }
-    }
+    $result = Invoke-VercelBoundedPublicGet `
+        -Url "$($BaseUrl.TrimEnd('/'))/$RelativePath`?status_verify=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())" `
+        -TimeoutSeconds $VercelCommandTimeoutSeconds -MaximumResponseBytes 1048576
+    return [int]$result.status_code
 }
 
 function Get-VercelAliasEndpointProof {
@@ -972,12 +1748,17 @@ function Get-VercelAliasEndpointProof {
     }
     catch { }
     try {
-        $manifestProcess = Invoke-VercelProcess `
-            -Arguments @("curl", "$AliasUrl/vercel-source-manifest.json?rollback_verify=$CacheBuster") `
-            -Label "Alias source manifest proof for $AliasUrl" `
+        $manifestResponse = Invoke-VercelBoundedPublicGet `
+            -Url "$AliasUrl/vercel-source-manifest.json?rollback_verify=$CacheBuster" `
             -TimeoutSeconds $VercelCommandTimeoutSeconds
+        if ([int]$manifestResponse.status_code -ne 200) {
+            throw 'Alias source manifest proof returned a non-success status.'
+        }
+        $manifestRaw = [Text.UTF8Encoding]::new($false, $true).GetString(
+            $manifestResponse.body_bytes
+        )
         $manifestCanonical = Convert-VercelSourceManifestToCanonicalJson `
-            -RawJson ([string]$manifestProcess.Stdout).Trim()
+            -RawJson $manifestRaw.Trim()
         $manifest = $manifestCanonical | ConvertFrom-Json
         $proof.source_manifest_available = $true
         $proof.source_manifest_http_status = 200
@@ -1032,11 +1813,14 @@ function Assert-VercelJournalSourceManifestLive {
         [Parameter(Mandatory = $true)][object]$Journal,
         [Parameter(Mandatory = $true)][string]$Label
     )
-    $remote = Invoke-VercelProcess `
-        -Arguments @("curl", "$($BaseUrl.TrimEnd('/'))/vercel-source-manifest.json?recovery_verify=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())") `
-        -Label "$Label exact source manifest" `
+    $response = Invoke-VercelBoundedPublicGet `
+        -Url "$($BaseUrl.TrimEnd('/'))/vercel-source-manifest.json?recovery_verify=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())" `
         -TimeoutSeconds $VercelCommandTimeoutSeconds
-    $canonical = Convert-VercelSourceManifestToCanonicalJson -RawJson ([string]$remote.Stdout).Trim()
+    if ([int]$response.status_code -ne 200) {
+        throw "$Label exact source manifest returned a non-success status."
+    }
+    $raw = [Text.UTF8Encoding]::new($false, $true).GetString($response.body_bytes)
+    $canonical = Convert-VercelSourceManifestToCanonicalJson -RawJson $raw.Trim()
     $payload = $canonical | ConvertFrom-Json
     if ([string]$payload.source_sha -cne [string]$Journal.candidate_source_sha -or
         [string]$payload.source_tree -cne [string]$Journal.candidate_source_tree -or
@@ -1215,9 +1999,14 @@ function Assert-VercelJournalBaseMatchesInvocation {
         [string]$Journal.expected_market_date -ne $resolvedExpectedMarketDate) {
         throw "Vercel publication journal cannot be reused without an exact ExpectedMarketDate match."
     }
+    $journalUsesCasEvidence = [string]$Journal.schema_version -in @(
+        'dawnstrike.vercel_publication_journal.v7',
+        'dawnstrike.vercel_publication_journal.v8'
+    )
     if ([string]$Journal.project_id -ne $ProjectId -or
         [string]$Journal.project_name -ne $ProjectName -or
-        [string]$Journal.provider_scope -ne $ProviderScope) {
+        [string]$Journal.provider_scope -ne $ProviderScope -or
+        ($journalUsesCasEvidence -and [string]$Journal.provider_team_id -ne $ProviderTeamId)) {
         throw "Vercel publication journal does not match the current Vercel project."
     }
     if ([string]$Journal.toolchain_identity_sha256 -cne $toolchainIdentitySha256) {
@@ -1284,7 +2073,10 @@ function Assert-VercelPriorJournalHistoryTerminal {
         }
     }
     $script:pinnedLegacyRollbackConsumed = @($history | Where-Object {
-        [string]$_.payload.schema_version -ceq 'dawnstrike.vercel_publication_journal.v3' -and
+        [string]$_.payload.schema_version -in @(
+            'dawnstrike.vercel_publication_journal.v3',
+            'dawnstrike.vercel_publication_journal.v7'
+        ) -and
         [string]$_.payload.phase -ceq 'COMPLETE'
     }).Count -gt 0
     $otherNonterminal = @($history | Where-Object { -not $_.terminal })
@@ -1571,10 +2363,11 @@ function Assert-GovernedPublicationAuthorization {
         throw "Immutable prepublication authorization identity is required."
     }
     $boundaryMode = if ($Promote) { "Production" } else { "Preview" }
-    $boundaryScript = Join-Path $resolvedRoot "scripts\publication_boundary.py"
-    $prepublicationScript = Join-Path $resolvedRoot "scripts\verify_daily_prepublication.py"
-    $pythonRoot = Split-Path -Parent ([string]$approvedPython.path)
-    $tzdataRoot = Join-Path $pythonRoot "Lib\site-packages\tzdata\zoneinfo"
+    $boundaryScript = Join-Path $codeRoot "scripts\publication_boundary.py"
+    $prepublicationScript = Join-Path $codeRoot "scripts\verify_daily_prepublication.py"
+    $pythonDependencyContract = Get-DawnstrikeProtectedPythonDependencyContract `
+        -ReleaseRoot $codeRoot -ExpectedSha $ExpectedSha
+    $tzdataRoot = Join-Path $pythonDependencyContract.dependency_root "Lib\site-packages\tzdata\zoneinfo"
     $authorizationEnvironment = @{
         PYTHONHOME = ""; PYTHONPATH = ""; PYTHONSTARTUP = "";
         PYTHONDONTWRITEBYTECODE = "1"; PYTHONTZPATH = $tzdataRoot;
@@ -2075,16 +2868,62 @@ function Assert-ProductionDateLineage {
 
 function Get-VercelAliasObservation {
     param([Parameter(Mandatory = $true)][string]$Alias)
-    $observed = Invoke-VercelJson `
-        -Arguments @("inspect", $Alias, "--json") `
+    if ($Alias -notin $allProductionAliases) {
+        throw 'Publication alias escaped the governed alias set.'
+    }
+    $aliasUri = [Uri]::new($Alias, [UriKind]::Absolute)
+    $aliasHost = $aliasUri.DnsSafeHost.ToLowerInvariant()
+    $encodedAlias = [Uri]::EscapeDataString($aliasHost)
+    $observed = Invoke-VercelApiReadJson `
+        -RelativeUri ("/v4/aliases/$encodedAlias`?projectId=$governedProjectId" +
+            "&teamId=$governedProviderTeamId") `
         -Label "Publication alias inspect for $Alias"
-    $id = [string](Get-OptionalJsonProperty -InputObject $observed -Name "id")
-    $urlRaw = [string](Get-OptionalJsonProperty -InputObject $observed -Name "url")
+    if ([string](Get-OptionalJsonProperty -InputObject $observed -Name 'alias') -cne $aliasHost -or
+        [string](Get-OptionalJsonProperty -InputObject $observed -Name 'projectId') -cne
+            $governedProjectId -or
+        $null -ne (Get-OptionalJsonProperty -InputObject $observed -Name 'redirect')) {
+        throw "Publication alias inspect returned a foreign or redirected alias for $Alias."
+    }
+    $id = [string](Get-OptionalJsonProperty -InputObject $observed -Name "deploymentId")
+    $deployment = Get-OptionalJsonProperty -InputObject $observed -Name 'deployment'
+    if (-not $id) { $id = [string](Get-OptionalJsonProperty -InputObject $deployment -Name 'id') }
+    $remoteDeployment = Get-VercelFrozenDeployment -DeploymentId $id
+    $urlRaw = [string](Get-OptionalJsonProperty -InputObject $remoteDeployment -Name "url")
     $url = if ($urlRaw) {
         Get-VercelImmutableDeploymentBaseUrl -DeploymentUrl $urlRaw
     } else { '' }
-    if (-not $id -or -not $url) { throw "Publication alias inspect is incomplete for $Alias." }
+    if ($id -cnotmatch '^dpl_[A-Za-z0-9]{20,64}$' -or -not $url -or
+        [string](Get-OptionalJsonProperty -InputObject $remoteDeployment -Name 'id') -cne $id -or
+        [string](Get-OptionalJsonProperty -InputObject $remoteDeployment -Name 'ownerId') -cne
+            $governedProviderTeamId -or
+        [string](Get-OptionalJsonProperty -InputObject $remoteDeployment -Name 'projectId') -cne
+            $governedProjectId -or
+        [string](Get-OptionalJsonProperty -InputObject $remoteDeployment -Name 'readyState') -cne
+            'READY') {
+        throw "Publication alias inspect is incomplete or foreign for $Alias."
+    }
     return [pscustomobject]@{ alias = $Alias; id = $id; url = $url }
+}
+
+function Get-VercelProductionDeployments {
+    $response = Invoke-VercelApiReadJson `
+        -RelativeUri ("/v7/deployments?projectId=$governedProjectId" +
+            "&target=production&limit=20&teamId=$governedProviderTeamId") `
+        -Label 'Governed Vercel production deployment list' `
+        -MaximumResponseBytes 8388608
+    $deployments = @(Get-OptionalJsonProperty -InputObject $response -Name 'deployments')
+    if ($null -eq $deployments) {
+        throw 'Governed Vercel production deployment list is malformed.'
+    }
+    foreach ($item in $deployments) {
+        if ([string](Get-OptionalJsonProperty -InputObject $item -Name 'projectId') -cne
+                $governedProjectId -or
+            [string](Get-OptionalJsonProperty -InputObject $item -Name 'ownerId') -cne
+                $governedProviderTeamId) {
+            throw 'Governed Vercel production deployment list contains a foreign entry.'
+        }
+    }
+    return @($deployments)
 }
 
 function Test-VercelAliasSetMatches {
@@ -2134,6 +2973,11 @@ function New-VercelPublicationJournalPayload {
         [Parameter(Mandatory = $true)][object]$CandidateDeployment,
         [Parameter(Mandatory = $true)][object]$PreviewManifest,
         [Parameter(Mandatory = $true)][string]$PackageManifestSha256,
+        [Parameter(Mandatory = $true)][string]$PackageMapSha256,
+        [Parameter(Mandatory = $true)][string]$RemoteFileAttestationSha256,
+        [string]$PromotedRemoteFileAttestationSha256 = $emptySha256,
+        [Parameter(Mandatory = $true)][string]$DeploymentOperationId,
+        [Parameter(Mandatory = $true)][string]$DeploymentRequestSha256,
         [Parameter(Mandatory = $true)][string]$CandidateBuildManifestSha256,
         [Parameter(Mandatory = $true)][string]$CandidateReleaseManifestSha256,
         [Parameter(Mandatory = $true)][string]$CandidatePublicArtifactRootSha256,
@@ -2150,7 +2994,6 @@ function New-VercelPublicationJournalPayload {
         [string]$CompensationRelativePath = "NONE",
         [string]$CompensationSha256 = $emptySha256
     )
-    $resultHash = if ($null -eq $ResultPayload) { $emptySha256 } else { Get-VercelResultSha256 $ResultPayload }
     $currentRollbackContracts = @($PriorAliases | Where-Object {
         Test-VercelObjectProperty -InputObject $_ -Name 'rollback_contract'
     }).Count
@@ -2158,13 +3001,29 @@ function New-VercelPublicationJournalPayload {
         throw 'Vercel publication journal cannot mix legacy and current rollback contracts.'
     }
     $currentJournalSchema = $currentRollbackContracts -eq $PriorAliases.Count
+    $resultHash = if ($null -eq $ResultPayload) { $emptySha256 } else { Get-VercelResultSha256 $ResultPayload }
+    if ($currentJournalSchema) {
+        foreach ($hashValue in @(
+            $PackageMapSha256,
+            $RemoteFileAttestationSha256,
+            $PromotedRemoteFileAttestationSha256,
+            $DeploymentRequestSha256
+        )) {
+            if ($hashValue -cnotmatch '^[0-9a-f]{64}$') {
+                throw 'Vercel publication CAS evidence contains an invalid hash.'
+            }
+        }
+        if ($DeploymentOperationId -cnotmatch '^[0-9a-f]{32}$') {
+            throw 'Vercel publication CAS operation identity is invalid.'
+        }
+    }
     $payload = [ordered]@{
         schema_version = if ($Phase -eq 'COMPENSATED') {
-            if ($currentJournalSchema) { 'dawnstrike.vercel_publication_journal.v4' }
+            if ($currentJournalSchema) { 'dawnstrike.vercel_publication_journal.v8' }
             else { 'dawnstrike.vercel_publication_journal.v2' }
         }
         else {
-            if ($currentJournalSchema) { 'dawnstrike.vercel_publication_journal.v3' }
+            if ($currentJournalSchema) { 'dawnstrike.vercel_publication_journal.v7' }
             else { 'dawnstrike.vercel_publication_journal.v1' }
         }
         operation = "vercel_publication"
@@ -2205,6 +3064,15 @@ function New-VercelPublicationJournalPayload {
         research_only = $true
         broker_execution_enabled = $false
     }
+    if ($currentJournalSchema) {
+        $payload.provider_team_id = $ProviderTeamId
+        $payload.candidate_deployment_operation_id = $DeploymentOperationId
+        $payload.candidate_deployment_request_sha256 = $DeploymentRequestSha256
+        $payload.candidate_package_map_sha256 = $PackageMapSha256
+        $payload.candidate_remote_file_attestation_sha256 = $RemoteFileAttestationSha256
+        $payload.promoted_remote_file_attestation_sha256 = `
+            $PromotedRemoteFileAttestationSha256
+    }
     if ($ExpectedPublicationMarketDate -or $PrepublicationAuthorization -or $DailyLedgerAuthorization) {
         if (-not $ExpectedPublicationMarketDate -or
             -not $PrepublicationAuthorization -or
@@ -2226,10 +3094,7 @@ function Get-VercelJournalCandidateDeployment {
             url = [string]$Journal.promoted_deployment_url
         }
     }
-    $response = Invoke-VercelJson `
-        -Arguments @("list", $ProjectName, "--json", "--limit", "20") `
-        -Label "Compensation candidate deployment list"
-    $matches = @(@(Get-OptionalJsonProperty -InputObject $response -Name "deployments") |
+    $matches = @(Get-VercelProductionDeployments |
         Where-Object {
             $metadata = Get-OptionalJsonProperty -InputObject $_ -Name "meta"
             [string](Get-OptionalJsonProperty -InputObject $_ -Name "target") -ceq "production" -and
@@ -2311,10 +3176,8 @@ function Invoke-VercelPublicationCompensation {
                 (Normalize-VercelDeploymentUrl $primaryRecord.observed.url)) {
             throw "Primary production alias changed before compensation; no rollback was attempted."
         }
-        $null = Invoke-VercelProcess `
-            -Arguments @("rollback", [string]$primaryRecord.prior.deployment_id, "--yes") `
-            -Label "Primary production compensation rollback" `
-            -TimeoutSeconds $VercelCommandTimeoutSeconds
+        Request-VercelProductionRollback `
+            -DeploymentId ([string]$primaryRecord.prior.deployment_id)
     }
     foreach ($record in @($plan.records)) {
         $alias = [string]$record.alias
@@ -2332,7 +3195,8 @@ function Invoke-VercelPublicationCompensation {
                 throw "Alias changed to a foreign deployment before compensation."
             }
             if ($currentIsCandidate) {
-                Set-VercelAlias -DeploymentUrl ([string]$prior.deployment_url) `
+                Set-VercelAlias -DeploymentId ([string]$prior.deployment_id) `
+                    -DeploymentUrl ([string]$prior.deployment_url) `
                     -AliasUrl $alias -Label "Compensation rollback for $alias"
             }
             $rollbackEvidence += Assert-VercelAliasRestored `
@@ -2345,10 +3209,17 @@ function Invoke-VercelPublicationCompensation {
     if (-not (Test-VercelAliasSetMatches -Journal $Journal -Kind prior)) {
         throw "Vercel publication compensation aliases changed before terminal evidence."
     }
+    $journalPromotedFileAttestation = if (Test-VercelObjectProperty `
+            -InputObject $Journal -Name 'promoted_remote_file_attestation_sha256') {
+        [string]$Journal.promoted_remote_file_attestation_sha256
+    }
+    else { $emptySha256 }
     $compensation = [ordered]@{
         schema_version = if ([string]$Journal.schema_version -in @(
             'dawnstrike.vercel_publication_journal.v3',
-            'dawnstrike.vercel_publication_journal.v4'
+            'dawnstrike.vercel_publication_journal.v4',
+            'dawnstrike.vercel_publication_journal.v7',
+            'dawnstrike.vercel_publication_journal.v8'
         )) { 'dawnstrike.vercel_publication_compensation.v2' }
         else { 'dawnstrike.vercel_publication_compensation.v1' }
         status = "COMPENSATED"
@@ -2394,6 +3265,11 @@ function Invoke-VercelPublicationCompensation {
         -CandidateDeployment ([pscustomobject]@{ url = $Journal.candidate_preview_url; id = $Journal.candidate_preview_deployment_id }) `
         -PreviewManifest ([pscustomobject]@{ source_sha = $Journal.candidate_source_sha; market_date = $Journal.candidate_market_date; build_id = $Journal.candidate_build_id; build_sha = $Journal.candidate_build_sha }) `
         -PackageManifestSha256 ([string]$Journal.candidate_package_manifest_sha256) `
+        -PackageMapSha256 ([string]$Journal.candidate_package_map_sha256) `
+        -RemoteFileAttestationSha256 ([string]$Journal.candidate_remote_file_attestation_sha256) `
+        -PromotedRemoteFileAttestationSha256 $journalPromotedFileAttestation `
+        -DeploymentOperationId ([string]$Journal.candidate_deployment_operation_id) `
+        -DeploymentRequestSha256 ([string]$Journal.candidate_deployment_request_sha256) `
         -CandidateBuildManifestSha256 ([string]$Journal.candidate_build_manifest_sha256) `
         -CandidateReleaseManifestSha256 ([string]$Journal.candidate_release_manifest_sha256) `
         -CandidatePublicArtifactRootSha256 ([string]$Journal.candidate_public_artifact_root_sha256) `
@@ -2418,6 +3294,10 @@ function Invoke-VercelPublicationCompensation {
 
 function Get-VercelJournalPreviewEvidence {
     param([Parameter(Mandatory = $true)][object]$Journal, [switch]$UsePromoted)
+    if ($UsePromoted -and
+        -not (Test-VercelPromotedCandidateSetMatchesJournal -Journal $Journal)) {
+        throw 'Recovery promoted deployment failed exact full-file attestation.'
+    }
     $previewUrl = if ($UsePromoted -and $Journal.promoted_deployment_url) {
         [string]$Journal.promoted_deployment_url
     }
@@ -2501,6 +3381,7 @@ function New-VercelRecoveredResultPayload {
         generated_at = [DateTimeOffset]::UtcNow.ToString("o")
         project_id = [string]$Journal.project_id
         provider_scope = [string]$Journal.provider_scope
+        provider_team_id = [string]$Journal.provider_team_id
         preview_url = [string]$Journal.candidate_preview_url
         preview_deployment_id = [string]$Journal.candidate_preview_deployment_id
         preview_ready_state = "READY"
@@ -2508,6 +3389,12 @@ function New-VercelRecoveredResultPayload {
         source_tree = [string]$Journal.candidate_source_tree
         vercel_source_manifest_sha256 = [string]$Journal.candidate_manifest_sha256
         vercel_package_manifest_sha256 = [string]$Journal.candidate_package_manifest_sha256
+        vercel_package_map_sha256 = [string]$Journal.candidate_package_map_sha256
+        vercel_remote_file_attestation_sha256 = [string]$Journal.candidate_remote_file_attestation_sha256
+        vercel_promoted_remote_file_attestation_sha256 = `
+            [string]$Journal.promoted_remote_file_attestation_sha256
+        vercel_deployment_operation_id = [string]$Journal.candidate_deployment_operation_id
+        vercel_deployment_request_sha256 = [string]$Journal.candidate_deployment_request_sha256
         authorized_build_manifest_sha256 = [string]$Journal.candidate_build_manifest_sha256
         authorized_release_manifest_sha256 = [string]$Journal.candidate_release_manifest_sha256
         public_artifact_root_sha256 = [string]$Journal.candidate_public_artifact_root_sha256
@@ -2546,6 +3433,10 @@ function New-VercelRecoveredResultPayload {
 
 function Complete-VercelJournalRecovery {
     param([Parameter(Mandatory = $true)][object]$Journal)
+    $null = Assert-VercelJournalFrozenPreviewEvidence -Journal $Journal
+    if (-not (Test-VercelPromotedCandidateSetMatchesJournal -Journal $Journal)) {
+        throw 'Recovery promoted deployment failed exact full-file attestation before completion.'
+    }
     $evidence = Get-VercelJournalPreviewEvidence -Journal $Journal -UsePromoted
     $live = Get-VercelAliasObservation ([string]$ProductionAlias)
     $freshResult = New-VercelRecoveredResultPayload `
@@ -2579,8 +3470,14 @@ function Resolve-VercelCompletePublicationJournal {
         $Journal.result_payload.allow_degraded -ne $false) {
         throw "Complete Vercel recovery journal authorization is invalid."
     }
-    if (-not (Test-VercelAliasSetMatches -Journal $Journal -Kind candidate)) {
-        throw "Complete Vercel publication journal does not match the live aliases."
+    if ([string]$Journal.schema_version -in @(
+        'dawnstrike.vercel_publication_journal.v7',
+        'dawnstrike.vercel_publication_journal.v8'
+    )) {
+        $null = Assert-VercelJournalFrozenPreviewEvidence -Journal $Journal
+    }
+    if (-not (Test-VercelPromotedCandidateSetMatchesJournal -Journal $Journal)) {
+        throw "Complete Vercel publication journal does not match the full attested live deployment."
     }
     $completeEvidence = Get-VercelJournalPreviewEvidence -Journal $Journal -UsePromoted
     $completeLive = Get-VercelAliasObservation ([string]$ProductionAlias)
@@ -2595,7 +3492,11 @@ function Resolve-VercelCompletePublicationJournal {
         "source_sha", "source_tree", "market_date", "build_id", "build_sha",
         "build_manifest_sha256", "authorized_build_manifest_sha256",
         "authorized_release_manifest_sha256", "toolchain_identity_sha256",
-        "production_deployment_id", "production_deployment_url"
+        "production_deployment_id", "production_deployment_url",
+        "provider_team_id", "vercel_deployment_operation_id",
+        "vercel_deployment_request_sha256", "vercel_package_map_sha256",
+        "vercel_remote_file_attestation_sha256",
+        "vercel_promoted_remote_file_attestation_sha256"
     )) {
         if ([string]$completeFresh[$field] -cne [string]$Journal.result_payload.$field) {
             throw "Complete Vercel journal live verification diverges at $field."
@@ -2644,10 +3545,7 @@ function Test-VercelPromotedCandidateSetMatchesJournal {
         (Normalize-VercelDeploymentUrl $primary.url) -cne
             (Normalize-VercelDeploymentUrl $journalPromotedUrl)
     )) { return $false }
-    $response = Invoke-VercelJson `
-        -Arguments @("list", $ProjectName, "--json", "--limit", "20") `
-        -Label "Interrupted promotion deployment list"
-    $matches = @(@(Get-OptionalJsonProperty -InputObject $response -Name "deployments") |
+    $matches = @(Get-VercelProductionDeployments |
         Where-Object {
             $metadata = Get-OptionalJsonProperty -InputObject $_ -Name "meta"
             [string](Get-OptionalJsonProperty -InputObject $_ -Name "id") -ceq [string]$primary.id -and
@@ -2656,7 +3554,29 @@ function Test-VercelPromotedCandidateSetMatchesJournal {
             [string](Get-OptionalJsonProperty -InputObject $metadata -Name "originalDeploymentId") -ceq
                 [string]$Journal.candidate_preview_deployment_id
         })
-    return $matches.Count -eq 1
+    if ($matches.Count -ne 1) { return $false }
+    try {
+        $expectedAttestation = ''
+        if (Test-VercelObjectProperty `
+                -InputObject $Journal -Name 'promoted_remote_file_attestation_sha256') {
+            $candidateExpected = [string]$Journal.promoted_remote_file_attestation_sha256
+            if ($candidateExpected -and $candidateExpected -cne $emptySha256) {
+                $expectedAttestation = $candidateExpected
+            }
+        }
+        $evidence = Assert-VercelPromotedDeploymentFileEvidence `
+            -DeploymentId ([string]$primary.id) `
+            -PreviewDeploymentId ([string]$Journal.candidate_preview_deployment_id) `
+            -PackageMapSha256 ([string]$Journal.candidate_package_map_sha256) `
+            -ExpectedAttestationSha256 $expectedAttestation
+        if ($hasJournalPromotedUrl -and
+            (Normalize-VercelDeploymentUrl $evidence.deployment_url) -cne
+                (Normalize-VercelDeploymentUrl $journalPromotedUrl)) {
+            return $false
+        }
+    }
+    catch { return $false }
+    return $true
 }
 
 function Get-VercelGovernedAssetProof {
@@ -2686,31 +3606,20 @@ function Get-VercelGovernedAssetProof {
         }
         Assert-LowerHex64 -Value $expected -Field "file_hashes.$relative" -Label $Label
         $encodedPath = (($relative.Split('/') | ForEach-Object { [Uri]::EscapeDataString($_) }) -join '/')
-        $temporary = Join-Path $journalRoot (".asset-" + [guid]::NewGuid().ToString('N') + ".bin")
-        Assert-VercelContainedNonReparsePath -RootPath $resolvedStateRoot -TargetPath $temporary
-        New-Item -ItemType Directory -Path $journalRoot -Force | Out-Null
-        Assert-VercelContainedNonReparsePath -RootPath $resolvedStateRoot -TargetPath $temporary
-        try {
-            $null = Invoke-VercelProcess -Arguments @(
-                "curl", "$($BaseUrl.TrimEnd('/'))/$encodedPath?asset_verify=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())",
-                "--", "--silent", "--show-error", "--max-filesize", "16777216", "--output", $temporary
-            ) -Label "$Label governed asset $relative" -TimeoutSeconds $VercelCommandTimeoutSeconds
-            if (-not (Test-Path -LiteralPath $temporary -PathType Leaf)) {
-                throw "$Label governed asset is missing: $relative"
-            }
-            $length = (Get-Item -LiteralPath $temporary).Length
-            if ($length -gt 16777216) { throw "$Label governed asset exceeds 16 MiB: $relative" }
-            $totalBytes += $length
-            if ($totalBytes -gt 134217728) { throw "$Label governed assets exceed 128 MiB total." }
-            $observed = Get-VercelFileSha256 -Path $temporary
-            if ($observed -cne $expected) { throw "$Label governed asset hash mismatch: $relative" }
-            $verified[$relative] = $observed
+        $response = Invoke-VercelBoundedPublicGet `
+            -Url "$($BaseUrl.TrimEnd('/'))/$encodedPath`?asset_verify=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())" `
+            -TimeoutSeconds $VercelCommandTimeoutSeconds `
+            -MaximumResponseBytes 16777216
+        if ([int]$response.status_code -ne 200) {
+            throw "$Label governed asset is unavailable: $relative"
         }
-        finally {
-            if (Test-Path -LiteralPath $temporary -PathType Leaf) {
-                Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
-            }
-        }
+        $length = [long]$response.body_bytes.LongLength
+        $totalBytes += $length
+        if ($totalBytes -gt 134217728) { throw "$Label governed assets exceed 128 MiB total." }
+        $observed = Get-VercelDeploymentBytesHash `
+            -Bytes $response.body_bytes -Algorithm SHA256
+        if ($observed -cne $expected) { throw "$Label governed asset hash mismatch: $relative" }
+        $verified[$relative] = $observed
     }
     $mapDigest = Get-Sha256Hex (ConvertTo-VercelCanonicalJson $verified)
     return [ordered]@{
@@ -2728,30 +3637,13 @@ function Get-VercelRemoteFileSha256 {
         [Parameter(Mandatory = $true)][ValidateSet('build-manifest.json', 'release-manifest.json')][string]$RelativePath,
         [Parameter(Mandatory = $true)][string]$Label
     )
-    $temporary = Join-Path $journalRoot (".manifest-" + [guid]::NewGuid().ToString('N') + ".json")
-    Assert-VercelContainedNonReparsePath -RootPath $resolvedStateRoot -TargetPath $temporary
-    New-Item -ItemType Directory -Path $journalRoot -Force | Out-Null
-    Assert-VercelContainedNonReparsePath -RootPath $resolvedStateRoot -TargetPath $temporary
-    try {
-        $null = Invoke-VercelProcess `
-            -Arguments @(
-                'curl',
-                "$($BaseUrl.TrimEnd('/'))/$RelativePath?manifest_bytes=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())",
-                '--', '--silent', '--show-error', '--max-filesize', '4194304', '--output', $temporary
-            ) `
-            -Label "$Label exact $RelativePath bytes" `
-            -TimeoutSeconds $VercelCommandTimeoutSeconds
-        if (-not (Test-Path -LiteralPath $temporary -PathType Leaf) -or
-            (Get-Item -LiteralPath $temporary).Length -gt 4194304) {
-            throw "$Label exact $RelativePath bytes are unavailable or oversized."
-        }
-        return Get-VercelFileSha256 -Path $temporary
+    $response = Invoke-VercelBoundedPublicGet `
+        -Url "$($BaseUrl.TrimEnd('/'))/$RelativePath`?manifest_bytes=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())" `
+        -TimeoutSeconds $VercelCommandTimeoutSeconds -MaximumResponseBytes 4194304
+    if ([int]$response.status_code -ne 200) {
+        throw "$Label exact $RelativePath bytes are unavailable."
     }
-    finally {
-        if (Test-Path -LiteralPath $temporary -PathType Leaf) {
-            Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
-        }
-    }
+    return Get-VercelDeploymentBytesHash -Bytes $response.body_bytes -Algorithm SHA256
 }
 
 function New-VercelReadyRollbackContract {
@@ -2910,10 +3802,16 @@ if ($Promote -or $RecoveryOnly) {
     # covers every operation after lock acquisition, including these checks.
     $existingJournal = Get-VercelPublicationJournal
     if ($null -ne $existingJournal) {
+        $existingUsesCasEvidence = [string]$existingJournal.schema_version -in @(
+            'dawnstrike.vercel_publication_journal.v7',
+            'dawnstrike.vercel_publication_journal.v8'
+        )
         if ([string]$existingJournal.candidate_market_date -cne $resolvedExpectedMarketDate -or
             [string]$existingJournal.project_id -cne $ProjectId -or
             [string]$existingJournal.project_name -cne $ProjectName -or
-            [string]$existingJournal.provider_scope -cne $ProviderScope) {
+            [string]$existingJournal.provider_scope -cne $ProviderScope -or
+            ($existingUsesCasEvidence -and
+                [string]$existingJournal.provider_team_id -cne $ProviderTeamId)) {
             throw "Existing Vercel recovery journal does not match its dated provider boundary."
         }
         $recoveryAliases = @($existingJournal.production_aliases | ForEach-Object { [string]$_ })
@@ -2937,6 +3835,7 @@ if ($RecoveryOnly -and $null -eq $existingJournal) {
         project_id = $ProjectId
         project_name = $ProjectName
         provider_scope = $ProviderScope
+        provider_team_id = $ProviderTeamId
         production_aliases = @($allProductionAliases)
         research_only = $true
         broker_execution_enabled = $false
@@ -2967,6 +3866,7 @@ if ($null -ne $existingJournal) {
         Write-Output (Resolve-VercelCompletePublicationJournal -Journal $existingJournal)
         return
     }
+    $null = Assert-VercelJournalFrozenPreviewEvidence -Journal $existingJournal
     $candidateLive = if ([string]$existingJournal.phase -eq "PRE_MUTATION") {
         Test-VercelPromotedCandidateSetMatchesJournal -Journal $existingJournal
     }
@@ -2974,6 +3874,14 @@ if ($null -ne $existingJournal) {
     if ($candidateLive) {
         if ([string]$existingJournal.phase -eq "PRE_MUTATION") {
             $live = Get-VercelAliasObservation ([string]$ProductionAlias)
+            $recoveredPromotedEvidence = Assert-VercelPromotedDeploymentFileEvidence `
+                -DeploymentId ([string]$live.id) `
+                -PreviewDeploymentId ([string]$existingJournal.candidate_preview_deployment_id) `
+                -PackageMapSha256 ([string]$existingJournal.candidate_package_map_sha256)
+            $promotedRemoteFileAttestationSha256 = `
+                [string]$recoveredPromotedEvidence.remote_file_attestation_sha256
+            $existingJournal.promoted_remote_file_attestation_sha256 = `
+                $promotedRemoteFileAttestationSha256
             $liveHealth = Invoke-VercelJson -Arguments @("curl", "$ProductionAlias/api/health?recovery_verify=1") -Label "Recovered production health"
             $liveReadiness = Invoke-VercelJson -Arguments @("curl", "$ProductionAlias/api/readiness?recovery_verify=1") -Label "Recovered production readiness"
             $liveManifest = Invoke-VercelJson -Arguments @("curl", "$ProductionAlias/build-manifest.json?recovery_verify=1") -Label "Recovered production build manifest"
@@ -2987,6 +3895,11 @@ if ($null -ne $existingJournal) {
                 -CandidateDeployment ([pscustomobject]@{ id = $existingJournal.candidate_preview_deployment_id; url = $existingJournal.candidate_preview_url }) `
                 -PreviewManifest ([pscustomobject]@{ source_sha = $existingJournal.candidate_source_sha; market_date = $existingJournal.candidate_market_date; build_id = $existingJournal.candidate_build_id; build_sha = $existingJournal.candidate_build_sha }) `
                 -PackageManifestSha256 ([string]$existingJournal.candidate_package_manifest_sha256) `
+                -PackageMapSha256 ([string]$existingJournal.candidate_package_map_sha256) `
+                -RemoteFileAttestationSha256 ([string]$existingJournal.candidate_remote_file_attestation_sha256) `
+                -PromotedRemoteFileAttestationSha256 $promotedRemoteFileAttestationSha256 `
+                -DeploymentOperationId ([string]$existingJournal.candidate_deployment_operation_id) `
+                -DeploymentRequestSha256 ([string]$existingJournal.candidate_deployment_request_sha256) `
                 -CandidateBuildManifestSha256 ([string]$existingJournal.candidate_build_manifest_sha256) `
                 -CandidateReleaseManifestSha256 ([string]$existingJournal.candidate_release_manifest_sha256) `
                 -CandidatePublicArtifactRootSha256 ([string]$existingJournal.candidate_public_artifact_root_sha256) `
@@ -3066,6 +3979,12 @@ if ($null -ne $existingJournal) {
     $previewManifest = $recoveryPreview.manifest
     $previewReleaseManifest = $recoveryPreview.release
     $packageManifestSha256 = [string]$existingJournal.candidate_package_manifest_sha256
+    $packageMapSha256 = [string]$existingJournal.candidate_package_map_sha256
+    $remoteFileAttestationSha256 = [string]$existingJournal.candidate_remote_file_attestation_sha256
+    $promotedRemoteFileAttestationSha256 = `
+        [string]$existingJournal.promoted_remote_file_attestation_sha256
+    $deploymentCasOperationId = [string]$existingJournal.candidate_deployment_operation_id
+    $deploymentCasRequestSha256 = [string]$existingJournal.candidate_deployment_request_sha256
     $candidateManifestSha256 = [string]$existingJournal.candidate_manifest_sha256
     $candidateBuildManifestSha256 = [string]$existingJournal.candidate_build_manifest_sha256
     $candidateReleaseManifestSha256 = [string]$existingJournal.candidate_release_manifest_sha256
@@ -3098,12 +4017,12 @@ if (-not $recoveryRetry) {
  Assert-VercelPublicationToolchainStable
  Assert-VercelContainedPathNoReparse -Root $resolvedRoot -Target $stage -Label "Vercel stage root"
  Assert-VercelContainedPathNoReparse -Root $resolvedRoot -Target $publicArtifactRoot -Label "Public artifact root"
- & (Join-Path $resolvedRoot "scripts\build_vercel_public_stage.ps1") `
+ & (Join-Path $codeRoot "scripts\build_vercel_public_stage.ps1") `
     -ProjectRoot $resolvedRoot `
     -StageRoot $StageRoot `
     -ExpectedSourceSha $expectedSourceSha `
     -ExpectedSourceTree $expectedSourceTree
-& (Join-Path $resolvedRoot "scripts\verify_vercel_candidate.ps1") `
+& (Join-Path $codeRoot "scripts\verify_vercel_candidate.ps1") `
     -ProjectRoot $resolvedRoot `
     -StageRoot $StageRoot `
     -ExpectedSourceSha $expectedSourceSha `
@@ -3124,22 +4043,18 @@ Assert-VercelGitSourceStable `
     -ExpectedSourceSha $expectedSourceSha `
     -ExpectedSourceTree $expectedSourceTree `
     -AllowedStageRoot $stage
-Push-Location $stage
+$deploymentPackageBoundary = $null
 try {
     Assert-VercelGitSourceStable `
         -Root $resolvedRoot `
         -ExpectedSourceSha $expectedSourceSha `
         -ExpectedSourceTree $expectedSourceTree `
         -AllowedStageRoot $stage
-    $buildResult = Invoke-VercelProcess `
-        -Arguments @("build", "--yes", "--project", $ProjectId) `
-        -Label "Vercel prebuild" `
-        -TimeoutSeconds $VercelBuildTimeoutSeconds
-    # Provider build output can contain environment values; never echo it.
-    $previewEnvironmentFile = Join-Path $stage ".vercel\.env.preview.local"
-    if (Test-Path -LiteralPath $previewEnvironmentFile -PathType Leaf) {
-        Remove-Item -LiteralPath $previewEnvironmentFile -Force
-    }
+    # Construct Build Output API v3 directly from exact Git/public inputs and
+    # the two digest-pinned wheel archives. No local Node, Python, uv, Vercel
+    # CLI, shell, or registry-resolving child receives the publication token or
+    # reads this writer-owned stage.
+    New-VercelDeterministicBuiltPackage -StageRoot $stage
     Assert-VercelNoEnvironmentArtifacts -StageRoot $stage
     Add-VercelFunctionPublicBindings -StageRoot $stage
     $packageManifestSha256 = Assert-VercelBuiltPackage `
@@ -3177,21 +4092,29 @@ try {
         -Label "Predeploy public artifact"
     Assert-VercelContainedPathNoReparse -Root $resolvedRoot -Target $stage -Label "Vercel stage root"
     Assert-VercelPublicationToolchainStable
-    $deploymentResponse = Invoke-VercelJson `
-        -Arguments @("deploy", "--prebuilt", "--project", $ProjectId, "--yes", "--json") `
-        -Label "Vercel prebuilt deploy"
-    $wrappedDeployment = Get-OptionalJsonProperty `
-        -InputObject $deploymentResponse `
-        -Name "deployment"
-    $deployment = if ($null -ne $wrappedDeployment) {
-        $wrappedDeployment
-    }
-    else {
-        $deploymentResponse
-    }
+    # Freeze every provider path, mode, and byte through retained handles. The
+    # provider receives only this explicit content-addressed map; it never
+    # receives or reopens the mutable stage pathname.
+    $deploymentPackageBoundary = Open-VercelDeploymentPackageBoundary `
+        -StageRoot $stage `
+        -ExpectedPackageManifestSha256 $packageManifestSha256
+    $packageRootRelativePath = [string]$deploymentPackageBoundary.package_root_relative_path
+    $packageTreeSha256 = [string]$deploymentPackageBoundary.snapshot_sha256
+    $packageMapSha256 = [string]$deploymentPackageBoundary.map_sha256
+    $null = Assert-VercelDeploymentPackageBoundaryStable -Boundary $deploymentPackageBoundary
+    $frozenDeployment = New-VercelFrozenPreviewDeployment `
+        -Boundary $deploymentPackageBoundary `
+        -SourceSha $expectedSourceSha -SourceTree $expectedSourceTree
+    $deployment = $frozenDeployment.deployment
+    $deploymentCasOperationId = [string]$frozenDeployment.operation_id
+    $deploymentCasRequestSha256 = [string]$frozenDeployment.request_sha256
+    $packageMapSha256 = [string]$frozenDeployment.package_map_sha256
+    $remoteFileAttestationSha256 = [string]$frozenDeployment.remote_file_attestation_sha256
 }
 finally {
-    Pop-Location
+    if ($null -ne $deploymentPackageBoundary) {
+        Close-VercelDeploymentPackageBoundary -Boundary $deploymentPackageBoundary
+    }
 }
 }
 
@@ -3246,9 +4169,7 @@ if ($Promote) {
     # every hostname.
     $legacyPriorAliasCount = 0
     foreach ($alias in $allProductionAliases) {
-        $snapshot = Invoke-VercelJson `
-            -Arguments @("inspect", [string]$alias, "--json") `
-            -Label "Prior production inspect for $alias"
+        $snapshot = Get-VercelAliasObservation -Alias ([string]$alias)
         $snapshotId = Get-OptionalJsonProperty -InputObject $snapshot -Name "id"
         $snapshotUrl = [string](
             Get-OptionalJsonProperty -InputObject $snapshot -Name "url"
@@ -3398,6 +4319,10 @@ if ($Promote) {
         -CandidateDeployment $journalCandidate `
         -PreviewManifest $previewManifest `
         -PackageManifestSha256 $packageManifestSha256 `
+        -PackageMapSha256 $packageMapSha256 `
+        -RemoteFileAttestationSha256 $remoteFileAttestationSha256 `
+        -DeploymentOperationId $deploymentCasOperationId `
+        -DeploymentRequestSha256 $deploymentCasRequestSha256 `
         -CandidateBuildManifestSha256 $candidateBuildManifestSha256 `
         -CandidateReleaseManifestSha256 $candidateReleaseManifestSha256 `
         -CandidatePublicArtifactRootSha256 ([string]$authorizedArtifactIdentity.public_artifact_root_sha256) `
@@ -3444,22 +4369,12 @@ try {
         # command. A timeout can occur after Vercel accepted the promotion, so
         # every promotion failure must enter the existing rollback boundary.
         $promoted = $true
-        $null = Invoke-VercelProcess `
-            -Arguments @("promote", $previewUrl, "--yes") `
-            -Label "Vercel promotion" `
-            -TimeoutSeconds $VercelCommandTimeoutSeconds
+        $null = Request-VercelProductionPromotion -PreviewDeploymentId $deploymentId
         Test-VercelPromotionSeam "after_promote"
         $promotionVerificationError = $null
         for ($attempt = 1; $attempt -le 10; $attempt++) {
             try {
-                $deploymentsResponse = Invoke-VercelJson `
-                    -Arguments @("list", $ProjectName, "--json", "--limit", "20") `
-                    -Label "Promoted deployment list"
-                $listedDeployments = @(
-                    Get-OptionalJsonProperty `
-                        -InputObject $deploymentsResponse `
-                        -Name "deployments"
-                )
+                $listedDeployments = @(Get-VercelProductionDeployments)
                 if (-not $listedDeployments.Count) {
                     throw "Promoted deployment list did not return deployments."
                 }
@@ -3484,17 +4399,38 @@ try {
                         } |
                         Sort-Object -Property createdAt -Descending
                 )
-                if (-not $promotedCandidates.Count) {
-                    throw "No promoted clone of the verified preview is visible yet."
+                if ($promotedCandidates.Count -ne 1) {
+                    throw "The exact single promoted clone of the verified preview is not visible yet."
                 }
-                $promotedUrl = [string]$promotedCandidates[0].url
-                if (-not $promotedUrl.StartsWith("http")) {
-                    $promotedUrl = "https://$promotedUrl"
+                $promotedDeploymentId = [string](Get-OptionalJsonProperty `
+                    -InputObject $promotedCandidates[0] -Name 'id')
+                $promotedDeployment = Get-VercelFrozenDeployment `
+                    -DeploymentId $promotedDeploymentId
+                $promotedMetadata = Get-OptionalJsonProperty `
+                    -InputObject $promotedDeployment -Name 'meta'
+                if ([string](Get-OptionalJsonProperty -InputObject $promotedDeployment -Name 'ownerId') -cne
+                        $governedProviderTeamId -or
+                    [string](Get-OptionalJsonProperty -InputObject $promotedDeployment -Name 'projectId') -cne
+                        $governedProjectId -or
+                    [string](Get-OptionalJsonProperty -InputObject $promotedDeployment -Name 'target') -cne
+                        'production' -or
+                    [string](Get-OptionalJsonProperty -InputObject $promotedDeployment -Name 'readyState') -cne
+                        'READY' -or
+                    [string](Get-OptionalJsonProperty -InputObject $promotedMetadata -Name 'action') -cne
+                        'promote' -or
+                    [string](Get-OptionalJsonProperty -InputObject $promotedMetadata -Name 'originalDeploymentId') -cne
+                        $deploymentId) {
+                    throw 'Promoted deployment identity is not the governed preview clone.'
                 }
+                $promotedFileEvidence = Assert-VercelPromotedDeploymentFileEvidence `
+                    -DeploymentId $promotedDeploymentId `
+                    -PreviewDeploymentId $deploymentId `
+                    -PackageMapSha256 $packageMapSha256
+                $promotedDeployment = $promotedFileEvidence.deployment
+                $promotedUrl = [string]$promotedFileEvidence.deployment_url
+                $promotedRemoteFileAttestationSha256 = `
+                    [string]$promotedFileEvidence.remote_file_attestation_sha256
                 $cacheBuster = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-                $promotedDeployment = Invoke-VercelJson `
-                    -Arguments @("inspect", $promotedUrl, "--json") `
-                    -Label "Promoted deployment inspect"
                 $promotedHealth = Invoke-VercelJson `
                     -Arguments @("curl", "$promotedUrl/api/health?verify=$cacheBuster") `
                     -Label "Promoted deployment health"
@@ -3562,6 +4498,7 @@ try {
         }
         foreach ($alias in $allProductionAliases) {
             Set-VercelAlias `
+                -DeploymentId ([string]$promotedDeploymentId) `
                 -DeploymentUrl $promotedUrl `
                 -AliasUrl ([string]$alias) `
                 -Label "Production alias assignment for $alias"
@@ -3579,9 +4516,7 @@ try {
         for ($attempt = 1; $attempt -le 10; $attempt++) {
             try {
                 $cacheBuster = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-                $production = Invoke-VercelJson `
-                    -Arguments @("inspect", $ProductionAlias, "--json") `
-                    -Label "Production inspect"
+                $production = Get-VercelAliasObservation -Alias $ProductionAlias
                 $productionHealth = Invoke-VercelJson `
                     -Arguments @("curl", "$ProductionAlias/api/health?verify=$cacheBuster") `
                     -Label "Production health"
@@ -3671,6 +4606,7 @@ try {
         generated_at = [DateTimeOffset]::UtcNow.ToString("o")
         project_id = $ProjectId
         provider_scope = $ProviderScope
+        provider_team_id = $ProviderTeamId
         preview_url = $previewUrl
         preview_deployment_id = $deploymentId
         preview_ready_state = Get-OptionalJsonProperty -InputObject $deployment -Name "readyState"
@@ -3678,6 +4614,12 @@ try {
         source_tree = $expectedSourceTree
         vercel_source_manifest_sha256 = Get-VercelFileSha256 -Path (Join-Path $stage "vercel-source-manifest.json")
         vercel_package_manifest_sha256 = $packageManifestSha256
+        vercel_package_map_sha256 = $packageMapSha256
+        vercel_remote_file_attestation_sha256 = $remoteFileAttestationSha256
+        vercel_promoted_remote_file_attestation_sha256 = `
+            if ($Promote) { $promotedRemoteFileAttestationSha256 } else { $emptySha256 }
+        vercel_deployment_operation_id = $deploymentCasOperationId
+        vercel_deployment_request_sha256 = $deploymentCasRequestSha256
         authorized_build_manifest_sha256 = $candidateBuildManifestSha256
         authorized_release_manifest_sha256 = $candidateReleaseManifestSha256
         public_artifact_root_sha256 = [string]$authorizedArtifactIdentity.public_artifact_root_sha256
@@ -3719,6 +4661,11 @@ try {
             -CandidateDeployment $journalCandidate `
             -PreviewManifest $previewManifest `
             -PackageManifestSha256 $packageManifestSha256 `
+            -PackageMapSha256 $packageMapSha256 `
+            -RemoteFileAttestationSha256 $remoteFileAttestationSha256 `
+            -PromotedRemoteFileAttestationSha256 $promotedRemoteFileAttestationSha256 `
+            -DeploymentOperationId $deploymentCasOperationId `
+            -DeploymentRequestSha256 $deploymentCasRequestSha256 `
             -CandidateBuildManifestSha256 $candidateBuildManifestSha256 `
             -CandidateReleaseManifestSha256 $candidateReleaseManifestSha256 `
             -CandidatePublicArtifactRootSha256 ([string]$authorizedArtifactIdentity.public_artifact_root_sha256) `
@@ -3746,6 +4693,11 @@ try {
             -CandidateDeployment $journalCandidate `
             -PreviewManifest $previewManifest `
             -PackageManifestSha256 $packageManifestSha256 `
+            -PackageMapSha256 $packageMapSha256 `
+            -RemoteFileAttestationSha256 $remoteFileAttestationSha256 `
+            -PromotedRemoteFileAttestationSha256 $promotedRemoteFileAttestationSha256 `
+            -DeploymentOperationId $deploymentCasOperationId `
+            -DeploymentRequestSha256 $deploymentCasRequestSha256 `
             -CandidateBuildManifestSha256 $candidateBuildManifestSha256 `
             -CandidateReleaseManifestSha256 $candidateReleaseManifestSha256 `
             -CandidatePublicArtifactRootSha256 ([string]$authorizedArtifactIdentity.public_artifact_root_sha256) `
@@ -3814,14 +4766,9 @@ catch {
                         (Normalize-VercelDeploymentUrl $primaryPlan.observed.url)) {
                     throw "Primary production alias changed before rollback."
                 }
-                $null = Invoke-VercelProcess `
-                    -Arguments @("rollback", [string]$priorPrimary.id, "--yes") `
-                    -Label "Primary production rollback" `
-                    -TimeoutSeconds $VercelCommandTimeoutSeconds
+                Request-VercelProductionRollback -DeploymentId ([string]$priorPrimary.id)
             }
-            $primaryAfterRollback = Invoke-VercelJson `
-                -Arguments @("inspect", $ProductionAlias, "--json") `
-                -Label "Primary production rollback inspect"
+            $primaryAfterRollback = Get-VercelAliasObservation -Alias $ProductionAlias
             $primaryAfterId = [string](Get-OptionalJsonProperty `
                 -InputObject $primaryAfterRollback -Name "id")
             if ($primaryAfterId -ne [string]$priorPrimary.id) {
@@ -3856,6 +4803,7 @@ catch {
                 }
                 if ($isCandidate) {
                     Set-VercelAlias `
+                        -DeploymentId ([string]$priorAlias.id) `
                         -DeploymentUrl ([string]$priorAlias.url) `
                         -AliasUrl ([string]$alias) `
                         -Label "Production rollback for $alias"

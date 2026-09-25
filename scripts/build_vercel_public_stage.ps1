@@ -8,15 +8,16 @@ param(
 
 $ErrorActionPreference = "Stop"
 $resolvedRoot = (Resolve-Path $ProjectRoot).Path
-$executingRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')).TrimEnd('\')
-if (-not [string]::Equals(
-    [System.IO.Path]::GetFullPath($resolvedRoot).TrimEnd('\'),
-    $executingRoot,
-    [System.StringComparison]::OrdinalIgnoreCase
-)) {
-    throw "Vercel stage builder must execute from the exact ProjectRoot being admitted."
+$codeRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')).TrimEnd('\')
+. (Join-Path $PSScriptRoot "dawnstrike_process_runner.ps1")
+$expectedCodeRoot = Get-DawnstrikeProtectedReleaseRoot -ExpectedSha $ExpectedSourceSha
+if (-not [string]::Equals($codeRoot, $expectedCodeRoot, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Vercel stage builder must execute from the protected exact-SHA release root."
 }
-. (Join-Path $resolvedRoot "scripts\vercel_source_contract.ps1")
+$null = Assert-DawnstrikeProcessSourceBoundToHead `
+    -ReleaseRoot $codeRoot -ExpectedSha $ExpectedSourceSha -EntryScript $PSCommandPath `
+    -AdditionalSourceFiles @('scripts/vercel_source_contract.ps1')
+. (Join-Path $PSScriptRoot "vercel_source_contract.ps1")
 
 function Assert-VercelTreeHasNoReparseDescendants {
     param(
@@ -173,7 +174,7 @@ Assert-VercelGitSourceStable `
     -ExpectedSourceSha $ExpectedSourceSha `
     -ExpectedSourceTree $ExpectedSourceTree
 $stagePublic = Join-Path $stage "public"
-$functionPublic = Join-Path $stage "api\public"
+$functionPublic = Join-Path $stage "function_public"
 
 if (-not (Test-Path -LiteralPath (Join-Path $publicSource "build-manifest.json") -PathType Leaf)) {
     throw "Build the public artifact before staging it."
@@ -211,12 +212,12 @@ $stageApi = Join-Path $stage "api"
 New-Item -ItemType Directory -Force -Path $stageApi | Out-Null
 foreach ($apiPath in @("api/health.py", "api/readiness.py")) {
     Write-VercelGitBlob `
-        -Root $resolvedRoot `
+        -Root $codeRoot `
         -Commit $ExpectedSourceSha `
         -RelativePath $apiPath `
         -Destination (Join-Path $stage ($apiPath -replace "/", "\"))
 }
-# The API reads the exact packaged files under api/public.  Keep this module
+# The API reads the exact packaged files under function_public. Keep this module
 # metadata-only: embedding snapshots or manifests creates duplicate sources of
 # truth and can let a stale caller/environment state shadow packaged bytes.
 $stateModule = "PUBLIC_STATE = {'static_file_hashes_verified': True}`n"
@@ -240,8 +241,8 @@ $config = @{
     version = 2
     outputDirectory = 'public'
     functions = @{
-        'api/health.py' = @{ includeFiles = 'api/public/**'; maxDuration = 10 }
-        'api/readiness.py' = @{ includeFiles = 'api/public/**'; maxDuration = 10 }
+        'api/health.py' = @{ includeFiles = 'function_public/**'; maxDuration = 10 }
+        'api/readiness.py' = @{ includeFiles = 'function_public/**'; maxDuration = 10 }
     }
     headers = @(
         [ordered]@{ source = '/(.*)'; headers = $securityHeaders }
@@ -253,7 +254,7 @@ $stagePyproject = @"
 name = "dawnstrike-public-stage"
 version = "0.0.0"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = ["vercel-runtime==0.22.1"]
 "@
 [System.IO.File]::WriteAllText((Join-Path $stage "pyproject.toml"), $stagePyproject, $utf8NoBom)
 Assert-VercelGitSourceStable `

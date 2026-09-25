@@ -11,12 +11,19 @@ is the hash-locked resolved set for the supported Python version.
 3. Regenerate the lock exactly:
 
    ```powershell
-   py -m pip install pip-tools
-   py -m piptools compile --generate-hashes --output-file requirements.lock requirements.in
+   py -3.13 -m pip install --upgrade pip-tools==7.6.1
+   py -3.13 -m piptools compile --upgrade --generate-hashes --allow-unsafe `
+     --strip-extras --index-url=https://pypi.org/simple `
+     --output-file=requirements.lock requirements.in
    ```
 
-4. Install with `py -m pip install --require-hashes -r requirements.lock`, then
-   run `py -m pip check`, the full test suite, `py -m pip_audit -r requirements.lock`,
+4. Install with `py -3.13 -m pip install --require-hashes -r requirements.lock`, then
+   install the project with
+   `py -3.13 -m pip install --no-build-isolation --no-deps -e .`. The exact
+   `setuptools` build backend must be present in both `pyproject.toml` and the
+   hash lock so this step cannot resolve mutable build tooling. Run
+   `py -3.13 -m pip check`, the full test suite,
+   `py -3.13 -m pip_audit -r requirements.lock`,
    and the CI security commands.
 5. Review every transitive change, SBOM delta, license result, and vulnerability
    advisory. Do not suppress high/critical findings without a dated owner and

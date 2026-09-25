@@ -44,7 +44,7 @@ def test_state_boundary_is_installed_and_admitted_before_production_dispatch() -
         "DISABLED_PENDING_GOVERNED_HARDEN_CAPTURE_REBIND",
     ):
         assert marker in installer
-    assert installer.index("Copy-DawnstrikeExactGitFile -RelativePath $stateBoundaryRelative") < (
+    assert installer.index("$materializedStateBoundaryBlob =") < (
         installer.index("Install-DawnstrikeStateRootBoundary")
     )
     assert "Assert-DawnstrikeStateRootBoundary -StateRoot $StateRoot" in launcher
@@ -76,6 +76,15 @@ def test_task_definition_reseal_has_durable_intent_completion_and_narrow_resume(
     ):
         assert marker in helper
     completion = helper.split("function Complete-DawnstrikeStateBoundaryTaskMutation {", 1)[1]
+    for marker in (
+        "[ValidatePattern('^[0-9a-f]{64}$')][string]$RequestContractSha256",
+        "[ValidatePattern('^[0-9a-f]{64}$')][string]$TerminalReceiptSha256",
+        "[ValidatePattern('^[0-9a-f]{64}$')][string]$TerminalJournalSha256",
+        "-RequestContractSha256 $RequestContractSha256",
+        "-ExpectedReceiptSha256 $TerminalReceiptSha256.ToLowerInvariant()",
+        "-ExpectedJournalSha256 $TerminalJournalSha256.ToLowerInvariant()",
+    ):
+        assert marker in completion
     assert completion.index("-Payload $completionPayload -Path $completionPath") < completion.index(
         "-Payload $newReceipt -Path $currentPath"
     )
@@ -490,7 +499,7 @@ def test_host_receipt_root_is_bound_before_acl_and_receipt_is_atomic_no_replace(
     assert "$temporaryStream.Flush($true)" in helper
     assert "Global\\Dawnstrike.HostBoundary.Install.v1" in installer
     assert installer.index("$installMutex.WaitOne(0, $false)") < installer.index(
-        "Copy-DawnstrikeExactGitFile -RelativePath $launcherRelative"
+        "$materializedLauncherBlob ="
     )
 
 
@@ -506,10 +515,22 @@ def test_task_mutation_intent_and_request_admission_are_single_writer_and_held()
     assert "request_contract_sha256" in fresh
     assert "-Payload $payload -Path $intentPath -NoReplace" in fresh
     resume = enter.split("$null = Assert-DawnstrikeStateBoundaryTaskMutationIntent", 1)[1]
-    assert resume.index("Find-DawnstrikeStateBoundaryExactTerminalEvidence") < resume.index(
-        "Disable-DawnstrikeStateBoundaryAffectedTasks"
+    assert "Find-DawnstrikeStateBoundaryExactTerminalEvidence" not in enter
+    assert "Complete-DawnstrikeStateBoundaryExistingTerminal" not in helper
+    # Writer-controlled terminal paths may be unreadable or reparsed. Every
+    # changed affected task must be isolated before those paths are opened.
+    assert resume.index("Disable-DawnstrikeStateBoundaryAffectedTasks") < resume.index(
+        "Get-DawnstrikeStateBoundaryTerminalEvidencePairs"
     )
-    assert "-ExcludedEvidencePairs @($intent.payload.predecessor_terminal_evidence_pairs)" in resume
+    assert "terminal_reconciliation_required = $terminalReconciliationRequired" in resume
+    assert "if ($drift.Count -ne 0) {" in resume
+    assert "-and -not $terminalReconciliationRequired" not in resume
+    cancel = helper.split(
+        "function Cancel-DawnstrikeStateBoundaryTaskMutationIfUnchanged {", 1
+    )[1]
+    assert cancel.index("Assert-DawnstrikeStateBoundaryTaskInventoryMatches") < cancel.index(
+        "Get-DawnstrikeStateBoundaryTerminalEvidencePairs"
+    )
     admission = launcher.index("Get-DawnstrikeStateBoundaryTaskMutationReadAdmission")
     first_request_read = launcher.index("Get-DawnstrikeLauncherRequestFileContract `", admission)
     release_receipt = launcher.index("$requestAdmission.locks[0].Dispose()", first_request_read)
@@ -731,7 +752,7 @@ $affected=@(Get-DawnstrikeStateBoundaryTaskMutationAffectedNames -Mode Rollback)
 
 
 @pytest.mark.skipif(not POWERSHELL.is_file(), reason="requires Windows PowerShell 5.1")
-def test_resume_adopts_only_terminal_evidence_newer_than_protected_predecessor_set(
+def test_terminal_pair_change_is_diagnostic_not_adoption_authority(
     tmp_path: Path,
 ) -> None:
     state = tmp_path / "state"
@@ -759,10 +780,12 @@ function Write-Terminal([string]$stamp){{
 }}
 Write-Terminal 'old'
 $predecessor=@(Get-DawnstrikeStateBoundaryTerminalEvidencePairs -StateRoot '{_quote(state)}' -Mode RebindCapture -ExpectedSha $sha)
-$stale=Find-DawnstrikeStateBoundaryExactTerminalEvidence -StateRoot '{_quote(state)}' -Mode RebindCapture -ExpectedSha $sha -ExpectedTree $tree -LiveTasks $live -ExcludedEvidencePairs $predecessor
+$stalePairs=@(Get-DawnstrikeStateBoundaryTerminalEvidencePairs -StateRoot '{_quote(state)}' -Mode RebindCapture -ExpectedSha $sha)
+$stale=@($stalePairs|Where-Object {{$_ -notin $predecessor}}).Count -gt 0
 Write-Terminal 'new'
-$fresh=Find-DawnstrikeStateBoundaryExactTerminalEvidence -StateRoot '{_quote(state)}' -Mode RebindCapture -ExpectedSha $sha -ExpectedTree $tree -LiveTasks $live -ExcludedEvidencePairs $predecessor
-[pscustomobject]@{{predecessor_count=$predecessor.Count;stale=($null -ne $stale);fresh=($null -ne $fresh)}}|ConvertTo-Json -Compress
+$freshPairs=@(Get-DawnstrikeStateBoundaryTerminalEvidencePairs -StateRoot '{_quote(state)}' -Mode RebindCapture -ExpectedSha $sha)
+$fresh=@($freshPairs|Where-Object {{$_ -notin $predecessor}}).Count -gt 0
+[pscustomobject]@{{predecessor_count=$predecessor.Count;stale=$stale;fresh=$fresh}}|ConvertTo-Json -Compress
 """
     result = _run_ps(script)
     assert result.returncode == 0, result.stderr
@@ -777,3 +800,328 @@ def test_windows_operations_timeout_covers_expanded_hostile_suites() -> None:
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     windows = workflow.split("  windows-operations:", 1)[1]
     assert "timeout-minutes: 90" in windows.split("    steps:", 1)[0]
+
+
+def test_candidate_migration_is_distinct_crash_safe_and_preserves_bootstrap_authority() -> None:
+    helper = HELPER.read_text(encoding="utf-8")
+    migration = helper.split(
+        "function Migrate-DawnstrikeStateRootBoundaryCandidate {", 1
+    )[1].split("function Set-DawnstrikeStateBoundaryTasksDisabled {", 1)[0]
+    transition = helper.split(
+        "function Complete-DawnstrikeStateBoundaryCandidateMigrationFileTransition {", 1
+    )[1].split("function Migrate-DawnstrikeStateRootBoundaryCandidate {", 1)[0]
+    installation = helper.split("function Install-DawnstrikeStateRootBoundary {", 1)[1]
+    assertion = helper.split("function Assert-DawnstrikeStateRootBoundary {", 1)[1]
+
+    for marker in (
+        "dawnstrike.state_boundary_candidate_migration_intent.v1",
+        "dawnstrike.state_boundary_candidate_migration_completion.v1",
+        "Open-DawnstrikeStateBoundaryRuntimeAuthorizationEvidence",
+        "BOOTSTRAP_DISABLED",
+        "ACTIVE_READY",
+        "current_runtime_authorization_sha256",
+        "rollbackAuthorization.status -ceq 'AUTHORIZED'",
+        "activationLineage.status -ceq 'ACTIVE'",
+        "Candidate migration target admission identity is invalid.",
+    ):
+        assert marker in migration or marker in helper
+    assert "return Get-DawnstrikeStateBoundaryTaskMutationIntentPath" in helper
+    assert "-Payload $intentPayload -Path $intentPath -NoReplace" in migration
+    assert transition.index("-Payload $completionPayload") < transition.index(
+        "-Payload $payload.new_current_receipt"
+    )
+    assert transition.index("-Path ([string]$payload.historical_receipt_path)") < (
+        transition.index("-Payload $payload.new_current_receipt -Path $CurrentReceiptPath")
+    )
+    assert transition.index("new_current_receipt_sha256") < transition.index(
+        "Remove-Item -LiteralPath ([string]$Intent.path)"
+    )
+    assert "explicit candidate migration; reinstall is denied" in installation
+    assert "Assert-DawnstrikeStateBoundaryNoCandidateMigration" in assertion
+
+
+def test_fail_closed_activation_completion_is_explicit_deep_and_crash_convergent() -> None:
+    helper = HELPER.read_text(encoding="utf-8")
+    adoption = helper.split(
+        "function Complete-DawnstrikeStateBoundaryTaskMutationFailClosedAdoption {", 1
+    )[1].split(
+        "function Complete-DawnstrikeStateBoundaryTaskMutationFailClosed {", 1
+    )[0]
+    completion = helper.split(
+        "function Complete-DawnstrikeStateBoundaryTaskMutationFailClosed {", 1
+    )[1].split(
+        "function Get-DawnstrikeStateBoundaryTaskMutationReadAdmission {", 1
+    )[0]
+    enter = helper.split("function Enter-DawnstrikeStateBoundaryTaskMutation {", 1)[1]
+
+    for marker in (
+        "dawnstrike.state_boundary_task_mutation_fail_closed.v1",
+        "COMPENSATED_DISABLED",
+        "Get-DawnstrikeStateBoundaryTaskMutationTerminalEvidence",
+        "Open-DawnstrikeStateBoundaryRuntimeAuthorizationEvidence",
+        "Assert-DawnstrikeStateBoundaryFailClosedTaskInventory",
+        "source_activation_id",
+        "source_terminal_receipt_sha256",
+        "source_terminal_journal_sha256",
+        "fail_closed_compensation_receipt_sha256",
+        "fail_closed_compensation_journal_sha256",
+        "DISABLED_BY_GOVERNED_ACTIVATION_CANCELLATION",
+        "TEST_CRASH_AFTER_FAIL_CLOSED_COMPLETION",
+        "TEST_CRASH_AFTER_FAIL_CLOSED_CURRENT",
+    ):
+        assert marker in adoption or marker in completion
+    deep_proof = adoption.index(
+        "Open-DawnstrikeStateBoundaryRuntimeAuthorizationEvidence"
+    )
+    live_proof = adoption.index("Assert-DawnstrikeStateBoundaryFailClosedTaskInventory")
+    protected_completion = adoption.index(
+        "-Payload $payload -Path $completionPath -NoReplace"
+    )
+    current_write = adoption.index("-Payload $newReceipt -Path $currentPath")
+    intent_removal = adoption.index(
+        "Remove-Item -LiteralPath ([string]$Intent.path)"
+    )
+    assert deep_proof < protected_completion
+    assert live_proof < protected_completion < current_write < intent_removal
+    assert "Complete-DawnstrikeStateBoundaryTaskMutationFailClosedAdoption" in enter
+
+
+@pytest.mark.skipif(not POWERSHELL.is_file(), reason="requires Windows PowerShell 5.1")
+def test_fail_closed_task_inventory_accepts_only_disabled_exact_actions() -> None:
+    script = f"""
+$ErrorActionPreference='Stop'
+. '{_quote(HELPER)}'
+$sid='S-1-5-21-1-2-3-1001';$def='a'*64;$action='b'*64;$section='c'*64
+$expected=@();$live=@()
+foreach($name in @(
+  'Dawnstrike AlphaOps Morning','Dawnstrike AlphaOps Monitor 5m',
+  'Dawnstrike AlphaOps EOD Full Report','Dawnstrike AlphaOps V6 Weekly Training',
+  'Dawnstrike 10of10 Daily Finalize'
+)){{
+  $expected += [pscustomobject]@{{task_name=$name;task_path='\';state='Ready';principal_sid=$sid;logon_type='Password';run_level='Limited';definition_sha256=('d'*64);definition_contract_sha256=$def;action_contract_sha256=$action;action_section_sha256=$section;canonical=$true;canonical_task_definition_contract_sha256=$def;canonical_task_action_contract_sha256=$action}}
+  $live += [pscustomobject]@{{task_name=$name;task_path='\';state='Disabled';principal_sid=$sid;logon_type='Password';run_level='Limited';definition_sha256=('e'*64);definition_contract_sha256=$def;action_contract_sha256=$action;action_section_sha256=$section;canonical=$true;canonical_task_definition_contract_sha256=$def;canonical_task_action_contract_sha256=$action}}
+}}
+$accepted=$false
+try {{$null=Assert-DawnstrikeStateBoundaryFailClosedTaskInventory -ExpectedTasks $expected -LiveTasks $live -WriterSids @($sid);$accepted=$true}} catch {{}}
+$live[0].state='Ready';$readyRejected=$false
+try {{$null=Assert-DawnstrikeStateBoundaryFailClosedTaskInventory -ExpectedTasks $expected -LiveTasks $live -WriterSids @($sid)}} catch {{$readyRejected=$true}}
+$live[0].state='Disabled';$live[0].action_contract_sha256='f'*64;$actionRejected=$false
+try {{$null=Assert-DawnstrikeStateBoundaryFailClosedTaskInventory -ExpectedTasks $expected -LiveTasks $live -WriterSids @($sid)}} catch {{$actionRejected=$true}}
+[pscustomobject]@{{accepted=$accepted;ready_rejected=$readyRejected;action_rejected=$actionRejected}}|ConvertTo-Json -Compress
+"""
+    result = _run_ps(script)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout.strip().splitlines()[-1]) == {
+        "accepted": True,
+        "ready_rejected": True,
+        "action_rejected": True,
+    }
+
+
+@pytest.mark.skipif(not POWERSHELL.is_file(), reason="requires Windows PowerShell 5.1")
+def test_fail_closed_completion_recovers_both_hard_kill_boundaries(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "state"
+    evidence = tmp_path / "evidence"
+    state.mkdir()
+    evidence.mkdir()
+    pending = evidence / "state-boundary-task-mutation-pending.json"
+    pending.write_text("pending", encoding="utf-8")
+    completion = evidence / ("state-boundary-task-mutation-completion-" + "1" * 32 + ".json")
+    current = evidence / "state-boundary-current.json"
+    compensation = state / "receipts" / "runtime-activation" / "compensated.json"
+    compensation.parent.mkdir(parents=True)
+    recovery_journal = (
+        state
+        / "receipts"
+        / "runtime-operation"
+        / ("terminal-recovery-" + "1" * 32 + ".json")
+    )
+    recovery_journal.parent.mkdir(parents=True)
+    script = rf"""
+$ErrorActionPreference='Stop'
+. '{_quote(HELPER)}'
+$candidate='a'*40;$candidateTree='b'*40;$previous='c'*40;$previousTree='d'*40
+$operation='1'*32;$request='2'*64;$sourceId='3'*24;$sid='S-1-5-21-1-2-3-1001'
+$taskContract='4'*64;$definition='5'*64;$action='6'*64;$section='7'*64
+$expected=@();$live=@()
+foreach($name in @(
+  'Dawnstrike AlphaOps Morning','Dawnstrike AlphaOps Monitor 5m',
+  'Dawnstrike AlphaOps EOD Full Report','Dawnstrike AlphaOps V6 Weekly Training',
+  'Dawnstrike 10of10 Daily Finalize'
+)){{
+  $expected += [pscustomobject]@{{task_name=$name;task_path='\';state='Ready';principal_sid=$sid;logon_type='Password';run_level='Limited';definition_sha256=('8'*64);definition_contract_sha256=$definition;action_contract_sha256=$action;action_section_sha256=$section;canonical=$true;canonical_task_contract_sha256=$taskContract;canonical_task_definition_contract_sha256=$definition;canonical_task_action_contract_sha256=$action}}
+  $live += [pscustomobject]@{{task_name=$name;task_path='\';state='Disabled';principal_sid=$sid;logon_type='Password';run_level='Limited';definition_sha256=('9'*64);definition_contract_sha256=$definition;action_contract_sha256=$action;action_section_sha256=$section;canonical=$true;canonical_task_contract_sha256=$taskContract;canonical_task_definition_contract_sha256=$definition;canonical_task_action_contract_sha256=$action}}
+}}
+$old=[pscustomobject][ordered]@{{
+ schema_version='dawnstrike.state_boundary_installation.v2';status='PASS';operation_id=('0'*32);installed_at_utc='2026-09-03T00:00:00Z';candidate_sha=$candidate;candidate_tree=$candidateTree;state_root='{_quote(state)}';state_root_identity='state';state_root_sddl='sddl';state_root_sddl_sha256=('a'*64);locks_root='locks';locks_root_identity='locks-id';locks_root_sddl='locks-sddl';locks_root_sddl_sha256=('b'*64);state_entry_count=1;state_identity_contract_sha256=('c'*64);rollback_manifest_path='rollback';rollback_manifest_sha256=('d'*64);installed_helper_path='helper';installed_helper_sha256=('e'*64);writer_sids=@($sid);task_definitions_and_principals=@($expected);task_binding_sha256='';research_only=$true;broker_execution_enabled=$false
+}}
+$old.task_binding_sha256=Get-DawnstrikeStateBoundaryTaskBindingHash $expected
+$script:currentReceipt=$old;$script:currentHash='f'*64
+$script:authorization=[pscustomobject]@{{status='AUTHORIZED';sha256=('a'*64);operation_type='BOOTSTRAP';runtime_sha=$previous;runtime_tree=$previousTree;contract=[pscustomobject]@{{}};material=[pscustomobject]@{{canonical_task_definition_contract_sha256=$definition;canonical_task_action_contract_sha256=$action}}}}
+$script:noneAuthorization=[pscustomobject]@{{status='NONE';sha256='NONE';operation_type='';runtime_sha='';runtime_tree='';contract=$null;material=$null}}
+$script:intent=[pscustomobject]@{{path='{_quote(pending)}';sha256=('b'*64);payload=[pscustomobject][ordered]@{{schema_version='dawnstrike.state_boundary_task_mutation.v1';operation_id=$operation;mode='Activate';expected_sha=$candidate;expected_tree=$candidateTree;candidate_sha=$candidate;candidate_tree=$candidateTree;state_root='{_quote(state)}';request_contract_sha256=$request;old_current_receipt_sha256=$script:currentHash;old_task_binding_sha256=$old.task_binding_sha256;predecessor_terminal_evidence_sha256=('c'*64);task_definitions_and_principals=@($expected);writer_sids=@($sid);completion_path='{_quote(completion)}'}}}}
+$comp=[ordered]@{{schema_version='dawnstrike.runtime_compensation_receipt.v2';status='COMPENSATED';operation='runtime_activation';candidate_sha=$candidate;candidate_tree=$candidateTree;prior_journal_file_sha256=('d'*64);task_contract_sha256=$taskContract;task_state='Disabled';task_action_contract_sha256=$action;task_definition_contract_sha256=$definition}}
+$journal=[ordered]@{{schema_version='dawnstrike.runtime_operation_journal.v2';operation='runtime_activation';phase='COMPENSATED';candidate_sha=$candidate;candidate_tree=$candidateTree;current_sha=$previous;current_tree=$previousTree;previous_sha=$previous;previous_tree=$previousTree;task_contract_sha256=$taskContract;prior_journal_file_sha256=('d'*64);compensation_receipt_relative_path='receipts/runtime-activation/compensated.json';compensation_receipt_sha256=('e'*64)}}
+function New-Disposable {{[IO.MemoryStream]::new()}}
+function Get-DawnstrikeStateBoundaryTaskMutationIntent {{param($EvidenceRoot);if(Test-Path -LiteralPath '{_quote(pending)}'){{$script:intent}}else{{$null}}}}
+function Assert-DawnstrikeStateBoundaryTaskMutationIntent {{param($Intent,$StateRoot,$Mode,$ExpectedSha,$ExpectedTree,$RequestContractSha256);$true}}
+function Get-DawnstrikeStateBoundaryTaskInventory {{@($script:live)}}
+function Get-DawnstrikeStateBoundaryRuntimeAuthorization {{param($Receipt,$Kind,$StateRoot);if($Kind -eq 'current'){{$script:authorization}}else{{$script:noneAuthorization}}}}
+function Get-DawnstrikeStateBoundaryActivationLineage {{[pscustomobject]@{{status='NONE';activation_id='NONE';receipt_relative_path='NONE';receipt_sha256='NONE';journal_relative_path='NONE';journal_sha256='NONE'}}}}
+function Open-DawnstrikeStateBoundaryRuntimeAuthorizationEvidence {{[pscustomobject]@{{locks=@(New-Disposable)}}}}
+function Get-DawnstrikeStateBoundaryTaskMutationTerminalEvidence {{[pscustomobject]@{{record=[pscustomobject]@{{activation_id=$sourceId;previous_sha=$previous;previous_tree=$previousTree}};locks=@(New-Disposable)}}}}
+function Open-DawnstrikeStateBoundaryExactFile {{
+  param($Path,$ExpectedSha256,$Label)
+  $value=if($Label -like '*journal*'){{$journal}}else{{$comp}}
+  [pscustomobject]@{{bytes=[Text.UTF8Encoding]::new($false).GetBytes(($value|ConvertTo-Json -Compress));stream=(New-Disposable);lease=(New-Disposable)}}
+}}
+function Assert-DawnstrikeStateRootBoundary {{
+  param($StateRoot,$EvidenceRoot,$AllowedTaskMutationOperationId,[switch]$AllowTaskDefinitionDrift)
+  [pscustomobject]@{{receipt=$script:currentReceipt;receipt_sha256=$script:currentHash;writer_sids=@($sid);locks=@((New-Disposable),(New-Disposable),(New-Disposable))}}
+}}
+function Write-DawnstrikeStateBoundaryProtectedJson {{
+  param($Payload,[string]$Path,[switch]$NoReplace)
+  $bytes=[Text.UTF8Encoding]::new($false).GetBytes(($Payload|ConvertTo-Json -Depth 20)+"`r`n")
+  $hash=Get-DawnstrikeStateBoundarySha256Bytes $bytes
+  if($NoReplace -and (Test-Path -LiteralPath $Path)){{
+    if((Get-DawnstrikeStateBoundarySha256Bytes ([IO.File]::ReadAllBytes($Path))) -cne $hash){{throw 'fixture no-replace mismatch'}}
+  }}else{{[IO.File]::WriteAllBytes($Path,$bytes)}}
+  if([IO.Path]::GetFullPath($Path) -eq [IO.Path]::GetFullPath('{_quote(current)}')){{$script:currentReceipt=[pscustomobject]$Payload;$script:currentHash=$hash}}
+  [pscustomobject]@{{path=$Path;sha256=$hash}}
+}}
+$args=@{{StateRoot='{_quote(state)}';EvidenceRoot='{_quote(evidence)}';ExpectedSha=$candidate;ExpectedTree=$candidateTree;OperationId=$operation;RequestContractSha256=$request;CompensationReceiptPath='{_quote(compensation)}';CompensationReceiptSha256=('e'*64);CompensationJournalPath='{_quote(recovery_journal)}';CompensationJournalSha256=('f'*64);SourceActivationId=$sourceId;SourceTerminalReceiptSha256=('1'*64);SourceTerminalJournalSha256=('2'*64)}}
+$firstCrash=$false
+try {{$null=Complete-DawnstrikeStateBoundaryTaskMutationFailClosed @args -TestCrashPoint after_completion}} catch {{$firstCrash=$_.Exception.Message -like '*AFTER_FAIL_CLOSED_COMPLETION*'}}
+$firstOld=($script:currentHash -ceq ('f'*64));$completionHeld=(Test-Path -LiteralPath '{_quote(completion)}');$pendingHeld=(Test-Path -LiteralPath '{_quote(pending)}')
+$secondCrash=$false
+try {{$null=Complete-DawnstrikeStateBoundaryTaskMutationFailClosed @args -TestCrashPoint after_current}} catch {{$secondCrash=$_.Exception.Message -like '*AFTER_FAIL_CLOSED_CURRENT*'}}
+$secondNew=($script:currentHash -cne ('f'*64));$pendingAfterCurrent=(Test-Path -LiteralPath '{_quote(pending)}')
+$bytes=[IO.File]::ReadAllBytes('{_quote(completion)}')
+$completionObject=[pscustomobject]@{{path='{_quote(completion)}';payload=([Text.Encoding]::UTF8.GetString($bytes)|ConvertFrom-Json);sha256=(Get-DawnstrikeStateBoundarySha256Bytes $bytes)}}
+$final=Complete-DawnstrikeStateBoundaryTaskMutationFailClosedAdoption -Intent $script:intent -Completion $completionObject -StateRoot '{_quote(state)}' -EvidenceRoot '{_quote(evidence)}'
+foreach($lock in @($final.locks)){{if($null-ne$lock){{$lock.Dispose()}}}}
+[pscustomobject]@{{first_crash=$firstCrash;first_old=$firstOld;completion_held=$completionHeld;pending_held=$pendingHeld;second_crash=$secondCrash;second_new=$secondNew;pending_after_current=$pendingAfterCurrent;final_status=([string]$final.status);pending_removed=(-not(Test-Path -LiteralPath '{_quote(pending)}'))}}|ConvertTo-Json -Compress
+"""
+    result = _run_ps(script)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout.strip().splitlines()[-1]) == {
+        "first_crash": True,
+        "first_old": True,
+        "completion_held": True,
+        "pending_held": True,
+        "second_crash": True,
+        "second_new": True,
+        "pending_after_current": True,
+        "final_status": "COMPENSATED_DISABLED",
+        "pending_removed": True,
+    }
+
+
+@pytest.mark.skipif(not POWERSHELL.is_file(), reason="requires Windows PowerShell 5.1")
+def test_candidate_migration_file_transition_recovers_both_hard_kill_boundaries(
+    tmp_path: Path,
+) -> None:
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    current = evidence / "state-boundary-current.json"
+    historical = evidence / ("state-boundary-" + "b" * 40 + ".json")
+    pending = evidence / "state-boundary-task-mutation-pending.json"
+    completion = evidence / ("state-boundary-candidate-migration-" + "c" * 32 + ".json")
+    script = rf"""
+$ErrorActionPreference='Stop'
+. '{_quote(HELPER)}'
+function Write-DawnstrikeStateBoundaryProtectedJson {{
+  param($Payload,[string]$Path,[switch]$NoReplace)
+  $bytes=[Text.UTF8Encoding]::new($false).GetBytes(($Payload|ConvertTo-Json -Depth 20)+"`r`n")
+  $hash=Get-DawnstrikeStateBoundarySha256Bytes $bytes
+  if($NoReplace -and (Test-Path -LiteralPath $Path -PathType Leaf)) {{
+    $old=[IO.File]::ReadAllBytes($Path)
+    if((Get-DawnstrikeStateBoundarySha256Bytes $old) -cne $hash) {{throw 'fixture no-replace mismatch'}}
+  }} else {{[IO.File]::WriteAllBytes($Path,$bytes)}}
+  [pscustomobject]@{{path=$Path;sha256=$hash}}
+}}
+function Read-DawnstrikeStateBoundaryProtectedJson {{
+  param([string]$Path)
+  $bytes=[IO.File]::ReadAllBytes($Path)
+  [pscustomobject]@{{payload=([Text.Encoding]::UTF8.GetString($bytes)|ConvertFrom-Json);sha256=(Get-DawnstrikeStateBoundarySha256Bytes $bytes);stream=[IO.MemoryStream]::new($bytes)}}
+}}
+$old=[ordered]@{{candidate_sha=('a'*40);current_runtime_authorization_sha256=('1'*64)}}
+$new=[ordered]@{{candidate_sha=('b'*40);current_runtime_authorization_sha256=('1'*64);rollback_runtime_authorization_sha256='NONE';last_activation_id='NONE';candidate_migration_runtime_sha=('a'*40);candidate_migration_runtime_tree=('2'*40);candidate_migration_runtime_helper_path='C:\Program Files\Dawnstrike\releases\'+('a'*40)+'\scripts\state_root_boundary.ps1';candidate_migration_runtime_helper_sha256=('7'*64)}}
+$oldWrite=Write-DawnstrikeStateBoundaryProtectedJson -Payload $old -Path '{_quote(current)}'
+$newHash=Get-DawnstrikeStateBoundarySha256Text (($new|ConvertTo-Json -Depth 20)+"`r`n")
+$intentPayload=[ordered]@{{
+ schema_version='dawnstrike.state_boundary_candidate_migration_intent.v1';operation_id=('c'*32);created_at_utc='2026-09-03T00:00:00Z';state_root='C:\r\dawnstrike-state';from_candidate_sha=('a'*40);from_candidate_tree=('2'*40);runtime_sha=('a'*40);runtime_tree=('2'*40);candidate_sha=('b'*40);candidate_tree=('3'*40);request_contract_sha256=('4'*64);old_current_receipt_sha256=$oldWrite.sha256;authorization_state='BOOTSTRAP_DISABLED';current_runtime_authorization_sha256=('1'*64);rollback_runtime_authorization_sha256='NONE';activation_lineage_id='NONE';predecessor_helper_path='C:\Program Files\Dawnstrike\releases\'+('a'*40)+'\scripts\state_root_boundary.ps1';predecessor_helper_sha256=('7'*64);runtime_helper_path='C:\Program Files\Dawnstrike\releases\'+('a'*40)+'\scripts\state_root_boundary.ps1';runtime_helper_sha256=('7'*64);installed_helper_path='C:\Program Files\Dawnstrike\releases\'+('b'*40)+'\scripts\state_root_boundary.ps1';installed_helper_sha256=('5'*64);candidate_admission_path='C:\Program Files\Dawnstrike\releases\'+('b'*40)+'\.git\dawnstrike-host-admission-v1.json';candidate_admission_sha256=('6'*64);new_current_receipt_sha256=$newHash;new_current_receipt=$new;completion_path='{_quote(completion)}';historical_receipt_path='{_quote(historical)}';research_only=$true;broker_execution_enabled=$false
+}}
+$intentWrite=Write-DawnstrikeStateBoundaryProtectedJson -Payload $intentPayload -Path '{_quote(pending)}'
+$intent=[pscustomobject]@{{path='{_quote(pending)}';payload=[pscustomobject]$intentPayload;sha256=$intentWrite.sha256}}
+$firstCrash=$false
+try {{$null=Complete-DawnstrikeStateBoundaryCandidateMigrationFileTransition -Intent $intent -EvidenceRoot '{_quote(evidence)}' -CurrentReceiptPath '{_quote(current)}' -TestCrashPoint after_completion}} catch {{$firstCrash=$_.Exception.Message -like '*after_completion*'}}
+$afterFirst=(Read-DawnstrikeStateBoundaryProtectedJson '{_quote(current)}').sha256
+$secondCrash=$false
+try {{$null=Complete-DawnstrikeStateBoundaryCandidateMigrationFileTransition -Intent $intent -EvidenceRoot '{_quote(evidence)}' -CurrentReceiptPath '{_quote(current)}' -TestCrashPoint after_current}} catch {{$secondCrash=$_.Exception.Message -like '*after_current*'}}
+$afterSecond=(Read-DawnstrikeStateBoundaryProtectedJson '{_quote(current)}').sha256
+$final=Complete-DawnstrikeStateBoundaryCandidateMigrationFileTransition -Intent $intent -EvidenceRoot '{_quote(evidence)}' -CurrentReceiptPath '{_quote(current)}'
+$currentRead=Read-DawnstrikeStateBoundaryProtectedJson '{_quote(current)}'
+$historicalRead=Read-DawnstrikeStateBoundaryProtectedJson '{_quote(historical)}'
+[pscustomobject]@{{first_crash=$firstCrash;first_old=($afterFirst -ceq $oldWrite.sha256);second_crash=$secondCrash;second_new=($afterSecond -ceq $newHash);current_new=($currentRead.sha256 -ceq $newHash);historical_new=($historicalRead.sha256 -ceq $newHash);authorization_preserved=([string]$currentRead.payload.current_runtime_authorization_sha256 -ceq ('1'*64));pending_removed=(-not (Test-Path -LiteralPath '{_quote(pending)}'));completion_preserved=(Test-Path -LiteralPath '{_quote(completion)}')}}|ConvertTo-Json -Compress
+"""
+    result = _run_ps(script)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout.strip().splitlines()[-1]) == {
+        "first_crash": True,
+        "first_old": True,
+        "second_crash": True,
+        "second_new": True,
+        "current_new": True,
+        "historical_new": True,
+        "authorization_preserved": True,
+        "pending_removed": True,
+        "completion_preserved": True,
+    }
+
+
+@pytest.mark.skipif(not POWERSHELL.is_file(), reason="requires Windows PowerShell 5.1")
+def test_candidate_migration_intent_rejects_remapped_retry(tmp_path: Path) -> None:
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    state = Path(r"C:\r\dawnstrike-state")
+    sha_a, tree_a, sha_b, tree_b = "a" * 40, "1" * 40, "b" * 40, "2" * 40
+    runtime_sha, runtime_tree = "d" * 40, "e" * 40
+    request = "3" * 64
+    helper = Path(rf"C:\Program Files\Dawnstrike\releases\{sha_b}\scripts\state_root_boundary.ps1")
+    admission = Path(
+        rf"C:\Program Files\Dawnstrike\releases\{sha_b}\.git\dawnstrike-host-admission-v1.json"
+    )
+    script = rf"""
+$ErrorActionPreference='Stop'
+. '{_quote(HELPER)}'
+$new=[ordered]@{{candidate_sha='{sha_b}';candidate_tree='{tree_b}';current_runtime_authorization_sha256=('4'*64);rollback_runtime_authorization_contract='NONE';rollback_runtime_authorization_sha256='NONE';last_activation_id='NONE';candidate_migration_operation_id=('5'*32);candidate_migration_request_contract_sha256='{request}';candidate_migration_predecessor_receipt_sha256=('6'*64);candidate_migration_predecessor_helper_path=('C:\Program Files\Dawnstrike\releases\{sha_a}\scripts\state_root_boundary.ps1');candidate_migration_predecessor_helper_sha256=('a'*64);candidate_migration_authorization_state='BOOTSTRAP_DISABLED';candidate_migration_runtime_sha='{runtime_sha}';candidate_migration_runtime_tree='{runtime_tree}';candidate_migration_runtime_helper_path=('C:\Program Files\Dawnstrike\releases\{runtime_sha}\scripts\state_root_boundary.ps1');candidate_migration_runtime_helper_sha256=('d'*64)}}
+$newHash=Get-DawnstrikeStateBoundarySha256Text (($new|ConvertTo-Json -Depth 20)+"`r`n")
+$payload=[ordered]@{{schema_version='dawnstrike.state_boundary_candidate_migration_intent.v1';operation_id=('5'*32);created_at_utc='2026-09-03T00:00:00Z';state_root='{_quote(state)}';from_candidate_sha='{sha_a}';from_candidate_tree='{tree_a}';runtime_sha='{runtime_sha}';runtime_tree='{runtime_tree}';candidate_sha='{sha_b}';candidate_tree='{tree_b}';request_contract_sha256='{request}';old_current_receipt_sha256=('6'*64);authorization_state='BOOTSTRAP_DISABLED';current_runtime_authorization_sha256=('4'*64);rollback_runtime_authorization_sha256='NONE';activation_lineage_id='NONE';predecessor_helper_path=('C:\Program Files\Dawnstrike\releases\{sha_a}\scripts\state_root_boundary.ps1');predecessor_helper_sha256=('a'*64);runtime_helper_path=('C:\Program Files\Dawnstrike\releases\{runtime_sha}\scripts\state_root_boundary.ps1');runtime_helper_sha256=('d'*64);installed_helper_path='{_quote(helper)}';installed_helper_sha256=('7'*64);candidate_admission_path='{_quote(admission)}';candidate_admission_sha256=('8'*64);new_current_receipt_sha256=$newHash;new_current_receipt=$new;completion_path=(Join-Path '{_quote(evidence)}' ('state-boundary-candidate-migration-'+('5'*32)+'.json'));historical_receipt_path=(Join-Path '{_quote(evidence)}' ('state-boundary-{sha_b}.json'));research_only=$true;broker_execution_enabled=$false}}
+$intent=[pscustomobject]@{{payload=[pscustomobject]$payload}}
+$valid=$false
+try {{$null=Assert-DawnstrikeStateBoundaryCandidateMigrationIntent -Intent $intent -StateRoot '{_quote(state)}' -EvidenceRoot '{_quote(evidence)}' -ExpectedBoundarySha '{sha_a}' -ExpectedBoundaryTree '{tree_a}' -ExpectedRuntimeSha '{runtime_sha}' -ExpectedRuntimeTree '{runtime_tree}' -CandidateSha '{sha_b}' -CandidateTree '{tree_b}' -RequestContractSha256 '{request}' -InstalledHelperPath '{_quote(helper)}' -InstalledHelperSha256 ('7'*64) -CandidateAdmissionPath '{_quote(admission)}' -CandidateAdmissionSha256 ('8'*64);$valid=$true}} catch {{}}
+$intent.payload.request_contract_sha256='9'*64
+$remapBlocked=$false
+try {{$null=Assert-DawnstrikeStateBoundaryCandidateMigrationIntent -Intent $intent -StateRoot '{_quote(state)}' -EvidenceRoot '{_quote(evidence)}' -ExpectedBoundarySha '{sha_a}' -ExpectedBoundaryTree '{tree_a}' -ExpectedRuntimeSha '{runtime_sha}' -ExpectedRuntimeTree '{runtime_tree}' -CandidateSha '{sha_b}' -CandidateTree '{tree_b}' -RequestContractSha256 '{request}' -InstalledHelperPath '{_quote(helper)}' -InstalledHelperSha256 ('7'*64) -CandidateAdmissionPath '{_quote(admission)}' -CandidateAdmissionSha256 ('8'*64)}} catch {{$remapBlocked=$true}}
+$intent.payload.request_contract_sha256='{request}'
+$intent.payload.authorization_state='ACTIVE_READY'
+$intent.payload.rollback_runtime_authorization_sha256='b'*64
+$intent.payload.activation_lineage_id='c'*24
+$intent.payload.new_current_receipt.candidate_migration_authorization_state='ACTIVE_READY'
+$intent.payload.new_current_receipt.rollback_runtime_authorization_sha256='b'*64
+$intent.payload.new_current_receipt.last_activation_id='c'*24
+$intent.payload.new_current_receipt_sha256=Get-DawnstrikeStateBoundarySha256Text (($intent.payload.new_current_receipt|ConvertTo-Json -Depth 20)+"`r`n")
+$activeValid=$false
+try {{$null=Assert-DawnstrikeStateBoundaryCandidateMigrationIntent -Intent $intent -StateRoot '{_quote(state)}' -EvidenceRoot '{_quote(evidence)}' -ExpectedBoundarySha '{sha_a}' -ExpectedBoundaryTree '{tree_a}' -ExpectedRuntimeSha '{runtime_sha}' -ExpectedRuntimeTree '{runtime_tree}' -CandidateSha '{sha_b}' -CandidateTree '{tree_b}' -RequestContractSha256 '{request}' -InstalledHelperPath '{_quote(helper)}' -InstalledHelperSha256 ('7'*64) -CandidateAdmissionPath '{_quote(admission)}' -CandidateAdmissionSha256 ('8'*64);$activeValid=$true}} catch {{}}
+[pscustomobject]@{{valid=$valid;remap_blocked=$remapBlocked;active_valid=$activeValid}}|ConvertTo-Json -Compress
+"""
+    result = _run_ps(script)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout.strip().splitlines()[-1]) == {
+        "valid": True,
+        "remap_blocked": True,
+        "active_valid": True,
+    }

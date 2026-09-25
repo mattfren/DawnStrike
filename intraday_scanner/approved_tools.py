@@ -12,8 +12,8 @@ from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-APPROVED_GIT_PATH = Path(r"C:\Program Files\Git\cmd\git.exe")
-APPROVED_GIT_SHA256 = "37c5725818d602e951ba2563b870d62763322956b73373da4c33a0b566a80bc9"
+APPROVED_GIT_PATH = Path(r"C:\Program Files\Dawnstrike\Git-2.55.0.5\cmd\git.exe")
+APPROVED_GIT_SHA256 = "78211c7ed73988da93a6d8a33d47ec6187f464d7ea2a9a00c182bbd7a1ecf30f"
 SAFE_GIT_CONFIGURATION = (
     "-c",
     "core.fsmonitor=false",

@@ -17,6 +17,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 def _resolve_public_root() -> Path:
     candidates = (
+        REPOSITORY_ROOT / "function_public",
         REPOSITORY_ROOT / "api" / "public",
         REPOSITORY_ROOT / "public",
         REPOSITORY_ROOT / "build" / "public",
@@ -145,7 +146,7 @@ class handler(BaseHTTPRequestHandler):
 def _validate_packaged_public_state(readiness: dict[str, object]) -> list[str]:
     # Kept as a compatibility entry point for callers that imported the old
     # embedded-state validator.  Packaged readiness now always reads files
-    # under api/public; metadata cannot stand in for missing bytes.
+    # under function_public; metadata cannot stand in for missing bytes.
     return ["embedded_public_state_unsupported"]
 
 

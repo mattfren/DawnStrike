@@ -5,7 +5,14 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-from scripts.runtime_activation_contract import activation_boundary
+import pytest
+
+from scripts.runtime_activation_contract import (
+    ActivationContractError,
+    activation_boundary,
+    activation_session_contract,
+    rollback_session_contract,
+)
 
 
 def _at(iso: str) -> datetime:
@@ -20,6 +27,7 @@ def test_activation_boundary_allows_next_session_after_completed_monday() -> Non
 
     assert result["status"] == "PASS"
     assert result["expected_market_date"] == "2026-09-01"
+    assert result["required_completed_market_date"] == "2026-08-31"
     assert result["window"] == "POST_SESSION_NEXT_SESSION"
     assert result["research_only"] is True
     assert result["broker_execution_enabled"] is False
@@ -48,10 +56,44 @@ def test_activation_boundary_allows_target_before_morning_but_not_after_morning(
 
     assert before_morning["status"] == "PASS"
     assert before_morning["window"] == "PRE_MORNING"
+    assert before_morning["required_completed_market_date"] == "2026-08-31"
     assert after_morning["status"] == "BLOCKED"
     assert after_morning["expected_market_date"] == "2026-09-02"
     assert after_morning["window"] == "ACTIVE_SESSION_BLOCKED"
     assert "activation_requires_next_session_pre_morning_window" in after_morning["errors"]
+
+
+def test_activation_session_contract_skips_weekend_and_market_holiday() -> None:
+    result = activation_session_contract("2026-09-08")
+
+    assert result == {
+        "status": "PASS",
+        "market_date": "2026-09-08",
+        "required_completed_market_date": "2026-09-04",
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+
+
+def test_fresh_rollback_session_accepts_weekday_pre_morning() -> None:
+    result = rollback_session_contract(now=_at("2026-09-01T12:30:00Z"))
+
+    assert result["rollback_target_market_date"] == "2026-09-01"
+    assert result["required_completed_market_date"] == "2026-08-31"
+    assert result["window"] == "PRE_MORNING"
+
+
+def test_fresh_rollback_session_accepts_sunday_before_monday() -> None:
+    result = rollback_session_contract(now=_at("2026-08-30T20:00:00Z"))
+
+    assert result["rollback_target_market_date"] == "2026-08-31"
+    assert result["required_completed_market_date"] == "2026-08-28"
+    assert result["window"] == "POST_SESSION_NEXT_SESSION"
+
+
+def test_fresh_rollback_session_blocks_active_session() -> None:
+    with pytest.raises(ActivationContractError, match="pre-Morning or post-session"):
+        rollback_session_contract(now=_at("2026-09-01T15:00:00Z"))
 
 
 def test_activation_boundary_blocks_next_session_during_active_session() -> None:

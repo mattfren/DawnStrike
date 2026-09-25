@@ -1,11 +1,11 @@
 [CmdletBinding()]
 param(
-    [string]$RuntimeRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")),
+    [string]$RuntimeRoot = ([IO.Path]::GetFullPath([IO.Path]::Combine($PSScriptRoot, '..'))),
     [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedSha,
     [Parameter(Mandatory = $true)][string]$LaunchManifestPath,
     [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')][string]$LaunchManifestSha256,
     [string]$StateRoot = "C:\r\dawnstrike-state",
-    [string]$MarketDate = (Get-Date).ToString("yyyy-MM-dd"),
+    [string]$MarketDate = ([DateTime]::Now.ToString('yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture)),
     [string]$Notify = "telegram",
     [string]$CoreUniverseManifest = "",
     [string]$PaperOpsRoot = "",
@@ -14,8 +14,13 @@ param(
     [int]$BackupRetention = 7
 )
 
+$global:PSModuleAutoLoadingPreference = 'None'
+$env:PSModulePath = 'C:\Windows\System32\WindowsPowerShell\v1.0\Modules'
+. ([IO.Path]::Combine($PSScriptRoot, 'powershell_module_boundary.ps1'))
+
 $ErrorActionPreference = "Stop"
 $runtime = (Resolve-Path $RuntimeRoot).Path
+$codeRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')).TrimEnd('\')
 New-Item -ItemType Directory -Path $StateRoot -Force | Out-Null
 $state = (Resolve-Path $StateRoot).Path
 $paperOpsRoot = if ($PaperOpsRoot) { [System.IO.Path]::GetFullPath($PaperOpsRoot) } else { Join-Path $state "v2_paper_ops_live" }
@@ -25,7 +30,7 @@ $script:DawnstrikeLaunchLocks = (Assert-DawnstrikeScheduledLaunchManifest -Runti
 . (Join-Path $PSScriptRoot "invoke_dawnstrike_stage.ps1")
 . (Join-Path $PSScriptRoot "alpha_cycle_artifact.ps1")
 Import-DawnstrikeEnvironment -StateRoot $state
-$null = Assert-DawnstrikeProcessSourceBoundToHead -ReleaseRoot $runtime -ExpectedSha $ExpectedSha -EntryScript $PSCommandPath
+$null = Assert-DawnstrikeProcessSourceBoundToHead -ReleaseRoot $codeRoot -ExpectedSha $ExpectedSha -EntryScript $PSCommandPath
 $dbPath = Join-Path $state "shadow_real.sqlite"
 $sourceConfigPath = Join-Path $state "config\web_sources.yaml"
 $outputRoot = Join-Path $state "outputs\alpha_cycle\$MarketDate"
@@ -88,7 +93,7 @@ if (-not $dailyLock.acquired) {
 $backup = Invoke-DawnstrikeNativeProcess `
     -FilePath "py.exe" `
     -ArgumentList @(
-        (Join-Path $runtime "scripts\state_disaster_recovery.py"),
+        (Join-Path $codeRoot "scripts\state_disaster_recovery.py"),
         "backup",
         "--source-db", $dbPath,
         "--backup-root", $BackupRoot,

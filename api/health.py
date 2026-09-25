@@ -13,6 +13,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 def _public_root() -> Path:
     candidates = (
+        REPOSITORY_ROOT / "function_public",
         REPOSITORY_ROOT / "api" / "public",
         REPOSITORY_ROOT / "public",
         REPOSITORY_ROOT / "build" / "public",

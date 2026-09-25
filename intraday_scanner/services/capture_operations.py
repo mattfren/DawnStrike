@@ -25,8 +25,10 @@ from intraday_scanner.market_calendar import canonical_regular_session_id, marke
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GIT_OID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _MODES = {"forward_observed", "retrospective_research"}
-_APPROVED_WINDOWS_GIT = Path(r"C:\Program Files\Git\cmd\git.exe")
-_APPROVED_WINDOWS_GIT_SHA256 = "37c5725818d602e951ba2563b870d62763322956b73373da4c33a0b566a80bc9"
+_APPROVED_WINDOWS_GIT = Path(
+    r"C:\Program Files\Dawnstrike\Git-2.55.0.5\cmd\git.exe"
+)
+_APPROVED_WINDOWS_GIT_SHA256 = "78211c7ed73988da93a6d8a33d47ec6187f464d7ea2a9a00c182bbd7a1ecf30f"
 
 
 class CapturePlanError(ValueError):

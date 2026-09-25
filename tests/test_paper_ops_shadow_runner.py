@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from intraday_scanner.market_calendar import market_session
 from intraday_scanner.v2.data import MarketBar, MarketDataset, write_ohlcv_csv
 from intraday_scanner.v2.data_truth import build_data_truth_snapshot
 from intraday_scanner.v2.data_truth.models import DataTruthManifest
@@ -35,14 +36,14 @@ CHALLENGER_ID = "fixture_shadow_parent_candidate_v2"
 
 def _future_session_date(days: int) -> date:
     value = date.today() + timedelta(days=days)
-    while value.weekday() >= 5:
+    while not market_session(value).is_trading_day:
         value += timedelta(days=1)
     return value
 
 
 def _next_session(value: date) -> date:
     value += timedelta(days=1)
-    while value.weekday() >= 5:
+    while not market_session(value).is_trading_day:
         value += timedelta(days=1)
     return value
 
@@ -1399,7 +1400,7 @@ def _build_retained_data_truth_snapshot(
     # fleet warm-up history and the last completed exchange session. Keep this
     # retained fixture realistic while preserving the requested terminal close.
     completed_date = run_date
-    while completed_date.weekday() >= 5:
+    while not market_session(completed_date).is_trading_day:
         completed_date -= timedelta(days=1)
     original_bars = list(source_dataset.bars_by_symbol.get("TST", ()))
     terminal = next(
@@ -1409,7 +1410,7 @@ def _build_retained_data_truth_snapshot(
     history: list[MarketBar] = []
     cursor = completed_date - timedelta(days=1)
     while len(history) < 100:
-        if cursor.weekday() < 5:
+        if market_session(cursor).is_trading_day:
             history.append(
                 replace(
                     terminal,

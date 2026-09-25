@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -14,6 +15,23 @@ import pytest
 
 import intraday_scanner.services.capture_operations as capture_operations
 from intraday_scanner.services.capture_operations import CapturePlan, CapturePlanError, plan_as_dict
+
+
+@pytest.fixture(autouse=True)
+def _bind_host_git_for_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exercise production identity checks against the CI host's Git bytes."""
+
+    if os.name != "nt":
+        return
+    discovered = shutil.which("git")
+    assert discovered is not None
+    git_path = Path(discovered).resolve(strict=True)
+    monkeypatch.setattr(capture_operations, "_APPROVED_WINDOWS_GIT", git_path)
+    monkeypatch.setattr(
+        capture_operations,
+        "_APPROVED_WINDOWS_GIT_SHA256",
+        hashlib.sha256(git_path.read_bytes()).hexdigest(),
+    )
 
 
 def _operations_module():
@@ -448,14 +466,14 @@ def test_capture_script_is_plan_only_without_execute() -> None:
         "intraday_scanner/services/capture_operations.py"
     ).read_text(encoding="utf-8")
     assert "Python313\\python.exe" in registration
-    assert "ef8f51028ac5329641985112f8efb1c2d4c47c86b8011ddf7e6fae21e2b4e5a1" in registration
+    assert "85b71d8c6ec1905935f74be0c9869aae198d00e98f39df699ec66f9c5a84cecd" in registration
     assert (
         '$pythonPrefix = @("-I", "-B", "-S", "-X", ("pycache_prefix=" + $bytecodePrefix), "-u")'
         in registration
     )
     assert "$bootstrapArgs = @(" in registration
     assert '"-c", $bootstrapPreloader, $bootstrap, $bootstrapSha256' in registration
-    assert '"--release-root", $RuntimeRoot, "--expected-sha", $CandidateSha,' in registration
+    assert '"--release-root", $releaseRoot, "--expected-sha", $CandidateSha,' in registration
     assert '"--script", $runner, "--"' in registration
     assert "Get-AuthenticodeSignature" in registration
     execute_index = registration.index("$pythonVersion = @(& $Python -I -c")

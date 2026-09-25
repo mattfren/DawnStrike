@@ -4,14 +4,12 @@ from pathlib import Path
 def test_task_scripts_exist_and_do_not_overwrite_existing_task() -> None:
     register = Path("scripts/register_daily_finalize_task.ps1").read_text(encoding="utf-8")
     runner = Path("scripts/run_daily_finalize.ps1").read_text(encoding="utf-8")
-    assert "Dawnstrike 10of10 Daily Finalize" in register
-    assert "already exists" in register
-    assert "ReplaceExisting" in register
-    assert "-RuntimeRoot" in register
-    assert "-StateRoot" in register
-    assert "-SourceRoot" not in register
-    assert "-PublicationMode" in register
-    assert "-AllowDegraded" not in register
+    assert "direct daily-finalize task registration is disabled" in register
+    assert "administrator-installed protected release launcher" in register
+    assert "governed scheduler transaction" in register
+    assert "Register-ScheduledTask" not in register
+    assert "Set-ScheduledTask" not in register
+    assert ". $processRunner" not in register
     assert "--retry-delay-seconds" in runner
     assert '$dbPath = Join-Path $state "shadow_real.sqlite"' in runner
     assert "publish_vercel_public.ps1" in runner
@@ -52,20 +50,23 @@ def test_task_scripts_exist_and_do_not_overwrite_existing_task() -> None:
     assert '"--release-sha", $releaseSha' in monitor
 
 
-def test_task_scripts_use_the_installed_windows_battery_safe_switches() -> None:
+def test_legacy_task_registration_scripts_have_no_scheduler_authority() -> None:
     scripts = (
         Path("scripts/register_alphaops_tasks.ps1").read_text(encoding="utf-8"),
         Path("scripts/register_daily_finalize_task.ps1").read_text(encoding="utf-8"),
     )
 
     for script in scripts:
-        assert "-AllowStartIfOnBatteries" in script
-        assert "-DontStopIfGoingOnBatteries" in script
-        assert "-DisallowStartIfOnBatteries" not in script
-        assert "-StopIfGoingOnBatteries" not in script
+        assert "governed scheduler transaction" in script
+        assert "Register-ScheduledTask" not in script
+        assert "Set-ScheduledTask" not in script
+        assert "New-ScheduledTask" not in script
+        assert "Get-ScheduledTask" not in script
+        assert "Resolve-Path" not in script
+        assert "Test-Path" not in script
 
 
-def test_task_registration_resolves_principal_to_a_windows_sid_before_mutation() -> None:
+def test_legacy_task_registration_never_loads_mutable_principal_code() -> None:
     helper = Path("scripts/resolve_dawnstrike_task_principal.ps1").read_text(encoding="utf-8")
     alphaops = Path("scripts/register_alphaops_tasks.ps1").read_text(encoding="utf-8")
     finalize = Path("scripts/register_daily_finalize_task.ps1").read_text(encoding="utf-8")
@@ -76,43 +77,21 @@ def test_task_registration_resolves_principal_to_a_windows_sid_before_mutation()
     assert "canonicalAccount.Value" in helper
     assert "cannot be mapped to a Windows SID" in helper
     for script in (alphaops, finalize):
-        assert "resolve_dawnstrike_task_principal.ps1" in script
-        assert "Resolve-DawnstrikeTaskPrincipal -Credential $RunAsCredential" in script
-        assert "-User $taskPrincipal" in script
-        assert script.index("Resolve-DawnstrikeTaskPrincipal") < script.index(
-            "Register-ScheduledTask"
-        )
+        assert "resolve_dawnstrike_task_principal.ps1" not in script
+        assert "Resolve-DawnstrikeTaskPrincipal" not in script
+        assert "Register-ScheduledTask" not in script
+        assert "governed scheduler transaction" in script
 
 
-def test_alphaops_monitor_builds_a_weekly_repetition_cim_pattern() -> None:
+def test_legacy_alphaops_registration_is_an_unconditional_denial() -> None:
     register = Path("scripts/register_alphaops_tasks.ps1").read_text(encoding="utf-8")
 
-    assert '-ClassName "MSFT_TaskRepetitionPattern"' in register
-    assert "-ClientOnly" in register
-    assert 'Interval = "PT5M"' in register
-    assert 'RepetitionDuration = "PT6H35M"' in register
-    assert "Duration = [string]$definition.RepetitionDuration" in register
-    assert 'Start = "21:00"' in register
-    assert "ExecutionLimitMinutes = 60" in register
-    assert "ExecutionLimitMinutes = 4" in register
-    assert "New-TimeSpan -Minutes ([int]$definition.ExecutionLimitMinutes)" in register
-    assert "validate_web_source_config.py" in register
-    assert "failed semantic validation" in register
-    assert "source-config-validation.json" in register
-    assert "--runtime-root" in register
-    assert "--receipt" in register
-    assert "RestartIntervalMinutes = 15" in register
-    assert "ReuseExistingPrincipal" in register
-    assert "Set-ScheduledTask" in register
-    assert "Existing Password tasks require RunAsCredential" in register
-    assert "-ErrorAction Stop" in register
-    assert "preserving its approved stored principal" in register
-    assert register.index("$taskPreflight = @{}") < register.index("Set-ScheduledTask")
-    assert register.index("Existing AlphaOps tasks do not share") < register.index(
-        "Set-ScheduledTask"
-    )
-    assert "$trigger.Repetition = $repetition" in register
-    assert "$trigger.Repetition.Interval =" not in register
+    assert "$ErrorActionPreference = \"Stop\"" in register
+    assert "direct AlphaOps task registration is disabled" in register
+    assert "BootstrapBaseline or Activate" in register
+    assert "Join-Path" not in register
+    assert "Get-Content" not in register
+    assert "Invoke-DawnstrikeNativeProcess" not in register
 
 
 def test_weekly_training_waits_for_exact_release_finalize_receipt() -> None:

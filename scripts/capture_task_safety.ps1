@@ -259,6 +259,7 @@ function Assert-DawnstrikeCaptureTaskSafety {
         [Parameter(Mandatory = $true)][string]$Xml,
         [Parameter(Mandatory = $true)][string]$RuntimeRoot,
         [Parameter(Mandatory = $true)][string]$StateRoot,
+        [string]$ExpectedReleaseRoot = "",
         [string]$ExpectedPrincipal = "",
         [string]$ExpectedCandidateSha = "",
         [string]$ExpectedSymbolsManifest = "",
@@ -275,7 +276,7 @@ function Assert-DawnstrikeCaptureTaskSafety {
         [string]$ExpectedConfigRoot = "C:\r\dawnstrike-capture-config-20260830",
         [string]$ExpectedInterpreterPath = "",
         [string]$ExpectedInterpreterSha256 = "",
-        [string]$ExpectedInterpreterSignerThumbprint = "9BA3C2E210C7E8296C5056515BFC0B0BBA78AC48",
+        [string]$ExpectedInterpreterSignerThumbprint = "847785B686B2D3879731FA9AA3F1F5D48E85D99E",
         [ValidateSet("", "true", "false")][string]$ExpectedEnabled = "",
         [switch]$AllowLegacySettings,
         [switch]$AllowLegacyLauncher,
@@ -513,6 +514,10 @@ function Assert-DawnstrikeCaptureTaskSafety {
     }
     $runtime = [System.IO.Path]::GetFullPath($RuntimeRoot).TrimEnd('\')
     $state = [System.IO.Path]::GetFullPath($StateRoot).TrimEnd('\')
+    $release = if ([string]::IsNullOrWhiteSpace($ExpectedReleaseRoot)) {
+        $runtime
+    }
+    else { [System.IO.Path]::GetFullPath($ExpectedReleaseRoot).TrimEnd('\') }
     if (-not [string]::Equals([System.IO.Path]::GetFullPath($record.WorkingDirectory).TrimEnd('\'), $runtime, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "Capture task WorkingDirectory must equal RuntimeRoot."
     }
@@ -525,8 +530,8 @@ function Assert-DawnstrikeCaptureTaskSafety {
     )
     $runtime = [System.IO.Path]::GetFullPath($RuntimeRoot).TrimEnd('\')
     $state = [System.IO.Path]::GetFullPath($StateRoot).TrimEnd('\')
-    $expectedBootstrap = [System.IO.Path]::GetFullPath((Join-Path $runtime "scripts\dawnstrike_python_bootstrap.py"))
-    $expectedRunner = [System.IO.Path]::GetFullPath((Join-Path $runtime "scripts\run_daily_intraday_capture.py"))
+    $expectedBootstrap = [System.IO.Path]::GetFullPath((Join-Path $release "scripts\dawnstrike_python_bootstrap.py"))
+    $expectedRunner = [System.IO.Path]::GetFullPath((Join-Path $release "scripts\run_daily_intraday_capture.py"))
     $runnerIndex = 0
     $optionStart = 0
     $bootstrapPath = $null
@@ -589,19 +594,19 @@ function Assert-DawnstrikeCaptureTaskSafety {
         }
         $bootstrapPath = [System.IO.Path]::GetFullPath($tokens[8])
         if (-not [string]::Equals($bootstrapPath, $expectedBootstrap, [System.StringComparison]::OrdinalIgnoreCase)) {
-            throw "Capture action bootstrap is outside the exact RuntimeRoot contract."
+            throw "Capture action bootstrap is outside the protected release-root contract."
         }
         if (Test-Path -LiteralPath $bootstrapPath) {
             $bootstrapPath = Assert-DawnstrikeCaptureRegularPath $bootstrapPath "Capture release bootstrap"
         }
         elseif (-not $AllowMissingBootstrap) {
-            throw "Capture release bootstrap is missing from RuntimeRoot."
+            throw "Capture release bootstrap is missing from the protected release root."
         }
         $bootstrapSha256 = $tokens[9]
         if ($bootstrapSha256 -notmatch '^[0-9a-f]{64}$') { throw "Capture action bootstrap hash is invalid." }
         $bootstrapExpectedSha = $tokens[13]
         if ($tokens[10] -ne "--release-root" -or
-            -not [string]::Equals([System.IO.Path]::GetFullPath($tokens[11]).TrimEnd('\'), $runtime, [System.StringComparison]::OrdinalIgnoreCase) -or
+            -not [string]::Equals([System.IO.Path]::GetFullPath($tokens[11]).TrimEnd('\'), $release, [System.StringComparison]::OrdinalIgnoreCase) -or
             $tokens[12] -ne "--expected-sha" -or $bootstrapExpectedSha -notmatch '^[0-9a-f]{40}$' -or
             $tokens[14] -ne "--script" -or
             -not [string]::Equals([System.IO.Path]::GetFullPath($tokens[15]), $expectedRunner, [System.StringComparison]::OrdinalIgnoreCase) -or
@@ -620,7 +625,7 @@ function Assert-DawnstrikeCaptureTaskSafety {
     }
     $runner = [System.IO.Path]::GetFullPath($tokens[$runnerIndex])
     if (-not [string]::Equals($runner, $expectedRunner, [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw "Capture action runner is outside the exact RuntimeRoot contract."
+        throw "Capture action runner is outside the protected release-root contract."
     }
     if ($RequireRunner) {
         $null = Assert-DawnstrikeCaptureRegularPath $runner "Capture action runner"
@@ -668,7 +673,7 @@ function Assert-DawnstrikeCaptureTaskSafety {
     foreach ($option in $externalOptions) {
         if (-not [System.IO.Path]::IsPathRooted($values[$option])) { throw "Capture action $option must be absolute." }
         $full = [System.IO.Path]::GetFullPath($values[$option])
-        foreach ($forbidden in @($runtime, $state)) {
+        foreach ($forbidden in @($runtime, $state, $release) | Select-Object -Unique) {
             $prefix = $forbidden.TrimEnd('\') + '\'
             if ([string]::Equals($full.TrimEnd('\'), $forbidden, [System.StringComparison]::OrdinalIgnoreCase) -or $full.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
                 throw "Capture action $option is inside a forbidden governed root."

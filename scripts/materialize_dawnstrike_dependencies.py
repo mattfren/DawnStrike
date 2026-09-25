@@ -24,7 +24,7 @@ import stat
 from pathlib import Path, PurePosixPath
 
 APPROVED_RECORD_SET_SHA256 = (
-    "447a0d12feffcfd6c353d9acb4cfd1e5cc1b35e3548cd7e9ad58666516b4b3af"  # pragma: allowlist secret
+    "abd40a213fd6b5b396d803a5a2ed1bdfdea22556bb2552f20b942e90d7c4c8c5"  # pragma: allowlist secret
 )
 
 
@@ -154,6 +154,8 @@ def _write_stage_file(source: Path, contents: bytes, source_prefix: Path, stage:
         _fail(f"dependency stage path is duplicated: {relative}")
     with destination.open("xb") as stream:
         stream.write(contents)
+        stream.flush()
+        os.fsync(stream.fileno())
 
 
 def materialize(source_prefix: Path, stage: Path, requirements_lock: Path) -> dict[str, object]:

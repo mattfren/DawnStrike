@@ -530,13 +530,71 @@ def _safe_backup_root(path: str | Path, state_root: Path) -> Path:
     return root
 
 
+def _read_retained_preparation_lock(path: Path) -> str:
+    """Read through the parent's protective Windows retained-lock handle."""
+
+    if os.name != "nt":
+        return path.read_text(encoding="utf-8")
+
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    raw_handle = create_file(
+        str(path),
+        0x80000000,  # GENERIC_READ
+        0x00000001 | 0x00000002 | 0x00000004,  # share read/write/delete
+        None,
+        3,  # OPEN_EXISTING
+        0x00000080 | 0x00200000,  # NORMAL | OPEN_REPARSE_POINT
+        None,
+    )
+    invalid_handle = ctypes.c_void_p(-1).value
+    if raw_handle is None or int(raw_handle) == invalid_handle:
+        error = ctypes.get_last_error()
+        raise OSError(error, f"cannot read retained state preparation lock: {path}")
+    try:
+        descriptor = msvcrt.open_osfhandle(
+            int(raw_handle), os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        )
+    except Exception:
+        close_handle(raw_handle)
+        raise
+    with os.fdopen(descriptor, "rb", closefd=True) as stream:
+        opened = os.fstat(stream.fileno())
+        content = stream.read()
+        after_read = os.fstat(stream.fileno())
+    after_path = path.stat()
+    opened_identity = (opened.st_dev, opened.st_ino, opened.st_size)
+    after_read_identity = (after_read.st_dev, after_read.st_ino, after_read.st_size)
+    after_path_identity = (after_path.st_dev, after_path.st_ino, after_path.st_size)
+    if opened_identity != after_read_identity or after_read_identity != after_path_identity:
+        raise OSError("state preparation lock identity changed while being read")
+    return content.decode("utf-8", "strict")
+
+
 def _validate_preparation_lock(path: str | Path, state_root: Path) -> Path:
     lock = _assert_no_reparse_components(path).resolve()
     expected = state_root / "locks" / "dawnstrike-runtime-activation.lock"
     if lock != expected or not lock.is_file() or _is_reparse_point(lock):
         raise StatePreparationError("state preparation lock is missing or unsafe")
     try:
-        payload = _strict_json(lock.read_text(encoding="utf-8"))
+        payload = _strict_json(_read_retained_preparation_lock(lock))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise StatePreparationError("state preparation lock is invalid") from exc
     legacy_valid = (

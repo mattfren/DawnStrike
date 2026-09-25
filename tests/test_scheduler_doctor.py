@@ -1,7 +1,9 @@
+import base64
 import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -17,6 +19,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 _REAL_RUNTIME_GIT_CONTRACT = scheduler_service._runtime_git_contract
+_REAL_PROTECTED_SCHEDULER_AUTHORITY = scheduler_service._load_protected_scheduler_authority
 
 
 def _stable_runtime_contract() -> dict[str, str]:
@@ -28,8 +31,77 @@ def _stable_runtime_contract() -> dict[str, str]:
     }
 
 
+def _test_definition_contract_sha256(task_name: str) -> str:
+    return hashlib.sha256(f"definition:{task_name}".encode()).hexdigest()
+
+
+def _test_guarded_arguments(task_name: str, runtime: Path, state: Path) -> str:
+    candidate_sha = _stable_runtime_contract()["candidate_sha"]
+    runner_name = scheduler_service.EXPECTED_TASKS[task_name]
+    runner = scheduler_service.PROTECTED_RELEASES_ROOT / candidate_sha / "scripts" / runner_name
+    manifest = state / "receipts" / "scheduler-launch" / f"{candidate_sha}-{runner_name}.json"
+    runner_arguments = (
+        f"& '{runner}' -RuntimeRoot '{runtime}' -StateRoot '{state}' "
+        f"-ExpectedSha '{candidate_sha}' -LaunchManifestPath '{manifest}' "
+        f"-LaunchManifestSha256 '{'9' * 64}'"
+    )
+    if task_name == scheduler_service.CANONICAL_TASK_NAME:
+        runner_arguments += (
+            " -PublicationMode 'Production' "
+            f"-VercelProjectId '{scheduler_service.EXPECTED_VERCEL_PROJECT_ID}'"
+        )
+    return (
+        "-NoProfile -ExecutionPolicy Bypass -Command \""
+        "$ErrorActionPreference='Stop'; "
+        f"{runner_arguments}\""
+    )
+
+
+def _test_canonical_task_contract(runtime: Path, state: Path) -> dict[str, object]:
+    rows = [
+        {
+            "name": task_name,
+            "task_path": "\\",
+            "action_count": 1,
+            "execute": scheduler_service.EXPECTED_TASK_EXECUTABLE,
+            "arguments": _test_guarded_arguments(task_name, runtime, state),
+            "working_directory": str(runtime),
+            "definition_contract_sha256": _test_definition_contract_sha256(task_name),
+        }
+        for task_name in scheduler_service.EXPECTED_TASKS
+    ]
+    contract = scheduler_service._canonical_task_contract_snapshot(rows)
+    assert contract is not None
+    return contract
+
+
+def _test_protected_scheduler_authority(
+    runtime: Path,
+    state: Path,
+    *,
+    completed_at: str = "2026-07-01T00:00:00+00:00",
+) -> dict[str, object]:
+    return {
+        "schema_version": "dawnstrike.scheduler_protected_authority.v1",
+        "status": "AUTHORIZED",
+        "runtime_sha": _stable_runtime_contract()["candidate_sha"],
+        "runtime_tree": _stable_runtime_contract()["candidate_tree"],
+        "runtime_origin_sha256": _stable_runtime_contract()["runtime_origin_sha256"],
+        "operation_type": "ACTIVATE",
+        "terminal_id": "1" * 24,
+        "terminal_receipt_sha256": "2" * 64,
+        "terminal_journal_sha256": "3" * 64,
+        **_test_canonical_task_contract(runtime, state),
+        "completed_at_utc": completed_at,
+        "state_boundary_receipt_sha256": "4" * 64,
+        "runtime_authorization_sha256": "5" * 64,
+        "research_only": True,
+        "broker_execution_enabled": False,
+    }
+
+
 @pytest.fixture(autouse=True)
-def _stub_stable_runtime_contract(monkeypatch) -> None:
+def _stub_stable_runtime_contract(monkeypatch, tmp_path: Path) -> None:
     host_interpreter = Path(sys.executable).resolve()
     monkeypatch.setattr(
         scheduler_service,
@@ -45,6 +117,16 @@ def _stub_stable_runtime_contract(monkeypatch) -> None:
         scheduler_service,
         "_runtime_git_contract",
         lambda _runtime: _stable_runtime_contract(),
+    )
+    monkeypatch.setattr(
+        scheduler_service,
+        "PROTECTED_RELEASES_ROOT",
+        tmp_path / "protected-releases",
+    )
+    monkeypatch.setattr(
+        scheduler_service,
+        "_load_protected_scheduler_authority",
+        _test_protected_scheduler_authority,
     )
 
 
@@ -483,7 +565,13 @@ def test_scheduler_task_query_timeout_fails_closed(
 
 def _write_required_scripts(root: Path) -> None:
     scripts = root / "scripts"
-    scripts.mkdir()
+    scripts.mkdir(parents=True, exist_ok=True)
+    protected_scripts = (
+        scheduler_service.PROTECTED_RELEASES_ROOT
+        / _stable_runtime_contract()["candidate_sha"]
+        / "scripts"
+    )
+    protected_scripts.mkdir(parents=True, exist_ok=True)
     for name in (
         "run_alphaops_morning.ps1",
         "run_alphaops_monitor.ps1",
@@ -497,6 +585,7 @@ def _write_required_scripts(root: Path) -> None:
         "run_daily_intraday_capture.py",
     ):
         (scripts / name).write_text("placeholder", encoding="utf-8")
+        (protected_scripts / name).write_text("placeholder", encoding="utf-8")
 
 
 def _write_required_state(state: Path) -> None:
@@ -556,19 +645,9 @@ def _healthy_tasks(
                 f"2026-07-31T{scheduler_service.EXPECTED_TASK_STARTS[name]}:00-05:00"
             ),
             "execute": scheduler_service.EXPECTED_TASK_EXECUTABLE,
-            "arguments": (
-                f"-NoProfile -ExecutionPolicy Bypass -File "
-                f'"{runtime / "scripts" / script}" '
-                f'-RuntimeRoot "{runtime}" -StateRoot "{state}" '
-                f'-ExpectedSha "{_stable_runtime_contract()["candidate_sha"]}"'
-                + (
-                    " -PublicationMode Production "
-                    f'-VercelProjectId "{scheduler_service.EXPECTED_VERCEL_PROJECT_ID}"'
-                    if name == scheduler_service.CANONICAL_TASK_NAME
-                    else ""
-                )
-            ),
+            "arguments": _test_guarded_arguments(name, runtime, state),
             "working_directory": str(runtime),
+            "definition_contract_sha256": _test_definition_contract_sha256(name),
             "repetition_duration": (scheduler_service.EXPECTED_TASK_REPETITIONS.get(name)),
             "repetition_interval": (scheduler_service.EXPECTED_REPETITION_INTERVALS.get(name)),
             "repetition_stop_at_duration_end": (
@@ -576,7 +655,7 @@ def _healthy_tasks(
             ),
             "execution_time_limit": scheduler_service.EXPECTED_EXECUTION_LIMITS[name],
         }
-        for name, script in scheduler_service.EXPECTED_TASKS.items()
+        for name in scheduler_service.EXPECTED_TASKS
     ]
     if include_disabled_auxiliary:
         rows.append(
@@ -592,6 +671,7 @@ def _healthy_tasks(
 
 
 def _auxiliary_task(runtime: Path, state: Path, *, candidate_sha: str = "a" * 40):
+    protected_release = scheduler_service.PROTECTED_RELEASES_ROOT / candidate_sha
     external = runtime.parent / "aux-inputs"
     (external / "db").mkdir(parents=True, exist_ok=True)
     (external / "evidence").mkdir(parents=True, exist_ok=True)
@@ -623,16 +703,16 @@ def _auxiliary_task(runtime: Path, state: Path, *, candidate_sha: str = "a" * 40
             "-u",
             "-c",
             scheduler_service.AUXILIARY_BOOTSTRAP_PRELOADER,
-            str(runtime / "scripts" / "dawnstrike_python_bootstrap.py"),
+            str(protected_release / "scripts" / "dawnstrike_python_bootstrap.py"),
             hashlib.sha256(
-                (runtime / "scripts" / "dawnstrike_python_bootstrap.py").read_bytes()
+                (protected_release / "scripts" / "dawnstrike_python_bootstrap.py").read_bytes()
             ).hexdigest(),
             "--release-root",
-            str(runtime),
+            str(protected_release),
             "--expected-sha",
             candidate_sha,
             "--script",
-            str(runtime / "scripts" / "run_daily_intraday_capture.py"),
+            str(protected_release / "scripts" / "run_daily_intraday_capture.py"),
             "--",
             "--candidate-sha",
             candidate_sha,
@@ -1190,7 +1270,11 @@ def test_scheduler_doctor_rejects_unsafe_auxiliary_action_files(
     _write_required_scripts(runtime)
     rows = _healthy_tasks(runtime, state, include_disabled_auxiliary=False)
     auxiliary = _auxiliary_task(runtime, state)
-    unsafe_path = runtime / relative_path
+    unsafe_path = (
+        scheduler_service.PROTECTED_RELEASES_ROOT
+        / _stable_runtime_contract()["candidate_sha"]
+        / relative_path
+    )
     unsafe_path.unlink()
     if unsafe_shape == "directory":
         unsafe_path.mkdir()
@@ -1218,7 +1302,11 @@ def test_scheduler_doctor_rejects_tampered_auxiliary_bootstrap(tmp_path: Path, m
     _write_required_scripts(runtime)
     rows = _healthy_tasks(runtime, state, include_disabled_auxiliary=False)
     auxiliary = _auxiliary_task(runtime, state)
-    (runtime / scheduler_service.AUXILIARY_PYTHON_BOOTSTRAP).write_text(
+    (
+        scheduler_service.PROTECTED_RELEASES_ROOT
+        / _stable_runtime_contract()["candidate_sha"]
+        / scheduler_service.AUXILIARY_PYTHON_BOOTSTRAP
+    ).write_text(
         "tampered", encoding="utf-8"
     )
     rows.append(auxiliary)
@@ -2008,7 +2096,7 @@ def test_scheduler_doctor_blocks_when_any_v5_task_is_missing(
     result = scheduler_service.scheduler_doctor(runtime, state)
 
     assert result["status"] == "BLOCKED_EXTERNAL"
-    assert result["failed_task_count"] == 1
+    assert result["failed_task_count"] == len(scheduler_service.EXPECTED_TASKS)
     assert result["expected_task_name"] == "Dawnstrike 10of10 Daily Finalize"
 
 
@@ -2153,23 +2241,20 @@ def test_scheduler_holds_durable_source_config_identity_through_final_result(
     assert result["durable_source_config"]["config_sha256"] == hashlib.sha256(admitted).hexdigest()
 
 
-def test_activation_history_accepts_one_exact_clean_runtime_receipt(
-    tmp_path: Path, monkeypatch
+def test_activation_history_uses_the_protected_authority_timestamp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     runtime = tmp_path / "runtime"
     state = tmp_path / "state"
     runtime.mkdir()
-    activation_id = "1" * 24
-    receipt_root = state / "receipts" / "runtime-activation"
-    receipt_root.mkdir(parents=True)
-    (receipt_root / f"runtime-activation-{activation_id}.json").write_text("{}", encoding="utf-8")
-    (receipt_root / f"runtime-activation-{activation_id}.prepared.json").write_text(
-        "{}", encoding="utf-8"
-    )
     monkeypatch.setattr(
         scheduler_service,
-        "_validate_activation_receipt_bytes",
-        lambda _raw: _activation_history_payload(activation_id),
+        "_load_protected_scheduler_authority",
+        lambda loaded_runtime, loaded_state: _test_protected_scheduler_authority(
+            loaded_runtime,
+            loaded_state,
+            completed_at="2026-08-31T03:00:00+00:00",
+        ),
     )
 
     completed = scheduler_service._load_exact_activation_completion(runtime, state)
@@ -2177,7 +2262,7 @@ def test_activation_history_accepts_one_exact_clean_runtime_receipt(
     assert completed == datetime.fromisoformat("2026-08-31T03:00:00+00:00")
 
 
-def test_activation_history_receipt_is_identity_locked_until_final_check(
+def test_activation_history_ignores_writer_owned_receipts_without_protected_authority(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     runtime = tmp_path / "runtime"
@@ -2187,100 +2272,96 @@ def test_activation_history_receipt_is_identity_locked_until_final_check(
     receipt_root = state / "receipts" / "runtime-activation"
     receipt_root.mkdir(parents=True)
     receipt_path = receipt_root / f"runtime-activation-{activation_id}.json"
-    receipt_path.write_bytes(b"admitted")
-    hostile = receipt_root / "hostile.json"
-    hostile.write_bytes(b"hostile")
+    receipt_path.write_text(
+        json.dumps(_activation_history_payload(activation_id)), encoding="utf-8"
+    )
     monkeypatch.setattr(
         scheduler_service,
-        "_validate_activation_receipt_bytes",
-        lambda _raw: _activation_history_payload(activation_id),
+        "_load_protected_scheduler_authority",
+        lambda _runtime, _state: None,
     )
-    real_read = scheduler_service._read_identity_locked_bytes
-    attacked = False
-    blocked = False
-
-    def attack_after_read(
-        path: Path,
-        *,
-        label: str,
-        max_bytes: int,
-        held: list[tuple[Path, object, tuple[int, ...]]],
-    ) -> bytes:
-        nonlocal attacked, blocked
-        raw = real_read(path, label=label, max_bytes=max_bytes, held=held)  # type: ignore[arg-type]
-        if label == "activation history receipt":
-            attacked = True
-            try:
-                os.replace(hostile, path)
-            except PermissionError:
-                blocked = True
-        return raw
-
-    monkeypatch.setattr(scheduler_service, "_read_identity_locked_bytes", attack_after_read)
 
     completed = scheduler_service._load_exact_activation_completion(runtime, state)
 
-    assert attacked is True
-    assert blocked is True
-    assert receipt_path.read_bytes() == b"admitted"
-    assert completed == datetime.fromisoformat("2026-08-31T03:00:00+00:00")
+    assert receipt_path.is_file()
+    assert completed is None
 
 
-def test_activation_history_requires_stable_clean_exact_origin_runtime(
-    tmp_path: Path, monkeypatch
+def test_protected_scheduler_authority_command_is_parseable_and_strict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime = tmp_path / "runtime"
     state = tmp_path / "state"
     runtime.mkdir()
-    activation_id = "1" * 24
-    receipt_root = state / "receipts" / "runtime-activation"
-    receipt_root.mkdir(parents=True)
-    (receipt_root / f"runtime-activation-{activation_id}.json").write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(
-        scheduler_service,
-        "_validate_activation_receipt_bytes",
-        lambda _raw: _activation_history_payload(activation_id),
-    )
-    contracts = iter([_stable_runtime_contract(), None])
-    monkeypatch.setattr(
-        scheduler_service,
-        "_runtime_git_contract",
-        lambda _runtime: next(contracts),
-    )
+    authority = _test_protected_scheduler_authority(runtime, state)
+    authority.pop("task_count")
+    real_subprocess_run = subprocess.run
 
-    assert scheduler_service._load_exact_activation_completion(runtime, state) is None
-
-
-@pytest.mark.parametrize("failure", ["origin", "tampered", "ambiguous"])
-def test_activation_history_rejects_unbound_or_ambiguous_receipts(
-    tmp_path: Path, monkeypatch, failure: str
-) -> None:
-    runtime = tmp_path / "runtime"
-    state = tmp_path / "state"
-    runtime.mkdir()
-    receipt_root = state / "receipts" / "runtime-activation"
-    receipt_root.mkdir(parents=True)
-    first_id = "1" * 24
-    second_id = "2" * 24
-    first_path = receipt_root / f"runtime-activation-{first_id}.json"
-    first_path.write_text(first_id, encoding="utf-8")
-    if failure in {"tampered", "ambiguous"}:
-        (receipt_root / f"runtime-activation-{second_id}.json").write_text(
-            second_id, encoding="utf-8"
+    def validated_result(command, **_kwargs):
+        script = str(command[-1])
+        encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+        parser = (
+            "$raw=[Convert]::FromBase64String('"
+            + encoded
+            + "'); $text=[Text.Encoding]::Unicode.GetString($raw); "
+            "[ScriptBlock]::Create($text) | Out-Null"
+        )
+        parsed = real_subprocess_run(
+            [
+                scheduler_service.EXPECTED_TASK_EXECUTABLE,
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                parser,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert parsed.returncode == 0, parsed.stderr
+        assert "Assert-DawnstrikeStateRootBoundary" in script
+        assert "Open-DawnstrikeStateBoundaryRuntimeAuthorizationEvidence" in script
+        assert "ENABLED_BY_GOVERNED_ACTIVATE_RESEAL" in script
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(authority),
+            stderr="",
         )
 
-    def validate_receipt(raw: bytes) -> dict[str, object]:
-        activation_id = raw.decode("utf-8")
-        if failure == "tampered" and activation_id == second_id:
-            raise ValueError("tampered")
-        payload = _activation_history_payload(activation_id)
-        if failure == "origin":
-            payload["runtime_origin_sha256"] = "f" * 64
-        return payload
+    monkeypatch.setattr(scheduler_service, "_safe_regular_path", lambda _path: True)
+    monkeypatch.setattr(scheduler_service.subprocess, "run", validated_result)
 
-    monkeypatch.setattr(scheduler_service, "_validate_activation_receipt_bytes", validate_receipt)
+    loaded = _REAL_PROTECTED_SCHEDULER_AUTHORITY(runtime, state)
 
-    assert scheduler_service._load_exact_activation_completion(runtime, state) is None
+    assert loaded is not None
+    assert loaded["status"] == "AUTHORIZED"
+    assert loaded["completed_at_utc"] == "2026-07-01T00:00:00+00:00"
+
+
+def test_protected_scheduler_authority_rejects_unbound_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    authority = _test_protected_scheduler_authority(runtime, state)
+    authority.pop("task_count")
+    authority["completed_at_utc"] = "2026-07-01T00:00:00+00:00"
+    authority["terminal_receipt_sha256"] = "0" * 63
+    monkeypatch.setattr(scheduler_service, "_safe_regular_path", lambda _path: True)
+    monkeypatch.setattr(
+        scheduler_service.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(authority),
+            stderr="",
+        ),
+    )
+
+    assert _REAL_PROTECTED_SCHEDULER_AUTHORITY(runtime, state) is None
 
 
 @pytest.mark.parametrize(
@@ -2316,8 +2397,12 @@ def test_scheduler_doctor_accepts_failure_from_replaced_task_definition(
     monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
     monkeypatch.setattr(
         scheduler_service,
-        "_load_exact_activation_completion",
-        lambda _runtime, _state, **_kwargs: datetime.fromisoformat("2026-08-01T00:00:00+00:00"),
+        "_load_protected_scheduler_authority",
+        lambda loaded_runtime, loaded_state: _test_protected_scheduler_authority(
+            loaded_runtime,
+            loaded_state,
+            completed_at="2026-08-01T00:00:00+00:00",
+        ),
     )
 
     result = scheduler_service.scheduler_doctor(runtime, state)
@@ -2561,7 +2646,12 @@ def test_scheduler_doctor_requires_exact_action_shape(
     result = scheduler_service.scheduler_doctor(runtime, state)
 
     assert result["status"] == "BLOCKED_EXTERNAL"
-    assert result["failed_task_count"] == 1
+    expected_failures = (
+        len(scheduler_service.EXPECTED_TASKS)
+        if field in {"action_count", "execute"}
+        else 1
+    )
+    assert result["failed_task_count"] == expected_failures
     assert result["scheduled_tasks"][0][match_field] is False
 
 
@@ -2575,15 +2665,101 @@ def test_scheduler_doctor_rejects_inert_command_containing_expected_paths(
     state.mkdir()
     _write_required_scripts(runtime)
     rows = _healthy_tasks(runtime, state)
-    runner = runtime / "scripts" / scheduler_service.EXPECTED_TASKS[rows[0]["name"]]
+    runner = (
+        scheduler_service.PROTECTED_RELEASES_ROOT
+        / _stable_runtime_contract()["candidate_sha"]
+        / "scripts"
+        / scheduler_service.EXPECTED_TASKS[rows[0]["name"]]
+    )
     rows[0]["arguments"] = f"-Command \"Write-Output '{runner} {runtime} {state}'\""
     monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
 
     result = scheduler_service.scheduler_doctor(runtime, state)
 
     assert result["status"] == "BLOCKED_EXTERNAL"
-    assert result["failed_task_count"] == 1
+    assert result["failed_task_count"] == len(scheduler_service.EXPECTED_TASKS)
     assert result["scheduled_tasks"][0]["action_arguments_match"] is False
+
+
+def test_scheduler_doctor_rejects_marker_complete_injected_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    _write_required_scripts(runtime)
+    rows = _healthy_tasks(runtime, state)
+    morning = rows[0]
+    runner = (
+        scheduler_service.PROTECTED_RELEASES_ROOT
+        / _stable_runtime_contract()["candidate_sha"]
+        / "scripts"
+        / scheduler_service.EXPECTED_TASKS[morning["name"]]
+    )
+    morning["arguments"] = (
+        "-NoProfile -ExecutionPolicy Bypass -Command \"& C:\\evil.ps1; # "
+        f"scheduled launch manifest {runner} {runtime} {state} "
+        f"{_stable_runtime_contract()['candidate_sha']} -LaunchManifestPath "
+        "-LaunchManifestSha256 [IO.File]::Open [IO.FileShare]::Read SHA256\""
+    )
+    monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    assert result["status"] == "BLOCKED_EXTERNAL"
+    assert result["canonical_task_action_contract_matches"] is False
+    assert result["failed_task_count"] == len(scheduler_service.EXPECTED_TASKS)
+    assert result["scheduled_tasks"][0]["guarded_command_shape_matches"] is True
+    assert result["scheduled_tasks"][0]["action_arguments_match"] is False
+
+
+def test_scheduler_doctor_rejects_definition_aggregate_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    _write_required_scripts(runtime)
+    rows = _healthy_tasks(runtime, state)
+    rows[0]["definition_contract_sha256"] = "0" * 64
+    monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    assert result["status"] == "BLOCKED_EXTERNAL"
+    assert result["canonical_task_action_contract_matches"] is True
+    assert result["canonical_task_definition_contract_matches"] is False
+    assert result["failed_task_count"] == len(scheduler_service.EXPECTED_TASKS)
+
+
+def test_scheduler_doctor_requires_current_protected_runtime_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    _write_required_scripts(runtime)
+    rows = _healthy_tasks(runtime, state)
+    monkeypatch.setattr(scheduler_service, "_query_scheduled_tasks", lambda: rows)
+    monkeypatch.setattr(
+        scheduler_service,
+        "_load_protected_scheduler_authority",
+        lambda _runtime, _state: None,
+    )
+
+    result = scheduler_service.scheduler_doctor(runtime, state)
+
+    assert result["status"] == "BLOCKED_EXTERNAL"
+    assert result["protected_task_authority"] is None
+    assert result["canonical_task_action_contract_matches"] is False
+    assert result["canonical_task_definition_contract_matches"] is False
+    assert result["failed_task_count"] == len(scheduler_service.EXPECTED_TASKS)
 
 
 def test_scheduler_doctor_preserves_case_sensitive_publication_identity(
@@ -2606,7 +2782,7 @@ def test_scheduler_doctor_preserves_case_sensitive_publication_identity(
     result = scheduler_service.scheduler_doctor(runtime, state)
 
     assert result["status"] == "BLOCKED_EXTERNAL"
-    assert result["failed_task_count"] == 1
+    assert result["failed_task_count"] == len(scheduler_service.EXPECTED_TASKS)
     checked = next(
         row
         for row in result["scheduled_tasks"]

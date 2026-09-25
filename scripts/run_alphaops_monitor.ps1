@@ -1,16 +1,21 @@
 [CmdletBinding()]
 param(
-    [string]$RuntimeRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")),
+    [string]$RuntimeRoot = ([IO.Path]::GetFullPath([IO.Path]::Combine($PSScriptRoot, '..'))),
     [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedSha,
     [Parameter(Mandatory = $true)][string]$LaunchManifestPath,
     [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')][string]$LaunchManifestSha256,
     [string]$StateRoot = "C:\r\dawnstrike-state",
-    [string]$MarketDate = (Get-Date).ToString("yyyy-MM-dd"),
+    [string]$MarketDate = ([DateTime]::Now.ToString('yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture)),
     [string]$Notify = "telegram"
 )
 
+$global:PSModuleAutoLoadingPreference = 'None'
+$env:PSModulePath = 'C:\Windows\System32\WindowsPowerShell\v1.0\Modules'
+. ([IO.Path]::Combine($PSScriptRoot, 'powershell_module_boundary.ps1'))
+
 $ErrorActionPreference = "Stop"
 $runtime = (Resolve-Path $RuntimeRoot).Path
+$codeRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')).TrimEnd('\')
 New-Item -ItemType Directory -Path $StateRoot -Force | Out-Null
 $state = (Resolve-Path $StateRoot).Path
 . (Join-Path $PSScriptRoot "dawnstrike_process_runner.ps1")
@@ -20,7 +25,7 @@ $script:DawnstrikeLaunchLocks = (Assert-DawnstrikeScheduledLaunchManifest -Runti
 . (Join-Path $PSScriptRoot "alpha_cycle_artifact.ps1")
 . (Join-Path $PSScriptRoot "monitor_schedule_helper.ps1")
 Import-DawnstrikeEnvironment -StateRoot $state
-$null = Assert-DawnstrikeProcessSourceBoundToHead -ReleaseRoot $runtime -ExpectedSha $ExpectedSha -EntryScript $PSCommandPath
+$null = Assert-DawnstrikeProcessSourceBoundToHead -ReleaseRoot $codeRoot -ExpectedSha $ExpectedSha -EntryScript $PSCommandPath
 $dbPath = Join-Path $state "shadow_real.sqlite"
 $nowUtc = [DateTimeOffset]::UtcNow
 $cycleStart = Get-DawnstrikeMonitorCycleStartUtc -NowUtc $nowUtc -IntervalSeconds 300

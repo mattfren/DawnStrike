@@ -31,6 +31,16 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$releaseRoot = if ($CandidateSha) {
+    [IO.Path]::GetFullPath((Join-Path 'C:\Program Files\Dawnstrike\releases' $CandidateSha)).TrimEnd('\')
+}
+else { '' }
+$executingRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')).TrimEnd('\')
+if (-not $CandidateSha -or -not [string]::Equals(
+    $executingRoot, $releaseRoot, [StringComparison]::OrdinalIgnoreCase
+)) {
+    throw "Capture task registration must execute from the protected exact-SHA release root."
+}
 $captureSafety = Join-Path $PSScriptRoot "capture_task_safety.ps1"
 if (-not (Test-Path -LiteralPath $captureSafety -PathType Leaf)) {
     throw "Capture task safety contract is missing: $captureSafety"
@@ -49,6 +59,7 @@ if ($ReplaceExisting) {
         StateRoot = $StateRoot
         CandidateSha = $CandidateSha
         CandidateTree = $CandidateTree
+        RuntimeRoot = $RuntimeRoot
         RunAsCredential = $RunAsCredential
     }
     if (-not [string]::IsNullOrWhiteSpace($HardeningBackupRoot)) {
@@ -100,7 +111,7 @@ $EntitlementReceipt = Assert-DawnstrikeCaptureInputBindingFile `
 $SourceConfig = Assert-DawnstrikeCaptureInputBindingFile `
     -Path $SourceConfig -ExpectedSha256 $SourceConfigSha256 -Label "Source config"
 $approvedPython = "C:\Program Files\Dawnstrike\Python313\python.exe"
-$approvedPythonSha256 = "ef8f51028ac5329641985112f8efb1c2d4c47c86b8011ddf7e6fae21e2b4e5a1"
+$approvedPythonSha256 = "85b71d8c6ec1905935f74be0c9869aae198d00e98f39df699ec66f9c5a84cecd"
 if ([string]::IsNullOrWhiteSpace($Python)) { $Python = $approvedPython }
 $Python = [System.IO.Path]::GetFullPath($Python)
 if (-not [string]::Equals($Python, $approvedPython, [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -122,7 +133,7 @@ if (
     [string]$pythonSignature.Status -ne "Valid" -or
     $null -eq $pythonSignature.SignerCertificate -or
     [string]$pythonSignature.SignerCertificate.Subject -ne "CN=Python Software Foundation, O=Python Software Foundation, L=Beaverton, S=Oregon, C=US" -or
-    [string]$pythonSignature.SignerCertificate.Thumbprint -ne "9BA3C2E210C7E8296C5056515BFC0B0BBA78AC48"
+    [string]$pythonSignature.SignerCertificate.Thumbprint -ne "847785B686B2D3879731FA9AA3F1F5D48E85D99E"
 ) { throw "Capture interpreter Authenticode identity is not approved." }
 $pythonVersion = @(& $Python -I -c "import sys; print('.'.join(map(str, sys.version_info[:3])))" 2>$null)
 if ($LASTEXITCODE -ne 0 -or $pythonVersion.Count -ne 1 -or [string]$pythonVersion[0] -notmatch '^3\.13\.') {
@@ -139,12 +150,12 @@ $pythonPrefix = @("-I", "-B", "-S", "-X", ("pycache_prefix=" + $bytecodePrefix),
 if ([string]::IsNullOrWhiteSpace($EnvFile)) {
     $EnvFile = Join-Path $StateRoot "secrets\runtime.env"
 }
-$runner = Join-Path $RuntimeRoot "scripts\run_daily_intraday_capture.py"
+$runner = Join-Path $releaseRoot "scripts\run_daily_intraday_capture.py"
 $runnerItem = Get-Item -LiteralPath $runner -Force -ErrorAction Stop
 if ($runnerItem.PSIsContainer -or ($runnerItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
     throw "Capture runner must be a regular non-reparse file."
 }
-$bootstrap = Join-Path $RuntimeRoot "scripts\dawnstrike_python_bootstrap.py"
+$bootstrap = Join-Path $releaseRoot "scripts\dawnstrike_python_bootstrap.py"
 $bootstrapItem = Get-Item -LiteralPath $bootstrap -Force -ErrorAction Stop
 if ($bootstrapItem.PSIsContainer -or ($bootstrapItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
     throw "Capture release bootstrap must be a regular non-reparse file."
@@ -164,7 +175,7 @@ $captureArgs = @(
 )
 $bootstrapArgs = @(
     "-c", $bootstrapPreloader, $bootstrap, $bootstrapSha256,
-    "--release-root", $RuntimeRoot, "--expected-sha", $CandidateSha,
+    "--release-root", $releaseRoot, "--expected-sha", $CandidateSha,
     "--script", $runner, "--"
 )
 $captureActionArguments = @(
@@ -231,7 +242,7 @@ if ($InteractiveCurrentUser) {
     $taskPrincipal = New-ScheduledTaskPrincipal -UserId $currentPrincipal -LogonType Interactive -RunLevel Limited
     Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Principal $taskPrincipal -Description "Dawnstrike delayed SIP research capture; no broker execution." | Out-Null
 } else {
-    . (Join-Path $RuntimeRoot "scripts\resolve_dawnstrike_task_principal.ps1")
+    . (Join-Path $PSScriptRoot "resolve_dawnstrike_task_principal.ps1")
     $principal = Resolve-DawnstrikeTaskPrincipal -Credential $RunAsCredential
     $password = $RunAsCredential.GetNetworkCredential().Password
     if ([string]::IsNullOrWhiteSpace($password)) { throw "RunAsCredential must contain a non-empty Windows password." }

@@ -101,6 +101,19 @@ def _install_local_origin_fixture_seam(lock_script: Path) -> None:
     lock_script.write_text(text[:start] + fixture + text[end:], encoding="utf-8")
 
 
+def _install_local_bootstrap_origin_fixture_seam(
+    bootstrap_script: Path, origin: Path
+) -> None:
+    """Permit only this copied candidate's exact disposable Git origin."""
+
+    text = bootstrap_script.read_text(encoding="utf-8")
+    marker = '        "https://github.com/mattfren/DawnStrike.git",\n'
+    if text.count(marker) != 1:
+        raise AssertionError("bootstrap governed-origin seam is absent or ambiguous")
+    replacement = marker + f"        {str(origin)!r},\n"
+    bootstrap_script.write_text(text.replace(marker, replacement, 1), encoding="utf-8")
+
+
 def _install_local_interpreter_fixture_seam(candidate: Path) -> None:
     """Use this host's signed Python only inside the disposable integration copy."""
 
@@ -710,6 +723,58 @@ def test_state_preparation_accepts_only_its_owned_atomic_lock(tmp_path: Path) ->
             task_proof=proof,
             preparation_lock=lock,
         )
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell unavailable")
+def test_state_preparation_reader_preserves_retained_lock_exclusion(tmp_path: Path) -> None:
+    """The worker may read the held lock without admitting writers or deletion."""
+
+    source = Path.cwd()
+    lock_script = str(source / "scripts" / "runtime_activation_lock.ps1").replace("'", "''")
+    worker = str(source / "scripts" / "state_preparation.py").replace("'", "''")
+    python = str(Path(sys.executable).resolve()).replace("'", "''")
+    lock_root = tmp_path / "state" / "locks"
+    lock_root.mkdir(parents=True)
+    lock_path = str(lock_root / "dawnstrike-runtime-activation.lock").replace("'", "''")
+    command = rf"""
+. '{lock_script}'
+$path = '{lock_path}'
+$handle = Open-DawnstrikeRetainedRuntimeLockFile -Path $path -CreateNew
+try {{
+    $payload = '{{"schema_version":"fixture.retained-lock.v1"}}'
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes($payload)
+    $handle.Write($bytes, 0, $bytes.Length)
+    $handle.Flush($true)
+    $code = "import importlib.util,sys; s=importlib.util.spec_from_file_location('state_preparation_fixture',sys.argv[1]); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); print(m._read_retained_preparation_lock(__import__('pathlib').Path(sys.argv[2])))"
+    $read = @(& '{python}' -I -B -c $code '{worker}' $path)
+    if ($LASTEXITCODE -ne 0) {{ throw 'retained reader child failed' }}
+    $writeBlocked = $false
+    try {{ [IO.File]::WriteAllText($path, 'hostile') }} catch {{ $writeBlocked = $true }}
+    $deleteBlocked = $false
+    try {{ [IO.File]::Delete($path) }} catch {{ $deleteBlocked = $true }}
+    [pscustomobject]@{{
+        read_payload = [string]($read -join "`n")
+        write_blocked = $writeBlocked
+        delete_blocked = $deleteBlocked
+    }} | ConvertTo-Json -Compress
+}}
+finally {{ $handle.Dispose() }}
+"""
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=source,
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert payload == {
+        "read_payload": '{"schema_version":"fixture.retained-lock.v1"}',
+        "write_blocked": True,
+        "delete_blocked": True,
+    }
 
 
 def test_state_inventory_requires_canonical_indexes_and_live_snapshot(tmp_path: Path) -> None:
@@ -1548,10 +1613,12 @@ def test_powershell_sidecar_activation_rebind_and_legacy_rollback_quarantine(
         "resolve_dawnstrike_task_principal.ps1",
         "dawnstrike_job_process.ps1",
         "dawnstrike_process_runner.ps1",
+        "state_root_boundary.ps1",
         "invoke_dawnstrike_stage.ps1",
-        "state_disaster_recovery.py",
-        "dawnstrike_python_bootstrap.py",
-        "run_daily_intraday_capture.py",
+            "state_disaster_recovery.py",
+            "dawnstrike_python_bootstrap.py",
+            "refresh_luna_core_universe.py",
+            "run_daily_intraday_capture.py",
         "import_dawnstrike_environment.ps1",
         "run_alphaops_morning.ps1",
         "run_alphaops_monitor.ps1",
@@ -1573,6 +1640,7 @@ def test_powershell_sidecar_activation_rebind_and_legacy_rollback_quarantine(
     candidate_runner = candidate / "scripts" / "run_daily_intraday_capture.py"
     candidate_bootstrap = candidate / "scripts" / "dawnstrike_python_bootstrap.py"
     _install_local_origin_fixture_seam(candidate / "scripts" / "runtime_activation_lock.ps1")
+    _install_local_bootstrap_origin_fixture_seam(candidate_bootstrap, remote)
     _install_local_state_preparation_origin_fixture_seam(
         candidate / "scripts" / "prepare_dawnstrike_state.ps1", remote
     )
@@ -1912,11 +1980,31 @@ function Export-ScheduledTask {{
   $execute = ConvertTo-TestXmlText ([string]$action.Execute)
   $arguments = ConvertTo-TestXmlText ([string]$action.Arguments)
   $working = ConvertTo-TestXmlText ([string]$action.WorkingDirectory)
-  return "<Task><Name>$TaskName</Name><Runtime>$global:MockRuntime</Runtime><State>$global:MockState</State><Settings><Enabled>$enabled</Enabled></Settings><Actions><Exec><Command>$execute</Command><Arguments>$arguments</Arguments><WorkingDirectory>$working</WorkingDirectory></Exec></Actions></Task>"
+  return "<Task><Name>$TaskName</Name><Runtime>$global:MockRuntime</Runtime><State>$global:MockState</State><Principal><UserId>capture-test</UserId><LogonType>Password</LogonType></Principal><Triggers><CalendarTrigger><StartBoundary>2026-08-31T08:00:00-05:00</StartBoundary></CalendarTrigger></Triggers><Settings><Enabled>$enabled</Enabled></Settings><Actions><Exec><Command>$execute</Command><Arguments>$arguments</Arguments><WorkingDirectory>$working</WorkingDirectory></Exec></Actions></Task>"
 }}
 function Get-ScheduledTaskInfo {{
   [CmdletBinding()] param([string]$TaskName,[string]$TaskPath)
-  [pscustomobject]@{{ LastTaskResult=$global:MockAuxLastTaskResult; LastRunTime=$global:MockAuxLastRunTime }}
+  if ($TaskName -eq 'Dawnstrike Delayed SIP Capture') {{
+    return [pscustomobject]@{{
+      LastTaskResult=$global:MockAuxLastTaskResult
+      LastRunTime=$global:MockAuxLastRunTime
+      NextRunTime=[DateTime]::MinValue
+    }}
+  }}
+  $lastRun = switch ($TaskName) {{
+    'Dawnstrike AlphaOps EOD Full Report' {{ [DateTime]'2026-08-28T15:15:00' }}
+    'Dawnstrike 10of10 Daily Finalize' {{ [DateTime]'2026-08-30T17:30:00' }}
+    'Dawnstrike AlphaOps V6 Weekly Training' {{ [DateTime]'2026-08-24T21:00:00' }}
+    default {{ [DateTime]'2026-08-28T08:00:00' }}
+  }}
+  $nextRun = if ($TaskName -eq 'Dawnstrike AlphaOps V6 Weekly Training') {{
+    [DateTime]'2026-08-31T21:00:00'
+  }} else {{ [DateTime]'2026-08-31T08:00:00' }}
+  [pscustomobject]@{{
+    LastTaskResult=0
+    LastRunTime=$lastRun
+    NextRunTime=$nextRun
+  }}
 }}
 function Unregister-ScheduledTask {{
   [CmdletBinding()] param([string]$TaskName,[string]$TaskPath,[switch]$Confirm)
@@ -2148,7 +2236,10 @@ if ($LASTEXITCODE -ne 0) {{ throw ('Test hardening COMPLETE sealing failed: ' + 
 Remove-Item -LiteralPath $hardeningInput -Force
 $hardeningReceipt = Get-Content -LiteralPath $hardeningReceiptPath -Raw | ConvertFrom-Json
 & '{prep_q}' -CandidateRoot '{candidate_q}' -RuntimeRoot '{runtime_q}' -StateRoot '{state_q}' -BackupRoot '{backup_q}' -CandidateSha '{candidate_sha}' -ProcessTimeoutSeconds 120 | Out-Null
-$activated = Invoke-DawnstrikeRuntimeActivation -ExpectedSha '{candidate_sha}' -MarketDate '2026-08-31' -CiEvidencePath '{ci_q}' -SolEvidencePath '{sol_q}' -CandidateRoot '{candidate_q}' -RuntimeRoot '{runtime_q}' -StateRoot '{state_q}' -BackupRoot '{backup_q}' -BackupRetention 5 -ProcessTimeoutSeconds 120 -RunAsCredential $global:TestCredential -TestNowUtc '2026-08-30T14:00:00Z'
+    $activated = Invoke-DawnstrikeRuntimeActivation -ExpectedSha '{candidate_sha}' -MarketDate '2026-08-31' -CiEvidencePath '{ci_q}' -SolEvidencePath '{sol_q}' -CandidateRoot '{candidate_q}' -RuntimeRoot '{runtime_q}' -StateRoot '{state_q}' -BackupRoot '{backup_q}' -BackupRetention 5 -ProcessTimeoutSeconds 120 -RunAsCredential $global:TestCredential -TestNowUtc '2026-08-30T23:00:00Z'
+if ([string]$activated.status -ne 'COMPLETE') {{
+  throw ('Fixture activation did not reach COMPLETE: ' + ($activated | ConvertTo-Json -Depth 8 -Compress))
+}}
 $activationAuxState = $global:MockAuxState
     $rebindScript = '{quote(candidate / "scripts" / "rebind_intraday_capture_task.ps1")}'
     $rebound = & $rebindScript -RuntimeRoot '{runtime_q}' -StateRoot '{state_q}' -CandidateSha '{candidate_sha}' -SymbolsManifest '{symbols_q}' -SymbolsManifestSha256 '{symbols_sha}' -EntitlementReceipt '{entitlement_q}' -EntitlementReceiptSha256 '{entitlement_sha}' -SourceConfig '{source_config_q}' -SourceConfigSha256 '{source_config_sha}' -RunAsCredential $global:TestCredential -Enable -ProcessTimeoutSeconds 120

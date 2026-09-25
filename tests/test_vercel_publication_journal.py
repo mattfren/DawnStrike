@@ -89,6 +89,7 @@ def _pre_payload() -> dict:
         "project_id": "prj_test",
         "project_name": "dawnstrike-command-center-x3",
         "provider_scope": "mattfrens-projects",
+        "provider_team_id": "team_b6Z9qvhxLpInBs2kGeP5Nb8X",
         "production_aliases": aliases,
         "candidate_preview_url": (
             "https://dawnstrike-command-center-x3-previewabc-mattfrens-projects.vercel.app"
@@ -105,6 +106,11 @@ def _pre_payload() -> dict:
         "candidate_public_artifact_root_sha256": "1" * 64,
         "candidate_manifest_sha256": "d" * 64,
         "candidate_package_manifest_sha256": "e" * 64,
+        "candidate_deployment_operation_id": "0" * 32,
+        "candidate_deployment_request_sha256": "6" * 64,
+        "candidate_package_map_sha256": "7" * 64,
+        "candidate_remote_file_attestation_sha256": "b" * 64,
+        "promoted_remote_file_attestation_sha256": journal.EMPTY_SHA256,
         "prior_aliases": [
             {
                 "alias": alias,
@@ -516,6 +522,8 @@ def test_publisher_rejects_impossible_expected_market_date_before_source_or_prov
 def test_v1_active_journal_remains_read_compatible(tmp_path: Path) -> None:
     payload = _pre_payload()
     payload["schema_version"] = journal.LEGACY_SCHEMA
+    for field in journal.KEYS - journal.PRE_CAS_KEYS:
+        payload.pop(field)
     for item in payload["prior_aliases"]:
         item.pop("rollback_contract")
         item["artifact_proof"]["endpoint"] = item["alias"]
@@ -529,6 +537,8 @@ def test_legacy_v2_terminal_and_v1_compensation_remain_recoverable(tmp_path: Pat
     root.mkdir()
     prior = _pre_payload()
     prior["schema_version"] = journal.LEGACY_SCHEMA
+    for field in journal.KEYS - journal.PRE_CAS_KEYS:
+        prior.pop(field)
     prior.update(_authorization_fields())
     for item in prior["prior_aliases"]:
         item.pop("rollback_contract")
@@ -879,7 +889,9 @@ def test_powershell_journal_schema_detection_handles_dictionary_and_json_objects
         + "$emptySha256='e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';"  # pragma: allowlist secret  # noqa: E501
         + "$expectedSourceTree='b' * 40;$resultRelativePath='build/result.json';"
         + "$ProjectId='prj_test';$ProjectName='dawnstrike-command-center-x3';"
-        + "$ProviderScope='mattfrens-projects';$toolchainIdentitySha256='9' * 64;"
+        + "$ProviderScope='mattfrens-projects';"
+        + "$ProviderTeamId='team_b6Z9qvhxLpInBs2kGeP5Nb8X';"
+        + "$toolchainIdentitySha256='9' * 64;"
         + f"$allProductionAliases=@((ConvertFrom-Json '{aliases_json}')|ForEach-Object{{$_}});"
         + f"$records=@((ConvertFrom-Json '{prior_json}')|ForEach-Object{{$_}});"
         + ordered_conversion
@@ -890,7 +902,9 @@ def test_powershell_journal_schema_detection_handles_dictionary_and_json_objects
         + "build_id=('c' * 20);build_sha=('c' * 64)};"
         + "$payload=New-VercelPublicationJournalPayload -Phase PRE_MUTATION -Sequence 0 "
         + "-CandidateDeployment $candidate -PreviewManifest $manifest "
-        + "-PackageManifestSha256 ('e' * 64) -CandidateBuildManifestSha256 ('8' * 64) "
+        + "-PackageManifestSha256 ('e' * 64) -PackageMapSha256 ('7' * 64) "
+        + "-RemoteFileAttestationSha256 ('b' * 64) -DeploymentOperationId ('0' * 32) "
+        + "-DeploymentRequestSha256 ('6' * 64) -CandidateBuildManifestSha256 ('8' * 64) "
         + "-CandidateReleaseManifestSha256 ('a' * 64) "
         + "-CandidatePublicArtifactRootSha256 ('1' * 64) "
         + "-CandidateManifestSha256 ('d' * 64) -PriorAliases $prior "
@@ -969,6 +983,7 @@ def test_transitions_are_adjacent_and_atomic(tmp_path: Path) -> None:
         {
             "phase": "POST_ALIASES",
             "sequence": 1,
+            "promoted_remote_file_attestation_sha256": "f" * 64,
             "promoted_deployment_id": "dpl_promoted",
             "promoted_deployment_url": (
                 "https://dawnstrike-command-center-x3-promotedabc-mattfrens-projects.vercel.app"
@@ -1000,6 +1015,7 @@ def test_post_aliases_requires_current_publication_authorization(tmp_path: Path)
         {
             "phase": "POST_ALIASES",
             "sequence": 1,
+            "promoted_remote_file_attestation_sha256": "f" * 64,
             "promoted_deployment_id": "dpl_promoted",
             "promoted_deployment_url": (
                 "https://dawnstrike-command-center-x3-promotedabc-mattfrens-projects.vercel.app"
@@ -1036,6 +1052,7 @@ def _complete_payload() -> dict:
             ),
         }
     )
+    payload["promoted_remote_file_attestation_sha256"] = "f" * 64
     account_session_report = _account_session_report(
         payload["candidate_market_date"], payload["candidate_source_sha"]
     )
@@ -1050,10 +1067,22 @@ def _complete_payload() -> dict:
         "build_sha": payload["candidate_build_sha"],
         "project_id": payload["project_id"],
         "provider_scope": payload["provider_scope"],
+        "provider_team_id": payload["provider_team_id"],
         "promoted_deployment_id": payload["promoted_deployment_id"],
         "production_deployment_id": payload["promoted_deployment_id"],
         "vercel_source_manifest_sha256": payload["candidate_manifest_sha256"],
         "vercel_package_manifest_sha256": payload["candidate_package_manifest_sha256"],
+        "vercel_deployment_operation_id": payload["candidate_deployment_operation_id"],
+        "vercel_deployment_request_sha256": payload[
+            "candidate_deployment_request_sha256"
+        ],
+        "vercel_package_map_sha256": payload["candidate_package_map_sha256"],
+            "vercel_remote_file_attestation_sha256": payload[
+                "candidate_remote_file_attestation_sha256"
+            ],
+            "vercel_promoted_remote_file_attestation_sha256": payload[
+                "promoted_remote_file_attestation_sha256"
+            ],
         "authorized_build_manifest_sha256": payload["candidate_build_manifest_sha256"],
         "authorized_release_manifest_sha256": payload["candidate_release_manifest_sha256"],
         "public_artifact_root_sha256": payload["candidate_public_artifact_root_sha256"],
@@ -1353,8 +1382,9 @@ def test_recovery_bootstraps_exact_clean_origin_before_loading_helpers() -> None
     bootstrap = script.index("$bootstrapSource = Assert-VercelRecoveryBootstrapSource")
     helper = script.index('. (Join-Path $PSScriptRoot "dawnstrike_job_process.ps1")')
     assert bootstrap < helper
-    assert "Vercel publisher must execute from the exact ProjectRoot being admitted." in script
-    assert script.index("$executingRoot =") < bootstrap
+    assert "Vercel publisher must execute from the protected exact-SHA release root." in script
+    assert script.index("$codeRoot =") < bootstrap
+    assert "Get-DawnstrikeProtectedReleaseRoot -ExpectedSha $ExpectedSha" in script
     function = script.split("function Assert-VercelRecoveryBootstrapSource", 1)[1].split(
         "$resolvedRoot =", 1
     )[0]
@@ -1384,7 +1414,9 @@ def test_terminal_complete_is_revalidated_before_failure_compensation() -> None:
     catch = script.split("catch {\n    $publicationError = $_.Exception.Message", 1)[1]
     reread = catch.index("$caughtJournal = Get-VercelPublicationJournal")
     complete = catch.index("Resolve-VercelCompletePublicationJournal")
-    rollback = catch.index('Arguments @("rollback", [string]$priorPrimary.id, "--yes")')
+    rollback = catch.index(
+        "Request-VercelProductionRollback -DeploymentId ([string]$priorPrimary.id)"
+    )
     assert reread < complete < rollback
     assert "no provider compensation was attempted" in catch[:rollback]
 
@@ -1506,7 +1538,7 @@ def test_compensation_never_overwrites_foreign_alias_state() -> None:
     assert "Alias changed to a foreign deployment before compensation." in compensation
     catch = script.split("catch {\n    $publicationError = $_.Exception.Message", 1)[1]
     assert catch.index("Get-VercelCompensationPlan") < catch.index(
-        'Arguments @("rollback", [string]$priorPrimary.id, "--yes")'
+        "Request-VercelProductionRollback -DeploymentId ([string]$priorPrimary.id)"
     )
     assert "no provider rollback was attempted" in catch
 
@@ -1594,85 +1626,43 @@ def test_publisher_governed_asset_proof_is_bounded_and_covers_every_alias() -> N
     )[0]
     for marker in (
         "$properties.Count -gt 256",
-        "$length -gt 16777216",
+        "-MaximumResponseBytes 16777216",
         "$totalBytes -gt 134217728",
         "$relative.Contains('\\')",
         "$_ -in @('', '.', '..')",
         "governed asset hash mismatch",
-        '"--max-filesize", "16777216"',
+        "Invoke-VercelBoundedPublicGet",
     ):
         assert marker in proof
     assert "preview_artifact_proof = $previewArtifactProof" in script
     assert "production_artifact_proofs = @($productionArtifactProofs)" in script
     alias_loop = script.split("$productionArtifactProofs += Get-VercelGovernedAssetProof", 1)[0]
     assert "foreach ($alias in $allProductionAliases)" in alias_loop
-    assert "$vercel + $vercelAuth + $Arguments" in script
+    assert "$vercelAuth" not in script
+    assert 'AuthenticationHeaderValue]::new(\'Bearer\', $token)' in script
+    assert '"--token"' not in script
     assert "$vercel + $Arguments + $vercelAuth" not in script
-    assert script.index("$vercel + $vercelAuth + $Arguments") < script.index(
-        '"--", "--silent", "--show-error"'
-    )
 
 
-@pytest.mark.skipif(os.name != "nt", reason="requires Windows PowerShell 5.1")
-def test_vercel_token_precedes_native_curl_separator_under_powershell_51(
-    tmp_path: Path,
-) -> None:
+def test_vercel_token_is_header_only_and_provider_cli_auth_is_retired() -> None:
     script = (Path(__file__).parents[1] / "scripts" / "publish_vercel_public.ps1").read_text(
         encoding="utf-8"
     )
-    function = script.split("function Invoke-VercelProcess", 1)[1].split(
+    api = script.split("function Invoke-VercelBoundedApiRequest", 1)[1].split(
+        "function ConvertFrom-VercelApiJsonBytes", 1
+    )[0]
+    assert "AuthenticationHeaderValue]::new('Bearer', $token)" in api
+    assert "$handler.AllowAutoRedirect = $false" in api
+    assert "$handler.UseProxy = $false" in api
+    assert "$handler.UseDefaultCredentials = $false" in api
+    assert '"--token"' not in script
+    build_process = script.split("function Invoke-VercelProcess", 1)[1].split(
         "function Assert-RemoteVercelSourceManifest", 1
     )[0]
-
-    fake_executables = {
-        "node": tmp_path / "node" / "node.exe",
-        "git": tmp_path / "git" / "git.exe",
-        "python": tmp_path / "python" / "python.exe",
-        "uv": tmp_path / "uv" / "uv.exe",
-    }
-    for executable in fake_executables.values():
-        executable.parent.mkdir()
-        executable.touch()
-    state_root = tmp_path / "state"
-    state_root.mkdir()
-
-    def quote(path: Path) -> str:
-        return str(path).replace("'", "''")
-
-    command = (
-        "$ErrorActionPreference='Stop';Set-StrictMode -Version Latest;"
-        "$vercelEntryPath='vc.js';$vercel=@('--scope','scope');"
-        "$vercelAuth=@('--token','sentinel');"
-        f"$nodePath='{quote(fake_executables['node'])}';"
-        "$expectedCurlPath='C:\\Windows\\System32\\curl.exe';"
-        f"$gitPath='{quote(fake_executables['git'])}';"
-        f"$uvPath='{quote(fake_executables['uv'])}';"
-        f"$approvedPython=[pscustomobject]@{{path='{quote(fake_executables['python'])}'}};"
-        f"$resolvedStateRoot='{quote(state_root)}';"
-        "$providerConfigRoot=Join-Path $resolvedStateRoot 'provider-config';"
-        "$script:captured=@();"
-        "function Assert-VercelPublicationSourceStable {};"
-        "function Assert-VercelPublicationToolchainStable {};"
-        "function Assert-VercelContainedPathNoReparse { param($Root,$Target,$Label) };"
-        "function Assert-DawnstrikeSharedLockNoReparse { param($Path,$Label) };"
-        "function Invoke-DawnstrikeJobProcess { param($FilePath,$ArgumentList,$WorkingDirectory,"
-        "$Label,$TimeoutSeconds,$OutputDrainTimeoutSeconds,$EnvironmentOverrides);"
-        "$script:captured=@($ArgumentList);[pscustomobject]@{ExitCode=0;Stdout='';Stderr=''} };"
-        "function Invoke-VercelProcess" + function + ";"
-        "$null=Invoke-VercelProcess -Arguments @('curl','/asset','--','--output','x') "
-        "-Label test -TimeoutSeconds 1;$captured -join [char]31"
-    )
-    completed = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
-        capture_output=True,
-        text=True,
-        timeout=20,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stderr
-    argv = completed.stdout.strip().split(chr(31))
-    assert argv.index("--token") < argv.index("curl") < argv.index("--")
-    assert argv[argv.index("--token") + 1] == "sentinel"
+    assert "$expectedCurlPath" not in build_process
+    assert "'curl.exe'" not in build_process
+    assert 'VERCEL_TOKEN = ""' in build_process
+    assert '"--token"' not in build_process
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows PowerShell 5.1")
@@ -2039,7 +2029,10 @@ def test_complete_and_interrupted_recovery_repair_both_result_copies() -> None:
     assert any(
         script.index("scripts\\build_vercel_public_stage.ps1")
         < index
-        < script.index('Invoke-VercelProcess `\n            -Arguments @("promote"')
+        < script.index(
+            "Request-VercelProductionPromotion",
+            script.index("scripts\\build_vercel_public_stage.ps1"),
+        )
         for index in authorization_calls
     )
     existing_boundary = script.split("$existingJournal = Get-VercelPublicationJournal", 1)[1].split(
@@ -2119,10 +2112,18 @@ def test_powershell_promotion_recovery_binds_recorded_clone_when_present(
         + f"$script:observedId='{observed_id}';$script:observedUrl='{observed_url}';"
         + "function Get-VercelAliasObservation {param($Alias);"
         + "[pscustomobject]@{id=$script:observedId;url=$script:observedUrl}};"
-        + "function Invoke-VercelJson {[pscustomobject]@{deployments=@([pscustomobject]@{"
+        + "function Get-VercelProductionDeployments {@([pscustomobject]@{"
         + "id=$script:observedId;target='production';meta=[pscustomobject]@{"
-        + "action='promote';originalDeploymentId='dpl_preview'}})}};"
+        + "action='promote';originalDeploymentId='dpl_preview'}})};"
+        + "function Assert-VercelPromotedDeploymentFileEvidence {param("
+        + "$DeploymentId,$PreviewDeploymentId,$PackageMapSha256,"
+        + "$ExpectedAttestationSha256);[pscustomobject]@{"
+        + "deployment_url=$script:observedUrl;"
+        + "remote_file_attestation_sha256=('f' * 64)}};"
+        + "$emptySha256=('e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');"
         + "$journal=[pscustomobject]@{candidate_preview_deployment_id='dpl_preview';"
+        + "candidate_package_map_sha256=('7' * 64);"
+        + "promoted_remote_file_attestation_sha256=('f' * 64);"
         + f"promoted_deployment_id={literal(journal_id)};"
         + f"promoted_deployment_url={literal(journal_url)}}};"
         + "Test-VercelPromotedCandidateSetMatchesJournal -Journal $journal"
@@ -2136,6 +2137,59 @@ def test_powershell_promotion_recovery_binds_recorded_clone_when_present(
     )
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.strip() == str(expected)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows PowerShell 5.1")
+def test_promoted_clone_full_file_attestation_rejects_unenumerated_function_change() -> None:
+    publisher = Path("scripts/publish_vercel_public.ps1").read_text(encoding="utf-8")
+    function = (
+        "function Assert-VercelPromotedDeploymentFileEvidence"
+        + publisher.split("function Assert-VercelPromotedDeploymentFileEvidence", 1)[1].split(
+            "function Assert-RemoteVercelSourceManifest", 1
+        )[0]
+    )
+    deployment_id = "dpl_" + "a" * 20
+    preview_id = "dpl_" + "b" * 20
+    command = (
+        "$ErrorActionPreference='Stop';"
+        + function
+        + "$governedProviderTeamId='team_b6Z9qvhxLpInBs2kGeP5Nb8X';"
+        + "$governedProjectId='prj_governed';$script:tampered=$false;"
+        + "function Get-OptionalJsonProperty {param($InputObject,$Name);"
+        + "$property=$InputObject.PSObject.Properties[$Name];"
+        + "if($null-ne$property){$property.Value}};"
+        + "function Get-VercelImmutableDeploymentBaseUrl {param($DeploymentUrl);"
+        + "'https://dawnstrike-command-center-x3-clone-mattfrens-projects.vercel.app'};"
+        + "function Get-VercelFrozenDeployment {param($DeploymentId);"
+        + f"[pscustomobject]@{{id='{deployment_id}';ownerId=$governedProviderTeamId;"
+        + "projectId=$governedProjectId;target='production';readyState='READY';"
+        + "url='dawnstrike-command-center-x3-clone-mattfrens-projects.vercel.app';"
+        + f"meta=[pscustomobject]@{{action='promote';originalDeploymentId='{preview_id}'}}}}}};"
+        + "function Get-VercelRemoteDeploymentFileAttestation {param($Deployment,"
+        + "$ExpectedMapSha256,$ExpectedAttestationSha256);"
+        + "if($script:tampered){throw 'Vercel deployment source-byte map differs from "
+        + "the frozen package map.'};[pscustomobject]@{"
+        + "remote_file_attestation_sha256=('f'*64)}};"
+        + f"$valid=Assert-VercelPromotedDeploymentFileEvidence -DeploymentId '{deployment_id}' "
+        + f"-PreviewDeploymentId '{preview_id}' -PackageMapSha256 ('7'*64) "
+        + "-ExpectedAttestationSha256 ('f'*64);"
+        + "if($valid.remote_file_attestation_sha256 -cne ('f'*64)){throw 'valid proof lost'};"
+        + "$script:tampered=$true;$rejected=$false;try{"
+        + f"$null=Assert-VercelPromotedDeploymentFileEvidence -DeploymentId '{deployment_id}' "
+        + f"-PreviewDeploymentId '{preview_id}' -PackageMapSha256 ('7'*64) "
+        + "-ExpectedAttestationSha256 ('f'*64)}catch{"
+        + "if($_.Exception.Message -notmatch 'source-byte map'){throw};$rejected=$true};"
+        + "if(-not$rejected){throw 'altered unenumerated function was accepted'};'OK'"
+    )
+    completed = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "OK"
 
 
 def test_publisher_two_lock_handshake_precedes_history_and_provider_recovery() -> None:

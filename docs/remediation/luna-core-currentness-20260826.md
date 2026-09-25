@@ -89,7 +89,7 @@ must be the host's current date:
 ```powershell
 C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe `
   -NoProfile -ExecutionPolicy Bypass `
-  -File 'C:\Program Files\Dawnstrike\bin\dawnstrike_release_launcher.ps1' `
+  -File 'C:\Program Files\Dawnstrike\releases\<exact-current-origin-main-sha>\scripts\dawnstrike_release_launcher.ps1' `
   -Mode BootstrapUniverse `
   -CandidateRoot C:\r\dawnstrike-runtime `
   -ExpectedSha <exact-current-origin-main-sha> `

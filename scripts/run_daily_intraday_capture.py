@@ -21,7 +21,7 @@ from intraday_scanner.market_calendar import (
 )
 
 _APPROVED_PYTHON = Path(r"C:\Program Files\Dawnstrike\Python313\python.exe")
-_APPROVED_PYTHON_SHA256 = "ef8f51028ac5329641985112f8efb1c2d4c47c86b8011ddf7e6fae21e2b4e5a1"
+_APPROVED_PYTHON_SHA256 = "85b71d8c6ec1905935f74be0c9869aae198d00e98f39df699ec66f9c5a84cecd"
 _BOOTSTRAP_PRELOADER = (
     "import hashlib,sys; p=sys.argv[1]; e=sys.argv[2]; b=open(p,'rb').read(); "
     "a=hashlib.sha256(b).hexdigest(); a==e or (_ for _ in ()).throw("
