@@ -2299,21 +2299,16 @@ function Invoke-DawnstrikeRuntimeActivation {
         try {
             $lockOrigin = Convert-DawnstrikeCanonicalOriginIdentity $origin
             $lockInterpreter = Get-DawnstrikeApprovedLockInterpreter
-            $activationLock = Enter-DawnstrikeGovernedRuntimeLock -StateRoot $state -Operation runtime_activation `
-                -CandidateSha $ExpectedSha -CandidateTree ([string]$candidateContract.tree) `
-                -OriginIdentity $lockOrigin -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
             $emptyJournalHash = Get-DawnstrikeSha256Text ""
-            $null = Set-DawnstrikeRuntimeOperationJournalPhase `
-                -StateRoot $state -JournalPath $operationJournal -Lock $activationLock `
-                -Operation runtime_activation -Phase INIT -CandidateSha $ExpectedSha `
+            $activationLock = Enter-DawnstrikeGovernedRuntimeLockWithJournal `
+                -StateRoot $state -JournalPath $operationJournal -Operation runtime_activation `
+                -CandidateSha $ExpectedSha `
                 -CandidateTree ([string]$candidateContract.tree) `
                 -CurrentSha ([string]$runtimeContract.head) -CurrentTree ([string]$runtimeContract.tree) `
                 -PreviousSha ([string]$runtimeContract.head) -PreviousTree ([string]$runtimeContract.tree) `
                 -OriginIdentity $lockOrigin -PreparedReceiptRelativePath $preparedReceiptRelative `
-                -PreparedReceiptSha256 $emptyJournalHash -CompleteReceiptRelativePath $completeReceiptRelative `
-                -CompleteReceiptSha256 $emptyJournalHash -BackupContractSha256 $emptyJournalHash `
+                -CompleteReceiptRelativePath $completeReceiptRelative `
                 -TaskContractSha256 ([string]$taskBefore.task_contract_sha256) `
-                -RuntimeStageContractSha256 $emptyJournalHash `
                 -PythonPath $lockInterpreter.path -PythonSha256 $lockInterpreter.sha256
             Assert-DawnstrikeNoDailyLocks $state
             $dailyLock = Enter-DawnstrikeDailyRunLock -StateRoot $state -MarketDate $MarketDate -Owner "runtime_activation"
