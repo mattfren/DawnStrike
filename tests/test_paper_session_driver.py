@@ -164,7 +164,9 @@ def test_a_gate_approved_signal_reaches_the_broker(monkeypatch, tmp_path):
     assert sent["symbol"] == "AAA"
     assert sent["limit_price"] == 10.05
     assert sent["stop_loss"] == 9.55
-    assert sent["take_profit"] == 11.618
+    # 11.618 is a sub-penny price the broker rejects (HTTP 422); the engine now
+    # rounds the target down to a whole cent. See tests/test_tick_rounding.py.
+    assert sent["take_profit"] == 11.61
     assert receipt["funnel"]["entry_submitted"] == 1
 
 

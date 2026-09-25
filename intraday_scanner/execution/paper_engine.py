@@ -14,8 +14,9 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +65,40 @@ class EntryPlan:
     signal_id: str = ""
     data_age_seconds: float = 0.0
     data_age_source: str = AGE_SOURCE_UNKNOWN
+
+
+# Alpaca rejects sub-penny prices on stocks at or above $1.00 (HTTP 422,
+# "sub-penny increment does not fulfill minimum pricing criteria"); below $1.00
+# the increment is $0.0001. Bracket legs must also sit at least one cent away
+# from the entry. Strategy levels arrive with four decimals (e.g. 1.9999), so
+# every order used to be rejected at the broker after the risk gate approved it.
+MIN_BRACKET_GAP = Decimal("0.01")
+
+
+def _tick(price: Decimal) -> Decimal:
+    return Decimal("0.01") if price >= 1 else Decimal("0.0001")
+
+
+def _to_tick(price: float, rounding: str) -> Decimal:
+    value = Decimal(str(price))
+    return value.quantize(_tick(value), rounding=rounding)
+
+
+def tick_rounded_levels(entry: float, stop: float, target: float) -> tuple[float, float, float] | None:
+    """Round a bracket to valid broker increments without adding risk.
+
+    Entry rounds down (never pay more than planned), stop rounds up (never risk
+    more per share than planned), target rounds down. Returns None when the
+    rounded bracket is no longer stop < entry < target with at least a one-cent
+    gap on each side, so the caller refuses rather than sending a bad order.
+    """
+
+    e = _to_tick(entry, ROUND_FLOOR)
+    s = _to_tick(stop, ROUND_CEILING)
+    t = _to_tick(target, ROUND_FLOOR)
+    if not (Decimal(0) < s and e - s >= MIN_BRACKET_GAP and t - e >= MIN_BRACKET_GAP):
+        return None
+    return float(e), float(s), float(t)
 
 
 class PaperExecutionStore:
@@ -242,6 +277,16 @@ class PaperExecutionEngine:
             self.store.upsert_order(existing, plan.market_date)
             self.store.log("entry_deduplicated", client_order_id=coid, status=existing.status)
             return {"submitted": False, "reason": "already_submitted", "order": existing}
+
+        # Size and submit on the prices the broker will actually accept.
+        levels = tick_rounded_levels(plan.entry, plan.stop, plan.target)
+        if levels is None:
+            self.store.log(
+                "entry_refused", symbol=plan.symbol, reason="plan_invalid_after_tick_rounding",
+                entry=plan.entry, stop=plan.stop, target=plan.target,
+            )
+            return {"submitted": False, "reason": "plan_invalid_after_tick_rounding"}
+        plan = replace(plan, entry=levels[0], stop=levels[1], target=levels[2])
 
         account = self.client.assert_paper_account()
         positions = self.client.get_positions()
