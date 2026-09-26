@@ -635,6 +635,211 @@ def test_datatruth_explicit_universe_rejects_partial_fetch_instead_of_stale_fall
         )
 
 
+def test_datatruth_yahoo_partial_alpaca_completes_missing_symbols(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(data_truth_core, "_governed_minimum_history_bars", lambda: 1)
+    required_bar_date = data_truth_core._last_completed_market_session(date(2026, 1, 3))
+    from intraday_scanner.public_data import yahoo_chart_fetcher
+
+    def partial_fetch(**_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            dataset=MarketDataset(
+                dataset_id="partial",
+                source_kind="public_yahoo_chart",
+                timeframe="1d",
+                bars_by_symbol={
+                    "SPY": (_bar("SPY", required_bar_date, 9, 10, 8, 9.5),),
+                },
+            ),
+            warnings=("incomplete requested symbol set",),
+        )
+
+    def fake_failover(
+        missing: tuple[str, ...], *, required_bar_date: date | None
+    ) -> tuple[dict[str, tuple], tuple[str, ...]]:
+        assert missing == ("WMT",)
+        return (
+            {"WMT": (_bar("WMT", required_bar_date, 50, 51, 49, 50.5, volume=2000),)},
+            ("alpaca_failover: WMT: recovered via Alpaca (iex feed)",),
+        )
+
+    monkeypatch.setattr(yahoo_chart_fetcher, "fetch_yahoo_chart_daily_dataset", partial_fetch)
+    monkeypatch.setattr(data_truth_core, "_comparison_datasets", lambda **_kwargs: {})
+    monkeypatch.setattr(data_truth_core, "_alpaca_failover_fetch_bars", fake_failover)
+
+    result = build_data_truth_snapshot(
+        as_of_date=date(2026, 1, 3),
+        output_root=Path("data/v2_data_truth"),
+        created_at=NOW,
+        allow_fetch=True,
+        symbols=("SPY", "WMT"),
+    )
+
+    assert result.dataset.symbols == ("SPY", "WMT")
+    wmt_bar = result.dataset.bars_by_symbol["WMT"][0]
+    assert (wmt_bar.open, wmt_bar.high, wmt_bar.low, wmt_bar.close, wmt_bar.volume) == (
+        50,
+        51,
+        49,
+        50.5,
+        2000,
+    )
+    assert result.dataset.timeframe == "1d"
+    assert any("provider:alpaca:WMT" in ref for ref in result.manifest.source_url_or_reference)
+    assert not any("provider:alpaca:SPY" in ref for ref in result.manifest.source_url_or_reference)
+    assert any("recovered via Alpaca" in warning for warning in result.manifest.warnings)
+
+
+def test_datatruth_yahoo_partial_alpaca_partial_still_raises_with_remainder(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(data_truth_core, "_governed_minimum_history_bars", lambda: 1)
+    required_bar_date = data_truth_core._last_completed_market_session(date(2026, 1, 3))
+    from intraday_scanner.public_data import yahoo_chart_fetcher
+
+    def partial_fetch(**_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            dataset=MarketDataset(
+                dataset_id="partial",
+                source_kind="public_yahoo_chart",
+                timeframe="1d",
+                bars_by_symbol={
+                    "SPY": (_bar("SPY", required_bar_date, 9, 10, 8, 9.5),),
+                },
+            ),
+            warnings=("incomplete requested symbol set",),
+        )
+
+    def fake_failover(
+        missing: tuple[str, ...], *, required_bar_date: date | None
+    ) -> tuple[dict[str, tuple], tuple[str, ...]]:
+        assert set(missing) == {"WMT", "GE"}
+        return (
+            {"WMT": (_bar("WMT", required_bar_date, 50, 51, 49, 50.5),)},
+            ("alpaca_failover: GE: Alpaca returned no usable daily bars",),
+        )
+
+    monkeypatch.setattr(yahoo_chart_fetcher, "fetch_yahoo_chart_daily_dataset", partial_fetch)
+    monkeypatch.setattr(data_truth_core, "_comparison_datasets", lambda **_kwargs: {})
+    monkeypatch.setattr(data_truth_core, "_alpaca_failover_fetch_bars", fake_failover)
+
+    with pytest.raises(DataTruthAcquisitionIncomplete, match=r"missing_after_alpaca_failover=\['GE'\]"):
+        build_data_truth_snapshot(
+            as_of_date=date(2026, 1, 3),
+            output_root=Path("data/v2_data_truth"),
+            created_at=NOW,
+            allow_fetch=True,
+            symbols=("SPY", "WMT", "GE"),
+        )
+
+
+def test_datatruth_yahoo_complete_never_calls_alpaca_failover(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    from intraday_scanner.public_data import yahoo_chart_fetcher
+
+    def one_bar_fetch(**kwargs: object) -> SimpleNamespace:
+        cache_dir = Path(str(kwargs["cache_dir"]))
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        source_csv = cache_dir / "one-bar.csv"
+        dataset = MarketDataset(
+            dataset_id="one-bar",
+            source_kind="public_yahoo_chart",
+            timeframe="1d",
+            bars_by_symbol={"SPY": (_bar("SPY", date(2026, 1, 2), 9, 10, 8, 9.5),)},
+            source_path=source_csv.as_posix(),
+            source_refs=("canonical_symbol:SPY",),
+        )
+        write_ohlcv_csv(dataset, source_csv)
+        return SimpleNamespace(dataset=dataset, warnings=())
+
+    def unexpected_failover(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("Alpaca failover must not run when Yahoo returns the full set")
+
+    monkeypatch.setattr(yahoo_chart_fetcher, "fetch_yahoo_chart_daily_dataset", one_bar_fetch)
+    monkeypatch.setattr(data_truth_core, "_comparison_datasets", lambda **_kwargs: {})
+    monkeypatch.setattr(data_truth_core, "_alpaca_failover_fetch_bars", unexpected_failover)
+
+    with pytest.raises(DataTruthAcquisitionIncomplete, match="insufficient_history"):
+        build_data_truth_snapshot(
+            as_of_date=date(2026, 1, 3),
+            output_root=Path("data/v2_data_truth"),
+            created_at=NOW,
+            allow_fetch=True,
+            symbols=("SPY",),
+        )
+
+
+def test_alpaca_failover_fetch_bars_fails_closed_on_provider_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from intraday_scanner.errors import DataProviderError
+    from intraday_scanner.providers.alpaca_provider import AlpacaProvider
+
+    monkeypatch.setenv("ALPACA_API_KEY_ID", "fixture-key")
+    monkeypatch.setenv("ALPACA_API_SECRET_KEY", "fixture-secret")
+
+    def broken_get_daily_bars(self, symbols, start, end, config):
+        raise DataProviderError("Alpaca request failed with HTTP 500: boom")
+
+    monkeypatch.setattr(AlpacaProvider, "get_daily_bars", broken_get_daily_bars)
+
+    bars, warnings = data_truth_core._alpaca_failover_fetch_bars(
+        ("ADI", "BKNG"), required_bar_date=date(2026, 1, 2)
+    )
+
+    assert bars == {}
+    assert any("batched fetch failed" in warning for warning in warnings)
+
+
+def test_alpaca_failover_fetch_bars_recovers_symbols_matching_yahoo_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from intraday_scanner.providers.alpaca_provider import AlpacaProvider
+
+    monkeypatch.setenv("ALPACA_API_KEY_ID", "fixture-key")
+    monkeypatch.setenv("ALPACA_API_SECRET_KEY", "fixture-secret")
+
+    def fake_get_daily_bars(self, symbols, start, end, config):
+        return {
+            "ADI": [
+                {
+                    "t": "2026-01-02T05:00:00Z",
+                    "o": 200.0,
+                    "h": 205.0,
+                    "l": 199.0,
+                    "c": 203.0,
+                    "v": 12345,
+                }
+            ]
+        }
+
+    monkeypatch.setattr(AlpacaProvider, "get_daily_bars", fake_get_daily_bars)
+
+    bars, warnings = data_truth_core._alpaca_failover_fetch_bars(
+        ("ADI",), required_bar_date=date(2026, 1, 2)
+    )
+
+    assert set(bars) == {"ADI"}
+    bar = bars["ADI"][0]
+    assert bar.timestamp.date() == date(2026, 1, 2)
+    assert (bar.open, bar.high, bar.low, bar.close, bar.volume) == (
+        200.0,
+        205.0,
+        199.0,
+        203.0,
+        12345,
+    )
+    assert any("recovered via Alpaca" in warning for warning in warnings)
+
+
 def test_datatruth_explicit_universe_validates_symbols_before_output_root_use(
     tmp_path: Path,
 ) -> None:
