@@ -53,6 +53,179 @@ class DataTruthAcquisitionIncomplete(RuntimeError):
     """Exact-universe acquisition did not produce a complete source set."""
 
 
+ALPACA_FAILOVER_HISTORY_DAYS = 760
+"""Calendar-day lookback for Alpaca failover requests, matching Yahoo's 2y window."""
+
+
+def _alpaca_failover_fetch_bars(
+    missing_symbols: tuple[str, ...],
+    *,
+    required_bar_date: date | None,
+) -> tuple[dict[str, tuple[MarketBar, ...]], tuple[str, ...]]:
+    """Fetch symbols Yahoo could not supply from Alpaca's market-data API.
+
+    Fails closed: any configuration, credential, network, or parsing failure
+    for a symbol leaves that symbol absent from the returned mapping, so the
+    caller's exact-requested-set guarantee still raises
+    ``DataTruthAcquisitionIncomplete`` for anything missing from both
+    providers. This never crashes the stage with an unrelated exception.
+    """
+
+    if not missing_symbols:
+        return {}, ()
+    if required_bar_date is None:
+        return {}, ("alpaca_failover: no required bar date; failover skipped",)
+    try:
+        from intraday_scanner.config import ConfigError, load_config
+        from intraday_scanner.errors import DataProviderError
+        from intraday_scanner.providers.alpaca_provider import AlpacaProvider
+    except ImportError as exc:  # pragma: no cover - defensive; plumbing always ships
+        return {}, (f"alpaca_failover: provider plumbing unavailable ({exc})",)
+    try:
+        config = load_config()
+    except (ConfigError, OSError, ValueError) as exc:
+        return {}, (f"alpaca_failover: configuration unavailable ({type(exc).__name__}: {exc})",)
+    provider = AlpacaProvider(config)
+    try:
+        provider.validate_credentials()
+    except DataProviderError as exc:
+        return {}, (f"alpaca_failover: {exc}",)
+    start = (required_bar_date - timedelta(days=ALPACA_FAILOVER_HISTORY_DAYS)).isoformat()
+    end = (required_bar_date + timedelta(days=1)).isoformat()
+    try:
+        raw_by_symbol = provider.get_daily_bars(missing_symbols, start, end, config)
+    except (DataProviderError, OSError, TimeoutError, ValueError) as exc:
+        return {}, (f"alpaca_failover: batched fetch failed ({type(exc).__name__}: {exc})",)
+    warnings: list[str] = []
+    bars_by_symbol: dict[str, tuple[MarketBar, ...]] = {}
+    for symbol in missing_symbols:
+        rows = raw_by_symbol.get(symbol, [])
+        bars = _market_bars_from_alpaca_rows(symbol, rows)
+        if bars:
+            bars_by_symbol[symbol] = bars
+            warnings.append(
+                f"alpaca_failover: {symbol}: recovered via Alpaca ({provider.feed} feed) "
+                "after Yahoo returned no usable daily bars"
+            )
+        else:
+            warnings.append(f"alpaca_failover: {symbol}: Alpaca returned no usable daily bars")
+    return bars_by_symbol, tuple(warnings)
+
+
+def _market_bars_from_alpaca_rows(
+    symbol: str,
+    rows: list[dict[str, object]],
+) -> tuple[MarketBar, ...]:
+    """Validate and convert raw Alpaca daily-bar rows to ``MarketBar`` objects.
+
+    Applies the same finiteness/sanity checks the Yahoo parser applies so a
+    malformed Alpaca row is rejected rather than silently accepted.
+    """
+
+    bars: list[MarketBar] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            open_price = float(row.get("o"))  # type: ignore[arg-type]
+            high_price = float(row.get("h"))  # type: ignore[arg-type]
+            low_price = float(row.get("l"))  # type: ignore[arg-type]
+            close_price = float(row.get("c"))  # type: ignore[arg-type]
+            volume = int(row.get("v"))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            continue
+        if not all(math.isfinite(value) for value in (open_price, high_price, low_price, close_price)):
+            continue
+        if min(open_price, high_price, low_price, close_price) <= 0:
+            continue
+        if high_price < max(open_price, close_price, low_price):
+            continue
+        if low_price > min(open_price, close_price, high_price):
+            continue
+        if volume < 0 or volume > MAX_MARKET_VOLUME:
+            continue
+        timestamp_raw = row.get("t")
+        if not isinstance(timestamp_raw, str) or not timestamp_raw:
+            continue
+        try:
+            timestamp = datetime.fromisoformat(timestamp_raw.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        timestamp = (
+            timestamp.replace(tzinfo=timezone.utc)
+            if timestamp.tzinfo is None
+            else timestamp.astimezone(timezone.utc)
+        )
+        bars.append(
+            MarketBar(
+                symbol=symbol,
+                timestamp=timestamp,
+                open=open_price,
+                high=high_price,
+                low=low_price,
+                close=close_price,
+                volume=volume,
+            )
+        )
+    return tuple(sorted(bars, key=lambda bar: bar.timestamp))
+
+
+def _write_alpaca_failover_artifacts(
+    dataset: MarketDataset,
+    *,
+    cache_root: Path,
+    provenance: dict[str, str],
+    request_contract: dict[str, object] | None,
+) -> tuple[Path, tuple[str, ...]]:
+    """Persist a merged Yahoo+Alpaca dataset as content-addressed cache artifacts.
+
+    Every symbol gets its own content-addressed raw provenance object naming
+    the provider that supplied it, so a mixed-source dataset is auditable.
+    """
+
+    csv_bytes = _serialize_ohlcv(dataset)
+    csv_digest = _sha256_bytes(csv_bytes)
+    csv_path = cache_root / f"public_yahoo_ohlcv_{csv_digest}.csv"
+    _write_immutable_bytes(csv_path, csv_bytes)
+    if request_contract is not None:
+        _write_cache_contract(csv_path, request_contract)
+    refs: list[str] = [csv_path.as_posix()]
+    for symbol in dataset.symbols:
+        provider_id = provenance.get(symbol, "yahoo")
+        payload = {
+            "provider": provider_id,
+            "symbol": symbol,
+            "bars": [
+                {
+                    "timestamp": bar.timestamp.isoformat(),
+                    "open": bar.open,
+                    "high": bar.high,
+                    "low": bar.low,
+                    "close": bar.close,
+                    "volume": bar.volume,
+                }
+                for bar in dataset.bars_by_symbol[symbol]
+            ],
+        }
+        content = _json_bytes(payload)
+        digest = _sha256_bytes(content)
+        raw_path = cache_root / f"{symbol.lower()}_chart_{digest}.json"
+        _write_immutable_bytes(raw_path, content)
+        refs.extend(
+            (
+                f"canonical_symbol:{symbol}",
+                f"provider:{provider_id}:{symbol}",
+                raw_path.as_posix(),
+            )
+        )
+    return csv_path, tuple(refs)
+
+
+def _write_cache_contract(artifact_path: Path, request_contract: dict[str, object]) -> None:
+    contract_path = artifact_path.with_name(f"{artifact_path.name}.contract.json")
+    _write_immutable_bytes(contract_path, _json_bytes(request_contract))
+
+
 @dataclass(frozen=True)
 class DataTruthPaths:
     root: Path
@@ -1314,6 +1487,7 @@ def _resolve_public_yahoo_source(
     minimum_history_bars: int = 0,
     require_production: bool = False,
 ) -> tuple[Path, Path, tuple[str, ...], tuple[str, ...]]:
+    request_contract = _production_request_contract() if require_production else None
     if source_csv is not None and raw_dir is not None:
         return (
             source_csv,
@@ -1367,9 +1541,57 @@ def _resolve_public_yahoo_source(
                         for symbol in requested_symbols
                         if symbol not in fetched.dataset.symbols
                     )
-                    raise DataTruthAcquisitionIncomplete(
-                        "DataTruth Yahoo acquisition PARTIAL; exact requested symbol set was not "
-                        f"completed; missing={list(missing)}"
+                    # Yahoo stays primary; only the symbols Yahoo failed to
+                    # return are requested from Alpaca (the owner's existing
+                    # free market-data entitlement), in one batched call.
+                    failover_bars, failover_warnings = _alpaca_failover_fetch_bars(
+                        missing, required_bar_date=required_bar_date
+                    )
+                    fetch_warnings = tuple(fetch_warnings) + failover_warnings
+                    still_missing = tuple(
+                        symbol
+                        for symbol in missing
+                        if symbol not in failover_bars
+                        or (
+                            required_bar_date is not None
+                            and required_bar_date
+                            not in {bar.timestamp.date() for bar in failover_bars[symbol]}
+                        )
+                        or len({bar.timestamp for bar in failover_bars.get(symbol, ())})
+                        < minimum_history_bars
+                    )
+                    if still_missing:
+                        # Never accept a partial set: anything still missing
+                        # from BOTH Yahoo and Alpaca still fails the stage.
+                        raise DataTruthAcquisitionIncomplete(
+                            "DataTruth acquisition PARTIAL; exact requested symbol set was not "
+                            f"completed by Yahoo or its Alpaca failover; missing_from_yahoo="
+                            f"{list(missing)}; missing_after_alpaca_failover={list(still_missing)}"
+                        )
+                    merged_bars_by_symbol = dict(fetched.dataset.bars_by_symbol)
+                    merged_bars_by_symbol.update(failover_bars)
+                    provenance = {
+                        symbol: ("alpaca" if symbol in failover_bars else "yahoo")
+                        for symbol in requested_symbols
+                    }
+                    merged_dataset = MarketDataset(
+                        dataset_id=fetched.dataset.dataset_id,
+                        source_kind=fetched.dataset.source_kind,
+                        timeframe=fetched.dataset.timeframe,
+                        bars_by_symbol=merged_bars_by_symbol,
+                        warnings=fetched.dataset.warnings,
+                    )
+                    merged_csv_path, provenance_refs = _write_alpaca_failover_artifacts(
+                        merged_dataset,
+                        cache_root=local_cache,
+                        provenance=provenance,
+                        request_contract=request_contract if require_production else None,
+                    )
+                    return (
+                        merged_csv_path,
+                        local_cache,
+                        tuple(dict.fromkeys(provenance_refs)),
+                        tuple(dict.fromkeys(fetch_warnings)),
                     )
             if fetched.dataset.source_path:
                 fetched_csv = Path(fetched.dataset.source_path)
