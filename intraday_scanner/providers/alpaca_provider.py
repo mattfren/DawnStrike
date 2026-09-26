@@ -300,6 +300,55 @@ class AlpacaProvider(MarketDataProvider):
             page_token = page.next_page_token
         return rows
 
+    def get_daily_bars(
+        self,
+        symbols: Sequence[str],
+        start: str,
+        end: str,
+        config: ScannerConfig,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Return raw unadjusted daily OHLCV bars per symbol.
+
+        Uses the same ``/v2/stocks/bars`` endpoint and ``feed`` already used
+        elsewhere in this provider, requesting ``timeframe=1Day`` with
+        ``adjustment=raw`` so the shape matches the unadjusted daily bars the
+        public Yahoo chart source supplies. Read-only market-data call; no
+        trading/order endpoints are touched.
+        """
+
+        clean_symbols = sorted({str(symbol).upper() for symbol in symbols if str(symbol).strip()})
+        results: dict[str, list[dict[str, Any]]] = {symbol: [] for symbol in clean_symbols}
+        if not clean_symbols:
+            return results
+        page_token: str | None = None
+        for _ in range(config.historical_intraday_max_pages):
+            params = {
+                "symbols": ",".join(clean_symbols),
+                "timeframe": "1Day",
+                "start": start,
+                "end": end,
+                "feed": self.feed,
+                "adjustment": "raw",
+                "limit": str(config.historical_intraday_page_limit),
+                "sort": "asc",
+            }
+            if page_token:
+                params["page_token"] = page_token
+            payload = self._request_json("/v2/stocks/bars", params, config)
+            grouped = payload.get("bars") if isinstance(payload, dict) else {}
+            if isinstance(grouped, dict):
+                for symbol, rows in grouped.items():
+                    if not isinstance(rows, list):
+                        continue
+                    results.setdefault(str(symbol).upper(), []).extend(
+                        row for row in rows if isinstance(row, dict)
+                    )
+            next_token = payload.get("next_page_token") if isinstance(payload, dict) else None
+            if not next_token:
+                break
+            page_token = str(next_token)
+        return results
+
     def get_previous_close(self, symbols: Sequence[str], config: ScannerConfig) -> dict[str, float]:
         snapshots = self.get_premarket_snapshot(symbols, config)
         return {snapshot.ticker: snapshot.previous_close for snapshot in snapshots}
